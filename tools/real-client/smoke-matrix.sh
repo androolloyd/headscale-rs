@@ -86,11 +86,13 @@ smoke_ids=(
   authkey-nonreusable
   authkey-expired
   authkey-relogin-same-user
+  authkey-relogin-expired
   authkey-relogin-route-preserve
   postgres-authkey
   postgres-authkey-nonreusable
   postgres-authkey-expired
   postgres-authkey-relogin-same-user
+  postgres-authkey-relogin-expired
   postgres-authkey-relogin-route-preserve
   postgres-taildrop-capmap
   postgres-derp-private
@@ -260,6 +262,8 @@ smoke_areas=(
   registration
   lifecycle
   lifecycle
+  lifecycle
+  database
   database
   database
   database
@@ -432,11 +436,13 @@ smoke_rust_scripts=(
   tools/real-client/authkey-nonreusable-smoke.sh
   tools/real-client/authkey-expired-smoke.sh
   tools/real-client/authkey-relogin-same-user-smoke.sh
+  tools/real-client/authkey-relogin-expired-smoke.sh
   tools/real-client/authkey-relogin-route-preserve-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-smoke.sh
   tools/real-client/postgres-authkey-expired-smoke.sh
   tools/real-client/postgres-authkey-relogin-same-user-smoke.sh
+  tools/real-client/postgres-authkey-relogin-expired-smoke.sh
   tools/real-client/postgres-authkey-relogin-route-preserve-smoke.sh
   tools/real-client/postgres-taildrop-capmap-smoke.sh
   tools/real-client/postgres-derp-private-smoke.sh
@@ -605,11 +611,13 @@ smoke_go_scripts=(
   tools/real-client/authkey-nonreusable-headscale-go-smoke.sh
   tools/real-client/authkey-expired-headscale-go-smoke.sh
   tools/real-client/authkey-relogin-same-user-headscale-go-smoke.sh
+  tools/real-client/authkey-relogin-expired-headscale-go-smoke.sh
   tools/real-client/authkey-relogin-route-preserve-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-relogin-same-user-headscale-go-smoke.sh
+  tools/real-client/postgres-authkey-relogin-expired-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh
   tools/real-client/postgres-taildrop-capmap-headscale-go-smoke.sh
   tools/real-client/postgres-derp-private-headscale-go-smoke.sh
@@ -778,11 +786,13 @@ smoke_assertions=(
   "one-time auth-key rejects second stock-client registration"
   "expired auth-key rejects stock-client registration"
   "auth-key logout then same-user relogin preserves node identity and IPs"
+  "auth-key logout then expired same-user relogin key is rejected"
   "auth-key same-user relogin preserves approved route state"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres one-time auth-key rejects second stock-client registration"
   "production Postgres expired auth-key rejects stock-client registration"
   "production Postgres auth-key logout then same-user relogin preserves node identity and IPs"
+  "production Postgres auth-key logout then expired same-user relogin key is rejected"
   "production Postgres auth-key same-user relogin preserves approved route state"
   "production Postgres taildrop disabled removes file-sharing from stock-client self CapMap"
   "production Postgres private DERP sidecar, STUN, relay path, and DERP map metadata"

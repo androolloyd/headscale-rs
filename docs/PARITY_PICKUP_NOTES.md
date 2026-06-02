@@ -1234,8 +1234,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   auth-key relogin cycle, wait for the stock client to return to `NeedsLogin`,
   relogin with a newly minted key, and assert the node keeps its Tailscale IPs.
 - This closes the first upstream auth-key lifecycle smoke gap and leaves
-  deleted-key restart, expired-key relogin rejection, and different-user
-  relogin cases as the next auth-key lifecycle rows.
+  deleted-key restart and different-user relogin cases as the next auth-key
+  lifecycle rows.
 
 ## 2026-06-01 auth-key relogin route-preservation smoke slice
 
@@ -1246,6 +1246,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   fresh auth key, and assert stable IPs plus stable logical node/user/route
   state.
 - The bounded push/PR real-client smoke set now includes the new row.
+
+## 2026-06-01 auth-key expired relogin rejection smoke slice
+
+- Added paired `authkey-relogin-expired` Rust/headscale-go rows and paired
+  `postgres-authkey-relogin-expired` Rust/headscale-go rows.
+- The shared auth-key relogin flow can now expire the fresh same-user preauth
+  key before `tailscale up`, assert the stock client does not reach a logged-in
+  netmap, and assert the registered node count remains unchanged.
+- This closes the expired-key relogin rejection gap; deleted-key restart and
+  different-user relogin remain as the next auth-key lifecycle rows.
 
 ## 2026-06-01 Taildrop CapMap stock-client smoke slice
 

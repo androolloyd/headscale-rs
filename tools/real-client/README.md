@@ -80,12 +80,14 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `authkey-nonreusable` | `authkey-nonreusable-smoke.sh` | `authkey-nonreusable-headscale-go-smoke.sh` | One-time auth-key rejects second stock-client registration |
 | Registration | `authkey-expired` | `authkey-expired-smoke.sh` | `authkey-expired-headscale-go-smoke.sh` | Expired auth-key rejects stock-client registration |
 | Lifecycle | `authkey-relogin-same-user` | `authkey-relogin-same-user-smoke.sh` | `authkey-relogin-same-user-headscale-go-smoke.sh` | Auth-key logout then same-user relogin preserves node identity and IPs |
+| Lifecycle | `authkey-relogin-expired` | `authkey-relogin-expired-smoke.sh` | `authkey-relogin-expired-headscale-go-smoke.sh` | Auth-key logout then expired same-user relogin key is rejected |
 | Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Tailcfg | `taildrop-capmap` | `taildrop-capmap-smoke.sh` | `taildrop-capmap-headscale-go-smoke.sh` | Disabled Taildrop removes file-sharing from stock-client self CapMap |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-authkey-nonreusable` | `postgres-authkey-nonreusable-smoke.sh` | `postgres-authkey-nonreusable-headscale-go-smoke.sh` | Production Postgres one-time auth-key rejects second stock-client registration |
 | Database | `postgres-authkey-expired` | `postgres-authkey-expired-smoke.sh` | `postgres-authkey-expired-headscale-go-smoke.sh` | Production Postgres expired auth-key rejects stock-client registration |
 | Database | `postgres-authkey-relogin-same-user` | `postgres-authkey-relogin-same-user-smoke.sh` | `postgres-authkey-relogin-same-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then same-user relogin preserves node identity and IPs |
+| Database | `postgres-authkey-relogin-expired` | `postgres-authkey-relogin-expired-smoke.sh` | `postgres-authkey-relogin-expired-headscale-go-smoke.sh` | Production Postgres auth-key logout then expired same-user relogin key is rejected |
 | Database | `postgres-authkey-relogin-route-preserve` | `postgres-authkey-relogin-route-preserve-smoke.sh` | `postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh` | Production Postgres auth-key same-user relogin preserves approved route state |
 | Database | `postgres-taildrop-capmap` | `postgres-taildrop-capmap-smoke.sh` | `postgres-taildrop-capmap-headscale-go-smoke.sh` | Production Postgres taildrop disabled removes file-sharing from stock-client self CapMap |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
@@ -341,6 +343,9 @@ stock Tailscale client image, and asserts that headscale-go registered one
 The same-user relogin wrappers run an initial auth-key login, mint a fresh key
 for the same user, run `tailscale logout`, and relogin with the existing
 client state. They assert stable Tailscale IPs and stable logical node state.
+The expired-relogin variant expires the fresh same-user key before relogin,
+then asserts the stock client remains logged out and the persisted node count
+does not change.
 The route-preservation variant advertises and approves `REAL_CLIENT_ROUTE`
 (default `10.40.0.0/24`) before relogin, then asserts the approved route
 remains on the same node.
@@ -356,6 +361,9 @@ Additional knobs:
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 - `REAL_CLIENT_PREAUTH_EXPIRATION` controls the upstream CLI `--expiration`
   duration when creating the key.
+- `REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED=true` can be combined with
+  `REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER=true` to require the fresh relogin
+  auth key to be rejected after expiration.
 
 ## Web Registration Smoke
 
@@ -699,6 +707,8 @@ tools/real-client/postgres-authkey-nonreusable-smoke.sh
 tools/real-client/postgres-authkey-nonreusable-headscale-go-smoke.sh
 tools/real-client/postgres-authkey-expired-smoke.sh
 tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
+tools/real-client/postgres-authkey-relogin-expired-smoke.sh
+tools/real-client/postgres-authkey-relogin-expired-headscale-go-smoke.sh
 tools/real-client/postgres-online-lastseen-smoke.sh
 tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-smoke.sh

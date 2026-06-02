@@ -45,6 +45,7 @@ expected_set_tags_failure="${REAL_CLIENT_EXPECT_SET_TAGS_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
+authkey_relogin_expired="${REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 policy_reload_json="${REAL_CLIENT_POLICY_RELOAD_JSON:-}"
@@ -222,8 +223,26 @@ case "${authkey_relogin_same_user}" in
     exit 2
     ;;
 esac
+case "${authkey_relogin_expired}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    authkey_relogin_expired_flag=1
+    authkey_relogin_expired_json=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    authkey_relogin_expired_flag=0
+    authkey_relogin_expired_json=false
+    ;;
+  *)
+    echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED must be true or false, got ${authkey_relogin_expired}" >&2
+    exit 2
+    ;;
+esac
 if ((authkey_relogin_same_user_flag)) && [[ "${login_mode}" != "authkey" ]]; then
   echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER requires REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+if ((authkey_relogin_expired_flag && ! authkey_relogin_same_user_flag)); then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED requires REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER=true" >&2
   exit 2
 fi
 if ((authkey_relogin_same_user_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
@@ -1638,7 +1657,11 @@ if [[ -n "${approve_routes}" || -n "${approve_routes_by_client}" ]]; then
 fi
 
 if ((authkey_relogin_same_user_flag)); then
-  echo "::group::auth-key logout and same-user relogin"
+  if ((authkey_relogin_expired_flag)); then
+    echo "::group::auth-key logout and expired-key relogin rejection"
+  else
+    echo "::group::auth-key logout and same-user relogin"
+  fi
   relogin_authkeys=()
   relogin_before_ips=()
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-before-relogin.json"
@@ -1652,10 +1675,10 @@ if ((authkey_relogin_same_user_flag)); then
           user: ARGV.fetch(0),
           reusable: true,
           ephemeral: false,
-          expired: false,
+          expired: ARGV.fetch(2) == "true",
           tags: tags,
         })
-      ' "${client_users[$idx]}" "${preauth_tags_values[$idx]}"
+      ' "${client_users[$idx]}" "${preauth_tags_values[$idx]}" "${authkey_relogin_expired_json}"
     )"
     preauth_json="$(
       curl -fsS -X POST "http://127.0.0.1:${http_port}/harness/preauth" \
@@ -1696,6 +1719,16 @@ if ((authkey_relogin_same_user_flag)); then
     relogin_status=0
     run_with_timeout "tailscale same-user relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       relogin_status="$?"
+    if ((authkey_relogin_expired_flag)); then
+      if tailscale_logged_in "${client_name}"; then
+        echo "expected expired auth-key relogin to fail for ${client_name}, but it reached a logged-in netmap" >&2
+        docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.unexpected-relogin-status.json" 2>/dev/null || true
+        exit 1
+      fi
+      docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.expected-relogin-failure-status.json" 2>/dev/null || true
+      echo "expired auth-key relogin failed as expected for ${client_name}"
+      continue
+    fi
     if ((relogin_status != 0)); then
       echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
     fi
@@ -1712,6 +1745,19 @@ if ((authkey_relogin_same_user_flag)); then
     cp "${work_dir}/${client_name}.relogin-tailscale-status.json" "${work_dir}/${client_name}.tailscale-status.json"
   done
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-relogin.json"
+  if ((authkey_relogin_expired_flag)); then
+    ruby -rjson -e '
+      before = JSON.parse(File.read(ARGV.fetch(0)))
+      after = JSON.parse(File.read(ARGV.fetch(1)))
+      expected_count = Integer(ARGV.fetch(2))
+      abort("expected #{expected_count} machines before expired relogin, got #{before.length}") unless before.length == expected_count
+      abort("expected #{expected_count} machines after expired relogin rejection, got #{after.length}") unless after.length == expected_count
+      puts JSON.pretty_generate({expired_relogin_rejected_machines: after.length})
+    ' "${work_dir}/machines-before-relogin.json" "${work_dir}/machines-after-relogin.json" "${expected_machine_count}"
+    echo "::endgroup::"
+    echo "authkey expired-relogin real-client smoke passed"
+    exit 0
+  fi
   ruby -rjson -e '
     before = JSON.parse(File.read(ARGV.fetch(0)))
     after = JSON.parse(File.read(ARGV.fetch(1)))

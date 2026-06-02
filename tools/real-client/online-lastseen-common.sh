@@ -39,6 +39,7 @@ expected_register_failure="${REAL_CLIENT_EXPECT_REGISTER_FAILURE:-false}"
 reauth_after_login="${REAL_CLIENT_REAUTH_AFTER_LOGIN:-false}"
 reauth_tags="${REAL_CLIENT_REAUTH_TAGS:-}"
 authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
+authkey_relogin_expired="${REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
@@ -191,8 +192,24 @@ case "${authkey_relogin_same_user}" in
     exit 2
     ;;
 esac
+case "${authkey_relogin_expired}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    authkey_relogin_expired_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    authkey_relogin_expired_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED must be true or false, got ${authkey_relogin_expired}" >&2
+    exit 2
+    ;;
+esac
 if ((authkey_relogin_same_user_flag)) && [[ "${login_mode}" != "authkey" ]]; then
   echo "REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER requires REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+if ((authkey_relogin_expired_flag && ! authkey_relogin_same_user_flag)); then
+  echo "REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED requires REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER=true" >&2
   exit 2
 fi
 if ((authkey_relogin_same_user_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
@@ -1925,8 +1942,12 @@ mint_preauth_key_for_user() {
   local key_user_id="$1"
   local output_name="$2"
   local key_tags="${preauth_tags}"
+  local key_expired_flag="${preauth_expired_flag}"
   if (($# >= 3)); then
     key_tags="$3"
+  fi
+  if (($# >= 4)); then
+    key_expired_flag="$4"
   fi
   local preauth_args=(
     -o json preauthkeys create
@@ -1940,7 +1961,7 @@ mint_preauth_key_for_user() {
     preauth_args+=(--tags "${key_tags}")
   fi
   headscale_cmd "${preauth_args[@]}" >"${work_dir}/${output_name}.json"
-  if ((preauth_expired_flag)); then
+  if ((key_expired_flag)); then
     local authkey_id
     authkey_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); id = j["id"] || j["ID"]; abort("missing preauth key ID") unless id; puts id' "${work_dir}/${output_name}.json")"
     headscale_cmd -o json preauthkeys expire --id "${authkey_id}" \
@@ -2210,7 +2231,11 @@ tailscale_status_ips() {
 
 relogin_with_authkey_if_requested() {
   ((authkey_relogin_same_user_flag)) || return 0
-  echo "::group::auth-key logout and same-user relogin"
+  if ((authkey_relogin_expired_flag)); then
+    echo "::group::auth-key logout and expired-key relogin rejection"
+  else
+    echo "::group::auth-key logout and same-user relogin"
+  fi
   local expected_count="${expected_machine_count:-${#successful_client_names[@]}}"
   local before_nodes_path="${work_dir}/nodes-before-relogin.json"
   local after_nodes_path="${work_dir}/nodes-after-relogin.json"
@@ -2225,7 +2250,7 @@ relogin_with_authkey_if_requested() {
     docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.relogin-before-status.json"
     relogin_before_ips+=("$(tailscale_status_ips "${work_dir}/${client_name}.relogin-before-status.json")")
     user_id="$(user_id_for_name "${client_users[$idx]}")"
-    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}" "${preauth_tags_values[$idx]}")")
+    relogin_authkeys+=("$(mint_preauth_key_for_user "${user_id}" "preauth-relogin-${idx}" "${preauth_tags_values[$idx]}" "${authkey_relogin_expired_flag}")")
   done
 
   for idx in "${!client_names[@]}"; do
@@ -2258,6 +2283,17 @@ relogin_with_authkey_if_requested() {
     relogin_status=0
     run_with_timeout "tailscale same-user relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       relogin_status="$?"
+    if ((authkey_relogin_expired_flag)); then
+      if client_logged_in "${client_name}" "${work_dir}/${client_name}.unexpected-relogin-status.json"; then
+        echo "expected expired auth-key relogin to fail for ${client_name}, but it logged in" >&2
+        echo "::endgroup::"
+        return 1
+      fi
+      docker exec "${client_name}" tailscale status --json \
+        >"${work_dir}/${client_name}.expected-relogin-failure-status.json" 2>/dev/null || true
+      echo "expired auth-key relogin failed as expected for ${client_name}"
+      continue
+    fi
     if ((relogin_status != 0)); then
       echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
     fi
@@ -2277,6 +2313,24 @@ relogin_with_authkey_if_requested() {
   done
 
   headscale_cmd -o json nodes list >"${after_nodes_path}"
+  if ((authkey_relogin_expired_flag)); then
+    ruby -rjson -e '
+      def nodes(path)
+        payload = JSON.parse(File.read(path))
+        payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
+      end
+
+      before = nodes(ARGV.fetch(0))
+      after = nodes(ARGV.fetch(1))
+      expected_count = Integer(ARGV.fetch(2))
+      abort("expected #{expected_count} nodes before expired relogin, got #{before.length}") unless before.length == expected_count
+      abort("expected #{expected_count} nodes after expired relogin rejection, got #{after.length}") unless after.length == expected_count
+      puts JSON.pretty_generate({expired_relogin_rejected_nodes: after.length})
+    ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}"
+    echo "::endgroup::"
+    echo "${target} expired auth-key relogin real-client smoke passed"
+    exit 0
+  fi
   ruby -rjson -e '
     def nodes(path)
       payload = JSON.parse(File.read(path))

@@ -1448,6 +1448,58 @@ assert_derp_map_if_requested() {
   echo "::endgroup::"
 }
 
+snapshot_derp_map_before_restart_if_available() {
+  [[ -n "${expected_derp_region_id}" ]] || return 0
+  local derp_client_name current_path snapshot_path
+  for derp_client_name in "${successful_client_names[@]}"; do
+    current_path="${work_dir}/${derp_client_name}.derp-map.json"
+    snapshot_path="${work_dir}/${derp_client_name}.pre-derp-restart-derp-map.json"
+    if [[ -f "${current_path}" ]]; then
+      cp "${current_path}" "${snapshot_path}"
+    fi
+  done
+}
+
+assert_derp_map_stable_after_restart_if_available() {
+  [[ -n "${expected_derp_region_id}" ]] || return 0
+  echo "::group::assert DERP map stable after restart"
+  local derp_client_name pre_path post_path output_path
+  for derp_client_name in "${successful_client_names[@]}"; do
+    pre_path="${work_dir}/${derp_client_name}.pre-derp-restart-derp-map.json"
+    post_path="${work_dir}/${derp_client_name}.derp-map.json"
+    output_path="${work_dir}/${derp_client_name}.derp-map-restart-stability.json"
+    if [[ ! -f "${pre_path}" ]]; then
+      echo "missing pre-restart DERP map snapshot for ${derp_client_name}: ${pre_path}" >&2
+      echo "::endgroup::"
+      return 1
+    fi
+    if ! ruby -rjson -e '
+      pre = JSON.parse(File.read(ARGV.fetch(0)))
+      post = JSON.parse(File.read(ARGV.fetch(1)))
+      client = ARGV.fetch(2)
+      unless pre == post
+        abort("DERP map changed after restart for #{client}: before=#{JSON.generate(pre)} after=#{JSON.generate(post)}")
+      end
+      node = post.fetch("node", {})
+      puts JSON.pretty_generate({
+        client: client,
+        stable_derp_map_after_restart: true,
+        host: node["HostName"],
+        derp_port: node["DERPPort"],
+        stun_port: node["STUNPort"],
+        omitDefaultRegions: post["omitDefaultRegions"],
+      })
+    ' "${pre_path}" "${post_path}" "${derp_client_name}" >"${output_path}" 2>"${output_path}.err"; then
+      cat "${output_path}.err" >&2 || true
+      dump_client_debug "${derp_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
+}
+
 tailscale_derp_ping_succeeded() {
   local source_name="$1"
   local target_name="$2"
@@ -1499,6 +1551,7 @@ assert_derp_ping_if_requested() {
 assert_derp_restart_if_requested() {
   ((derp_restart_after_assertions_flag)) || return 0
   echo "::group::restart ${target} server and assert DERP recovery"
+  snapshot_derp_map_before_restart_if_available
   stop_server
   if ! start_server; then
     echo "::endgroup::"
@@ -1519,6 +1572,7 @@ assert_derp_restart_if_requested() {
 
   assert_derp_stun_if_requested
   assert_derp_map_if_requested
+  assert_derp_map_stable_after_restart_if_available
   assert_derp_ping_if_requested
   echo "::endgroup::"
 }

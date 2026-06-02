@@ -4508,6 +4508,125 @@ async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult 
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_grpc_gateway_api_key_lifecycle_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_api_key").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let bootstrap = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(bootstrap.status.success(), "stderr: {}", stderr(&bootstrap));
+        let bootstrap = json_output(&bootstrap);
+        let bootstrap_secret = bootstrap.as_str().expect("bootstrap api key secret");
+        assert!(
+            bootstrap_secret.starts_with("hskey-api-"),
+            "api key: {bootstrap_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created = http
+            .post(format!("{server_url}/api/v1/apikey"))
+            .bearer_auth(bootstrap_secret)
+            .json(&serde_json::json!({ "expiration": "2030-01-02T03:04:05Z" }))
+            .send()
+            .await?;
+        assert_eq!(created.status(), reqwest::StatusCode::OK);
+        let created = created.json::<serde_json::Value>().await?;
+        let created_secret = created["apiKey"].as_str().expect("created api key secret");
+        assert!(
+            created_secret.starts_with("hskey-api-"),
+            "created api key: {created}"
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/apikey"))
+            .bearer_auth(bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        let api_keys = listed["apiKeys"].as_array().expect("apiKeys");
+        assert_eq!(api_keys.len(), 2, "listed api keys: {listed}");
+        let created_row = api_keys
+            .iter()
+            .find(|key| key["id"] == "2")
+            .expect("created api key row");
+        let created_prefix = created_row["prefix"]
+            .as_str()
+            .expect("created api key prefix")
+            .to_string();
+        assert!(
+            created_prefix.starts_with("hskey-api-") && created_prefix.ends_with("-***"),
+            "created api key row: {created_row}"
+        );
+        assert_eq!(created_row["expiration"], "2030-01-02T03:04:05Z");
+        assert!(
+            created_row["createdAt"]
+                .as_str()
+                .is_some_and(|created_at| created_at.ends_with('Z')),
+            "created api key row: {created_row}"
+        );
+        assert!(created_row.get("lastSeen").is_none());
+
+        let expired = http
+            .post(format!("{server_url}/api/v1/apikey/expire"))
+            .bearer_auth(bootstrap_secret)
+            .json(&serde_json::json!({ "id": "2" }))
+            .send()
+            .await?;
+        assert_eq!(expired.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            expired.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let deleted = http
+            .delete(format!("{server_url}/api/v1/apikey/{created_prefix}"))
+            .bearer_auth(bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            deleted.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let listed = http
+            .get(format!("{server_url}/api/v1/apikey"))
+            .bearer_auth(bootstrap_secret)
+            .send()
+            .await?;
+        assert_eq!(listed.status(), reqwest::StatusCode::OK);
+        let listed = listed.json::<serde_json::Value>().await?;
+        let api_keys = listed["apiKeys"].as_array().expect("apiKeys");
+        assert_eq!(api_keys.len(), 1, "listed api keys after delete: {listed}");
+        assert_eq!(api_keys[0]["id"], "1");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_node_lifecycle").await? else {
         return Ok(());

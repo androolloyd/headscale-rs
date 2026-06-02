@@ -1868,3 +1868,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   route approval, rename, expire, backfill, and delete.
 - The smoke compiles and uses the existing local skip path when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is absent; CI provides the live Postgres URL.
+
+## 2026-06-02 Postgres grpc-gateway API-key lifecycle smoke
+
+- Added the sibling feature-gated production `headscale serve` smoke for public
+  grpc-gateway API-key lifecycle over Postgres: a CLI bootstrap key authenticates
+  gateway create, list, expire, delete, and post-delete list checks.
+- The test asserts protojson `apiKey`/`apiKeys` field names, display-prefix
+  deletion, `{}` mutation responses, and timestamp field projection on the real
+  public gateway path.

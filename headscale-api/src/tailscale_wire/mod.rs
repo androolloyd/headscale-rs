@@ -2533,6 +2533,13 @@ impl MachineRegistry {
         )
     }
 
+    fn node_key_still_maps_to_node_id(&self, node_key_hex: &str, node_id: u64) -> bool {
+        self.inner
+            .read()
+            .get(node_key_hex)
+            .is_some_and(|rec| rec.stable_node_id_for_key(node_key_hex) == node_id)
+    }
+
     /// Subscribe to the generation-counter wake channel. Each mutating
     /// call (`upsert`, `update_with`, the lifecycle setters that route
     /// through `update_with`) bumps the counter. Holders of a
@@ -2768,7 +2775,11 @@ impl MachineRegistry {
         reason: Option<MapChangeReason>,
     ) {
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        let node_key_for_presence = node_key_hex.clone();
         let existed = self.upsert_record(node_key_hex, rec);
+        if !self.node_key_still_maps_to_node_id(&node_key_for_presence, node_id) {
+            return;
+        }
         let reason = reason.unwrap_or(if existed {
             MapChangeReason::NodeUpdated
         } else {
@@ -2781,7 +2792,11 @@ impl MachineRegistry {
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
         let existing = self.get(&node_key_hex);
         let changes = Self::auth_completion_pending_changes(existing.as_ref(), &rec, node_id);
+        let node_key_for_presence = node_key_hex.clone();
         self.upsert_record(node_key_hex, rec);
+        if !self.node_key_still_maps_to_node_id(&node_key_for_presence, node_id) {
+            return;
+        }
         self.wake_waiters_with_many(changes);
     }
 
@@ -6288,6 +6303,74 @@ mod registry_tests {
         let batch_size = reg.nodestore_batch_size_metrics();
         assert_eq!(batch_size.count, 1);
         assert_eq!(batch_size.bucket("2"), 1);
+    }
+
+    #[test]
+    fn nodestore_write_batcher_upsert_deleted_same_batch_emits_only_delete_change() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(1);
+        rec.node_key_hex = "node-upsert-delete".into();
+        rec.hostname = "before-upsert-delete".into();
+        let node_id = rec.stable_node_id_for_key(&rec.node_key_hex);
+        reg.upsert(rec.node_key_hex.clone(), rec);
+        let history_len = reg.map_change_history().len();
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || {
+            let mut rec = first_reg
+                .get("node-upsert-delete")
+                .expect("existing node before queued upsert");
+            rec.hostname = "after-upsert-delete".into();
+            first_reg.upsert("node-upsert-delete".into(), rec);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first upsert did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            reg.get("node-upsert-delete").map(|rec| rec.hostname),
+            Some("before-upsert-delete".into()),
+            "first upsert should wait for another item or the timeout"
+        );
+
+        assert!(reg.delete("node-upsert-delete"));
+        first.join().expect("first upsert thread should finish");
+
+        assert!(reg.get("node-upsert-delete").is_none());
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("put")
+                .copied()
+                .unwrap_or_default(),
+            2
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("delete")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_label(), "peers removed");
+        assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
+        assert!(new_changes[0].content.peers_changed.is_empty());
+        assert!(new_changes[0].content.peer_patches.is_empty());
     }
 
     #[test]

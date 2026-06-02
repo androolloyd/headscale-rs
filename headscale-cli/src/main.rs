@@ -1126,6 +1126,7 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         parts.push(arg.as_ref().to_str()?);
     }
     let output_format = output_format_from_raw_args(args);
+    let command_parts = upstream_exact_command_parts(parts.as_slice());
 
     if parts
         .iter()
@@ -1146,8 +1147,8 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("{UPSTREAM_TOP_LEVEL_USAGE}\nError: {error}\n"));
     }
 
-    if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
-        let fmt = if matches!(parts.as_slice(), ["mockoidc", ..]) {
+    if let Some(error) = upstream_unknown_utility_flag(command_parts) {
+        let fmt = if matches!(command_parts, ["mockoidc", ..]) {
             OutputFormat::Table
         } else {
             output_format
@@ -1171,7 +1172,6 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(format!("Error: {error}\n"));
     }
 
-    let command_parts = upstream_exact_command_parts(parts.as_slice());
     if let Some(error) = debug_create_node_required_flag_error(command_parts) {
         return Some(admin::output::format_error(output_format, &error));
     }

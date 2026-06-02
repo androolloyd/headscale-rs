@@ -1755,3 +1755,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   labels, equal labels with different numeric owners do not match, tagged nodes
   remain excluded from `autogroup:self`, and map snapshot SSH policy nodes keep
   the numeric owner ID.
+
+## 2026-06-02 gRPC preauth response parity slice
+
+- `CreatePreAuthKey` still returns the one-time full `hskey-auth-*` token, but
+  `ListPreAuthKeys` now matches headscale-go by rendering stored modern keys as
+  `hskey-auth-<prefix>-***` instead of leaking cached plaintext.
+- `CreatePreAuthKey` missing-owner lookup failures now preserve headscale-go's
+  raw lookup shape: gRPC `Unknown` with `user not found`, and grpc-gateway HTTP
+  500/code 2.
+- Added gRPC and gateway regressions for create/full-token versus list/masked
+  token behavior and the missing-user status mapping.

@@ -890,8 +890,8 @@ pub mod upstream {
                 self.users
                     .get_by_id(body.user)
                     .await
-                    .map_err(user_error_to_status)?
-                    .ok_or_else(|| Status::not_found("user not found"))?
+                    .map_err(user_lookup_error_to_unknown)?
+                    .ok_or_else(|| Status::unknown("user not found"))?
                     .name
             };
             let expiration = body
@@ -952,7 +952,7 @@ pub mod upstream {
             let keys = self.preauth.list().await;
             let mut pre_auth_keys = Vec::with_capacity(keys.len());
             for key in &keys {
-                pre_auth_keys.push(preauth_key_to_proto(key, &self.users).await?);
+                pre_auth_keys.push(listed_preauth_key_to_proto(key, &self.users).await?);
             }
             pre_auth_keys.sort_by_key(|key| key.id);
             Ok(Response::new(ListPreAuthKeysResponse { pre_auth_keys }))
@@ -1501,10 +1501,26 @@ pub mod upstream {
         key: &PreauthAdminKey,
         users: &Arc<dyn UserAdmin>,
     ) -> Result<PreAuthKey, Status> {
+        preauth_key_to_proto_with_display_key(key, users, key.key.clone()).await
+    }
+
+    async fn listed_preauth_key_to_proto(
+        key: &PreauthAdminKey,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<PreAuthKey, Status> {
+        let display_key = listed_preauth_display_key(&key.key);
+        preauth_key_to_proto_with_display_key(key, users, display_key).await
+    }
+
+    async fn preauth_key_to_proto_with_display_key(
+        key: &PreauthAdminKey,
+        users: &Arc<dyn UserAdmin>,
+        display_key: String,
+    ) -> Result<PreAuthKey, Status> {
         Ok(PreAuthKey {
             user: preauth_user_to_proto(key, users).await?,
             id: key.id,
-            key: key.key.clone(),
+            key: display_key,
             reusable: key.reusable,
             ephemeral: key.ephemeral,
             used: key.redemptions > 0,
@@ -1512,6 +1528,23 @@ pub mod upstream {
             created_at: Some(unix_to_timestamp(saturating_u64_to_i64(key.created_at))),
             acl_tags: key.tags.clone(),
         })
+    }
+
+    fn listed_preauth_display_key(key: &str) -> String {
+        const PREAUTH_KEY_PREFIX: &str = "hskey-auth-";
+        const PREAUTH_KEY_DISPLAY_PREFIX_LEN: usize = 12;
+
+        let Some(rest) = key.strip_prefix(PREAUTH_KEY_PREFIX) else {
+            return key.to_string();
+        };
+        let Some((prefix, _secret)) = rest.split_once('-') else {
+            return key.to_string();
+        };
+        if prefix.len() != PREAUTH_KEY_DISPLAY_PREFIX_LEN {
+            return key.to_string();
+        }
+
+        format!("{PREAUTH_KEY_PREFIX}{prefix}-***")
     }
 
     async fn preauth_user_to_proto(
@@ -5382,6 +5415,7 @@ mod upstream_tests {
         assert_eq!(created.acl_tags, vec!["tag:server".to_string()]);
         assert_eq!(created.user.as_ref().unwrap().id, user.id);
         assert_eq!(created.expiration.as_ref().unwrap().seconds, 4_102_444_800);
+        assert!(!created.key.ends_with("-***"));
 
         let listed = service
             .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
@@ -5390,6 +5424,9 @@ mod upstream_tests {
             .into_inner();
         assert_eq!(listed.pre_auth_keys.len(), 1);
         assert_eq!(listed.pre_auth_keys[0].id, created.id);
+        assert_ne!(listed.pre_auth_keys[0].key, created.key);
+        assert!(listed.pre_auth_keys[0].key.starts_with("hskey-auth-"));
+        assert!(listed.pre_auth_keys[0].key.ends_with("-***"));
         assert_eq!(
             listed.pre_auth_keys[0].expiration.as_ref().unwrap().seconds,
             4_102_444_800
@@ -5499,7 +5536,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "user not found");
 
         let err = service
             .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {

@@ -1854,8 +1854,8 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             method: Method::POST,
             uri: "/api/v1/preauthkey",
             body: r#"{"user":"404"}"#,
-            expected_http_status: 404,
-            expected_grpc_code: 5,
+            expected_http_status: 500,
+            expected_grpc_code: 2,
             expected_message: "user not found",
         },
         Case {
@@ -2647,6 +2647,11 @@ async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
             .unwrap()
             .starts_with("hskey-auth-")
     );
+    let created_key = body["preAuthKey"]["key"]
+        .as_str()
+        .expect("created full preauth key")
+        .to_string();
+    assert!(!created_key.ends_with("-***"));
 
     let resp = app
         .clone()
@@ -2662,6 +2667,12 @@ async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
     let body = body_json(resp).await;
     assert_eq!(body["preAuthKeys"].as_array().unwrap().len(), 1);
     assert_eq!(body["preAuthKeys"][0]["id"], "1");
+    let listed_key = body["preAuthKeys"][0]["key"]
+        .as_str()
+        .expect("listed preauth display key");
+    assert_ne!(listed_key, created_key);
+    assert!(listed_key.starts_with("hskey-auth-"));
+    assert!(listed_key.ends_with("-***"));
 
     let resp = app
         .clone()

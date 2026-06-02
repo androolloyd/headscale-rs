@@ -266,6 +266,7 @@ smoke_ids=(
   route-health-mixed-exit-all-unhealthy-reload
   route-health-mixed-exit-all-unhealthy-restart
   route-health-mixed-exit-all-unhealthy-reload-restart
+  route-edge-current-upstream-audit
   taildrop-capmap
   derp-private
   ssh
@@ -423,6 +424,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -652,6 +654,7 @@ smoke_rust_scripts=(
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-restart-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
+  tools/real-client/route-edge-current-upstream-audit-smoke.sh
   tools/real-client/taildrop-capmap-smoke.sh
   tools/real-client/derp-private-smoke.sh
   tools/real-client/ssh-smoke.sh
@@ -845,6 +848,7 @@ smoke_go_scripts=(
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
+  tools/real-client/route-edge-current-upstream-audit-headscale-go-smoke.sh
   tools/real-client/taildrop-capmap-headscale-go-smoke.sh
   tools/real-client/derp-private-headscale-go-smoke.sh
   tools/real-client/ssh-headscale-go-smoke.sh
@@ -1038,6 +1042,7 @@ smoke_assertions=(
   "current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention"
   "current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart"
   "current-head route-health mixed exit-node all-unavailable policy reload survives server restart"
+  "evidence-only current-head route-via/route-health default and Postgres matrix symmetry audit"
   "taildrop disabled removes file-sharing from stock-client self CapMap"
   "private DERP relay, STUN, verify-client admission, and DERP map metadata"
   "Tailscale SSH allow, deny, and ACL timeout"

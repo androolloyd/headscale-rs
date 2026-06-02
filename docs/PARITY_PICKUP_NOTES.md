@@ -2238,3 +2238,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   upstream headscale-go `171fd7a3`.
 - Added focused process snapshots for the three structured forms while
   preserving the existing human `Error: flag needs an argument: --user` output.
+
+## 2026-06-02 SQLite listener separation process smoke
+
+- Added a default SQLite production `headscale serve` process smoke for the
+  current headscale-go `171fd7a3` listener topology: public control,
+  metrics/debug, and remote gRPC bind to separate sockets.
+- The smoke creates a user and API key over local Unix gRPC, proves remote
+  insecure gRPC admin traffic works through `grpc_listen_addr` with that API
+  key, and asserts `/metrics` plus `/debug/config` are available on
+  `metrics_listen_addr` while the public `listen_addr` fallback does not expose
+  those diagnostic payloads.
+- Remaining adjacent gaps are broader public-CA ACME failure-mode snapshots and
+  config/map-stream churn; this slice only closes the default SQLite
+  process-level listener-separation proof.

@@ -1269,7 +1269,7 @@ fn append_companion_cap_grant_rules(
 ) {
     let mut src_prefixes = src_ips
         .iter()
-        .filter_map(|src| parse_ip_net(src).map(|net| net.to_string()))
+        .flat_map(|src| ipset_string_to_cidrs(src))
         .collect::<Vec<_>>();
     src_prefixes.sort();
     src_prefixes.dedup();
@@ -1817,6 +1817,24 @@ fn ipset_string_contains_addr(ipset: &str, addr: &str) -> bool {
             u128::from(start) <= u128::from(addr) && u128::from(addr) <= u128::from(end)
         }
         _ => false,
+    }
+}
+
+fn ipset_string_to_cidrs(ipset: &str) -> Vec<String> {
+    if let Some(net) = parse_ip_net(ipset) {
+        return vec![net.to_string()];
+    }
+    let Some((start, end)) = ipset.split_once('-') else {
+        return Vec::new();
+    };
+    match (start.trim().parse::<IpAddr>(), end.trim().parse::<IpAddr>()) {
+        (Ok(IpAddr::V4(start)), Ok(IpAddr::V4(end))) => {
+            cidrs_for_interval(u32::from(start) as u128, u32::from(end) as u128, 32)
+        }
+        (Ok(IpAddr::V6(start)), Ok(IpAddr::V6(end))) => {
+            cidrs_for_interval(u128::from(start), u128::from(end), 128)
+        }
+        _ => Vec::new(),
     }
 }
 

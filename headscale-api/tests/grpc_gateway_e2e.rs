@@ -394,7 +394,7 @@ async fn assert_not_gateway_route_fallback(resp: Response, context: &str) {
     );
 }
 
-async fn assert_plain_unauthorized(resp: Response) {
+async fn assert_plain_unauthorized_without_leak(resp: Response, forbidden: &[&str]) {
     assert_eq!(resp.status(), 401);
     assert_eq!(
         resp.headers()
@@ -408,6 +408,111 @@ async fn assert_plain_unauthorized(resp: Response) {
     );
     let body = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     assert_eq!(body.as_ref(), b"Unauthorized");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.len() < 100,
+        "unauthorized body should be minimal: {body}"
+    );
+    for forbidden in forbidden {
+        assert!(
+            !body.contains(forbidden),
+            "unauthorized response leaked protected value {forbidden}: {body}"
+        );
+    }
+}
+
+async fn assert_plain_unauthorized(resp: Response) {
+    assert_plain_unauthorized_without_leak(resp, &[]).await;
+}
+
+#[tokio::test]
+async fn apiauthenticationbypass_apiauthenticationbypasscurl() {
+    let (app, token) = fixture().await;
+    let users = ["user1", "user2", "user3", "testuser1", "testuser2"];
+
+    for user in users {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/user",
+                Some(&token),
+                Body::from(format!(r#"{{"name":"{user}"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "create {user}");
+    }
+
+    for authorization in [
+        None,
+        Some("InvalidToken"),
+        Some("Bearer invalid-token-12345"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                Method::GET,
+                "/api/v1/user",
+                authorization,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_plain_unauthorized_without_leak(resp, &users).await;
+    }
+
+    for authorization in [None, Some("Authorization: InvalidToken")] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                Method::GET,
+                "/api/v1/user?name=testuser1",
+                authorization,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_plain_unauthorized_without_leak(resp, &users).await;
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::GET,
+            "/api/v1/user",
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let returned = body["users"].as_array().expect("users");
+    assert_eq!(returned.len(), users.len());
+    for user in users {
+        assert!(
+            returned
+                .iter()
+                .any(|entry| entry["name"].as_str() == Some(user)),
+            "authorized response should include {user}: {body}"
+        );
+    }
+
+    let valid_header = format!("Bearer {token}");
+    let resp = app
+        .oneshot(req_raw_auth(
+            Method::GET,
+            "/api/v1/user?name=testuser1",
+            Some(&valid_header),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["users"].as_array().expect("filtered users").len(), 1);
+    assert_eq!(body["users"][0]["name"].as_str(), Some("testuser1"));
 }
 
 #[tokio::test]

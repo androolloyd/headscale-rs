@@ -2329,3 +2329,31 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   and route approval before the batch tick emit one incremental policy-style
   delta with peer online patch, route-bearing peer change, DNS config, and no
   extra observer frame.
+
+## 2026-06-02 Pending parity authorization and delegated backlog slice
+
+- Generated `headscale-api/tests/current_head_go_parity_pending.rs` from the
+  current-head surface inventory, first authorizing the 111 audited backlog
+  rows as ignored Rust stubs plus one active authorization-count test. After
+  worker adoption and inventory refresh, the file now has zero ignored pending
+  tests and one active zero-count guard.
+- CI now checks the generated backlog stubs before real-client metadata. The
+  refreshed current-head inventory reports all 142 upstream integration tests as
+  `present`, with backlog count 0, and the inventory scanner explicitly ignores
+  the generated file and `go_parity_pending_` prefix so pending stubs never
+  count as parity evidence.
+- Six worker agents were dispatched across all current backlog clusters:
+  tags, ACL/policy/grant-cap, route/DNS, CLI/API auth, SSH, and the combined
+  auth/OIDC/general/DERP slice.
+- Adopted completed worker coverage/fixes: same-machine auth-key and web/OIDC
+  reauth now preserve stable node/user IDs, native DERP replays current health
+  before keepalive, `auth reject --output=yaml` missing `--auth-id` matches
+  current upstream stderr, and TLS-ALPN explicit `server.https_listen` startup
+  failure avoids public-CA cache writes before listener bind failure.
+- Adopted the six backlog slices: exact-name focused evidence for tags,
+  ACL/policy/grant-cap, route/DNS, CLI/API auth, SSH, and
+  auth/OIDC/general/DERP. The ACL/grant-cap slice also fixes companion cap
+  grants for range-style source IP sets by expanding ranges to CIDRs.
+- Added paired `ssh-profile-subdomain-deny` and
+  `postgres-policy-rename-restart` real-client rows; the Postgres row is now in
+  PR real-client CI, bringing deterministic PR selection to 155 rows.

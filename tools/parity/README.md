@@ -19,12 +19,14 @@ CI also runs a Docker-free metadata check before the differential harness:
 
 ```sh
 python3 scripts/check_parity_golden.py
+python3 scripts/check_headscale_go_refs.py --remote
 ```
 
-It verifies that the pinned headscale-go version in
+These checks verify that the pinned headscale-go version in
 `tools/parity/headscale-go/go.mod` has a matching active golden, that scenario
-file names and `name` fields line up, and that pinned/current-head goldens cover
-the checked-in scenario sets exactly.
+file names and `name` fields line up, that pinned/current-head goldens cover
+the checked-in scenario sets exactly, that the real-client current-head SHA
+still matches upstream `main`, and that the pinned release tag exists upstream.
 
 Scenario files for the pinned differential gate live in
 `tools/parity/scenarios/*.json`. Each scenario carries an upstream-shaped HuJSON

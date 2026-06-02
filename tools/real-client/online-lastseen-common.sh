@@ -117,7 +117,7 @@ expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
 assert_derp_status_health_clear="${REAL_CLIENT_ASSERT_DERP_STATUS_HEALTH_CLEAR:-false}"
 assert_derp_reload_stability="${REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY:-false}"
-derp_restart_after_assertions="${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}"
+restart_after_assertions="${REAL_CLIENT_RESTART_AFTER_ASSERTIONS:-${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
@@ -539,15 +539,15 @@ case "${assert_derp_reload_stability}" in
     exit 2
     ;;
 esac
-case "${derp_restart_after_assertions}" in
+case "${restart_after_assertions}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
-    derp_restart_after_assertions_flag=1
+    restart_after_assertions_flag=1
     ;;
   "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
-    derp_restart_after_assertions_flag=0
+    restart_after_assertions_flag=0
     ;;
   *)
-    echo "REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS must be true or false, got ${derp_restart_after_assertions}" >&2
+    echo "REAL_CLIENT_RESTART_AFTER_ASSERTIONS/REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS must be true or false, got ${restart_after_assertions}" >&2
     exit 2
     ;;
 esac
@@ -1720,9 +1720,39 @@ assert_derp_status_health_clear_if_requested() {
   echo "::endgroup::"
 }
 
-assert_derp_restart_if_requested() {
-  ((derp_restart_after_assertions_flag)) || return 0
-  echo "::group::restart ${target} server and assert DERP recovery"
+assert_post_restart_peer_visibility_if_requested() {
+  [[ -n "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]] || return 0
+  assert_peer_visibility_counts \
+    "after restart" \
+    "${expected_peer_count_after_policy_reload}" \
+    "${expected_peer_counts_after_policy_reload}"
+}
+
+assert_renamed_peer_visibility_after_restart_if_requested() {
+  [[ -n "${rename_node_after_login}" ]] || return 0
+  ((${#successful_client_names[@]} > 1)) || return 0
+  echo "::group::assert renamed peer after restart"
+  local old_name="${successful_client_names[0]}"
+  local new_name="${rename_node_after_login}"
+  local observer_name output_path safe_observer
+  for observer_name in "${successful_client_names[@]:1}"; do
+    safe_observer="${observer_name//[^a-zA-Z0-9_.-]/-}"
+    output_path="${work_dir}/renamed-peer-after-restart-${safe_observer}.json"
+    wait_for "renamed peer ${new_name} visible to ${observer_name} after restart" \
+      "peer_netmap_has_renamed_node '${observer_name}' '${old_name}' '${new_name}' '${output_path}'" || {
+        cat "${output_path}.err" >&2 || true
+        dump_client_debug "${observer_name}"
+        echo "::endgroup::"
+        return 1
+      }
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
+}
+
+assert_restart_if_requested() {
+  ((restart_after_assertions_flag)) || return 0
+  echo "::group::restart ${target} server and assert stock-client recovery"
   snapshot_derp_map_before_restart_if_available
   stop_server
   if ! start_server; then
@@ -1742,6 +1772,8 @@ assert_derp_restart_if_requested() {
     fi
   done
 
+  assert_post_restart_peer_visibility_if_requested
+  assert_renamed_peer_visibility_after_restart_if_requested
   assert_derp_stun_if_requested
   assert_derp_map_if_requested
   assert_derp_map_stable_after_restart_if_available
@@ -3868,7 +3900,7 @@ assert_derp_map_if_requested
 assert_derp_map_stable_after_policy_reload_if_requested
 assert_derp_ping_if_requested
 assert_derp_status_health_clear_if_requested
-assert_derp_restart_if_requested
+assert_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
 assert_self_capmap_keys_if_requested

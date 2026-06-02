@@ -923,6 +923,29 @@ The observer receives one incremental policy-style delta with the online peer
 patch, route-bearing peer change, DNS config, and no full self map or extra
 frame.
 
+Recent coverage note (2026-06-02): the audited current-head integration backlog
+is now represented end-to-end. Six worker agents covered the tags,
+ACL/policy/grant-cap, route/DNS, CLI/API auth, SSH, and
+auth/OIDC/general/DERP clusters; the refreshed current-head inventory reports
+all 142 upstream integration tests as `present` with backlog count 0.
+`current_head_go_parity_pending.rs` remains generated as a zero-pending
+authorization guard, and the source inventory ignores that generated
+file/prefix so pending stubs cannot falsely close backlog.
+
+Recent coverage note (2026-06-02): same-machine reauth now preserves stable
+node/user IDs for auth-key and web/OIDC completion paths, preventing map peer
+ID churn relative to headscale-go. Additional breadth coverage pins native DERP
+health replay before keepalive, `auth reject --output=yaml` missing
+`--auth-id`, and TLS-ALPN explicit `server.https_listen` pre-issuance bind
+failure. The real-client PR matrix now selects 155 deterministic rows,
+including `postgres-policy-rename-restart`.
+
+Recent coverage note (2026-06-02): focused exact-name Rust evidence was added
+for the former tags, ACL, route/DNS, CLI/API auth, SSH, auth/OIDC/lifecycle,
+network retry, DERP verify, and native DERP backlog rows. Companion cap grants
+now expand range-style source IP sets to CIDRs so current-head cap-grant
+companions are not dropped when upstream policies aggregate source ranges.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

@@ -110,6 +110,7 @@ smoke_ids=(
   postgres-policy-churn
   postgres-web-register-policy-churn
   postgres-node-rename
+  postgres-policy-rename-restart
   postgres-magicdns
   postgres-magicdns-custom-domain
   postgres-extra-records
@@ -275,6 +276,7 @@ smoke_ids=(
   ssh
   ssh-localpart
   ssh-profile-variants
+  ssh-profile-subdomain-deny
   ssh-accept-env
 )
 
@@ -288,6 +290,7 @@ smoke_areas=(
   lifecycle
   lifecycle
   policy
+  database
   database
   database
   database
@@ -473,6 +476,7 @@ smoke_areas=(
   ssh
   ssh
   ssh
+  ssh
 )
 
 smoke_rust_scripts=(
@@ -504,6 +508,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-policy-churn-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-smoke.sh
   tools/real-client/postgres-node-rename-smoke.sh
+  tools/real-client/postgres-policy-rename-restart-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-smoke.sh
   tools/real-client/postgres-extra-records-smoke.sh
@@ -669,6 +674,7 @@ smoke_rust_scripts=(
   tools/real-client/ssh-smoke.sh
   tools/real-client/ssh-localpart-smoke.sh
   tools/real-client/ssh-profile-variants-smoke.sh
+  tools/real-client/ssh-profile-subdomain-deny-smoke.sh
   tools/real-client/ssh-accept-env-smoke.sh
 )
 
@@ -701,6 +707,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-node-rename-headscale-go-smoke.sh
+  tools/real-client/postgres-policy-rename-restart-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/postgres-extra-records-headscale-go-smoke.sh
@@ -866,6 +873,7 @@ smoke_go_scripts=(
   tools/real-client/ssh-headscale-go-smoke.sh
   tools/real-client/ssh-localpart-headscale-go-smoke.sh
   tools/real-client/ssh-profile-variants-headscale-go-smoke.sh
+  tools/real-client/ssh-profile-subdomain-deny-headscale-go-smoke.sh
   tools/real-client/ssh-accept-env-headscale-go-smoke.sh
 )
 
@@ -898,6 +906,7 @@ smoke_assertions=(
   "production Postgres auth-key registration plus database policy mutation wakes live peer maps"
   "production Postgres web registration plus database policy mutation wakes live peer maps"
   "production Postgres admin node rename wakes live peer maps and preserves lifecycle state"
+  "production Postgres policy reload plus node rename map churn survives server restart"
   "production Postgres default MagicDNS suffix"
   "production Postgres custom MagicDNS base domain"
   "production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup"
@@ -1063,6 +1072,7 @@ smoke_assertions=(
   "Tailscale SSH allow, deny, and ACL timeout"
   "current-head Tailscale SSH localpart login users from profile emails"
   "current-head Tailscale SSH profile email variants and exact denial status/stderr"
+  "current-head Tailscale SSH localpart profile email subdomain denial status/stderr"
   "current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
 )
 

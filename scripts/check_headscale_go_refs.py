@@ -44,16 +44,39 @@ def headscale_go_version() -> str:
     raise CheckError(f"{relative(GO_MOD)} does not pin github.com/juanfont/headscale")
 
 
-def upstream_main_sha() -> str:
+def git_ls_remote(refs: list[str]) -> dict[str, str]:
     output = subprocess.check_output(
-        ["git", "ls-remote", UPSTREAM_URL, "refs/heads/main"],
+        ["git", "ls-remote", UPSTREAM_URL, *refs],
         cwd=REPO_ROOT,
         text=True,
     )
-    parts = output.split()
-    if len(parts) < 2 or parts[1] != "refs/heads/main":
-        raise CheckError(f"unexpected git ls-remote output for {UPSTREAM_URL}: {output!r}")
-    return parts[0]
+    found: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise CheckError(f"unexpected git ls-remote output for {UPSTREAM_URL}: {output!r}")
+        found[parts[1]] = parts[0]
+    return found
+
+
+def upstream_main_sha() -> str:
+    found = git_ls_remote(["refs/heads/main"])
+    try:
+        return found["refs/heads/main"]
+    except KeyError as err:
+        raise CheckError(f"{UPSTREAM_URL} is missing refs/heads/main") from err
+
+
+def upstream_tag_sha(version: str) -> str:
+    ref = f"refs/tags/{version}"
+    peeled_ref = f"{ref}^{{}}"
+    found = git_ls_remote([ref, peeled_ref])
+    if peeled_ref in found:
+        return found[peeled_ref]
+    try:
+        return found[ref]
+    except KeyError as err:
+        raise CheckError(f"{UPSTREAM_URL} is missing pinned tag {version}") from err
 
 
 def check(remote: bool) -> None:
@@ -80,7 +103,9 @@ def check(remote: bool) -> None:
                 "checked-in current-head headscale-go pin is stale: "
                 f"{relative(CURRENT_SH)} has {current}, upstream main is {upstream}"
             )
+        tag_sha = upstream_tag_sha(baseline)
         print(f"checked upstream headscale-go main pin: {current}")
+        print(f"checked upstream headscale-go baseline tag: {baseline} -> {tag_sha}")
 
     print(f"checked headscale-go baseline pin: {baseline}")
 

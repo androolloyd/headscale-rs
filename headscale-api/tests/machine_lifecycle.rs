@@ -481,6 +481,81 @@ async fn admin_expire_invalid_timestamp_400() {
 }
 
 #[tokio::test]
+async fn expirenode() {
+    let reg = Arc::new(MachineRegistry::new());
+    let node_id = "a3".repeat(32);
+    reg.upsert(node_id.clone(), mk_record(0xa3, "expire-node", 33, false));
+    reg.upsert("a4".repeat(32), mk_record(0xa4, "expire-peer", 34, false));
+    let (wire, admin) = fixture(reg);
+
+    let (status, _) = admin_post(&admin, &node_id, "expire", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = wire_full_map(&wire, &node_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["Node"]["Expired"], serde_json::Value::Bool(true));
+    assert!(body["Node"]["KeyExpiry"].is_string());
+}
+
+#[tokio::test]
+async fn setnodeexpiryinfuture() {
+    let reg = Arc::new(MachineRegistry::new());
+    let node_id = "a5".repeat(32);
+    reg.upsert(
+        node_id.clone(),
+        mk_record(0xa5, "future-expiry-node", 35, false),
+    );
+    reg.upsert("a6".repeat(32), mk_record(0xa6, "future-peer", 36, false));
+    let (wire, admin) = fixture(reg.clone());
+    let target = chrono::Utc::now() + chrono::Duration::hours(2);
+
+    let (status, _) = admin_post(
+        &admin,
+        &node_id,
+        "expire",
+        serde_json::json!({ "expiry": target.to_rfc3339() }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(reg.get(&node_id).unwrap().expiry, Some(target));
+
+    let (status, body) = wire_full_map(&wire, &node_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(body["Node"]["Expired"], serde_json::Value::Bool(true));
+    assert!(body["Node"]["KeyExpiry"].is_string());
+}
+
+#[tokio::test]
+async fn disablenodeexpiry() {
+    let reg = Arc::new(MachineRegistry::new());
+    let node_id = "a7".repeat(32);
+    reg.upsert(
+        node_id.clone(),
+        mk_record(0xa7, "disable-expiry-node", 37, false),
+    );
+    reg.upsert("a8".repeat(32), mk_record(0xa8, "disable-peer", 38, false));
+    let (wire, admin) = fixture(reg.clone());
+    let target = chrono::Utc::now() + chrono::Duration::hours(1);
+
+    admin
+        .machines
+        .expire_at(&node_id, Some(target))
+        .await
+        .unwrap();
+    assert!(reg.get(&node_id).unwrap().expiry.is_some());
+
+    admin.machines.disable_expiry(&node_id).await.unwrap();
+    assert!(reg.get(&node_id).unwrap().expiry.is_none());
+    let (_, admin_body) = admin_get(&admin, &node_id).await;
+    assert!(admin_body["expiry"].is_null());
+
+    let (status, body) = wire_full_map(&wire, &node_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(body["Node"]["Expired"], serde_json::Value::Bool(true));
+    assert!(body["Node"]["KeyExpiry"].is_null());
+}
+
+#[tokio::test]
 async fn admin_logout_preserves_machine_key_and_expires_now() {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert("bb".repeat(32), mk_record(0xbb, "node-2", 11, false));
@@ -576,6 +651,35 @@ async fn admin_delete_removes_from_list_and_wire() {
     // /map for the deleted node returns 404.
     let (s, _) = wire_map(&wire, &"ee".repeat(32)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[cfg(feature = "full")]
+#[tokio::test]
+async fn _2118_deleting_online_node_panics() {
+    let reg = Arc::new(MachineRegistry::new());
+    let node_id = "e1".repeat(32);
+    reg.upsert(node_id.clone(), mk_record(0xe1, "online-delete", 81, false));
+    reg.upsert("e2".repeat(32), mk_record(0xe2, "online-peer", 82, false));
+    let (wire, admin) = fixture(reg.clone());
+    let app = wire_machine_router(wire);
+    let machine_key = reg.get(&node_id).unwrap().machine_key_hex;
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/machine/nodekey:{node_id}/map"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"Stream":true,"Version":113}"#))
+        .unwrap();
+    req.extensions_mut()
+        .insert(NoisePeerMachineKey(machine_key));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let first = next_stream_map(&mut body).await;
+    assert_eq!(first.node.as_ref().unwrap().name, "online-delete");
+
+    assert_eq!(admin_delete(&admin, &node_id).await, StatusCode::NO_CONTENT);
+    assert!(reg.get(&node_id).is_none());
+    drop(body);
 }
 
 #[tokio::test]
@@ -711,6 +815,33 @@ async fn map_last_seen_touch_does_not_wake_long_pollers() {
 }
 
 #[tokio::test]
+async fn ephemeralinalternatetimezone() {
+    let reg = Arc::new(MachineRegistry::new());
+    let pacific = chrono::FixedOffset::west_opt(8 * 60 * 60).unwrap();
+    let mut stale = mk_record(0xb0, "ephem-pacific", 39, true);
+    stale.last_seen = (chrono::Utc::now() - chrono::Duration::minutes(5))
+        .with_timezone(&pacific)
+        .with_timezone(&chrono::Utc);
+    reg.upsert("b0".repeat(32), stale);
+
+    let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+    assert_eq!(removed, vec!["b0".repeat(32)]);
+    assert!(reg.get(&"b0".repeat(32)).is_none());
+}
+
+#[tokio::test]
+async fn ephemeral2006deletedtooquickly() {
+    let reg = Arc::new(MachineRegistry::new());
+    let mut active = mk_record(0xb1, "ephem-active", 40, true);
+    active.last_seen = chrono::Utc::now() - chrono::Duration::seconds(30);
+    reg.upsert("b1".repeat(32), active);
+
+    let removed = reg.gc_ephemeral(std::time::Duration::from_secs(66));
+    assert!(removed.is_empty());
+    assert!(reg.get(&"b1".repeat(32)).is_some());
+}
+
+#[tokio::test]
 async fn gc_ephemeral_removes_stale_devices() {
     let reg = Arc::new(MachineRegistry::new());
     let mut stale = mk_record(0xc0, "ephem-stale", 40, true);
@@ -788,4 +919,18 @@ async fn forced_tags_override_registration() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, v) = admin_get(&admin, &"f0".repeat(32)).await;
     assert_eq!(v["tags"][0], "tag:override");
+}
+
+#[test]
+fn updatehostnamefromclient() {
+    use headscale_api::tailscale_wire::wire::sanitize_hostname_for_given_name;
+
+    let cases = [
+        ("Joe's Mac mini", "joes-mac-mini"),
+        ("Test@Host", "test-host"),
+        ("mail.server", "mail-server"),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(sanitize_hostname_for_given_name(raw), expected);
+    }
 }

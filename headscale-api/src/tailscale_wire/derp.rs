@@ -1003,6 +1003,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_replays_current_health_before_keepalive() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_keepalive_interval(Duration::from_millis(20))
+            .with_keepalive_jitter(Duration::ZERO),
+        );
+        assert_eq!(runtime.set_health_problem("BAD").await, 0);
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Health("BAD".to_string())
+        );
+
+        let keepalive = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_next_frame(&mut client_reader, &mut decoder),
+        )
+        .await
+        .expect("timed out waiting for DERP keepalive")
+        .unwrap();
+        assert_eq!(keepalive, Frame::KeepAlive);
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_sends_health_state_and_restart_advisory() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(NativeDerpRuntime::new(

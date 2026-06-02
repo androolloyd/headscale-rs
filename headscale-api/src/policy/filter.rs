@@ -323,7 +323,7 @@ fn append_companion_cap_grant_rules(
 ) {
     let mut src_prefixes = src_ips
         .iter()
-        .filter_map(|src| parse_ip_net(src).map(|net| net.to_string()))
+        .flat_map(|src| ipset_string_to_cidrs(src))
         .collect::<Vec<_>>();
     src_prefixes.sort();
     src_prefixes.dedup();

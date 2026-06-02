@@ -15,7 +15,10 @@ use axum::{
 use chrono::{Duration as ChronoDuration, Utc};
 use headscale_api::{
     dns::DnsStore,
-    oidc::{OidcAuthConfig, OidcAuthRuntime, OidcPkceConfig, OidcPkceMethod, OidcPolicyConfig},
+    oidc::{
+        OidcAuthConfig, OidcAuthRuntime, OidcPkceConfig, OidcPkceMethod, OidcPolicyConfig,
+        determine_node_expiry,
+    },
     policy::{PolicyStore, parse_hujson_policy},
     tailscale_wire::{
         AllocError, DerpMap, IpAllocator, KnockConfig, MachineRecord, MachineRegistry, MapResponse,
@@ -308,6 +311,30 @@ async fn oidc_register_confirm_rejects_wire_ssh_check_auth_id() {
             dst_node_id: 1002,
             local_user: "root".into(),
         })
+    );
+}
+
+#[test]
+fn oidc_expire_nodes_based_on_token_expiry() {
+    let now = Utc::now();
+    let token_expiry = now + ChronoDuration::minutes(45);
+
+    let mut cfg = OidcPolicyConfig {
+        expiry: ChronoDuration::days(180),
+        use_expiry_from_token: true,
+        ..OidcPolicyConfig::default()
+    };
+    assert_eq!(
+        determine_node_expiry(&cfg, token_expiry, now),
+        Some(token_expiry),
+        "upstream TestOIDCExpireNodesBasedOnTokenExpiry uses the provider token expiry"
+    );
+
+    cfg.use_expiry_from_token = false;
+    assert_eq!(
+        determine_node_expiry(&cfg, token_expiry, now),
+        None,
+        "current upstream ignores legacy oidc.expiry unless token expiry use is enabled"
     );
 }
 

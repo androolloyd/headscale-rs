@@ -636,10 +636,22 @@ def parse_rust_integration_tests(rust_root: Path) -> list[dict[str, Any]]:
     ]
     for root in test_roots:
         for path in iter_files(root, suffixes=(".rs",)):
+            if path.name == "current_head_go_parity_pending.rs":
+                continue
             text = read_text(path)
             for match in re.finditer(r"\b(?:async\s+)?fn\s+([a-zA-Z0-9_]+)\s*\(", text):
                 name = match.group(1)
-                if name.startswith(("fixture", "body_", "assert_", "helper", "service_for", "get_free_port")):
+                if name.startswith(
+                    (
+                        "fixture",
+                        "body_",
+                        "assert_",
+                        "helper",
+                        "service_for",
+                        "get_free_port",
+                        "go_parity_pending_",
+                    )
+                ):
                     continue
                 tests.append(
                     {

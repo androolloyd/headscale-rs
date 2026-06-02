@@ -426,6 +426,22 @@ async fn register_inner(
             .as_ref()
             .and_then(|(_, existing)| existing.auth_key_id)
     });
+    let node_id = existing_machine
+        .as_ref()
+        .and_then(|(_, existing)| existing.node_id);
+    let user_id = existing_machine
+        .as_ref()
+        .and_then(|(_, existing)| existing.user_id);
+    let user_display_name = existing_machine
+        .as_ref()
+        .map_or_else(String::new, |(_, existing)| {
+            existing.user_display_name.clone()
+        });
+    let user_profile_pic_url = existing_machine
+        .as_ref()
+        .map_or_else(String::new, |(_, existing)| {
+            existing.user_profile_pic_url.clone()
+        });
     let (disco_key, endpoints, home_derp) =
         existing_machine
             .as_ref()
@@ -487,14 +503,14 @@ async fn register_inner(
         )
     };
     let rec = MachineRecord {
-        node_id: None,
+        node_id,
         auth_key_id,
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
         user,
-        user_id: None,
-        user_display_name: String::new(),
-        user_profile_pic_url: String::new(),
+        user_id,
+        user_display_name,
+        user_profile_pic_url,
         hostname: given_name,
         os,
         os_version,
@@ -1173,6 +1189,7 @@ mod tests {
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),
+            #[cfg(feature = "full")]
             native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
@@ -2267,6 +2284,8 @@ mod tests {
         let mut first = state.machines.get(&first_node_key).unwrap();
         let first_ipv4 = first.ipv4;
         let first_created_at = first.created_at;
+        first.node_id = Some(8800);
+        first.user_id = Some(42);
         first.disco_key = Some("discokey:old".into());
         first.endpoints = vec!["198.51.100.10:41641".into()];
         first.approved_routes = vec!["10.40.0.0/24".into(), "10.41.0.0/24".into()];
@@ -2296,6 +2315,8 @@ mod tests {
         assert_eq!(rotated.node_key_hex, second_node_key);
         assert_eq!(rotated.machine_key_hex, machine_key_hex);
         assert_eq!(rotated.user, "alice");
+        assert_eq!(rotated.node_id, Some(8800));
+        assert_eq!(rotated.user_id, Some(42));
         assert_eq!(rotated.hostname, "peer-rotated");
         assert_eq!(rotated.ipv4, first_ipv4);
         assert_eq!(rotated.created_at, first_created_at);

@@ -79,7 +79,7 @@ jobs:
         authkey,authkey-nonreusable,authkey-expired,authkey-relogin-same-user,authkey-relogin-expired,authkey-relogin-different-user,authkey-relogin-deleted,authkey-relogin-route-preserve,
         taildrop-capmap,ssh-accept-env,ping-lifecycle,postgres-authkey,postgres-authkey-nonreusable,postgres-authkey-expired,postgres-authkey-relogin-same-user,postgres-authkey-relogin-expired,
         postgres-authkey-relogin-different-user,postgres-authkey-relogin-deleted,postgres-authkey-relogin-route-preserve,postgres-taildrop-capmap,postgres-randomize-client-port,postgres-derp-private,postgres-derp-native,postgres-derp-native-reload,postgres-derp-native-restart,
-        postgres-online-lastseen,postgres-ping-lifecycle,postgres-policy-churn,postgres-web-register-policy-churn,postgres-node-rename,postgres-magicdns,postgres-magicdns-custom-domain,postgres-extra-records,postgres-dns-disabled,
+        postgres-online-lastseen,postgres-ping-lifecycle,postgres-policy-churn,postgres-web-register-policy-churn,postgres-node-rename,postgres-policy-rename-restart,postgres-magicdns,postgres-magicdns-custom-domain,postgres-extra-records,postgres-dns-disabled,
         postgres-dns-edge,postgres-dns-hot-reload,postgres-magicdns-ipv6-only,postgres-prefix-family-dual-stack,postgres-prefix-family-v4-to-dual-backfill,postgres-prefix-family-dual-stack-to-ipv4-only-backfill,postgres-prefix-family-dual-stack-to-ipv6-only-backfill,postgres-prefix-family-ipv4-only,
         postgres-prefix-family-ipv6-only,postgres-web-register,postgres-web-register-tags,postgres-web-register-unowned-tag,postgres-route-advertise,postgres-route-approve,postgres-route-primary,postgres-route-primary-restart,
         postgres-route-primary-failover,postgres-route-primary-sticky,postgres-route-primary-withdraw,postgres-route-exit-node,postgres-web-register-route-approve,postgres-web-register-route-approve-restart,postgres-oidc,postgres-oidc-restart,
@@ -93,7 +93,7 @@ jobs:
         ssh-oidc-check-period-cache,ssh-oidc-check-period-local-user,ssh-oidc-policy-restart,online-lastseen,restart-persistence,magicdns,extra-records,acl-allow,
         route-approve,route-via,route-via-health,route-via-health-restart,route-via-same-tag-restart,route-via-reload-restart,route-via-multiprefix,route-health,
         route-health-all-unhealthy,route-health-mixed-exit-reload-restart,route-health-mixed-exit-all-unhealthy-reload-restart,route-edge-current-upstream-audit,prefix-family-v4-to-dual-backfill,prefix-family-dual-stack-to-ipv4-only-backfill,prefix-family-dual-stack-to-ipv6-only-backfill,web-register-tags,
-        web-register-unowned-tag,ssh-oidc-check,ssh-cli-check,ssh-localpart,ssh-profile-variants,magicdns-custom-domain,dns-edge,dns-hot-reload,
+        web-register-unowned-tag,ssh-oidc-check,ssh-cli-check,ssh-localpart,ssh-profile-variants,ssh-profile-subdomain-deny,magicdns-custom-domain,dns-edge,dns-hot-reload,
         magicdns-ipv6-only,acl-empty,acl-autogroup-self,derp-private,route-via-multiprefix-reload-restart,route-health-reload-restart,tag-update-invalid
     steps:
       - uses: actions/checkout@v6

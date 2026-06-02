@@ -86,7 +86,9 @@ use super::tls::ReloadableServerConfig;
 /// base64-StdEncoding of the entire controlbase-framed Initiation
 /// (5-byte header + Noise body).
 pub const HANDSHAKE_HEADER_NAME: &str = "X-Tailscale-Handshake";
+#[cfg(feature = "full")]
 const DERP_UPGRADE_PROTOCOL: &[u8] = b"derp";
+#[cfg(feature = "full")]
 const DERP_FAST_START_HEADER: &str = "Derp-Fast-Start";
 
 /// How many bytes we read off a freshly-accepted TLS stream before
@@ -382,6 +384,7 @@ fn is_ts2021_upgrade(buf: &[u8]) -> bool {
 
 /// True iff the buffer starts with an HTTP request for `/derp`, carries
 /// `Upgrade: DERP`, and opts into Tailscale's no-HTTP-response DERP fast-start.
+#[cfg(feature = "full")]
 fn is_derp_fast_start_upgrade(buf: &[u8]) -> bool {
     let Some(headers_end) = find_header_end(buf) else {
         return false;
@@ -415,6 +418,7 @@ fn is_derp_fast_start_upgrade(buf: &[u8]) -> bool {
     upgrade_derp && fast_start
 }
 
+#[cfg(feature = "full")]
 fn request_path(headers: &[u8]) -> Option<&[u8]> {
     let request_line_end = headers
         .windows(2)
@@ -566,6 +570,7 @@ mod tests {
         noise::ServerNoiseKey,
         test_support::{MockIpAllocator, MockRedeemer},
     };
+    #[cfg(feature = "full")]
     use headscale_core::derp::{
         native::NativeDerpRelay,
         protocol::{
@@ -573,7 +578,9 @@ mod tests {
             encode_client_info_frame, open_server_info,
         },
     };
-    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, duplex};
+    #[cfg(feature = "full")]
+    use tokio::io::AsyncRead;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -587,6 +594,7 @@ mod tests {
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),
+            #[cfg(feature = "full")]
             native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
@@ -629,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "full")]
     fn detects_derp_fast_start_upgrade_request() {
         let req = b"GET /derp HTTP/1.1\r\n\
             Host: derp.example\r\n\
@@ -640,6 +649,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "full")]
     fn detects_derp_fast_start_with_query_string() {
         let req = b"GET /derp?mesh=1 HTTP/1.1\r\n\
             Host: derp.example\r\n\
@@ -650,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "full")]
     fn rejects_derp_upgrade_without_fast_start() {
         let req = b"GET /derp HTTP/1.1\r\n\
             Host: derp.example\r\n\
@@ -660,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "full")]
     fn rejects_derp_fast_start_websocket() {
         let req = b"GET /derp HTTP/1.1\r\n\
             Host: derp.example\r\n\
@@ -810,6 +822,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "full")]
     async fn derp_fast_start_dispatch_preserves_client_info_bytes_across_peek() {
         let runtime = Arc::new(crate::tailscale_wire::derp::NativeDerpRuntime::new(
             DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
@@ -846,6 +859,7 @@ mod tests {
         assert!(server_task.await.unwrap().is_ok());
     }
 
+    #[cfg(feature = "full")]
     async fn read_derp_frame<R>(reader: &mut R, decoder: &mut FrameDecoder) -> Frame
     where
         R: AsyncRead + Unpin,

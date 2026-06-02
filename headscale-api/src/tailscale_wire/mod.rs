@@ -4307,6 +4307,14 @@ impl MachineRegistry {
             replaced_node_key = Some(old_node_key);
             pending.ipv4 = existing.ipv4;
             pending.ipv6 = existing.ipv6;
+            pending.node_id = existing.node_id;
+            pending.user_id = pending.user_id.or(existing.user_id);
+            if pending.user_display_name.is_empty() {
+                pending.user_display_name = existing.user_display_name;
+            }
+            if pending.user_profile_pic_url.is_empty() {
+                pending.user_profile_pic_url = existing.user_profile_pic_url;
+            }
             pending.created_at = existing.created_at;
             pending.ephemeral = existing.ephemeral;
             pending.auth_key_id = pending.auth_key_id.or(existing.auth_key_id);
@@ -5269,6 +5277,7 @@ mod registry_tests {
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
             derp_map: DerpMapStore::shared(wire::DerpMap::default()),
+            #[cfg(feature = "full")]
             native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: KnockConfig::disabled(),
@@ -7329,6 +7338,42 @@ mod registry_tests {
         let stored = reg.get("nk-pending").unwrap();
         assert_eq!(stored.hostname, "admin-name");
         assert_eq!(stored.host_info_for_node().hostname, "client-new-host");
+    }
+
+    #[test]
+    fn complete_web_registration_rekey_preserves_ids_and_node_added_reason() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(1);
+        existing.node_id = Some(777);
+        existing.user_id = Some(7);
+        existing.node_key_hex = "nk-existing".into();
+        existing.machine_key_hex = "mkey-same".into();
+        reg.upsert(existing.node_key_hex.clone(), existing);
+        let history_len = reg.map_change_history().len();
+
+        let mut pending = mk_record(2);
+        pending.node_key_hex = "nk-pending".into();
+        pending.machine_key_hex = "mkey-same".into();
+        pending.hostname = "client-new-host".into();
+        pending.host_info.hostname = "client-new-host".into();
+
+        let completed = reg.complete_web_registration(pending, "alice", 2);
+        assert_eq!(completed.node_id, Some(777));
+        assert_eq!(completed.user_id, Some(7));
+        assert!(reg.get("nk-existing").is_none());
+        let stored = reg.get("nk-pending").unwrap();
+        assert_eq!(stored.node_id, Some(777));
+        assert_eq!(stored.user_id, Some(7));
+
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1);
+        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(new_changes[0].change_type(), "peers");
+        assert_eq!(new_changes[0].origin_node_id, Some(777));
+        assert_eq!(new_changes[0].content.peers_changed, vec![777]);
+        assert!(!new_changes[0].content.include_policy);
+        assert!(!new_changes[0].content.requires_runtime_peer_computation);
     }
 
     /// `rename` rewrites the explicit GivenName; invalid or duplicate labels are rejected.

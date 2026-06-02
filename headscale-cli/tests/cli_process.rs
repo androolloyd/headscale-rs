@@ -161,6 +161,12 @@ fn headscale_in_with_env(args: &[&str], cwd: &Path, home: &Path, envs: &[(&str, 
     command.output().expect("run headscale binary")
 }
 
+fn headscale_clean_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = headscale_clean_command();
+    command.args(args).envs(envs.iter().copied());
+    command.output().expect("run headscale binary")
+}
+
 fn headscale_in_with_mockoidc_env(
     args: &[&str],
     cwd: &Path,
@@ -644,6 +650,16 @@ fn write_remote_grpc_config(dir: &Path, address: &str, api_key: &str) -> std::pa
     fs::write(
         &config,
         format!("cli:\n  address: \"{address}\"\n  api_key: \"{api_key}\"\n  insecure: true\n"),
+    )
+    .unwrap();
+    config
+}
+
+fn write_remote_grpc_config_without_api_key(dir: &Path, address: &str) -> std::path::PathBuf {
+    let config = dir.join("config.yaml");
+    fs::write(
+        &config,
+        format!("cli:\n  address: \"{address}\"\n  insecure: true\n"),
     )
     .unwrap();
     config
@@ -4722,6 +4738,23 @@ fn implemented_admin_errors_follow_output_format() {
     );
 }
 
+#[test]
+fn auth_reject_yaml_missing_auth_id_matches_current_upstream_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("missing.sock");
+    let config = write_unix_socket_config(dir.path(), &socket);
+
+    assert_config_stderr_snapshot(
+        &config,
+        &["--output=yaml", "auth", "reject"],
+        1,
+        concat!(
+            include_str!("snapshots/auth_reject_missing_auth_id_yaml.stderr"),
+            "\n"
+        ),
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -> BoxTestResult {
     let dir = tempfile::tempdir()?;
@@ -7006,6 +7039,599 @@ async fn serve_postgres_runtime_grpc_gateway_policy_write_smoke() -> BoxTestResu
     stop_child(&mut child);
     database.cleanup().await?;
     result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkeycommandreusableephemeral_preauthkeycorrectuserloggedincommand_apikeycommand()
+ {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    for user in ["user1", "user2"] {
+        let create = headscale_with_config(&config, &["users", "create", user]);
+        assert!(create.status.success(), "stderr: {}", stderr(&create));
+        assert_eq!(
+            stdout(&create),
+            include_str!("snapshots/usercommand_create.stdout")
+        );
+        assert_eq!(stderr(&create), "");
+    }
+
+    let list = headscale_with_config(&config, &["-o", "json", "users", "list"]);
+    let list = json_output(&list);
+    assert_eq!(list.as_array().expect("users").len(), 2);
+    assert_eq!(list[0]["name"].as_str(), Some("user1"));
+    assert_eq!(list[1]["name"].as_str(), Some("user2"));
+
+    let rename = headscale_with_config(
+        &config,
+        &[
+            "users",
+            "rename",
+            "--identifier",
+            "2",
+            "--new-name",
+            "newname",
+        ],
+    );
+    assert!(rename.status.success(), "stderr: {}", stderr(&rename));
+    assert_eq!(
+        stdout(&rename),
+        include_str!("snapshots/usercommand_rename.stdout")
+    );
+    assert_eq!(stderr(&rename), "");
+
+    let renamed = headscale_with_config(
+        &config,
+        &["-o", "json", "users", "list", "--name", "newname"],
+    );
+    let renamed = json_output(&renamed);
+    assert_eq!(renamed.as_array().expect("renamed user").len(), 1);
+    assert_eq!(renamed[0]["id"].as_u64(), Some(2));
+    assert_eq!(renamed[0]["name"].as_str(), Some("newname"));
+
+    let destroy = headscale_with_config(
+        &config,
+        &["--force", "users", "destroy", "--identifier", "1"],
+    );
+    assert!(destroy.status.success(), "stderr: {}", stderr(&destroy));
+    assert_eq!(
+        stdout(&destroy),
+        include_str!("snapshots/usercommand_destroy.stdout")
+    );
+    assert_eq!(stderr(&destroy), "");
+
+    let after_destroy = headscale_with_config(&config, &["-o", "json", "users", "list"]);
+    let after_destroy = json_output(&after_destroy);
+    assert_eq!(after_destroy.as_array().expect("remaining users").len(), 1);
+    assert_eq!(after_destroy[0]["name"].as_str(), Some("newname"));
+
+    let mut preauth_ids = Vec::new();
+    for _ in 0..3 {
+        let create = headscale_with_config(
+            &config,
+            &[
+                "-o",
+                "json",
+                "preauthkeys",
+                "--user",
+                "2",
+                "create",
+                "--reusable",
+                "--expiration",
+                "1h",
+                "--tags",
+                "tag:test1,tag:test2",
+            ],
+        );
+        assert!(create.status.success(), "stderr: {}", stderr(&create));
+        assert_eq!(stderr(&create), "");
+        let key = json_output(&create);
+        assert!(key["key"].as_str().unwrap().starts_with("hskey-auth-"));
+        assert_eq!(key["user"]["name"].as_str(), Some("newname"));
+        assert_eq!(key["reusable"].as_bool(), Some(true));
+        assert_eq!(
+            key["acl_tags"],
+            serde_json::json!(["tag:test1", "tag:test2"])
+        );
+        preauth_ids.push(key["id"].as_u64().unwrap().to_string());
+    }
+
+    let listed_preauth = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
+    let listed_preauth = json_output(&listed_preauth);
+    assert_eq!(listed_preauth.as_array().expect("preauth keys").len(), 3);
+    for key in listed_preauth.as_array().unwrap() {
+        assert_eq!(key["user"]["name"].as_str(), Some("newname"));
+        assert_eq!(key["reusable"].as_bool(), Some(true));
+        assert_eq!(
+            key["acl_tags"],
+            serde_json::json!(["tag:test1", "tag:test2"])
+        );
+        assert!(key["expiration"]["seconds"].as_i64().is_some());
+    }
+
+    let expire_preauth =
+        headscale_with_config(&config, &["preauthkeys", "expire", "--id", &preauth_ids[0]]);
+    assert!(
+        expire_preauth.status.success(),
+        "stderr: {}",
+        stderr(&expire_preauth)
+    );
+    assert_eq!(
+        stdout(&expire_preauth),
+        include_str!("snapshots/preauthkeycommand_expire.stdout")
+    );
+    assert_eq!(stderr(&expire_preauth), "");
+
+    let no_expiry = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "--user",
+            "2",
+            "create",
+            "--reusable",
+        ],
+    );
+    assert!(no_expiry.status.success(), "stderr: {}", stderr(&no_expiry));
+    let no_expiry = json_output(&no_expiry);
+    assert_eq!(no_expiry["user"]["name"].as_str(), Some("newname"));
+    assert_eq!(no_expiry["reusable"].as_bool(), Some(true));
+    assert!(no_expiry["expiration"]["seconds"].as_i64().is_some());
+
+    let ephemeral = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "--user",
+            "2",
+            "create",
+            "--ephemeral",
+        ],
+    );
+    assert!(ephemeral.status.success(), "stderr: {}", stderr(&ephemeral));
+    let ephemeral = json_output(&ephemeral);
+    assert_eq!(ephemeral["user"]["name"].as_str(), Some("newname"));
+    assert_eq!(ephemeral["ephemeral"].as_bool(), Some(true));
+    assert_ne!(ephemeral["reusable"].as_bool(), Some(true));
+
+    let tagged = headscale_with_config(
+        &config,
+        &[
+            "-o",
+            "json",
+            "preauthkeys",
+            "--user",
+            "2",
+            "create",
+            "--reusable",
+            "--expiration",
+            "1h",
+            "--tags",
+            "tag:test1,tag:test2",
+        ],
+    );
+    assert!(tagged.status.success(), "stderr: {}", stderr(&tagged));
+    let tagged = json_output(&tagged);
+    assert_eq!(tagged["user"]["name"].as_str(), Some("newname"));
+    assert_eq!(
+        tagged["acl_tags"],
+        serde_json::json!(["tag:test1", "tag:test2"])
+    );
+
+    let mut api_prefixes = Vec::new();
+    for _ in 0..5 {
+        let create = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(create.status.success(), "stderr: {}", stderr(&create));
+        let secret = json_output(&create)
+            .as_str()
+            .expect("api key secret")
+            .to_string();
+        assert!(secret.starts_with("hskey-api-"));
+        api_prefixes.push(display_prefix(&secret, "hskey-api-"));
+    }
+
+    let listed_api_keys = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
+    let listed_api_keys = json_output(&listed_api_keys);
+    assert_eq!(listed_api_keys.as_array().expect("api keys").len(), 5);
+    for (index, key) in listed_api_keys.as_array().unwrap().iter().enumerate() {
+        assert_eq!(key["id"].as_u64(), Some(index as u64 + 1));
+        assert_eq!(key["prefix"].as_str(), Some(api_prefixes[index].as_str()));
+        assert!(key["expiration"]["seconds"].as_i64().is_some());
+    }
+
+    let expire_api_key = headscale_with_config(
+        &config,
+        &["apikeys", "expire", "--prefix", &api_prefixes[0]],
+    );
+    assert!(
+        expire_api_key.status.success(),
+        "stderr: {}",
+        stderr(&expire_api_key)
+    );
+    assert_eq!(
+        stdout(&expire_api_key),
+        include_str!("snapshots/apikeycommand_expire.stdout")
+    );
+    assert_eq!(stderr(&expire_api_key), "");
+
+    let delete_api_key = headscale_with_config(&config, &["apikeys", "delete", "--id", "2"]);
+    assert!(
+        delete_api_key.status.success(),
+        "stderr: {}",
+        stderr(&delete_api_key)
+    );
+    assert_eq!(
+        stdout(&delete_api_key),
+        include_str!("snapshots/apikeycommand_delete.stdout")
+    );
+    assert_eq!(stderr(&delete_api_key), "");
+
+    let after_api_delete = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
+    let after_api_delete = json_output(&after_api_delete);
+    assert_eq!(after_api_delete.as_array().expect("api keys").len(), 4);
+    assert!(
+        after_api_delete
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|key| key["id"].as_u64() != Some(2))
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let create_user = headscale_with_config(&config, &["users", "create", "node-user"]);
+    assert!(
+        create_user.status.success(),
+        "stderr: {}",
+        stderr(&create_user)
+    );
+    assert_eq!(stderr(&create_user), "");
+
+    for (name, registration_id) in [
+        ("node-1", "aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ("node-2", "bbbbbbbbbbbbbbbbbbbbbbbb"),
+        ("node-3", "cccccccccccccccccccccccc"),
+    ] {
+        let auth_id = format!("hskey-authreq-{registration_id}");
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--name",
+                name,
+                "--user",
+                "node-user",
+                "--key",
+                &auth_id,
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stderr(&debug_create), "");
+
+        let register = headscale_with_config(
+            &config,
+            &[
+                "auth",
+                "register",
+                "--user",
+                "node-user",
+                "--auth-id",
+                &auth_id,
+            ],
+        );
+        assert!(register.status.success(), "stderr: {}", stderr(&register));
+        assert!(
+            stdout(&register).contains(name),
+            "stdout: {}",
+            stdout(&register)
+        );
+        assert_eq!(stderr(&register), "");
+    }
+
+    let listed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+    let listed = json_output(&listed);
+    let listed = listed.as_array().expect("nodes");
+    assert_eq!(listed.len(), 3);
+    let node_id = |name: &str| {
+        listed
+            .iter()
+            .find(|node| node["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing node {name}: {listed:?}"))["id"]
+            .as_u64()
+            .unwrap()
+    };
+    let node_1_id = node_id("node-1");
+    let node_2_id = node_id("node-2");
+    let node_3_id = node_id("node-3");
+    let node_1_id_arg = node_1_id.to_string();
+    let node_2_id_arg = node_2_id.to_string();
+    let node_3_id_arg = node_3_id.to_string();
+
+    let expire = headscale_with_config(
+        &config,
+        &["nodes", "expire", "--identifier", &node_1_id_arg],
+    );
+    assert!(expire.status.success(), "stderr: {}", stderr(&expire));
+    assert_eq!(
+        stdout(&expire),
+        include_str!("snapshots/nodeexpirecommand_expire.stdout")
+    );
+    assert_eq!(stderr(&expire), "");
+
+    let rename = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "rename",
+            "--identifier",
+            &node_2_id_arg,
+            "newnode-2",
+        ],
+    );
+    assert!(rename.status.success(), "stderr: {}", stderr(&rename));
+    assert_eq!(
+        stdout(&rename),
+        include_str!("snapshots/noderenamecommand_rename.stdout")
+    );
+    assert_eq!(stderr(&rename), "");
+
+    let policy_path = config_dir.path().join("tag-policy.hujson");
+    fs::write(
+        &policy_path,
+        r#"{"tagOwners":{"tag:test1":["node-user@"]}}"#,
+    )
+    .unwrap();
+    let policy_path = policy_path.to_string_lossy().to_string();
+    let set_policy = headscale_with_config(&config, &["policy", "set", "--file", &policy_path]);
+    assert!(
+        set_policy.status.success(),
+        "stderr: {}",
+        stderr(&set_policy)
+    );
+    assert_eq!(stderr(&set_policy), "");
+
+    let tag = headscale_with_config(
+        &config,
+        &[
+            "nodes",
+            "tag",
+            "--identifier",
+            &node_3_id_arg,
+            "--tags",
+            "tag:test1",
+        ],
+    );
+    assert!(tag.status.success(), "stderr: {}", stderr(&tag));
+    assert_eq!(
+        stdout(&tag),
+        include_str!("snapshots/taggednodesclioutput_tag.stdout")
+    );
+    assert_eq!(stderr(&tag), "");
+
+    let after_mutation = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+    let after_mutation = json_output(&after_mutation);
+    let after_mutation = after_mutation.as_array().expect("nodes");
+    assert_eq!(after_mutation.len(), 3);
+    let renamed = after_mutation
+        .iter()
+        .find(|node| node["id"].as_u64() == Some(node_2_id))
+        .expect("renamed node");
+    assert_eq!(renamed["given_name"].as_str(), Some("newnode-2"));
+    let expired = after_mutation
+        .iter()
+        .find(|node| node["id"].as_u64() == Some(node_1_id))
+        .expect("expired node");
+    assert!(expired["expiry"]["seconds"].as_i64().is_some());
+
+    let delete = headscale_with_config(
+        &config,
+        &["--force", "nodes", "delete", "--identifier", &node_1_id_arg],
+    );
+    assert!(delete.status.success(), "stderr: {}", stderr(&delete));
+    assert_eq!(
+        stdout(&delete),
+        include_str!("snapshots/nodecommand_delete.stdout")
+    );
+    assert_eq!(stderr(&delete), "");
+
+    let after_delete = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+    let after_delete = json_output(&after_delete);
+    assert_eq!(after_delete.as_array().expect("nodes").len(), 2);
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policycommand_policybrokenconfigcommand() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    let policy_path = config_dir.path().join("policy.hujson");
+    fs::write(
+        &policy_path,
+        r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#,
+    )
+    .unwrap();
+    let policy_path = policy_path.to_string_lossy().to_string();
+    let set_policy = headscale_with_config(&config, &["policy", "set", "--file", &policy_path]);
+    assert!(
+        set_policy.status.success(),
+        "stderr: {}",
+        stderr(&set_policy)
+    );
+    assert_eq!(
+        stdout(&set_policy),
+        include_str!("snapshots/policycommand_set.stdout")
+    );
+    assert_eq!(stderr(&set_policy), "");
+
+    let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+    assert!(
+        get_policy.status.success(),
+        "stderr: {}",
+        stderr(&get_policy)
+    );
+    assert_eq!(
+        stdout(&get_policy),
+        include_str!("snapshots/policycommand_get.stdout")
+    );
+    assert_eq!(stderr(&get_policy), "");
+
+    let bad_policy_path = config_dir.path().join("bad-policy.hujson");
+    fs::write(&bad_policy_path, r#"{"unknown":true}"#).unwrap();
+    let bad_policy_path = bad_policy_path.to_string_lossy().to_string();
+    let bad_policy = headscale_with_config(
+        &config,
+        &["-o", "json", "policy", "set", "--file", &bad_policy_path],
+    );
+    assert_process_stderr_snapshot(
+        &bad_policy,
+        6,
+        include_str!("snapshots/policybrokenconfigcommand_set_json.stderr"),
+        "policy broken config",
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
+    let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
+
+    let health = wait_for_headscale_status(&config, &["health"], 0).await;
+    assert_eq!(stdout(&health), "\n");
+    assert_eq!(stderr(&health), "");
+
+    for user in ["grpcuser1", "grpcuser2"] {
+        let create = headscale_with_config(&config, &["users", "create", user]);
+        assert!(create.status.success(), "stderr: {}", stderr(&create));
+        assert_eq!(stderr(&create), "");
+    }
+
+    let address_env = [
+        ("HEADSCALE_CLI_ADDRESS", address.as_str()),
+        ("HEADSCALE_CLI_INSECURE", "true"),
+    ];
+    let no_key = headscale_clean_with_env(&["users", "list", "--output", "json"], &address_env);
+    assert_process_stderr_snapshot(
+        &no_key,
+        6,
+        include_str!("snapshots/grpcauthenticationbypass_missing_api_key.stderr"),
+        "gRPC missing API key",
+    );
+    assert!(!stderr(&no_key).contains("grpcuser1"));
+    assert!(!stderr(&no_key).contains("grpcuser2"));
+
+    let invalid_env = [
+        ("HEADSCALE_CLI_ADDRESS", address.as_str()),
+        ("HEADSCALE_CLI_API_KEY", "invalid-key-12345"),
+        ("HEADSCALE_CLI_INSECURE", "true"),
+    ];
+    let invalid = headscale_clean_with_env(&["users", "list", "--output", "json"], &invalid_env);
+    assert_process_stderr_snapshot(
+        &invalid,
+        4,
+        include_str!("snapshots/grpcauthenticationbypass_invalid_api_key.stderr"),
+        "gRPC invalid API key",
+    );
+    assert!(!stderr(&invalid).contains("grpcuser1"));
+    assert!(!stderr(&invalid).contains("grpcuser2"));
+
+    let valid_env = [
+        ("HEADSCALE_CLI_ADDRESS", address.as_str()),
+        ("HEADSCALE_CLI_API_KEY", api_key.as_str()),
+        ("HEADSCALE_CLI_INSECURE", "true"),
+    ];
+    let valid = headscale_clean_with_env(&["users", "list", "--output", "json"], &valid_env);
+    assert!(valid.status.success(), "stderr: {}", stderr(&valid));
+    assert_eq!(stderr(&valid), "");
+    let valid = json_output(&valid);
+    assert_eq!(valid.as_array().expect("users").len(), 2);
+    assert_eq!(valid[0]["name"].as_str(), Some("grpcuser1"));
+    assert_eq!(valid[1]["name"].as_str(), Some("grpcuser2"));
+
+    let no_key_config_dir = tempfile::tempdir().unwrap();
+    let no_key_config =
+        write_remote_grpc_config_without_api_key(no_key_config_dir.path(), &address);
+    let no_key_config_output =
+        headscale_with_config(&no_key_config, &["users", "list", "--output", "json"]);
+    assert_process_stderr_snapshot(
+        &no_key_config_output,
+        6,
+        include_str!("snapshots/cliwithconfigauthenticationbypass_missing_api_key.stderr"),
+        "CLI config missing API key",
+    );
+    assert!(!stderr(&no_key_config_output).contains("grpcuser1"));
+    assert!(!stderr(&no_key_config_output).contains("grpcuser2"));
+
+    let invalid_config_dir = tempfile::tempdir().unwrap();
+    let invalid_config =
+        write_remote_grpc_config(invalid_config_dir.path(), &address, "invalid-key-12345");
+    let invalid_config_output =
+        headscale_with_config(&invalid_config, &["users", "list", "--output", "json"]);
+    assert_process_stderr_snapshot(
+        &invalid_config_output,
+        4,
+        include_str!("snapshots/cliwithconfigauthenticationbypass_invalid_api_key.stderr"),
+        "CLI config invalid API key",
+    );
+    assert!(!stderr(&invalid_config_output).contains("grpcuser1"));
+    assert!(!stderr(&invalid_config_output).contains("grpcuser2"));
+
+    let valid_config_output =
+        headscale_with_config(&config, &["users", "list", "--output", "json"]);
+    assert!(
+        valid_config_output.status.success(),
+        "stderr: {}",
+        stderr(&valid_config_output)
+    );
+    assert_eq!(stderr(&valid_config_output), "");
+    let valid_config_output = json_output(&valid_config_output);
+    assert_eq!(valid_config_output.as_array().expect("users").len(), 2);
+    assert_eq!(valid_config_output[0]["name"].as_str(), Some("grpcuser1"));
+    assert_eq!(valid_config_output[1]["name"].as_str(), Some("grpcuser2"));
+
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -126,6 +126,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-route-advertise` | `postgres-route-advertise-smoke.sh` | `postgres-route-advertise-headscale-go-smoke.sh` | Production Postgres route advertisement without approval |
 | Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
 | Database | `postgres-route-primary` | `postgres-route-primary-smoke.sh` | `postgres-route-primary-headscale-go-smoke.sh` | Production Postgres primary route selection |
+| Database | `postgres-route-primary-restart` | `postgres-route-primary-restart-smoke.sh` | `postgres-route-primary-restart-headscale-go-smoke.sh` | Production Postgres primary route owner survives server restart |
 | Database | `postgres-route-primary-failover` | `postgres-route-primary-failover-smoke.sh` | `postgres-route-primary-failover-headscale-go-smoke.sh` | Production Postgres primary route failover after unapproval |
 | Database | `postgres-route-primary-sticky` | `postgres-route-primary-sticky-smoke.sh` | `postgres-route-primary-sticky-headscale-go-smoke.sh` | Production Postgres primary route sticky owner after old primary return |
 | Database | `postgres-route-primary-withdraw` | `postgres-route-primary-withdraw-smoke.sh` | `postgres-route-primary-withdraw-headscale-go-smoke.sh` | Production Postgres primary route withdrawal preserves approval and fails over |
@@ -807,6 +808,8 @@ tools/real-client/postgres-route-approve-smoke.sh
 tools/real-client/postgres-route-approve-headscale-go-smoke.sh
 tools/real-client/postgres-route-primary-smoke.sh
 tools/real-client/postgres-route-primary-headscale-go-smoke.sh
+tools/real-client/postgres-route-primary-restart-smoke.sh
+tools/real-client/postgres-route-primary-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-primary-failover-smoke.sh
 tools/real-client/postgres-route-primary-failover-headscale-go-smoke.sh
 tools/real-client/postgres-route-primary-sticky-smoke.sh
@@ -818,8 +821,8 @@ tools/real-client/postgres-route-primary-withdraw-headscale-go-smoke.sh
 Both use `HEADSCALE_DB_POSTGRES_TEST_URL` and skip cleanly when that URL is not
 set. The route row additionally asserts CLI route state and approved-route
 netmap projection; the primary-route variants exercise primary selection,
-unapproval failover, sticky owner retention, and advertised-route withdrawal
-over the production Postgres harness.
+restart owner preservation, unapproval failover, sticky owner retention, and
+advertised-route withdrawal over the production Postgres harness.
 
 The Postgres OIDC scenario runs the production OIDC confirmation flow against
 Rust and headscale-go with a temporary Postgres database:

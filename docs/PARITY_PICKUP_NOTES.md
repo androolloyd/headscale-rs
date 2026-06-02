@@ -400,7 +400,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all ninety-three Pg rows, including
+  all ninety-five Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -418,6 +418,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-prefix-family-ipv4-only`, `postgres-prefix-family-ipv6-only`,
   `postgres-web-register-tags`, `postgres-web-register-unowned-tag`,
   `postgres-route-advertise`, `postgres-route-primary`,
+  `postgres-route-primary-restart`,
   `postgres-route-primary-failover`, `postgres-route-primary-sticky`,
   `postgres-route-primary-withdraw`,
   `postgres-web-register-route-approve-restart`, `postgres-acl-allow`,
@@ -925,6 +926,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   approval state.
 - The rows are included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to seventy-six rows.
+
+## 2026-06-02 Postgres primary-route restart smoke slice
+
+- Added paired `postgres-route-primary-restart` Rust/headscale-go rows over the
+  production Postgres restart harness.
+- The row uses the existing route-primary mode without the no-restart shortcut
+  and now asserts the primary route owner before restart matches the owner after
+  the real server process is restarted and both stock clients reconnect.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to ninety-five rows.
 
 ## 2026-06-01 Postgres SSH smoke slice
 

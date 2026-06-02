@@ -624,6 +624,7 @@ pub mod upstream {
                 name: name.to_string(),
                 user: user.to_string(),
                 user_id: None,
+                auth_key_id: None,
                 online: false,
                 last_seen: now,
                 created_at: now,
@@ -727,7 +728,7 @@ pub mod upstream {
             self.registration_cache
                 .complete(&registration_id, wire_record);
             Ok(RegisterNodeResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
+                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
             })
         }
     }
@@ -983,7 +984,7 @@ pub mod upstream {
             self.registration_cache
                 .insert(registration_id, machine_admin_to_wire_record(&record));
             Ok(Response::new(DebugCreateNodeResponse {
-                node: Some(machine_to_node(&record, &self.users).await?),
+                node: Some(machine_to_node(&record, &self.users, &self.preauth).await?),
             }))
         }
 
@@ -994,7 +995,7 @@ pub mod upstream {
             self.authorize(&request).await?;
             let node = self.machine_by_id(request.into_inner().node_id).await?;
             Ok(Response::new(GetNodeResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
+                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
             }))
         }
 
@@ -1035,7 +1036,7 @@ pub mod upstream {
                 .await
                 .ok_or_else(|| Status::not_found("node not found"))?;
             Ok(Response::new(SetTagsResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
+                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
             }))
         }
 
@@ -1061,7 +1062,10 @@ pub mod upstream {
             let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
             let primary_routes = route_sets.primary_routes_for(&node.id);
             Ok(Response::new(SetApprovedRoutesResponse {
-                node: Some(machine_to_node_with_routes(&node, &self.users, &primary_routes).await?),
+                node: Some(
+                    machine_to_node_with_routes(&node, &self.users, &self.preauth, &primary_routes)
+                        .await?,
+                ),
             }))
         }
 
@@ -1175,7 +1179,7 @@ pub mod upstream {
                 .get(&node.id)
                 .await
                 .ok_or_else(|| Status::not_found("node not found"))?;
-            let mut node = machine_to_node(&node, &self.users).await?;
+            let mut node = machine_to_node(&node, &self.users, &self.preauth).await?;
             // MachineAdminRecord stores expiry at Unix-second precision; keep
             // the validated request timestamp exact in the immediate response.
             if let Some(expiry) = requested_expiry {
@@ -1201,7 +1205,7 @@ pub mod upstream {
                 .await
                 .ok_or_else(|| Status::not_found("node not found"))?;
             Ok(Response::new(RenameNodeResponse {
-                node: Some(machine_to_node(&node, &self.users).await?),
+                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
             }))
         }
 
@@ -1227,7 +1231,13 @@ pub mod upstream {
                 }
                 let subnet_routes = route_sets.subnet_routes_for(&node.id);
                 nodes.push(
-                    machine_to_list_node_with_routes(&node, &self.users, &subnet_routes).await?,
+                    machine_to_list_node_with_routes(
+                        &node,
+                        &self.users,
+                        &self.preauth,
+                        &subnet_routes,
+                    )
+                    .await?,
                 );
             }
             nodes.sort_by_key(|node| node.id);
@@ -1601,8 +1611,9 @@ pub mod upstream {
     async fn machine_to_node(
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
+        preauth: &Arc<dyn PreauthAdmin>,
     ) -> Result<Node, Status> {
-        machine_to_node_with_routes(machine, users, &[]).await
+        machine_to_node_with_routes(machine, users, preauth, &[]).await
     }
 
     fn machine_admin_to_wire_record(machine: &MachineAdminRecord) -> MachineRecord {
@@ -1632,6 +1643,7 @@ pub mod upstream {
         );
         record.node_id = (machine.node_id != 0).then_some(machine.node_id);
         record.user_id = machine.user_id;
+        record.auth_key_id = machine.auth_key_id;
         record.expiry = machine
             .expiry
             .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
@@ -1694,6 +1706,7 @@ pub mod upstream {
             name: record.hostname,
             user: record.user,
             user_id: record.user_id,
+            auth_key_id: record.auth_key_id,
             ipv4: record.ipv4.map(|ip| ip.to_string()).unwrap_or_default(),
             ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
             online: !expired,
@@ -1723,9 +1736,11 @@ pub mod upstream {
     async fn machine_to_node_with_routes(
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
+        preauth: &Arc<dyn PreauthAdmin>,
         subnet_routes: &[String],
     ) -> Result<Node, Status> {
         let user = machine_user_to_proto(machine, users).await?;
+        let pre_auth_key = machine_preauth_key_to_proto(machine, users, preauth).await?;
         Ok(Node {
             id: machine_numeric_id(machine),
             machine_key: prefix_key("mkey:", &machine.machine_key_hex),
@@ -1739,7 +1754,7 @@ pub mod upstream {
                 .expiry
                 .map(saturating_u64_to_i64)
                 .map(unix_to_timestamp),
-            pre_auth_key: None,
+            pre_auth_key,
             created_at: nonzero_u64_timestamp(machine.created_at),
             register_method: machine.register_method,
             given_name: machine.name.clone(),
@@ -1754,13 +1769,32 @@ pub mod upstream {
     async fn machine_to_list_node_with_routes(
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
+        preauth: &Arc<dyn PreauthAdmin>,
         subnet_routes: &[String],
     ) -> Result<Node, Status> {
-        let mut node = machine_to_node_with_routes(machine, users, subnet_routes).await?;
+        let mut node = machine_to_node_with_routes(machine, users, preauth, subnet_routes).await?;
         if !machine.tags.is_empty() {
             node.user = Some(tagged_devices_user_to_proto());
         }
         Ok(node)
+    }
+
+    async fn machine_preauth_key_to_proto(
+        machine: &MachineAdminRecord,
+        users: &Arc<dyn UserAdmin>,
+        preauth: &Arc<dyn PreauthAdmin>,
+    ) -> Result<Option<PreAuthKey>, Status> {
+        let Some(auth_key_id) = machine.auth_key_id else {
+            return Ok(None);
+        };
+        let Ok(auth_key_id) = u64::try_from(auth_key_id) else {
+            return Ok(None);
+        };
+        let keys = preauth.list().await;
+        let Some(key) = keys.iter().find(|key| key.id == auth_key_id) else {
+            return Ok(None);
+        };
+        listed_preauth_key_to_proto(key, users).await.map(Some)
     }
 
     fn tagged_devices_user_to_proto() -> ProtoUser {
@@ -2109,6 +2143,7 @@ pub mod upstream {
                 name: "alice-laptop".into(),
                 user: "alice".into(),
                 user_id: Some(42),
+                auth_key_id: Some(88),
                 ipv4: "100.64.0.7".into(),
                 ipv6: None,
                 online: true,
@@ -2128,7 +2163,10 @@ pub mod upstream {
 
             let record = machine_admin_to_wire_record(&machine);
             assert_eq!(record.user_id, Some(42));
-            assert_eq!(wire_record_to_machine_admin(record).user_id, Some(42));
+            assert_eq!(record.auth_key_id, Some(88));
+            let roundtrip = wire_record_to_machine_admin(record);
+            assert_eq!(roundtrip.user_id, Some(42));
+            assert_eq!(roundtrip.auth_key_id, Some(88));
 
             let mut pending = MachineRecord::new_at(
                 Utc::now(),
@@ -4066,6 +4104,114 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_node_grpc_persistent_machines_project_preauth_key() {
+        let (service, db) = admin_service_with_persistent_machines().await;
+        const REGISTRATION_ID: &str = "bcdefghijklmnopqrstuvwxy";
+
+        let user = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user");
+
+        let created_key = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: user.id,
+                reusable: true,
+                ephemeral: true,
+                expiration: Some(prost_types::Timestamp {
+                    seconds: 4_102_444_800,
+                    nanos: 0,
+                }),
+                acl_tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("created preauth key");
+
+        let pending = service
+            .debug_create_node(Request::new(DebugCreateNodeRequest {
+                user: "alice".into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
+                name: "debug-router".into(),
+                routes: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("pending node");
+        assert!(pending.pre_auth_key.is_none());
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: format!("hskey-authreq-{REGISTRATION_ID}"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert!(registered.pre_auth_key.is_none());
+
+        sqlx::query("UPDATE nodes SET auth_key_id = ?, register_method = ? WHERE id = ?")
+            .bind(i64::try_from(created_key.id).expect("preauth id fits i64"))
+            .bind(headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY)
+            .bind(i64::try_from(registered.id).expect("node id fits i64"))
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let got = service
+            .get_node(Request::new(GetNodeRequest {
+                node_id: registered.id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node");
+        assert_eq!(got.register_method, RegisterMethod::AuthKey as i32);
+        let projected = got.pre_auth_key.as_ref().expect("preauth key");
+        assert_eq!(projected.id, created_key.id);
+        assert_eq!(projected.user.as_ref().unwrap().id, user.id);
+        assert_eq!(projected.user.as_ref().unwrap().name, "alice");
+        assert!(projected.reusable);
+        assert!(projected.ephemeral);
+        assert_eq!(projected.acl_tags, vec!["tag:server"]);
+        assert_ne!(projected.key, created_key.key);
+        assert!(projected.key.starts_with("hskey-auth-"));
+        assert!(projected.key.ends_with("-***"));
+        assert_eq!(
+            projected.expiration.as_ref().unwrap().seconds,
+            4_102_444_800
+        );
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.nodes.len(), 1);
+        let listed_key = listed.nodes[0].pre_auth_key.as_ref().expect("preauth key");
+        assert_eq!(listed_key.id, created_key.id);
+        assert_eq!(listed_key.key, projected.key);
+        assert_eq!(listed_key.acl_tags, vec!["tag:server"]);
+    }
+
+    #[tokio::test]
     async fn upstream_node_grpc_persistent_register_rekeys_and_projects_live_registry() {
         let db = headscale_db::Database::in_memory()
             .await
@@ -4904,6 +5050,7 @@ mod upstream_tests {
             name: "bob-laptop".into(),
             user: "bob".into(),
             user_id: None,
+            auth_key_id: None,
             ipv4: "100.64.0.7".into(),
             ipv6: None,
             online: true,

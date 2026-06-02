@@ -1551,6 +1551,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_derp_shutdown_broadcast_reaches_raw_and_websocket_sessions() {
+        let raw_client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let websocket_client_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let (raw_client_io, raw_server_io) = tokio::io::duplex(4096);
+        let raw_server_runtime = runtime.clone();
+        let raw_server =
+            tokio::spawn(async move { drive_native_derp(raw_server_runtime, raw_server_io).await });
+        let (mut raw_reader, mut raw_writer) = tokio::io::split(raw_client_io);
+        let mut raw_decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut raw_reader, &mut raw_decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected raw server-key frame");
+        };
+        assert_eq!(server_public, runtime.public_key());
+        let raw_client_info =
+            encode_client_info_frame(&raw_client_key, &server_public, &ClientInfo::regular())
+                .unwrap();
+        raw_writer.write_all(&raw_client_info).await.unwrap();
+        raw_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut raw_reader, &mut raw_decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&raw_client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let websocket_client_info = encode_client_info_frame(
+            &websocket_client_key,
+            &server_public,
+            &ClientInfo::regular(),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let websocket_server_sent = sent.clone();
+        let websocket_server_runtime = runtime.clone();
+        let websocket_server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                websocket_server_runtime,
+                CollectWebsocketSink {
+                    sent: websocket_server_sent,
+                },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(websocket_client_info)))
+            .await
+            .unwrap();
+        wait_for_sent_messages(&sent, 2).await;
+
+        let delivery = runtime.announce_server_shutdown().await;
+        assert_eq!(
+            delivery,
+            NativeDerpLifecycleDelivery {
+                health: 2,
+                restarting: 2
+            }
+        );
+        assert_eq!(delivery.delivered(), 4);
+
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            Frame::Restarting {
+                reconnect_in_ms: NATIVE_DERP_SHUTDOWN_RECONNECT_IN.as_millis() as u32,
+                try_for_ms: NATIVE_DERP_SHUTDOWN_TRY_FOR.as_millis() as u32,
+            }
+        );
+
+        wait_for_sent_messages(&sent, 4).await;
+        let messages = sent.lock().unwrap().clone();
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
+                .expect("websocket shutdown health frame decodes");
+        assert_eq!(
+            frame,
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[3]), MAX_INFO_LEN)
+                .expect("websocket shutdown restarting frame decodes");
+        assert_eq!(
+            frame,
+            Frame::Restarting {
+                reconnect_in_ms: NATIVE_DERP_SHUTDOWN_RECONNECT_IN.as_millis() as u32,
+                try_for_ms: NATIVE_DERP_SHUTDOWN_TRY_FOR.as_millis() as u32,
+            }
+        );
+
+        drop(raw_writer);
+        drop(raw_reader);
+        assert!(raw_server.await.unwrap().is_ok());
+
+        tx.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(websocket_server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_reports_duplicate_connection_health_and_clear() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(NativeDerpRuntime::new(

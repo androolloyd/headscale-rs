@@ -2004,9 +2004,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   round trips, split-stream decoding, and coalesced frames.
 - This closes the native DERP crypto/auth payload foundation. The remaining
   native DERP gap is the public `/derp` HTTP upgrade/runtime loop, including
-  `Upgrade: DERP`/websocket boundaries, `Derp-Fast-Start`, server-key header
-  behavior, verify-client admission, keepalive/ping runtime, and stock-client
-  native DERP smokes.
+  `Upgrade: DERP`/websocket boundaries, server-key header behavior,
+  verify-client admission, keepalive/ping runtime, and stock-client native DERP
+  smokes.
 
 ## 2026-06-02 native DERP HTTP upgrade foundation
 
@@ -2021,9 +2021,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   core registry.
 - Tests cover missing-upgrade `426` body parity, websocket-without-DERP-protocol
   rejection, and an in-memory native DERP login plus ping/pong stream.
-- Remaining native DERP runtime gaps: `Derp-Fast-Start` no-response hijack,
-  keepalive/restarting/health runtime scheduling, and stock-client native DERP
-  smokes.
+- Remaining native DERP runtime gaps: keepalive/restarting/health runtime
+  scheduling and stock-client native DERP smokes.
 
 ## 2026-06-02 native DERP config/runtime enablement
 
@@ -2048,8 +2047,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   are carried as a binary-message byte stream like Tailscale's `wsconn`.
 - WebSocket text messages now fail closed with an unsupported-data close frame,
   while ping/pong/close control messages are handled separately from DERP frame
-  bytes. `Derp-Fast-Start` remains raw-DERP-only and is still open for the raw
-  upgrade path.
+  bytes. `Derp-Fast-Start` remains raw-DERP-only and outside the WebSocket path.
 - Focused tests cover WebSocket login, encrypted server info, ping/pong relay,
   and unsupported text-frame rejection.
 
@@ -2064,3 +2062,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   fail-closed registry admission behavior for native DERP mode.
 - Focused tests cover raw DERP and DERP-over-WebSocket allow/deny paths plus
   CLI runtime wiring against a registered and unknown node key.
+
+## 2026-06-02 native DERP fast-start over raw TLS
+
+- Added production raw-TLS dispatch for `GET /derp` with `Upgrade: DERP` and
+  `Derp-Fast-Start: 1`. The raw listener now suppresses the HTTP `101` response
+  exactly like upstream and passes post-header bytes directly into the native
+  DERP stream driver.
+- This closes the stock-client fast-start blocker for native embedded DERP,
+  because Tailscale only enables this optimization after learning the DERP
+  server key from the TLS meta certificate path.
+- Focused tests cover fast-start request detection, WebSocket rejection, query
+  strings, and preserving an already-pipelined encrypted `ClientInfo` frame
+  across the raw-TLS peek buffer.

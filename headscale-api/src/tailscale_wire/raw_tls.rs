@@ -39,12 +39,11 @@
 //!   already runs from `tls::build_server_config`.
 //! - **Peek with a fixed-size buffer, not `AsyncBufReadExt::fill_buf`.**
 //!   The smallest valid HTTP request line we care about is the
-//!   `/ts2021` POST (~80 bytes including the Upgrade header). 1 KiB
-//!   covers everything we need to disambiguate; anything larger we
-//!   defer to hyper. We don't actually parse headers in the upgrade
-//!   path beyond a substring check for `tailscale-control-protocol` —
-//!   the actual HTTP/1.1 parser stays in hyper for the non-/ts2021
-//!   path.
+//!   `/ts2021` POST and `/derp` fast-start requests. 1 KiB covers
+//!   everything we need to disambiguate; anything larger we defer to
+//!   hyper. We only parse the small header subset needed to identify
+//!   protocol hijacks — the actual HTTP/1.1 parser stays in hyper for
+//!   the ordinary route path.
 //! - **`PrefixedStream<T>` for non-/ts2021 traffic.** A thin adapter
 //!   that emits the peeked bytes from a small in-memory buffer before
 //!   delegating reads to the underlying TLS stream. Keeps hyper's
@@ -72,6 +71,8 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tower::ServiceExt;
 
 use super::WireState;
+#[cfg(feature = "full")]
+use super::derp::drive_native_derp;
 use super::noise::{UPGRADE_PROTOCOL, drive_ts2021_be_with_init};
 use super::tls::ReloadableServerConfig;
 
@@ -85,6 +86,8 @@ use super::tls::ReloadableServerConfig;
 /// base64-StdEncoding of the entire controlbase-framed Initiation
 /// (5-byte header + Noise body).
 pub const HANDSHAKE_HEADER_NAME: &str = "X-Tailscale-Handshake";
+const DERP_UPGRADE_PROTOCOL: &[u8] = b"derp";
+const DERP_FAST_START_HEADER: &str = "Derp-Fast-Start";
 
 /// How many bytes we read off a freshly-accepted TLS stream before
 /// deciding whether to hijack it for `/ts2021`. 1 KiB is enough to
@@ -240,6 +243,27 @@ async fn handle_one(
         return Ok(());
     }
 
+    #[cfg(feature = "full")]
+    if saw_header_end && is_derp_fast_start_upgrade(&buf) {
+        let body_after_headers = body_tail(&buf);
+        let Some(runtime) = wire_state.native_derp.clone() else {
+            return Err(io::Error::other(
+                "DERP fast-start requested but native DERP runtime is not configured",
+            ));
+        };
+        tracing::debug!(
+            target = "tailscale_wire::raw_tls",
+            %peer,
+            post_header_bytes = body_after_headers.len(),
+            "dispatching /derp fast-start to native DERP runtime"
+        );
+        let stream = PrefixedStream::new(body_after_headers.to_vec(), tls);
+        drive_native_derp(runtime, stream)
+            .await
+            .map_err(|e| io::Error::other(format!("DERP fast-start: {e}")))?;
+        return Ok(());
+    }
+
     // 4b. Non-/ts2021 traffic — feed the prefixed stream into hyper
     //     http1 and hand requests off to the axum router as a tower
     //     service.
@@ -354,6 +378,52 @@ fn is_ts2021_upgrade(buf: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// True iff the buffer starts with an HTTP request for `/derp`, carries
+/// `Upgrade: DERP`, and opts into Tailscale's no-HTTP-response DERP fast-start.
+fn is_derp_fast_start_upgrade(buf: &[u8]) -> bool {
+    let Some(headers_end) = find_header_end(buf) else {
+        return false;
+    };
+    let headers = &buf[..headers_end];
+    let Some(path) = request_path(headers) else {
+        return false;
+    };
+    if path != b"/derp" && !path.starts_with(b"/derp?") {
+        return false;
+    }
+
+    let mut upgrade_derp = false;
+    let mut fast_start = false;
+    for line in headers.split(|c| *c == b'\n') {
+        let trimmed = trim_trailing_cr(line);
+        let Some(colon) = trimmed.iter().position(|c| *c == b':') else {
+            continue;
+        };
+        let name = &trimmed[..colon];
+        let value = trim_ascii(&trimmed[colon + 1..]);
+        if eq_ignore_ascii_case(name, b"upgrade")
+            && eq_ignore_ascii_case(value, DERP_UPGRADE_PROTOCOL)
+        {
+            upgrade_derp = true;
+        }
+        if eq_ignore_ascii_case(name, DERP_FAST_START_HEADER.as_bytes()) && value == b"1" {
+            fast_start = true;
+        }
+    }
+    upgrade_derp && fast_start
+}
+
+fn request_path(headers: &[u8]) -> Option<&[u8]> {
+    let request_line_end = headers
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap_or(headers.len());
+    let request_line = &headers[..request_line_end];
+    let mut tokens = request_line.split(|c| *c == b' ');
+    let _method = tokens.next()?;
+    tokens.next()
 }
 
 /// Returns the bytes that appear *after* the `\r\n\r\n` header
@@ -496,7 +566,14 @@ mod tests {
         noise::ServerNoiseKey,
         test_support::{MockIpAllocator, MockRedeemer},
     };
-    use tokio::io::{AsyncWriteExt, duplex};
+    use headscale_core::derp::{
+        native::NativeDerpRelay,
+        protocol::{
+            ClientInfo, DerpNodeKeyPair, Frame, FrameDecoder, KEY_LEN, MAX_INFO_LEN, ServerInfo,
+            encode_client_info_frame, open_server_info,
+        },
+    };
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, duplex};
 
     fn fixture_state() -> (WireState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -549,6 +626,48 @@ mod tests {
             Host: tsi-mesh-control\r\n\
             \r\n";
         assert!(!is_ts2021_upgrade(req));
+    }
+
+    #[test]
+    fn detects_derp_fast_start_upgrade_request() {
+        let req = b"GET /derp HTTP/1.1\r\n\
+            Host: derp.example\r\n\
+            Upgrade: DERP\r\n\
+            Connection: Upgrade\r\n\
+            Derp-Fast-Start: 1\r\n\
+            \r\n";
+        assert!(is_derp_fast_start_upgrade(req));
+    }
+
+    #[test]
+    fn detects_derp_fast_start_with_query_string() {
+        let req = b"GET /derp?mesh=1 HTTP/1.1\r\n\
+            Host: derp.example\r\n\
+            upgrade: derp\r\n\
+            derp-fast-start: 1\r\n\
+            \r\n";
+        assert!(is_derp_fast_start_upgrade(req));
+    }
+
+    #[test]
+    fn rejects_derp_upgrade_without_fast_start() {
+        let req = b"GET /derp HTTP/1.1\r\n\
+            Host: derp.example\r\n\
+            Upgrade: DERP\r\n\
+            Connection: Upgrade\r\n\
+            \r\n";
+        assert!(!is_derp_fast_start_upgrade(req));
+    }
+
+    #[test]
+    fn rejects_derp_fast_start_websocket() {
+        let req = b"GET /derp HTTP/1.1\r\n\
+            Host: derp.example\r\n\
+            Upgrade: websocket\r\n\
+            Sec-WebSocket-Protocol: derp\r\n\
+            Derp-Fast-Start: 1\r\n\
+            \r\n";
+        assert!(!is_derp_fast_start_upgrade(req));
     }
 
     #[test]
@@ -688,5 +807,57 @@ mod tests {
 
         drop(framed);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn derp_fast_start_dispatch_preserves_client_info_bytes_across_peek() {
+        let runtime = Arc::new(crate::tailscale_wire::derp::NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let (client_io, server_io) = duplex(64 * 1024);
+        let server_runtime = runtime.clone();
+        let server_task = tokio::spawn(async move {
+            let prefixed = PrefixedStream::new(client_info, server_io);
+            crate::tailscale_wire::derp::drive_native_derp(server_runtime, prefixed).await
+        });
+        let (mut client_reader, client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let server_key = read_derp_frame(&mut client_reader, &mut decoder).await;
+        let Frame::ServerKey { key, extra } = server_key else {
+            panic!("expected server-key frame");
+        };
+        assert_eq!(key, server_public);
+        assert!(extra.is_empty());
+
+        let server_info = read_derp_frame(&mut client_reader, &mut decoder).await;
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info).unwrap(),
+            ServerInfo::current()
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server_task.await.unwrap().is_ok());
+    }
+
+    async fn read_derp_frame<R>(reader: &mut R, decoder: &mut FrameDecoder) -> Frame
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut buf = [0u8; 1024];
+        loop {
+            if let Some(frame) = decoder.next_frame().unwrap() {
+                return frame;
+            }
+            let n = reader.read(&mut buf).await.unwrap();
+            assert!(n > 0, "DERP stream closed before next frame");
+            decoder.push(&buf[..n]);
+        }
     }
 }

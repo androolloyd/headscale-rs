@@ -2,8 +2,9 @@
 //!
 //! The supported production relay path is still the upstream `derper` sidecar.
 //! This module wires the first native Rust `/derp` path for parity work:
-//! normal HTTP upgrade, DERP login frames, and local relay routing. Upstream's
-//! `Derp-Fast-Start` no-response hijack remains open.
+//! normal HTTP upgrade, DERP login frames, and local relay routing.
+//! `Derp-Fast-Start` no-response hijack is handled by the production raw TLS
+//! listener before requests reach this Hyper/Axum handler.
 
 use std::{
     borrow::Cow,
@@ -241,6 +242,10 @@ pub async fn handle_derp(State(state): State<WireState>, req: Request) -> Respon
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v == "1")
     {
+        // Production raw TLS intercepts DERP fast-start before Hyper and
+        // suppresses the HTTP response entirely. If a fast-start request reaches
+        // this handler, we are on a synthetic/non-production Hyper path where
+        // the upstream no-response hijack cannot be represented.
         return Response::builder()
             .status(StatusCode::NOT_IMPLEMENTED)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")

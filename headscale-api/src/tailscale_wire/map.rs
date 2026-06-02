@@ -5671,7 +5671,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_admin_rename_emits_self_only_node_update() {
+    async fn stream_true_admin_rename_emits_self_update_for_changed_node() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -5692,12 +5692,13 @@ mod tests {
         assert_eq!(changes.len(), history_len + 1);
         assert_eq!(
             changes[history_len].reasons,
-            vec![MapChangeReason::FullSelfUpdate]
+            vec![MapChangeReason::NodeAdded]
         );
         assert_eq!(
-            changes[history_len].target_node_id,
+            changes[history_len].origin_node_id,
             Some(stable_id_from_key(&a))
         );
+        assert_eq!(changes[history_len].target_node_id, None);
 
         let mr = next_zstd_map_response(&mut body).await;
         let self_node = mr.node.as_ref().expect("self rename update");
@@ -5712,6 +5713,35 @@ mod tests {
         assert!(mr.user_profiles.is_empty());
         assert!(mr.packet_filters.is_empty());
         assert!(mr.ssh_policy.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_admin_rename_emits_peer_update_for_observer() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.node.as_ref().unwrap().name, "peer-b");
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(first_mr.peers[0].name, "peer-a");
+
+        assert!(state.machines.rename(&a, "admin-renamed".into()));
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.node.is_none());
+        assert!(mr.peers.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&a));
+        assert_eq!(mr.peers_changed[0].name, "admin-renamed");
+        assert!(mr.peers_removed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.dns_config.is_none());
     }
 
     #[tokio::test]
@@ -7471,11 +7501,18 @@ mod tests {
         )
         .await
         .expect("observer route-aware peer delta");
-        assert!(alice_delta.peers.is_empty());
+        assert!(
+            alice_delta.node.is_some(),
+            "subnet-router online lifecycle emits a full map update"
+        );
+        assert!(alice_delta.peers_changed.is_empty());
         assert!(alice_delta.peers_removed.is_empty());
         assert!(alice_delta.peers_changed_patch.is_empty());
-        assert_eq!(alice_delta.peers_changed.len(), 1);
-        let peer = &alice_delta.peers_changed[0];
+        let peer = alice_delta
+            .peers
+            .iter()
+            .find(|peer| peer.id == stable_id_from_key(&router_key))
+            .expect("router peer in full subnet-router online update");
         assert_eq!(peer.id, stable_id_from_key(&router_key));
         assert_eq!(peer.name, "router");
         assert!(
@@ -7592,11 +7629,18 @@ mod tests {
         )
         .await
         .expect("observer route-aware peer delta");
+        assert!(
+            alice_delta.node.is_some(),
+            "subnet-router online lifecycle emits a full map update after persistence"
+        );
+        assert!(alice_delta.peers_changed.is_empty());
+        assert!(alice_delta.peers_removed.is_empty());
+        assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
-            .peers_changed
+            .peers
             .iter()
             .find(|peer| peer.id == stable_id_from_key(&router_key))
-            .expect("router peer delta present after connect");
+            .expect("router peer present after connect");
         assert!(
             peer.allowed_ips.iter().any(|allowed| allowed == route),
             "observer should only see the route update once the router is online"

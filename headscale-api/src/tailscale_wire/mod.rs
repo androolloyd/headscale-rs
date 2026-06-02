@@ -128,6 +128,7 @@ pub enum MapChangeReason {
     SubnetRouterOnline,
     SubnetRouterOffline,
     UserRemoved,
+    SelfUpdate,
     EndpointDerpUpdate,
     KeyExpiry,
     PolicyChange,
@@ -153,6 +154,7 @@ impl MapChangeReason {
             Self::SubnetRouterOnline => "subnet router online",
             Self::SubnetRouterOffline => "subnet router offline",
             Self::UserRemoved => "user removed",
+            Self::SelfUpdate => "self update",
             Self::EndpointDerpUpdate => "endpoint/DERP update",
             Self::KeyExpiry => "key expiry",
             Self::PolicyChange => "policy change",
@@ -203,6 +205,9 @@ impl MapChangeContent {
             | MapChangeReason::SubnetRouterOffline
             | MapChangeReason::UserRemoved => {
                 content = Self::full();
+            }
+            MapChangeReason::SelfUpdate => {
+                content.include_self = true;
             }
             MapChangeReason::NodeAdded
             | MapChangeReason::NodeUpdated
@@ -4326,7 +4331,7 @@ impl MachineRegistry {
                         let node_id = rec.stable_node_id_for_key(&node_key_hex);
                         rec.hostname = new_hostname;
                         NodeStoreBoolUpdateOutcome::changed_for_node(
-                            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id),
+                            PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
                             node_id,
                         )
                     }
@@ -7204,12 +7209,9 @@ mod registry_tests {
         assert!(full_self_change.should_send_to_node(node_id));
         assert!(!full_self_change.should_send_to_node(node_id + 1));
 
-        let mut self_change =
-            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(1);
-        self_change.content = MapChangeContent {
-            include_self: true,
-            ..MapChangeContent::default()
-        };
+        let self_change =
+            PendingMapChange::target(MapChangeReason::SelfUpdate, node_id).into_change(1);
+        assert_eq!(self_change.reason_labels(), vec!["self update"]);
         assert_eq!(self_change.change_type(), "self");
         assert!(self_change.should_send_to_node(node_id));
         assert!(!self_change.should_send_to_node(node_id + 1));

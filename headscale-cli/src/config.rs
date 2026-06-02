@@ -527,6 +527,7 @@ impl CliConfig {
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
+        config.apply_database_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
@@ -574,6 +575,7 @@ impl CliConfig {
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
+        config.apply_database_env_overrides_from(std::env::vars())?;
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
@@ -695,6 +697,153 @@ impl CliConfig {
                 _ => {}
             }
         }
+        Ok(())
+    }
+
+    fn apply_database_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_DATABASE_TYPE" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .database_type = Some(value.to_string());
+                }
+                "HEADSCALE_DATABASE_DEBUG" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .debug = parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_GORM_DEBUG" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .gorm
+                        .debug = parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_GORM_SLOW_THRESHOLD" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .gorm
+                        .slow_threshold = value
+                        .parse::<u64>()
+                        .with_context(|| format!("invalid {key}"))?
+                        .saturating_mul(1_000_000);
+                }
+                "HEADSCALE_DATABASE_GORM_SKIP_ERR_RECORD_NOT_FOUND" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .gorm
+                        .skip_err_record_not_found =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_GORM_PARAMETERIZED_QUERIES" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .gorm
+                        .parameterized_queries =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_GORM_PREPARE_STMT" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .gorm
+                        .prepare_stmt =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_SQLITE_PATH" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .sqlite
+                        .get_or_insert_with(UpstreamSqliteConfig::default)
+                        .path = Some(PathBuf::from(value));
+                }
+                "HEADSCALE_DATABASE_SQLITE_WRITE_AHEAD_LOG" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .sqlite
+                        .get_or_insert_with(UpstreamSqliteConfig::default)
+                        .write_ahead_log =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_SQLITE_WAL_AUTOCHECKPOINT" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .sqlite
+                        .get_or_insert_with(UpstreamSqliteConfig::default)
+                        .wal_autocheckpoint =
+                        value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_POSTGRES_HOST" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .host = value.to_string();
+                }
+                "HEADSCALE_DATABASE_POSTGRES_PORT" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .port = value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_POSTGRES_NAME" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .name = value.to_string();
+                }
+                "HEADSCALE_DATABASE_POSTGRES_USER" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .user = value.to_string();
+                }
+                "HEADSCALE_DATABASE_POSTGRES_PASS" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .pass = value.to_string();
+                }
+                "HEADSCALE_DATABASE_POSTGRES_SSL" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .ssl = value.to_string();
+                }
+                "HEADSCALE_DATABASE_POSTGRES_MAX_OPEN_CONNS" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .max_open_conns =
+                        value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_POSTGRES_MAX_IDLE_CONNS" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .max_idle_conns =
+                        value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_DATABASE_POSTGRES_CONN_MAX_IDLE_TIME_SECS" => {
+                    self.database
+                        .get_or_insert_with(UpstreamDatabaseConfig::default)
+                        .postgres
+                        .conn_max_idle_time_secs =
+                        value.parse().with_context(|| format!("invalid {key}"))?;
+                }
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 
@@ -2594,6 +2743,89 @@ taildrop:
 
         assert!(!config.logtail.enabled);
         assert!(!config.auto_update.enabled);
+    }
+
+    #[test]
+    fn applies_headscale_database_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config
+            .apply_database_env_overrides_from([
+                ("HEADSCALE_DATABASE_TYPE", "postgres"),
+                ("HEADSCALE_DATABASE_DEBUG", "true"),
+                ("HEADSCALE_DATABASE_GORM_DEBUG", "true"),
+                ("HEADSCALE_DATABASE_GORM_SLOW_THRESHOLD", "1500"),
+                ("HEADSCALE_DATABASE_GORM_SKIP_ERR_RECORD_NOT_FOUND", "true"),
+                ("HEADSCALE_DATABASE_GORM_PARAMETERIZED_QUERIES", "true"),
+                ("HEADSCALE_DATABASE_GORM_PREPARE_STMT", "true"),
+                (
+                    "HEADSCALE_DATABASE_SQLITE_PATH",
+                    "/srv/headscale/env.sqlite",
+                ),
+                ("HEADSCALE_DATABASE_SQLITE_WRITE_AHEAD_LOG", "false"),
+                ("HEADSCALE_DATABASE_SQLITE_WAL_AUTOCHECKPOINT", "250"),
+                ("HEADSCALE_DATABASE_POSTGRES_HOST", "pg.example"),
+                ("HEADSCALE_DATABASE_POSTGRES_PORT", "5433"),
+                ("HEADSCALE_DATABASE_POSTGRES_NAME", "headscale_env"),
+                ("HEADSCALE_DATABASE_POSTGRES_USER", "headscale"),
+                ("HEADSCALE_DATABASE_POSTGRES_PASS", "secret"),
+                ("HEADSCALE_DATABASE_POSTGRES_SSL", "verify-full"),
+                ("HEADSCALE_DATABASE_POSTGRES_MAX_OPEN_CONNS", "11"),
+                ("HEADSCALE_DATABASE_POSTGRES_MAX_IDLE_CONNS", "7"),
+                ("HEADSCALE_DATABASE_POSTGRES_CONN_MAX_IDLE_TIME_SECS", "120"),
+            ])
+            .unwrap();
+
+        let database = config.database.as_ref().unwrap();
+        assert_eq!(database.runtime_backend(), Some(DatabaseBackend::Postgres));
+        assert_eq!(database.debug_type(), "postgres");
+        assert!(database.debug_enabled());
+        assert!(database.debug_gorm().debug(false));
+        assert_eq!(database.debug_gorm().slow_threshold_nanos(), 1_500_000_000);
+        assert!(database.debug_gorm().skip_err_record_not_found());
+        assert!(database.debug_gorm().parameterized_queries());
+        assert!(database.debug_gorm().prepare_stmt());
+        assert_eq!(
+            database.debug_sqlite().path(),
+            Some(Path::new("/srv/headscale/env.sqlite"))
+        );
+        assert!(!database.debug_sqlite().write_ahead_log());
+        assert_eq!(database.debug_sqlite().wal_autocheckpoint(), 250);
+        let postgres = database.debug_postgres();
+        assert_eq!(postgres.host(), "pg.example");
+        assert_eq!(postgres.port(), 5433);
+        assert_eq!(postgres.name(), "headscale_env");
+        assert_eq!(postgres.user(), "headscale");
+        assert_eq!(postgres.ssl(), "verify-full");
+        assert_eq!(postgres.max_open_conns(), 11);
+        assert_eq!(postgres.max_idle_conns(), 7);
+        assert_eq!(postgres.conn_max_idle_time_secs(), 120);
+    }
+
+    #[test]
+    fn rejects_invalid_headscale_database_env_overrides() {
+        let invalid_cases = [
+            ("HEADSCALE_DATABASE_DEBUG", "maybe"),
+            ("HEADSCALE_DATABASE_GORM_SLOW_THRESHOLD", "not-a-number"),
+            ("HEADSCALE_DATABASE_SQLITE_WRITE_AHEAD_LOG", "maybe"),
+            (
+                "HEADSCALE_DATABASE_SQLITE_WAL_AUTOCHECKPOINT",
+                "not-a-number",
+            ),
+            ("HEADSCALE_DATABASE_POSTGRES_PORT", "not-a-number"),
+            ("HEADSCALE_DATABASE_POSTGRES_MAX_OPEN_CONNS", "not-a-number"),
+        ];
+
+        for (key, value) in invalid_cases {
+            let mut config = CliConfig::default();
+            let err = config
+                .apply_database_env_overrides_from([(key, value)])
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&format!("invalid {key}")),
+                "error for {key}: {err:#}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-01 21:33 ADT
+Updated: 2026-06-01 22:13 ADT
 
 ## Current State
 
@@ -1379,6 +1379,20 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused coverage includes unit tests for the loaded runtime config and a
   process-level `configtest` snapshot proving env-provided invalid
   `grpc_listen_addr` fails like the same file-provided value.
+
+## 2026-06-01 database env override parity slice
+
+- `CliConfig::load` and default config discovery now apply current-upstream
+  Viper-style database env overrides for `HEADSCALE_DATABASE_TYPE`,
+  `HEADSCALE_DATABASE_DEBUG`, `HEADSCALE_DATABASE_GORM_*`,
+  `HEADSCALE_DATABASE_SQLITE_*`, and `HEADSCALE_DATABASE_POSTGRES_*`.
+- `HEADSCALE_DATABASE_SQLITE_PATH` participates in the same upstream alias
+  normalization as file-provided `database.sqlite.path`, so it can feed the
+  runtime SQLite path when no explicit Rust `server.db_path` overrides it.
+- Focused coverage includes unit assertions for gorm/sqlite/postgres
+  projection and a process-level `configtest` case proving env-only Postgres
+  config is accepted while env-provided invalid pool sizing fails like the
+  file-provided value.
 
 ## 2026-06-01 configtest default fatal parity slice
 

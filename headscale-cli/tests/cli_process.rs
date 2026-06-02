@@ -68,6 +68,25 @@ const CLEAN_ENV: &[&str] = &[
     "HEADSCALE_DISABLE_CHECK_UPDATES",
     "HEADSCALE_LOGTAIL_ENABLED",
     "HEADSCALE_AUTO_UPDATE_ENABLED",
+    "HEADSCALE_DATABASE_TYPE",
+    "HEADSCALE_DATABASE_DEBUG",
+    "HEADSCALE_DATABASE_GORM_DEBUG",
+    "HEADSCALE_DATABASE_GORM_SLOW_THRESHOLD",
+    "HEADSCALE_DATABASE_GORM_SKIP_ERR_RECORD_NOT_FOUND",
+    "HEADSCALE_DATABASE_GORM_PARAMETERIZED_QUERIES",
+    "HEADSCALE_DATABASE_GORM_PREPARE_STMT",
+    "HEADSCALE_DATABASE_SQLITE_PATH",
+    "HEADSCALE_DATABASE_SQLITE_WRITE_AHEAD_LOG",
+    "HEADSCALE_DATABASE_SQLITE_WAL_AUTOCHECKPOINT",
+    "HEADSCALE_DATABASE_POSTGRES_HOST",
+    "HEADSCALE_DATABASE_POSTGRES_PORT",
+    "HEADSCALE_DATABASE_POSTGRES_NAME",
+    "HEADSCALE_DATABASE_POSTGRES_USER",
+    "HEADSCALE_DATABASE_POSTGRES_PASS",
+    "HEADSCALE_DATABASE_POSTGRES_SSL",
+    "HEADSCALE_DATABASE_POSTGRES_MAX_OPEN_CONNS",
+    "HEADSCALE_DATABASE_POSTGRES_MAX_IDLE_CONNS",
+    "HEADSCALE_DATABASE_POSTGRES_CONN_MAX_IDLE_TIME_SECS",
     "HEADSCALE_TUNING_NODE_STORE_BATCH_SIZE",
     "HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT",
     "HEADSCALE_ACME_URL",
@@ -2086,6 +2105,57 @@ database:
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
     assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn configtest_applies_database_env_overrides() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_DATABASE_TYPE", "postgres"),
+            ("HEADSCALE_DATABASE_POSTGRES_HOST", "127.0.0.1"),
+            ("HEADSCALE_DATABASE_POSTGRES_PORT", "5432"),
+            ("HEADSCALE_DATABASE_POSTGRES_NAME", "headscale"),
+            ("HEADSCALE_DATABASE_POSTGRES_USER", "headscale"),
+            ("HEADSCALE_DATABASE_POSTGRES_SSL", "false"),
+        ],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_DATABASE_TYPE", "postgres"),
+            ("HEADSCALE_DATABASE_POSTGRES_MAX_OPEN_CONNS", "-1"),
+        ],
+    );
+    assert_configtest_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/configtest_invalid_postgres_pool.stderr"),
+        "configtest invalid postgres pool from env",
+    );
 }
 
 #[test]

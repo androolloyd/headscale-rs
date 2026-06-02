@@ -33,7 +33,10 @@ use headscale_api::{
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
     },
 };
-use headscale_core::{config::EmbeddedDerpConfig, derp::EmbeddedDerpRuntime};
+use headscale_core::{
+    config::{EmbeddedDerpConfig, EmbeddedDerpRelayMode},
+    derp::EmbeddedDerpRuntime,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::signal;
@@ -112,6 +115,13 @@ struct Args {
     embedded_derp_ipv6: Option<String>,
     #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_STUN_ONLY")]
     embedded_derp_stun_only: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HarnessEmbeddedDerpRelayMode::Sidecar,
+        env = "HSRS_HARNESS_EMBEDDED_DERP_RELAY_MODE"
+    )]
+    embedded_derp_relay_mode: HarnessEmbeddedDerpRelayMode,
     #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_BINARY")]
     embedded_derp_derper_binary: Option<PathBuf>,
     #[arg(long, env = "HSRS_HARNESS_EMBEDDED_DERP_DERPER_LISTEN_ADDR")]
@@ -174,6 +184,21 @@ enum IpFamilies {
     Ipv4Only,
     Ipv6Only,
     DualStack,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HarnessEmbeddedDerpRelayMode {
+    Sidecar,
+    Native,
+}
+
+impl From<HarnessEmbeddedDerpRelayMode> for EmbeddedDerpRelayMode {
+    fn from(mode: HarnessEmbeddedDerpRelayMode) -> Self {
+        match mode {
+            HarnessEmbeddedDerpRelayMode::Sidecar => EmbeddedDerpRelayMode::Sidecar,
+            HarnessEmbeddedDerpRelayMode::Native => EmbeddedDerpRelayMode::Native,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -945,6 +970,7 @@ fn embedded_derp_config(args: &Args) -> Result<EmbeddedDerpConfig> {
         derp_port: args.embedded_derp_derp_port,
         stun_addr: args.embedded_derp_stun_addr,
         stun_only: args.embedded_derp_stun_only,
+        relay_mode: args.embedded_derp_relay_mode.into(),
         region_id: args.embedded_derp_region_id,
         region_code: args.embedded_derp_region_code.clone(),
         region_name: args.embedded_derp_region_name.clone(),

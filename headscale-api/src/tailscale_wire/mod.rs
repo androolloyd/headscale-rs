@@ -1598,6 +1598,14 @@ impl RegistrationCache {
             .and_then(|entry| entry.record.clone())
     }
 
+    pub fn get_pending_registration(&self, registration_id: &str) -> Option<MachineRecord> {
+        let entry = self.get_entry(registration_id)?;
+        if entry.outcome().is_some() {
+            return None;
+        }
+        entry.record.clone()
+    }
+
     pub fn ssh_binding(&self, auth_id: &str) -> Option<SshCheckBinding> {
         self.get_entry(auth_id)
             .and_then(|entry| entry.ssh_binding.clone())

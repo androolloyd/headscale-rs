@@ -2530,3 +2530,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Adopted the DNS-edge live split-resolver fixture and paired DNS-edge smoke
   assertions for a real split-suffix A lookup. The DNS row remains open until
   the paired Docker stock-client rows are run successfully.
+
+## 2026-06-02 Postgres auth terminal-session coverage
+
+- `AuthRegister` now refuses pending auth IDs that already have a terminal
+  cache outcome, so a CLI/gateway register cannot complete a previously
+  approved or rejected session from the registration cache.
+- Added a focused upstream gRPC regression for approved and rejected terminal
+  auth sessions, plus a feature-gated production Postgres `headscale serve`
+  smoke covering CLI `auth approve`, grpc-gateway `auth reject`, failed
+  register-after-terminal-auth, restart, and empty node persistence.
+- The `p0-production-postgres-process-mutations` row remains open until the
+  new Postgres process smoke runs against a live `HEADSCALE_DB_POSTGRES_TEST_URL`
+  and broader mutation/restart coverage is complete.

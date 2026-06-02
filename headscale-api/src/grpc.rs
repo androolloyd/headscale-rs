@@ -696,10 +696,18 @@ pub mod upstream {
                 .await
                 .map_err(user_error_to_status)?
                 .ok_or_else(|| Status::unknown("looking up user: user not found"))?;
-            let pending = self
+            let pending = match self
                 .registration_cache
-                .get(&registration_id)
-                .ok_or_else(|| Status::unknown("node not found in registration cache"))?;
+                .get_pending_registration(&registration_id)
+            {
+                Some(pending) => pending,
+                None if self.registration_cache.get(&registration_id).is_some() => {
+                    return Err(Status::failed_precondition(
+                        "auth request already completed",
+                    ));
+                }
+                None => return Err(Status::unknown("node not found in registration cache")),
+            };
             let mut record = wire_record_to_machine_admin(pending.clone());
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
@@ -4061,6 +4069,78 @@ mod upstream_tests {
             err.message(),
             "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_grpc_register_rejects_completed_auth_sessions() {
+        let (service, _db) = admin_service_with_persistent_machines().await;
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        for (auth_id, node_name, approve) in [
+            (
+                "hskey-authreq-cccccccccccccccccccccccc",
+                "approved-terminal-node",
+                true,
+            ),
+            (
+                "hskey-authreq-dddddddddddddddddddddddd",
+                "rejected-terminal-node",
+                false,
+            ),
+        ] {
+            service
+                .debug_create_node(Request::new(DebugCreateNodeRequest {
+                    user: "alice".into(),
+                    key: auth_id.into(),
+                    name: node_name.into(),
+                    routes: Vec::new(),
+                }))
+                .await
+                .unwrap();
+
+            if approve {
+                service
+                    .auth_approve(Request::new(AuthApproveRequest {
+                        auth_id: auth_id.into(),
+                    }))
+                    .await
+                    .unwrap();
+            } else {
+                service
+                    .auth_reject(Request::new(AuthRejectRequest {
+                        auth_id: auth_id.into(),
+                    }))
+                    .await
+                    .unwrap();
+            }
+
+            let err = service
+                .auth_register(Request::new(AuthRegisterRequest {
+                    user: "alice".into(),
+                    auth_id: auth_id.into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(err.message(), "auth request already completed");
+        }
+
+        let listed = service
+            .list_nodes(Request::new(ListNodesRequest {
+                user: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(listed.nodes.is_empty());
     }
 
     #[tokio::test]

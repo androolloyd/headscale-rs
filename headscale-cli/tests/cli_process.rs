@@ -6629,6 +6629,172 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("auth_terminal").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret").to_string();
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let approve_auth_id = "hskey-authreq-abababababababababababab";
+        let approve_pending = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                approve_auth_id,
+                "--name",
+                "pg-approve-terminal",
+            ],
+        );
+        assert!(
+            approve_pending.status.success(),
+            "stderr: {}",
+            stderr(&approve_pending)
+        );
+        assert_eq!(stdout(&approve_pending), "Node created\n");
+        assert_eq!(stderr(&approve_pending), "");
+
+        let approve =
+            headscale_with_config(&config, &["auth", "approve", "--auth-id", approve_auth_id]);
+        assert!(approve.status.success(), "stderr: {}", stderr(&approve));
+        assert_eq!(stdout(&approve), "Auth request approved\n");
+        assert_eq!(stderr(&approve), "");
+
+        let register_approved = headscale_with_config(
+            &config,
+            &[
+                "auth",
+                "register",
+                "--user",
+                "alice",
+                "--auth-id",
+                approve_auth_id,
+            ],
+        );
+        assert_eq!(register_approved.status.code(), Some(6));
+        assert_eq!(stdout(&register_approved), "");
+        assert!(
+            stderr(&register_approved).contains("auth request already completed"),
+            "stderr: {}",
+            stderr(&register_approved)
+        );
+
+        let http = reqwest::Client::new();
+        let reject_auth_id = "hskey-authreq-cdcdcdcdcdcdcdcdcdcdcdcd";
+        let gateway_debug = http
+            .post(format!("{server_url}/api/v1/debug/node"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "key": reject_auth_id,
+                "name": "pg-reject-terminal",
+                "routes": []
+            }))
+            .send()
+            .await?;
+        assert_eq!(gateway_debug.status(), reqwest::StatusCode::OK);
+        let gateway_debug = gateway_debug.json::<serde_json::Value>().await?;
+        assert_eq!(
+            gateway_debug["node"]["name"].as_str(),
+            Some("pg-reject-terminal")
+        );
+
+        let reject = http
+            .post(format!("{server_url}/api/v1/auth/reject"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({ "authId": reject_auth_id }))
+            .send()
+            .await?;
+        assert_eq!(reject.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            reject.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let register_rejected = http
+            .post(format!("{server_url}/api/v1/auth/register"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "authId": reject_auth_id
+            }))
+            .send()
+            .await?;
+        assert_eq!(register_rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+        let register_rejected = register_rejected.json::<serde_json::Value>().await?;
+        assert_eq!(register_rejected["code"].as_i64(), Some(9));
+        assert_eq!(
+            register_rejected["message"].as_str(),
+            Some("auth request already completed")
+        );
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        assert_eq!(json_output(&nodes), serde_json::json!([]));
+        assert_eq!(stderr(&nodes), "");
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let nodes_after_restart = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(
+            nodes_after_restart.status.success(),
+            "stderr: {}",
+            stderr(&nodes_after_restart)
+        );
+        assert_eq!(json_output(&nodes_after_restart), serde_json::json!([]));
+        assert_eq!(stderr(&nodes_after_restart), "");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_user_crud").await? else {
         return Ok(());

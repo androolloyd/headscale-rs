@@ -458,6 +458,45 @@ mod tests {
             .collect()
     }
 
+    fn assert_primary_state_invariants(
+        state: &PrimaryRouteState,
+        expected_primaries: &[(&str, u64)],
+    ) {
+        let expected = primary_map(expected_primaries);
+        assert_eq!(primaries(state), expected);
+
+        let debug = state.debug_routes();
+        let mut expected_by_node = BTreeMap::<u64, Vec<String>>::new();
+        for (route, node_id) in &expected {
+            let available = debug
+                .available_routes
+                .get(node_id)
+                .unwrap_or_else(|| panic!("primary node {node_id} missing available routes"));
+            assert!(
+                available.contains(route),
+                "primary node {node_id} no longer advertises {route}"
+            );
+            expected_by_node
+                .entry(*node_id)
+                .or_default()
+                .push(route.clone());
+        }
+
+        for routes in expected_by_node.values_mut() {
+            routes.sort();
+        }
+
+        let node_ids = [1, 2, 3];
+        for node_id in node_ids {
+            assert_eq!(
+                state.primary_routes(node_id),
+                expected_by_node.remove(&node_id).unwrap_or_default(),
+                "PrimaryRoutesForNode-style reverse lookup mismatch for node {node_id}"
+            );
+        }
+        assert!(expected_by_node.is_empty());
+    }
+
     #[test]
     fn normalize_routes_expands_exit_routes_and_dedupes() {
         let routes = normalize_routes(["::/0", "0.0.0.0/0", "10.0.0.0/24"]).unwrap();
@@ -855,6 +894,33 @@ mod tests {
         assert_eq!(state.primary_routes(2), Vec::<String>::new());
         assert_eq!(primaries(&state), BTreeMap::new());
         assert_eq!(unhealthy(&state), vec![1, 2]);
+    }
+
+    #[test]
+    fn primary_route_sequence_preserves_go_property_invariants() {
+        let mut state = PrimaryRouteState::new();
+
+        assert!(state.set_routes(1, ["10.0.0.0/24", "10.0.1.0/24"]).unwrap());
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 1), ("10.0.1.0/24", 1)]);
+
+        assert!(!state.set_routes(2, ["10.0.0.0/24"]).unwrap());
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 1), ("10.0.1.0/24", 1)]);
+
+        assert!(state.set_node_health(1, false));
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 2), ("10.0.1.0/24", 1)]);
+
+        assert!(state.set_routes(3, ["10.0.1.0/24"]).unwrap());
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 2), ("10.0.1.0/24", 3)]);
+
+        assert!(!state.set_node_health(1, true));
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 2), ("10.0.1.0/24", 3)]);
+
+        assert!(state.set_routes(2, Vec::<String>::new()).unwrap());
+        assert_primary_state_invariants(&state, &[("10.0.0.0/24", 1), ("10.0.1.0/24", 3)]);
+
+        assert!(state.set_routes(1, ["10.0.1.0/24"]).unwrap());
+        assert_primary_state_invariants(&state, &[("10.0.1.0/24", 3)]);
+        assert_eq!(state.primary_route_for("10.0.0.0/24"), None);
     }
 
     #[test]

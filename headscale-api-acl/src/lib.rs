@@ -256,9 +256,9 @@ pub struct SshRule {
     pub dst: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub users: Vec<String>,
-    #[serde(default, rename = "check_period", alias = "checkPeriod")]
+    #[serde(default, rename = "checkPeriod", alias = "check_period")]
     pub check_period: Option<String>,
-    #[serde(default, rename = "accept_env", alias = "acceptEnv")]
+    #[serde(default, rename = "acceptEnv", alias = "accept_env")]
     pub accept_env: Vec<String>,
 }
 
@@ -543,10 +543,10 @@ impl AclDoc {
                 value.insert("dst".to_string(), serde_json::json!(dst));
                 value.insert("users".to_string(), serde_json::json!(users));
                 if let Some(check_period) = &s.check_period {
-                    value.insert("check_period".to_string(), serde_json::json!(check_period));
+                    value.insert("checkPeriod".to_string(), serde_json::json!(check_period));
                 }
                 if !accept_env.is_empty() {
-                    value.insert("accept_env".to_string(), serde_json::json!(accept_env));
+                    value.insert("acceptEnv".to_string(), serde_json::json!(accept_env));
                 }
                 serde_json::Value::Object(value)
             })
@@ -4329,6 +4329,49 @@ mod tests {
         assert_eq!(doc.ssh_tests[0].dst, vec!["tag:server"]);
         assert_eq!(doc.ssh_tests[0].accept, vec!["root"]);
         assert_eq!(doc.ssh_tests[0].deny, vec!["ubuntu"]);
+    }
+
+    #[test]
+    fn renders_ssh_check_period_camelcase_and_rejects_trimmed_empty_users_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "check",
+                "checkPeriod": "24h",
+                "acceptEnv": ["LANG"],
+                "src": [" alice@ "],
+                "dst": [" autogroup:self "],
+                "users": [" root "]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let rendered = serde_json::to_value(&doc.ssh[0]).unwrap();
+
+        assert_eq!(rendered["checkPeriod"], "24h");
+        assert_eq!(rendered["acceptEnv"], serde_json::json!(["LANG"]));
+        assert!(rendered.get("check_period").is_none());
+        assert!(rendered.get("accept_env").is_none());
+
+        let stable = doc.canonical_value();
+        assert_eq!(stable["ssh"][0]["checkPeriod"], "24h");
+        assert_eq!(stable["ssh"][0]["acceptEnv"], serde_json::json!(["LANG"]));
+        assert!(stable["ssh"][0].get("check_period").is_none());
+        assert!(stable["ssh"][0].get("accept_env").is_none());
+
+        let err = parse_hujson_policy(
+            r#"{
+              "ssh": [{
+                "action": "accept",
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": [" "]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(r#"user "" is not a valid SSH user"#));
     }
 
     #[test]

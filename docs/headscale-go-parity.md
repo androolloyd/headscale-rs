@@ -226,6 +226,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   clear DERP status health. The headscale-go matrix script is an explicit
   no-equivalent skip so private/sidecar DERP coverage stays separate from
   headscale-rs native DERP claims.
+- Native DERP stock-client runtime assertions now also pin the client's own
+  `tailscale status --json` peer relay projection: the base and policy-reload
+  Rust-only native DERP rows require `Peer[].Relay` to include the advertised
+  native DERP region code after forced relay traffic succeeds.
 - Recent coverage closes the hidden `dumpConfig` no-config default-warning
   slice: process snapshots now pin headscale-go's timestamped
   `WRN no config file found, using defaults` line before the human,

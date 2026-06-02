@@ -20,16 +20,15 @@ use headscale_api::policy::{
 use headscale_api::tailscale_wire::wire::FilterRule;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/policy");
-const CURRENT_HEAD_FIXTURES: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/current-head");
+const PARITY_SCENARIOS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/scenarios");
 
 fn load(name: &str) -> String {
     let path = format!("{FIXTURES}/{name}");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
 }
 
-fn load_current_head_policy(name: &str) -> String {
-    let path = format!("{CURRENT_HEAD_FIXTURES}/{name}");
+fn load_parity_policy(name: &str) -> String {
+    let path = format!("{PARITY_SCENARIOS}/{name}");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
     let scenario: serde_json::Value =
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {path}: {e}"));
@@ -306,9 +305,9 @@ fn parses_internal_nodeattrs_toml() {
 }
 
 #[test]
-fn parses_current_head_taildrive_taildrop_caps_fixture() {
-    let raw = load_current_head_policy("policy-v2-taildrive-taildrop-caps.json");
-    let doc = parse_hujson_policy(&raw).expect("taildrive current-head fixture must parse");
+fn parses_taildrive_taildrop_caps_parity_fixture() {
+    let raw = load_parity_policy("policy-v2-taildrive-taildrop-caps.json");
+    let doc = parse_hujson_policy(&raw).expect("taildrive parity fixture must parse");
     assert_eq!(doc.node_attrs.len(), 2);
     assert_eq!(doc.grants.len(), 1);
     assert!(doc.grants[0].app.contains_key("tailscale.com/cap/drive"));

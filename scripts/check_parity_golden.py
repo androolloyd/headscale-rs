@@ -40,9 +40,11 @@ def headscale_go_version() -> str:
     raise CheckError(f"{relative(GO_MOD)} does not pin github.com/juanfont/headscale")
 
 
-def scenario_names(scenario_dir: pathlib.Path, label: str) -> list[str]:
+def scenario_names(
+    scenario_dir: pathlib.Path, label: str, *, allow_empty: bool = False
+) -> list[str]:
     paths = sorted(scenario_dir.glob("*.json"))
-    if not paths:
+    if not paths and not allow_empty:
         raise CheckError(f"{label} has no scenario files in {relative(scenario_dir)}")
 
     names: list[str] = []
@@ -71,14 +73,20 @@ def scenario_names(scenario_dir: pathlib.Path, label: str) -> list[str]:
     return names
 
 
-def golden_names(golden_path: pathlib.Path, label: str, expected_engine: str) -> list[str]:
+def golden_names(
+    golden_path: pathlib.Path,
+    label: str,
+    expected_engine: str,
+    *,
+    allow_empty: bool = False,
+) -> list[str]:
     if not golden_path.is_file():
         raise CheckError(f"{label} golden is missing: {relative(golden_path)}")
 
     document = load_json(golden_path)
     if not isinstance(document, list):
         raise CheckError(f"{relative(golden_path)} must contain a JSON array")
-    if not document:
+    if not document and not allow_empty:
         raise CheckError(f"{relative(golden_path)} must not be empty")
 
     names: list[str] = []
@@ -134,8 +142,13 @@ def check_pinned() -> None:
 
 
 def check_current_head() -> None:
-    scenarios = scenario_names(CURRENT_HEAD_SCENARIOS, "current-head")
-    golden = golden_names(CURRENT_HEAD_GOLDEN, "current-head", "headscale-rs")
+    scenarios = scenario_names(CURRENT_HEAD_SCENARIOS, "current-head", allow_empty=True)
+    golden = golden_names(
+        CURRENT_HEAD_GOLDEN,
+        "current-head",
+        "headscale-rs",
+        allow_empty=True,
+    )
     compare_names("current-head", scenarios, golden)
     print(
         f"checked current-head parity golden {relative(CURRENT_HEAD_GOLDEN)} "

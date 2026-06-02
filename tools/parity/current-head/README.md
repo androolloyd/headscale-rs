@@ -7,12 +7,10 @@ Rust golden until each scenario is promoted into the default
 
 The default v0.29 differential gate directly compares the former current-head
 route-via, route auto-approval, SSH policy, SSH `acceptEnv`,
-hold-and-delegate SSH check, and SSH host-destination rejection scenarios
-against headscale-go.
+hold-and-delegate SSH check, SSH host-destination rejection, and
+Taildrive/Taildrop capability scenarios against headscale-go.
 
-One current-head-only scenario remains staged here under the Rust golden:
-
-- `policy-v2-taildrive-taildrop-caps`
+No current-head-only scenarios are staged here right now.
 
 Keep new current-head-only scenarios here only when the Go harness or Rust
 implementation is not ready for default promotion yet.

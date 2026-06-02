@@ -1577,6 +1577,9 @@ pub mod native {
     use tokio::sync::{RwLock, mpsc};
 
     const DEFAULT_SESSION_QUEUE: usize = 256;
+    /// Health problem sent to clients while the same node key has more than
+    /// one live connection to this native DERP relay.
+    pub const DUPLICATE_CONNECTION_HEALTH: &str = "duplicate DERP connection for node key";
 
     /// In-process DERP relay registry.
     #[derive(Clone, Debug)]
@@ -1587,8 +1590,21 @@ pub mod native {
 
     #[derive(Debug, Default)]
     struct RelayState {
-        sessions: HashMap<[u8; KEY_LEN], mpsc::Sender<Frame>>,
+        sessions: HashMap<[u8; KEY_LEN], ClientSessions>,
         reverse_paths: HashMap<[u8; KEY_LEN], HashSet<[u8; KEY_LEN]>>,
+        next_session_id: u64,
+    }
+
+    #[derive(Debug, Default)]
+    struct ClientSessions {
+        sessions: Vec<SessionEntry>,
+        active_session_id: u64,
+    }
+
+    #[derive(Debug)]
+    struct SessionEntry {
+        id: u64,
+        tx: mpsc::Sender<Frame>,
     }
 
     /// A registered native DERP client session.
@@ -1596,6 +1612,7 @@ pub mod native {
     pub struct NativeDerpSession {
         relay: NativeDerpRelay,
         key: [u8; KEY_LEN],
+        session_id: u64,
         rx: mpsc::Receiver<Frame>,
     }
 
@@ -1630,55 +1647,118 @@ pub mod native {
             }
         }
 
-        /// Register or replace a client session for `key`.
+        /// Register a client session for `key`.
         pub async fn connect(&self, key: [u8; KEY_LEN]) -> NativeDerpSession {
             let (tx, rx) = mpsc::channel(self.session_queue);
-            self.inner.write().await.sessions.insert(key, tx);
+            let (session_id, duplicate_senders) = {
+                let mut state = self.inner.write().await;
+                state.next_session_id = state.next_session_id.wrapping_add(1).max(1);
+                let session_id = state.next_session_id;
+                let sessions = state.sessions.entry(key).or_default();
+                sessions.sessions.push(SessionEntry { id: session_id, tx });
+                sessions.active_session_id = session_id;
+                let duplicate_senders = if sessions.len() > 1 {
+                    sessions.senders()
+                } else {
+                    Vec::new()
+                };
+                (session_id, duplicate_senders)
+            };
+            send_health_to(duplicate_senders, DUPLICATE_CONNECTION_HEALTH.to_string()).await;
+
             NativeDerpSession {
                 relay: self.clone(),
                 key,
+                session_id,
                 rx,
             }
         }
 
-        /// Remove a client session and notify peers that had received packets
-        /// from it through this relay.
+        /// Remove all client sessions for `key` and notify peers that had
+        /// received packets from it through this relay.
         pub async fn disconnect(&self, key: &[u8; KEY_LEN]) {
-            let (watchers, frames) = {
+            self.disconnect_matching(key, None).await;
+        }
+
+        /// Remove one client session and notify peers only when no same-key
+        /// sessions remain.
+        pub async fn disconnect_session(&self, key: &[u8; KEY_LEN], session_id: u64) {
+            self.disconnect_matching(key, Some(session_id)).await;
+        }
+
+        async fn disconnect_matching(&self, key: &[u8; KEY_LEN], session_id: Option<u64>) {
+            enum DisconnectResult {
+                None,
+                ClearDuplicate(Vec<mpsc::Sender<Frame>>),
+                PeerGone(Vec<mpsc::Sender<Frame>>),
+            }
+
+            let result = {
                 let mut state = self.inner.write().await;
-                state.sessions.remove(key);
-                let watchers = state.reverse_paths.remove(key).unwrap_or_default();
-                for peers in state.reverse_paths.values_mut() {
-                    peers.remove(key);
+                let Some(sessions) = state.sessions.get_mut(key) else {
+                    return;
+                };
+
+                let removed = match session_id {
+                    Some(session_id) => sessions.remove(session_id),
+                    None => {
+                        sessions.sessions.clear();
+                        true
+                    }
+                };
+                if !removed {
+                    return;
                 }
-                let frames = watchers
-                    .iter()
-                    .filter_map(|watcher| {
-                        state
-                            .sessions
-                            .get(watcher)
-                            .cloned()
-                            .map(|tx| (*watcher, tx))
-                    })
-                    .collect::<Vec<_>>();
-                (watchers, frames)
+
+                if sessions.is_empty() {
+                    state.sessions.remove(key);
+                    let watchers = state.reverse_paths.remove(key).unwrap_or_default();
+                    for peers in state.reverse_paths.values_mut() {
+                        peers.remove(key);
+                    }
+                    let frames = watchers
+                        .iter()
+                        .filter_map(|watcher| {
+                            state
+                                .sessions
+                                .get(watcher)
+                                .and_then(ClientSessions::active_sender)
+                        })
+                        .collect::<Vec<_>>();
+                    DisconnectResult::PeerGone(frames)
+                } else if sessions.len() == 1 {
+                    DisconnectResult::ClearDuplicate(sessions.senders())
+                } else {
+                    DisconnectResult::None
+                }
             };
 
-            if watchers.is_empty() {
-                return;
-            }
-            let gone = Frame::PeerGone {
-                peer: *key,
-                reason: PeerGoneReason::Disconnected,
-            };
-            for (_, tx) in frames {
-                let _ = tx.send(gone.clone()).await;
+            match result {
+                DisconnectResult::None => {}
+                DisconnectResult::ClearDuplicate(senders) => {
+                    send_health_to(senders, String::new()).await;
+                }
+                DisconnectResult::PeerGone(senders) => {
+                    let gone = Frame::PeerGone {
+                        peer: *key,
+                        reason: PeerGoneReason::Disconnected,
+                    };
+                    for tx in senders {
+                        let _ = tx.send(gone.clone()).await;
+                    }
+                }
             }
         }
 
         /// Current registered session count.
         pub async fn session_count(&self) -> usize {
-            self.inner.read().await.sessions.len()
+            self.inner
+                .read()
+                .await
+                .sessions
+                .values()
+                .map(ClientSessions::len)
+                .sum()
         }
 
         /// Broadcast a server-originated control frame to all active sessions.
@@ -1692,7 +1772,7 @@ pub mod native {
                 .await
                 .sessions
                 .values()
-                .cloned()
+                .flat_map(ClientSessions::senders)
                 .collect::<Vec<_>>();
             let mut delivered = 0;
             for tx in senders {
@@ -1706,23 +1786,28 @@ pub mod native {
         async fn handle_from(
             &self,
             source: [u8; KEY_LEN],
+            session_id: u64,
             frame: Frame,
         ) -> Result<(), NativeDerpRelayError> {
             match frame {
                 Frame::SendPacket {
                     destination,
                     packet,
-                } => self.route_packet(source, destination, packet).await,
+                } => {
+                    self.route_packet(source, Some(session_id), destination, packet)
+                        .await
+                }
                 Frame::ForwardPacket {
                     source: forwarded_source,
                     destination,
                     packet,
                 } => {
-                    self.route_packet(forwarded_source, destination, packet)
+                    let source_session_id = (forwarded_source == source).then_some(session_id);
+                    self.route_packet(forwarded_source, source_session_id, destination, packet)
                         .await
                 }
                 Frame::Ping(payload) => self
-                    .send_to_registered(source, Frame::Pong(payload))
+                    .send_to_session(source, session_id, Frame::Pong(payload))
                     .await
                     .map(|_| ()),
                 Frame::ClosePeer { peer } => {
@@ -1737,24 +1822,40 @@ pub mod native {
         async fn route_packet(
             &self,
             source: [u8; KEY_LEN],
+            source_session_id: Option<u64>,
             destination: [u8; KEY_LEN],
             packet: Vec<u8>,
         ) -> Result<(), NativeDerpRelayError> {
-            let dest_tx = {
+            let (dest_tx, source_tx) = {
                 let mut state = self.inner.write().await;
-                if !state.sessions.contains_key(&source) {
+                let Some(source_sessions) = state.sessions.get_mut(&source) else {
                     return Err(NativeDerpRelayError::SourceNotRegistered);
-                }
-                state.sessions.get(&destination).cloned().inspect(|_| {
+                };
+                let source_tx = match source_session_id {
+                    Some(source_session_id) => {
+                        if !source_sessions.contains(source_session_id) {
+                            return Err(NativeDerpRelayError::SourceNotRegistered);
+                        }
+                        source_sessions.active_session_id = source_session_id;
+                        source_sessions.sender(source_session_id)
+                    }
+                    None => source_sessions.active_sender(),
+                };
+                let dest_tx = state
+                    .sessions
+                    .get(&destination)
+                    .and_then(ClientSessions::active_sender);
+                if dest_tx.is_some() {
                     state
                         .reverse_paths
                         .entry(source)
                         .or_default()
                         .insert(destination);
-                })
+                }
+                (dest_tx, source_tx)
             };
             let Some(dest_tx) = dest_tx else {
-                return self.send_peer_gone_not_here(source, destination).await;
+                return self.send_peer_gone_not_here(source_tx, destination).await;
             };
 
             dest_tx
@@ -1765,23 +1866,22 @@ pub mod native {
 
         async fn send_peer_gone_not_here(
             &self,
-            source: [u8; KEY_LEN],
+            source_tx: Option<mpsc::Sender<Frame>>,
             destination: [u8; KEY_LEN],
         ) -> Result<(), NativeDerpRelayError> {
-            self.send_to_registered(
-                source,
-                Frame::PeerGone {
-                    peer: destination,
-                    reason: PeerGoneReason::NotHere,
-                },
-            )
+            let tx = source_tx.ok_or(NativeDerpRelayError::SourceNotRegistered)?;
+            tx.send(Frame::PeerGone {
+                peer: destination,
+                reason: PeerGoneReason::NotHere,
+            })
             .await
-            .map(|_| ())
+            .map_err(|_| NativeDerpRelayError::DestinationClosed)
         }
 
-        async fn send_to_registered(
+        async fn send_to_session(
             &self,
             key: [u8; KEY_LEN],
+            session_id: u64,
             frame: Frame,
         ) -> Result<(), NativeDerpRelayError> {
             let tx = self
@@ -1790,11 +1890,63 @@ pub mod native {
                 .await
                 .sessions
                 .get(&key)
-                .cloned()
+                .and_then(|sessions| sessions.sender(session_id))
                 .ok_or(NativeDerpRelayError::SourceNotRegistered)?;
             tx.send(frame)
                 .await
                 .map_err(|_| NativeDerpRelayError::DestinationClosed)
+        }
+    }
+
+    impl ClientSessions {
+        fn len(&self) -> usize {
+            self.sessions.len()
+        }
+
+        fn is_empty(&self) -> bool {
+            self.sessions.is_empty()
+        }
+
+        fn contains(&self, session_id: u64) -> bool {
+            self.sessions.iter().any(|session| session.id == session_id)
+        }
+
+        fn active_sender(&self) -> Option<mpsc::Sender<Frame>> {
+            self.sessions
+                .iter()
+                .find(|session| session.id == self.active_session_id)
+                .or_else(|| self.sessions.last())
+                .map(|session| session.tx.clone())
+        }
+
+        fn sender(&self, session_id: u64) -> Option<mpsc::Sender<Frame>> {
+            self.sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.tx.clone())
+        }
+
+        fn senders(&self) -> Vec<mpsc::Sender<Frame>> {
+            self.sessions
+                .iter()
+                .map(|session| session.tx.clone())
+                .collect()
+        }
+
+        fn remove(&mut self, session_id: u64) -> bool {
+            let previous_len = self.sessions.len();
+            self.sessions.retain(|session| session.id != session_id);
+            let removed = self.sessions.len() != previous_len;
+            if removed && self.active_session_id == session_id {
+                self.active_session_id = self.sessions.last().map_or(0, |session| session.id);
+            }
+            removed
+        }
+    }
+
+    async fn send_health_to(senders: Vec<mpsc::Sender<Frame>>, problem: String) {
+        for tx in senders {
+            let _ = tx.send(Frame::Health(problem.clone())).await;
         }
     }
 
@@ -1804,9 +1956,16 @@ pub mod native {
             self.key
         }
 
+        /// Relay-local session identifier.
+        pub fn session_id(&self) -> u64 {
+            self.session_id
+        }
+
         /// Submit a frame received from this client.
         pub async fn handle_frame(&self, frame: Frame) -> Result<(), NativeDerpRelayError> {
-            self.relay.handle_from(self.key, frame).await
+            self.relay
+                .handle_from(self.key, self.session_id, frame)
+                .await
         }
 
         /// Receive the next frame that should be written to this client.
@@ -1949,6 +2108,25 @@ pub mod native {
                 recv_frame(&mut bob).await,
                 Frame::Health("restart soon".to_string())
             );
+        }
+
+        #[tokio::test]
+        async fn native_relay_reports_and_clears_duplicate_connection_health() {
+            let relay = NativeDerpRelay::new();
+            let client_key = [1u8; KEY_LEN];
+            let mut first = relay.connect(client_key).await;
+            let second = relay.connect(client_key).await;
+            let second_id = second.session_id();
+            let mut second = second;
+
+            let problem = Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string());
+            assert_eq!(recv_frame(&mut first).await, problem);
+            assert_eq!(recv_frame(&mut second).await, problem);
+            assert_eq!(relay.session_count().await, 2);
+
+            relay.disconnect_session(&client_key, second_id).await;
+            assert_eq!(recv_frame(&mut first).await, Frame::Health(String::new()));
+            assert_eq!(relay.session_count().await, 1);
         }
 
         #[tokio::test]

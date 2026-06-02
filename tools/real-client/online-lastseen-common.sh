@@ -115,6 +115,7 @@ expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-
 expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-}"
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+assert_derp_status_health_clear="${REAL_CLIENT_ASSERT_DERP_STATUS_HEALTH_CLEAR:-false}"
 derp_restart_after_assertions="${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
@@ -510,6 +511,18 @@ case "${assert_derp_stun}" in
     ;;
   *)
     echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+case "${assert_derp_status_health_clear}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    assert_derp_status_health_clear_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    assert_derp_status_health_clear_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ASSERT_DERP_STATUS_HEALTH_CLEAR must be true or false, got ${assert_derp_status_health_clear}" >&2
     exit 2
     ;;
 esac
@@ -1548,6 +1561,71 @@ assert_derp_ping_if_requested() {
   echo "::endgroup::"
 }
 
+assert_derp_status_health_clear() {
+  local derp_client_name="$1"
+  local output_path="$2"
+  local status_path="${output_path}.status.json"
+  : >"${output_path}.err"
+  docker exec "${derp_client_name}" tailscale status --json >"${status_path}" 2>>"${output_path}.err" &&
+    ruby -rjson -e '
+      def collect_strings(value)
+        case value
+        when nil
+          []
+        when String
+          [value]
+        when Array
+          value.flat_map { |item| collect_strings(item) }
+        when Hash
+          value.flat_map { |key, item| collect_strings(key) + collect_strings(item) }
+        else
+          [value.to_s]
+        end
+      end
+
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      client = ARGV.fetch(1)
+      health_text = %w[Health health Warnings warnings].flat_map { |key| collect_strings(status[key]) }
+        .map(&:strip)
+        .reject(&:empty?)
+        .uniq
+      lingering_derp_health = health_text.select do |entry|
+        entry.match?(/duplicate DERP connection/i) || entry.match?(/server restarting/i)
+      end
+      unless lingering_derp_health.empty?
+        abort("expected #{client} DERP health to clear, got #{lingering_derp_health.inspect}; all health=#{health_text.inspect}")
+      end
+      peers = status["Peer"] || status["peer"] || {}
+      peer_relays = peers.each_value.map { |peer| peer["Relay"] || peer["relay"] }.compact.sort
+      puts JSON.pretty_generate({
+        client: client,
+        derp_status_health_clear: true,
+        health: health_text,
+        peer_relays: peer_relays,
+        backend_state: status["BackendState"] || status["backendState"],
+      })
+    ' "${status_path}" "${derp_client_name}" >"${output_path}" 2>>"${output_path}.err"
+}
+
+assert_derp_status_health_clear_if_requested() {
+  ((assert_derp_status_health_clear_flag)) || return 0
+  echo "::group::assert stock-client DERP status health clear"
+  local derp_client_name safe_derp_client_name output_path
+  for derp_client_name in "${successful_client_names[@]}"; do
+    safe_derp_client_name="${derp_client_name//[^a-zA-Z0-9_.-]/-}"
+    output_path="${work_dir}/${safe_derp_client_name}.derp-status-health-clear.json"
+    if ! wait_for "DERP status health clear ${derp_client_name}" \
+      "assert_derp_status_health_clear '${derp_client_name}' '${output_path}'"; then
+      cat "${output_path}.err" >&2 || true
+      dump_client_debug "${derp_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
+}
+
 assert_derp_restart_if_requested() {
   ((derp_restart_after_assertions_flag)) || return 0
   echo "::group::restart ${target} server and assert DERP recovery"
@@ -1574,6 +1652,7 @@ assert_derp_restart_if_requested() {
   assert_derp_map_if_requested
   assert_derp_map_stable_after_restart_if_available
   assert_derp_ping_if_requested
+  assert_derp_status_health_clear_if_requested
   echo "::endgroup::"
 }
 
@@ -3691,6 +3770,7 @@ assert_post_reload_peer_visibility_if_requested
 rename_node_if_requested
 assert_derp_map_if_requested
 assert_derp_ping_if_requested
+assert_derp_status_health_clear_if_requested
 assert_derp_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested

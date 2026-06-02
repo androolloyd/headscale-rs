@@ -636,6 +636,13 @@ upsert-style write is followed by a delete for that same final-absent node in
 the worker batch. Focused registry and `Stream:true` tests prove observers see
 only the delayed `PeersRemoved` delta after the map-batcher tick.
 
+Recent coverage note (2026-06-02): NodeStore auth-completion rekey/delete
+coverage now also pins the opposite stale-delete ordering: when a reauth rekey
+is batched with a delete of the old node-key index, the stale delete produces no
+removal churn and observers receive only the delayed upstream `node added` /
+`PeersChanged` delta for the reauthenticated node, without policy, config, patch,
+or peer-removal payloads.
+
 Recent coverage note (2026-06-02): `sshTests` unit coverage now pins the
 current upstream empty-login-user edge: `accept: [""]` fails closed and renders
 the attempted login user as `""` in the failed assertion body.

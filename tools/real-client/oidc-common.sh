@@ -71,10 +71,6 @@ case "${oidc_policy_churn}" in
     exit 2
     ;;
 esac
-if ((oidc_policy_churn_flag)) && [[ "${database_backend}" != "sqlite" ]]; then
-  echo "REAL_CLIENT_OIDC_POLICY_CHURN currently supports only REAL_CLIENT_DATABASE_BACKEND=sqlite" >&2
-  exit 2
-fi
 if ((oidc_policy_churn_flag)) && [[ -n "${oidc_advertise_routes}${oidc_approve_routes}" ]]; then
   echo "REAL_CLIENT_OIDC_POLICY_CHURN cannot be combined with OIDC route advertisement/approval flags" >&2
   exit 2
@@ -511,10 +507,14 @@ name = $(quoted_string "${postgres_database_name}")
 user = $(quoted_string "${postgres_user}")
 pass = $(quoted_string "${postgres_pass}")
 ssl = $(quoted_string "${postgres_sslmode}")
+EOF
+    if ! ((oidc_policy_churn_flag)); then
+      cat >>"${config_path}" <<EOF
 
 [policy]
 mode = "database"
 EOF
+    fi
   else
     cat >>"${config_path}" <<EOF
 
@@ -569,10 +569,14 @@ database:
     user: $(quoted_string "${postgres_user}")
     pass: $(quoted_string "${postgres_pass}")
     ssl: $(quoted_string "${postgres_sslmode}")
+EOF
+      if ! ((oidc_policy_churn_flag)); then
+        cat <<EOF
 
 policy:
   mode: database
 EOF
+      fi
       ;;
   esac
 }

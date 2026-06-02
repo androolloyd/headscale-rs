@@ -124,6 +124,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-web-register-route-approve` | `postgres-web-register-route-approve-smoke.sh` | `postgres-web-register-route-approve-headscale-go-smoke.sh` | Production Postgres web registration with route advertisement/approval |
 | Database | `postgres-web-register-route-approve-restart` | `postgres-web-register-route-approve-restart-smoke.sh` | `postgres-web-register-route-approve-restart-headscale-go-smoke.sh` | Production Postgres web registration route approval survives server restart |
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
+| Database | `postgres-oidc-policy-churn` | `postgres-oidc-policy-churn-smoke.sh` | `postgres-oidc-policy-churn-headscale-go-smoke.sh` | Production Postgres OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-ssh` | `postgres-ssh-smoke.sh` | `postgres-ssh-headscale-go-smoke.sh` | Production Postgres Tailscale SSH allow, deny, and ACL timeout |

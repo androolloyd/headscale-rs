@@ -1934,3 +1934,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   prefixes. API-key display-prefix parse errors now surface the headscale-go
   shaped `failed to parse ApiKey: ...` message instead of the generic
   `Database operation failed: ...` wrapper.
+
+## 2026-06-02 Postgres OIDC policy-churn row
+
+- Added paired `postgres-oidc-policy-churn` real-client wrappers and allowed
+  the OIDC policy-churn harness to run with Postgres. File-policy churn now
+  suppresses the default Postgres database-policy mode in both Rust TOML and
+  headscale-go YAML configs, closing the remaining default-vs-Postgres smoke
+  matrix asymmetry.

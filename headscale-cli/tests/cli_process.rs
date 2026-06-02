@@ -3471,6 +3471,24 @@ trusted_proxies:
 }
 
 #[test]
+fn serve_rejects_invalid_https_listen_before_state_startup() {
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+server:
+  https_listen: "not-a-socket"
+"#,
+        include_str!("snapshots/serve_invalid_https_listen.stderr"),
+        "serve invalid HTTPS listener",
+    );
+}
+
+#[test]
 fn serve_rejects_http01_acme_challenge_listener_collision_before_public_ca_network() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

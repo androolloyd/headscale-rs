@@ -64,6 +64,7 @@ Current-head audit overlay, refreshed 2026-05-30:
   scoped grpc-gateway fallback routing, upstream-shaped grpc-gateway
   timestamp query/range parser errors plus duplicate scalar/timestamp
   query edge coverage, strict protojson-style grpc-gateway body field,
+  grpc-gateway status-code/envelope matrix coverage including plain 401 auth,
   timestamp range, timestamp scalar-subfield query-path rejection, and
   scalar-query-path rejection, private-DERP/STUN sidecar real-client parity,
   operator `/debug/ping`, tsweb-style `/debug/gc` method handling,
@@ -566,6 +567,11 @@ sweeps also run through the worker.
 Recent coverage note (2026-06-01): `CreatePreAuthKey` now rejects requests with
 neither an owner user nor ACL tags using the upstream `Unknown` gRPC status and
 message, with grpc-gateway HTTP/status JSON coverage for the same edge.
+
+Recent coverage note (2026-06-02): `grpc_gateway::parser_tests` now pins the
+grpc-gateway status-to-HTTP mapping and response envelope for every tonic
+status code, including the authenticated gateway's plain `401 Unauthorized`
+body without `WWW-Authenticate`.
 
 Recent coverage note (2026-06-01): parser-level CLI `auth register` /
 `auth approve` / `auth reject` missing-flag errors and `users create`

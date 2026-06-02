@@ -1886,6 +1886,77 @@ fn grpc_code_number(code: Code) -> i32 {
 mod parser_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn status_response_matches_grpc_gateway_status_envelope_matrix() {
+        for (code, grpc_code, http_status) in [
+            (Code::Ok, 0, StatusCode::OK),
+            (Code::Cancelled, 1, StatusCode::from_u16(499).unwrap()),
+            (Code::Unknown, 2, StatusCode::INTERNAL_SERVER_ERROR),
+            (Code::InvalidArgument, 3, StatusCode::BAD_REQUEST),
+            (Code::DeadlineExceeded, 4, StatusCode::GATEWAY_TIMEOUT),
+            (Code::NotFound, 5, StatusCode::NOT_FOUND),
+            (Code::AlreadyExists, 6, StatusCode::CONFLICT),
+            (Code::PermissionDenied, 7, StatusCode::FORBIDDEN),
+            (Code::ResourceExhausted, 8, StatusCode::TOO_MANY_REQUESTS),
+            (Code::FailedPrecondition, 9, StatusCode::BAD_REQUEST),
+            (Code::Aborted, 10, StatusCode::CONFLICT),
+            (Code::OutOfRange, 11, StatusCode::BAD_REQUEST),
+            (Code::Unimplemented, 12, StatusCode::NOT_IMPLEMENTED),
+            (Code::Internal, 13, StatusCode::INTERNAL_SERVER_ERROR),
+            (Code::Unavailable, 14, StatusCode::SERVICE_UNAVAILABLE),
+            (Code::DataLoss, 15, StatusCode::INTERNAL_SERVER_ERROR),
+            (Code::Unauthenticated, 16, StatusCode::UNAUTHORIZED),
+        ] {
+            assert_eq!(
+                http_status_from_grpc(code),
+                http_status,
+                "{code:?}: HTTP status"
+            );
+            assert_eq!(grpc_code_number(code), grpc_code, "{code:?}: gRPC code");
+
+            let response = status_response(&Status::new(code, "matrix status"));
+            assert_eq!(response.status(), http_status, "{code:?}: response status");
+
+            if code == Code::Unauthenticated {
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("text/plain; charset=utf-8"),
+                    "{code:?}: content type"
+                );
+                assert!(
+                    response.headers().get(header::WWW_AUTHENTICATE).is_none(),
+                    "{code:?}: WWW-Authenticate"
+                );
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(body.as_ref(), b"Unauthorized", "{code:?}: body");
+                continue;
+            }
+
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json"),
+                "{code:?}: content type"
+            );
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body,
+                json!({
+                    "code": grpc_code,
+                    "message": "matrix status",
+                    "details": [],
+                }),
+                "{code:?}: status envelope"
+            );
+        }
+    }
+
     #[test]
     fn parse_go_uint64_base0_matches_grpc_gateway_literals() {
         for (input, expected) in [

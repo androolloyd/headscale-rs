@@ -1177,6 +1177,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_websocket_sends_health_state_and_restart_advisory() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        assert_eq!(runtime.set_health_problem("BAD").await, 0);
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+        wait_for_sent_messages(&sent, 3).await;
+
+        assert_eq!(runtime.clear_health_problem().await, 1);
+        wait_for_sent_messages(&sent, 4).await;
+
+        assert_eq!(
+            runtime
+                .announce_restarting(Duration::from_millis(1), Duration::from_millis(2))
+                .await,
+            1
+        );
+        wait_for_sent_messages(&sent, 5).await;
+        tx.send(Ok(Message::Close(None))).await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_ok());
+
+        let messages = sent.lock().unwrap().clone();
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
+                .expect("initial health frame decodes");
+        assert_eq!(frame, Frame::Health("BAD".to_string()));
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[3]), MAX_INFO_LEN)
+                .expect("health clear frame decodes");
+        assert_eq!(frame, Frame::Health(String::new()));
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[4]), MAX_INFO_LEN)
+                .expect("restarting frame decodes");
+        assert_eq!(
+            frame,
+            Frame::Restarting {
+                reconnect_in_ms: 1,
+                try_for_ms: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_rejects_unverified_clients() {
         let runtime = Arc::new(
             NativeDerpRuntime::new(

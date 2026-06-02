@@ -2126,3 +2126,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   input state. The test remains
   `postgres-sqlx` feature-gated and skips cleanly when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is absent.
+
+## 2026-06-02 native DERP runtime-frame evidence
+
+- Added DERP-over-WebSocket runtime evidence alongside the existing raw DERP
+  path: native sessions now have focused tests for initial health-state replay,
+  health-clear broadcasts, restart advisories, and scheduled keepalives on both
+  transports.
+- This narrows the remaining native DERP runtime gap to production lifecycle
+  sources that decide when to set DERP health problems or announce server
+  restart, not the native `/derp` frame loop or sidecar-preserving route mount.

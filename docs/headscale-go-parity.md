@@ -653,6 +653,11 @@ reject positional node IDs before any connection attempt and require
 `--identifier`, while `/debug/ping` lists connected nodes from the map-batcher
 view even if their node expiry timestamp has passed.
 
+Recent coverage note (2026-06-02): residual utility parser stderr coverage now
+pins current-upstream `completion --no-descriptions`, `completion bash
+--no-descriptions -- bad`, and `generate private-key --force -x` one-line
+Cobra errors without adding any Octra-only CLI behavior to the parity ledger.
+
 Recent coverage note (2026-06-02): the `/debug/` index now mirrors tsweb's
 runtime key/value rows more closely by including `Uptime`, `Version`, and
 `Machine` before the headscale debug endpoint links.

@@ -3963,6 +3963,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_response_keeps_multi_address_magicdns_context_out_of_extra_records() {
+        let (state, _dir) = fixture();
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            base_domain: "headscale.test".into(),
+            ..crate::dns::DnsConfigSpec::default()
+        });
+        let requester_key = "3a".repeat(32);
+        let dual_peer_key = "3b".repeat(32);
+        let v6_peer_key = "3c".repeat(32);
+        insert_peer(&state, &requester_key, "requester", 30);
+        insert_peer(&state, &dual_peer_key, "dual-peer", 31);
+        insert_peer(&state, &v6_peer_key, "v6-peer", 32);
+        state.machines.update_with(|records| {
+            records.get_mut(&requester_key).unwrap().ipv6 =
+                Some("fd7a:115c:a1e0::30".parse().unwrap());
+            records.get_mut(&dual_peer_key).unwrap().ipv6 =
+                Some("fd7a:115c:a1e0::31".parse().unwrap());
+            let v6_peer = records.get_mut(&v6_peer_key).unwrap();
+            v6_peer.ipv4 = None;
+            v6_peer.ipv6 = Some("fd7a:115c:a1e0::32".parse().unwrap());
+        });
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{requester_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.domain, "headscale.test");
+        let dns = mr.dns_config.expect("dns config");
+        assert!(dns.proxied);
+        assert_eq!(dns.domains, vec!["headscale.test"]);
+        assert!(
+            dns.extra_records.is_empty(),
+            "headscale-go keeps peer MagicDNS A/AAAA state in MapNode records, not DNSConfig.ExtraRecords"
+        );
+
+        let requester = mr.node.as_ref().expect("own node present");
+        assert_eq!(
+            requester.addresses,
+            vec!["100.64.0.30/32", "fd7a:115c:a1e0::30/128"]
+        );
+        assert_eq!(
+            requester.allowed_ips,
+            vec!["100.64.0.30/32", "fd7a:115c:a1e0::30/128"]
+        );
+
+        let dual_peer = mr
+            .peers
+            .iter()
+            .find(|peer| peer.name == "dual-peer.headscale.test.")
+            .expect("dual-stack peer present");
+        assert_eq!(
+            dual_peer.addresses,
+            vec!["100.64.0.31/32", "fd7a:115c:a1e0::31/128"]
+        );
+        assert_eq!(
+            dual_peer.allowed_ips,
+            vec!["100.64.0.31/32", "fd7a:115c:a1e0::31/128"]
+        );
+
+        let v6_peer = mr
+            .peers
+            .iter()
+            .find(|peer| peer.name == "v6-peer.headscale.test.")
+            .expect("IPv6-only peer present");
+        assert_eq!(v6_peer.addresses, vec!["fd7a:115c:a1e0::32/128"]);
+        assert_eq!(v6_peer.allowed_ips, vec!["fd7a:115c:a1e0::32/128"]);
+    }
+
+    #[tokio::test]
     async fn map_response_applies_nextdns_profile_per_requester() {
         let (state, _dir) = fixture();
         state.dns.set_spec(crate::dns::DnsConfigSpec {

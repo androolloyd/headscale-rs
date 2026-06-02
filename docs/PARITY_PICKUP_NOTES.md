@@ -2238,3 +2238,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   upstream headscale-go `171fd7a3`.
 - Added focused process snapshots for the three structured forms while
   preserving the existing human `Error: flag needs an argument: --user` output.
+
+## 2026-06-02 Multi-address DNS map coverage slice
+
+- Added focused map-response coverage for a MagicDNS-enabled tailnet with a
+  dual-stack requester, a dual-stack peer, and an IPv6-only peer.
+- The regression pins the address-family projection through `MapNode.Addresses`
+  and `AllowedIPs`, while proving peer MagicDNS A/AAAA context does not leak
+  into operator-owned `DNSConfig.ExtraRecords`, matching the headscale-go
+  `MapNode.Name`/`Domain` separation.

@@ -3021,6 +3021,23 @@ derp:
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+derp:
+  server:
+    enabled: true
+    stun_listen_addr: null
+"#,
+        include_str!("snapshots/configtest_derp_missing_stun_listen.stderr"),
+        "configtest DERP missing STUN listener",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
 policy:
   mode: consul
 "#,

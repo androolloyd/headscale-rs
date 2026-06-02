@@ -781,6 +781,13 @@ Recent coverage note (2026-06-02): `configtest` now snapshots invalid
 guard so explicit HTTPS listener mistakes are caught before runtime state is
 opened.
 
+Recent coverage note (2026-06-02): `configtest` now snapshots the upstream
+top-level `derp.server.enabled=true` + `derp.server.stun_listen_addr=null`
+fatal edge. Evidence: headscale-go `hscontrol/types/config.go` requires
+`derp.server.stun_listen_addr` when the embedded DERP server is enabled at
+lines 697-710, and Rust now pins the same process stderr in
+`headscale-cli/tests/snapshots/configtest_derp_missing_stun_listen.stderr`.
+
 Recent coverage note (2026-06-02): an env-gated production Postgres `serve`
 process smoke now runs file-backed policy mode, registers a route-advertising
 node, mutates `policy.path`, sends SIGHUP, and asserts the policy reload

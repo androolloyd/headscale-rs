@@ -1,0 +1,1 @@
+Error: invalid static DERP configuration: derp.server.stun_listen_addr is required when derp.server.enabled=true

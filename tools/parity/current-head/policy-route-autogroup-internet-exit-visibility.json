@@ -1,0 +1,132 @@
+{
+  "name": "policy-route-autogroup-internet-exit-visibility",
+  "policy": {
+    "tagOwners": {
+      "tag:exit": [
+        "alice@example.com"
+      ],
+      "tag:router": [
+        "alice@example.com"
+      ]
+    },
+    "autoApprovers": {
+      "exitNode": [
+        "tag:exit"
+      ],
+      "routes": {
+        "10.0.0.0/8": [
+          "tag:router"
+        ]
+      }
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "autogroup:internet:*"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "email": "bob@example.com"
+    },
+    {
+      "id": 3,
+      "name": "ops",
+      "email": "ops@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-client",
+      "ipv4": "100.64.0.1"
+    },
+    {
+      "id": 2,
+      "user_id": 3,
+      "hostname": "exit-router",
+      "ipv4": "100.64.0.2",
+      "tags": [
+        "tag:exit"
+      ],
+      "routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ],
+      "approved_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "private-router",
+      "ipv4": "100.64.0.3",
+      "tags": [
+        "tag:router"
+      ],
+      "routes": [
+        "10.0.0.0/8"
+      ],
+      "approved_routes": [
+        "10.0.0.0/8"
+      ]
+    },
+    {
+      "id": 4,
+      "user_id": 2,
+      "hostname": "bob-client",
+      "ipv4": "100.64.0.4"
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "alice-sees-exit-only",
+      "node_id": 1
+    },
+    {
+      "name": "exit-sees-alice",
+      "node_id": 2
+    },
+    {
+      "name": "private-router-hidden-from-internet-acl",
+      "node_id": 3
+    },
+    {
+      "name": "unmatched-client-hidden",
+      "node_id": 4
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "exit-node-defaults-autoapproved",
+      "node_id": 2,
+      "announced_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    },
+    {
+      "name": "private-router-route-autoapproved",
+      "node_id": 3,
+      "announced_routes": [
+        "10.0.0.0/8"
+      ]
+    }
+  ]
+}

@@ -2494,7 +2494,12 @@ fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
 }
 
 fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeView<'_>>) -> bool {
-    if kind == "internet" || kind == "danger-all" {
+    if kind == "internet" {
+        return internet_filter_cidrs()
+            .iter()
+            .any(|cidr| addr_in_cidr(principal.addr, cidr));
+    }
+    if kind == "danger-all" {
         return true;
     }
     if kind == "member" {
@@ -3397,11 +3402,25 @@ mod tests {
     }
 
     #[test]
-    fn autogroup_internet_matches_anything() {
+    fn autogroup_internet_matches_public_addresses() {
         let doc = doc_with_rule(&["*"], &["autogroup:internet"]);
         let s = NodeView::new("100.64.0.1");
         let d = NodeView::new("8.8.8.8");
         assert_eq!(doc.evaluate_with(&s, &d, PortRef::any()), AclAction::Accept);
+    }
+
+    #[test]
+    fn autogroup_internet_does_not_match_tailnet_node_addresses() {
+        let doc = doc_with_rule(&["*"], &["autogroup:internet"]);
+        let s = NodeView::new("100.64.0.1");
+        for addr in ["100.64.0.2", "100.100.100.1", "fd7a:115c:a1e0::1"] {
+            let d = NodeView::new(addr);
+            assert_eq!(
+                doc.evaluate_with(&s, &d, PortRef::any()),
+                AclAction::Deny,
+                "{addr} should stay outside autogroup:internet"
+            );
+        }
     }
 
     #[test]

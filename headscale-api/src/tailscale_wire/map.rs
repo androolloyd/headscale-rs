@@ -6184,6 +6184,72 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_gc_ephemeral_emits_batched_peers_removed_reason() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        let mut stale_ephemeral = MachineRecord::new_at(
+            chrono::Utc::now(),
+            b.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "peer-b".into(),
+            Ipv4Addr::new(100, 64, 0, 11),
+            true,
+        );
+        stale_ephemeral.last_seen = chrono::Utc::now() - chrono::Duration::minutes(5);
+        state.machines.upsert(b.clone(), stale_ephemeral);
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(1, Duration::from_secs(5));
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&b));
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let removed = state.machines.gc_ephemeral(Duration::from_secs(60));
+        assert_eq!(removed, vec![b.clone()]);
+        assert!(state.machines.get(&b).is_none());
+
+        let changes = state.machines.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("worker GC records a peer-removal map change");
+        assert_eq!(change.reason_labels(), vec!["peers removed"]);
+        assert_eq!(change.change_type(), "peers");
+        assert_eq!(change.content.peers_removed, vec![stable_id_from_key(&b)]);
+        assert!(change.content.peers_changed.is_empty());
+        assert!(change.content.peer_patches.is_empty());
+        assert!(
+            state
+                .machines
+                .pending_map_changes()
+                .contains_key(&stable_id_from_key(&a)),
+            "worker GC peer removal should be queued for the map batcher"
+        );
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "worker GC peer removal must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_policy_reload_to_empty_acl_emits_peers_removed() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

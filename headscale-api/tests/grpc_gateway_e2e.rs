@@ -2796,6 +2796,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_message: "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
         },
         Case {
+            name: "auth reject no pending session",
+            method: Method::POST,
+            uri: "/api/v1/auth/reject",
+            body: r#"{"authId":"hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            expected_http_status: 404,
+            expected_grpc_code: 5,
+            expected_message: "no pending auth session for auth_id hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+        Case {
             name: "auth reject invalid prefixed auth id",
             method: Method::POST,
             uri: "/api/v1/auth/reject",

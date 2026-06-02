@@ -44,6 +44,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     extract::{ConnectInfo, State},
+    http::HeaderMap,
     middleware::{self, Next},
     response::Response,
 };
@@ -54,6 +55,18 @@ use super::acme::AcmeHttp01ChallengeStore;
 use super::raw_tls;
 use super::tls::{ReloadableServerConfig, SanConfig, TlsMaterial, TlsMaterialSource};
 use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
+
+const HEADER_TRUE_CLIENT_IP: &str = "true-client-ip";
+const HEADER_X_REAL_IP: &str = "x-real-ip";
+const HEADER_X_FORWARDED_FOR: &str = "x-forwarded-for";
+const FORWARDED_HEADER_NAMES: &[&str] = &[
+    HEADER_TRUE_CLIENT_IP,
+    HEADER_X_REAL_IP,
+    HEADER_X_FORWARDED_FOR,
+    "forwarded",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+];
 
 /// Configuration for [`serve`].
 #[derive(Clone, Debug)]
@@ -368,24 +381,68 @@ async fn trusted_proxy_headers(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    sanitize_forwarded_headers(request.headers_mut(), peer.ip(), &trusted);
+    let resolved_peer = resolve_trusted_proxy_headers(request.headers_mut(), peer, &trusted);
+    if resolved_peer != peer {
+        request.extensions_mut().insert(ConnectInfo(resolved_peer));
+    }
     next.run(request).await
 }
 
-fn sanitize_forwarded_headers(
-    headers: &mut axum::http::HeaderMap,
-    peer: IpAddr,
+fn resolve_trusted_proxy_headers(
+    headers: &mut HeaderMap,
+    peer: SocketAddr,
     trusted: &TrustedProxyConfig,
-) {
-    if trusted.is_trusted(peer) {
-        return;
+) -> SocketAddr {
+    if !trusted.is_trusted(peer.ip()) {
+        strip_forwarded_headers(headers);
+        return peer;
     }
 
-    headers.remove("forwarded");
-    headers.remove("x-forwarded-for");
-    headers.remove("x-forwarded-host");
-    headers.remove("x-forwarded-proto");
-    headers.remove("x-real-ip");
+    trusted_proxy_client_ip(headers, trusted)
+        .map(|ip| SocketAddr::new(ip, peer.port()))
+        .unwrap_or(peer)
+}
+
+fn strip_forwarded_headers(headers: &mut HeaderMap) {
+    for name in FORWARDED_HEADER_NAMES {
+        headers.remove(*name);
+    }
+}
+
+fn trusted_proxy_client_ip(headers: &HeaderMap, trusted: &TrustedProxyConfig) -> Option<IpAddr> {
+    single_ip_header(headers, HEADER_TRUE_CLIENT_IP)
+        .or_else(|| single_ip_header(headers, HEADER_X_REAL_IP))
+        .or_else(|| rightmost_untrusted_x_forwarded_for(headers, trusted))
+}
+
+fn single_ip_header(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+fn rightmost_untrusted_x_forwarded_for(
+    headers: &HeaderMap,
+    trusted: &TrustedProxyConfig,
+) -> Option<IpAddr> {
+    let value = headers.get(HEADER_X_FORWARDED_FOR)?.to_str().ok()?;
+    for hop in value.rsplit(',') {
+        let hop = hop.trim();
+        if hop.is_empty() {
+            continue;
+        }
+        let Ok(ip) = hop.parse::<IpAddr>() else {
+            return None;
+        };
+        if !trusted.is_trusted(ip) {
+            return Some(ip);
+        }
+    }
+
+    None
 }
 
 fn public_router(
@@ -457,14 +514,20 @@ mod tests {
     fn forwarded_headers_are_only_kept_for_trusted_proxies() {
         let trusted = TrustedProxyConfig::parse(["127.0.0.1/32"]).unwrap();
         let mut headers = axum::http::HeaderMap::new();
+        headers.insert("true-client-ip", "203.0.113.5".parse().unwrap());
         headers.insert("x-forwarded-host", "proxy.example".parse().unwrap());
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
         headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         headers.insert("x-real-ip", "203.0.113.5".parse().unwrap());
         headers.insert("forwarded", "for=203.0.113.5".parse().unwrap());
 
-        sanitize_forwarded_headers(&mut headers, "192.0.2.10".parse().unwrap(), &trusted);
+        let peer = "192.0.2.10:1234".parse().unwrap();
+        assert_eq!(
+            resolve_trusted_proxy_headers(&mut headers, peer, &trusted),
+            peer
+        );
 
+        assert!(!headers.contains_key("true-client-ip"));
         assert!(!headers.contains_key("x-forwarded-host"));
         assert!(!headers.contains_key("x-forwarded-proto"));
         assert!(!headers.contains_key("x-forwarded-for"));
@@ -472,9 +535,74 @@ mod tests {
         assert!(!headers.contains_key("forwarded"));
 
         headers.insert("x-forwarded-host", "proxy.example".parse().unwrap());
-        sanitize_forwarded_headers(&mut headers, "127.0.0.1".parse().unwrap(), &trusted);
+        resolve_trusted_proxy_headers(&mut headers, "127.0.0.1:1234".parse().unwrap(), &trusted);
 
         assert_eq!(headers.get("x-forwarded-host").unwrap(), "proxy.example");
+    }
+
+    #[test]
+    fn trusted_proxy_headers_resolve_client_ip_like_upstream_realip() {
+        struct Case {
+            name: &'static str,
+            peer: &'static str,
+            headers: &'static [(&'static str, &'static str)],
+            want: &'static str,
+        }
+
+        let trusted = TrustedProxyConfig::parse(["10.0.0.0/16", "fd00::/8"]).unwrap();
+        let cases = [
+            Case {
+                name: "trusted/no-headers-leaves-peer",
+                peer: "10.0.0.5:1234",
+                headers: &[],
+                want: "10.0.0.5:1234",
+            },
+            Case {
+                name: "trusted/true-client-ip-wins-over-others",
+                peer: "10.0.0.5:1234",
+                headers: &[
+                    ("true-client-ip", "1.2.3.4"),
+                    ("x-real-ip", "5.6.7.8"),
+                    ("x-forwarded-for", "9.10.11.12"),
+                ],
+                want: "1.2.3.4:1234",
+            },
+            Case {
+                name: "trusted/x-real-ip-wins-over-xff",
+                peer: "10.0.0.5:1234",
+                headers: &[("x-real-ip", "1.2.3.4"), ("x-forwarded-for", "9.10.11.12")],
+                want: "1.2.3.4:1234",
+            },
+            Case {
+                name: "trusted/xff-rightmost-walk-discards-trusted-hop",
+                peer: "10.0.0.5:1234",
+                headers: &[("x-forwarded-for", "203.0.113.99, 10.0.0.5")],
+                want: "203.0.113.99:1234",
+            },
+            Case {
+                name: "trusted/xff-all-trusted-leaves-peer",
+                peer: "10.0.0.5:1234",
+                headers: &[("x-forwarded-for", "10.0.0.99, 10.0.0.5")],
+                want: "10.0.0.5:1234",
+            },
+            Case {
+                name: "trusted/ipv6-peer-v6-real-ip",
+                peer: "[fd00::1]:1234",
+                headers: &[("x-real-ip", "2001:db8::1")],
+                want: "[2001:db8::1]:1234",
+            },
+        ];
+
+        for case in cases {
+            let mut headers = HeaderMap::new();
+            for (name, value) in case.headers {
+                headers.insert(*name, value.parse().unwrap());
+            }
+            let got =
+                resolve_trusted_proxy_headers(&mut headers, case.peer.parse().unwrap(), &trusted);
+
+            assert_eq!(got, case.want.parse().unwrap(), "{}", case.name);
+        }
     }
 
     /// Bind both listeners on ephemeral ports and probe `GET /key?v=39`

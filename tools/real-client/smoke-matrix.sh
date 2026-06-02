@@ -90,6 +90,7 @@ smoke_ids=(
   authkey-relogin-different-user
   authkey-relogin-deleted
   authkey-relogin-route-preserve
+  randomize-client-port
   postgres-authkey
   postgres-authkey-nonreusable
   postgres-authkey-expired
@@ -273,6 +274,7 @@ smoke_areas=(
   lifecycle
   lifecycle
   lifecycle
+  policy
   database
   database
   database
@@ -456,6 +458,7 @@ smoke_rust_scripts=(
   tools/real-client/authkey-relogin-different-user-smoke.sh
   tools/real-client/authkey-relogin-deleted-smoke.sh
   tools/real-client/authkey-relogin-route-preserve-smoke.sh
+  tools/real-client/randomize-client-port-smoke.sh
   tools/real-client/postgres-authkey-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-smoke.sh
   tools/real-client/postgres-authkey-expired-smoke.sh
@@ -639,6 +642,7 @@ smoke_go_scripts=(
   tools/real-client/authkey-relogin-different-user-headscale-go-smoke.sh
   tools/real-client/authkey-relogin-deleted-headscale-go-smoke.sh
   tools/real-client/authkey-relogin-route-preserve-headscale-go-smoke.sh
+  tools/real-client/randomize-client-port-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-nonreusable-headscale-go-smoke.sh
   tools/real-client/postgres-authkey-expired-headscale-go-smoke.sh
@@ -822,6 +826,7 @@ smoke_assertions=(
   "auth-key logout then different-user relogin key is rejected without duplicating or transferring node state"
   "auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state"
   "auth-key same-user relogin preserves approved route state"
+  "randomizeClientPort stamps randomize-client-port in stock-client self CapMap"
   "production Postgres auth-key login, stock-client netmap, and online/LastSeen"
   "production Postgres one-time auth-key rejects second stock-client registration"
   "production Postgres expired auth-key rejects stock-client registration"

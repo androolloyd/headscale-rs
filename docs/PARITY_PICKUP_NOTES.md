@@ -1911,3 +1911,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   wrappers by reusing the existing restart-persistence harness route-approval
   mode. This mirrors the existing Postgres row and closes the default-vs-Pg
   matrix symmetry gap for web/CLI registration route approval across restart.
+
+## 2026-06-02 randomizeClientPort default row
+
+- Added paired default SQLite `randomize-client-port` real-client wrappers over
+  the existing online/LastSeen harness. The row mirrors the existing Postgres
+  coverage by applying `randomizeClientPort: true` and asserting the stock
+  client self CapMap contains `randomize-client-port`.

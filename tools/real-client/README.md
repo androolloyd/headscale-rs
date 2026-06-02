@@ -85,6 +85,7 @@ upstream commit from `headscale-go-current.sh`.
 | Lifecycle | `authkey-relogin-deleted` | `authkey-relogin-deleted-smoke.sh` | `authkey-relogin-deleted-headscale-go-smoke.sh` | Auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Tailcfg | `taildrop-capmap` | `taildrop-capmap-smoke.sh` | `taildrop-capmap-headscale-go-smoke.sh` | Disabled Taildrop removes file-sharing from stock-client self CapMap |
+| Tailcfg | `randomize-client-port` | `randomize-client-port-smoke.sh` | `randomize-client-port-headscale-go-smoke.sh` | `randomizeClientPort` stamps `randomize-client-port` in stock-client self CapMap |
 | Database | `postgres-authkey` | `postgres-authkey-smoke.sh` | `postgres-authkey-headscale-go-smoke.sh` | Production Postgres auth-key login, stock-client netmap, and online/LastSeen |
 | Database | `postgres-authkey-nonreusable` | `postgres-authkey-nonreusable-smoke.sh` | `postgres-authkey-nonreusable-headscale-go-smoke.sh` | Production Postgres one-time auth-key rejects second stock-client registration |
 | Database | `postgres-authkey-expired` | `postgres-authkey-expired-smoke.sh` | `postgres-authkey-expired-headscale-go-smoke.sh` | Production Postgres expired auth-key rejects stock-client registration |

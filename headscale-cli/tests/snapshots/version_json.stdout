@@ -1,0 +1,11 @@
+{
+	"version": "<version>",
+	"commit": "<commit>",
+	"buildTime": "<build-time>",
+	"go": {
+		"version": "<runtime-version>",
+		"os": "<go-os>",
+		"arch": "<go-arch>"
+	},
+	"dirty": false
+}

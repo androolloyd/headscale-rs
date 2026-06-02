@@ -1,0 +1,4 @@
+headscale version <version>
+commit: <commit>
+build time: <build-time>
+built with: <runtime-version> <go-os>/<go-arch>

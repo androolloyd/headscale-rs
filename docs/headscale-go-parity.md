@@ -1142,6 +1142,18 @@ pinned golden now covers 96 scenarios; broader upstream ACL/grants/nodeAttrs/
 routes/policyTest/sshTest fixture auditing remains open before closing the
 policy v2 backlog row.
 
+Recent coverage note (2026-06-02): `policy-v2-compat-fixture-batch-3`
+adds a fourth pinned compatibility slice after auditing upstream
+`hscontrol/policy/v2/*compat*` at `171fd7a3c54156965753a63639cdcafcd50c8d67`
+(215 ACL, 266 grant, 56 nodeAttrs, 125 route, 108 SSH, 57 policyTest, and 37
+sshTest captures). The batch covers policy tester mixed ACL/grant tests,
+duplicate accepted test entries, bracketed IPv6 literal grant destinations,
+numeric TCP `tests[].proto`, SSH tester accept/check/deny/localpart assertions,
+wildcard/unknown/suggest-exit `nodeAttrs`, and `autogroup:member` excluding
+tagged nodes. Rust now accepts and canonicalizes numeric TCP `tests[].proto`
+like headscale-go. The pinned golden now covers 97 scenarios; the P1 row
+remains open because the full 864-capture upstream corpus is not exhausted.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

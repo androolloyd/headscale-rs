@@ -477,9 +477,9 @@ fn endpoint_matches_node(candidate: &Endpoint, node: &PolicyCheckNode) -> bool {
 
 fn test_protocols(proto: &str) -> Vec<&'static str> {
     match proto.trim().to_ascii_lowercase().as_str() {
-        "tcp" => vec!["tcp"],
-        "udp" => vec!["udp"],
-        "sctp" => vec!["sctp"],
+        "tcp" | "6" => vec!["tcp"],
+        "udp" | "17" => vec!["udp"],
+        "sctp" | "132" => vec!["sctp"],
         "" => vec!["tcp", "udp", "icmp", "ipv6-icmp"],
         _ => Vec::new(),
     }
@@ -801,6 +801,27 @@ mod tests {
         let nodes = vec![
             node(1, "alice", "alice", "100.64.0.1", &[]),
             node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+        ];
+
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
+    fn policy_tests_accept_numeric_tcp_proto() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "acls": [
+                    {"action": "accept", "proto": "tcp", "src": ["alice@"], "dst": ["100.64.0.2:443"]}
+                ],
+                "tests": [
+                    {"src": "alice@", "proto": "6", "accept": ["100.64.0.2:443"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &[]),
         ];
 
         check_policy_semantics(&doc, &nodes).unwrap();

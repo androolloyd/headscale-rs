@@ -2299,6 +2299,442 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-compat-fixture-batch-3",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.17",
+          "fd7a:115c:a1e0::17"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.16",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::10",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.11",
+          "fd7a:115c:a1e0::11"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.16",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::10",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.12",
+          "fd7a:115c:a1e0::12"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.16",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.12",
+          "fd7a:115c:a1e0::12"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.16",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "100.64.0.16",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::10",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-filter-policytests-grants-ssh",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.17",
+              "fd7a:115c:a1e0::17"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.16",
+                "Ports": {
+                  "First": 80,
+                  "Last": 80
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::10",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.16",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::10",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.16",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.16",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "100.64.0.16",
+                "Ports": {
+                  "First": 80,
+                  "Last": 80
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::10",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "client-filter-ipv6-literal-grant",
+        "rules": [
+
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "server-peer-map-policytests-ssh",
+        "peers": [
+          1,
+          2,
+          5
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "exit-autoapproves-exitnode-field",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "member-gets-randomize-and-disable-relay",
+        "attrs": [
+          "disable-relay-server",
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "server-gets-unknown-attr-not-member-randomize",
+        "attrs": [
+          "custom:headscale-test",
+          "disable-relay-server"
+        ]
+      },
+      {
+        "name": "exit-gets-suggest-exit-node",
+        "attrs": [
+          "disable-relay-server",
+          "suggest-exit-node"
+        ]
+      },
+      {
+        "name": "client-tagged-excluded-from-autogroup-member",
+        "attrs": [
+          "disable-relay-server"
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-ssh-tests-accept-check-localpart-deny",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "admin": "admin",
+              "root": ""
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "GIT_EDITOR",
+              "TERM"
+            ]
+          },
+          {
+            "principals": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "ssh_users": {
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "ssh_users": {
+              "odin": "odin"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "prod-ssh-deny-control",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ],
+    "policy_tests": [
+      {
+        "src": "odin@example.com",
+        "accept": [
+          "tag:server:22"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "proto": "tcp",
+        "accept": [
+          "webserver:443"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "accept": [
+          "[fd7a:115c:a1e0::10]:22"
+        ]
+      }
+    ],
+    "ssh_tests": [
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "odin@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "odin"
+        ]
+      },
+      {
+        "src": "freya@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-current-compat-fixture-batch",
     "filter": [
       {

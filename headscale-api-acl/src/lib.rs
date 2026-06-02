@@ -201,6 +201,16 @@ where
     String::deserialize(deserializer).map(|value| value.trim().to_string())
 }
 
+fn deserialize_policy_test_proto<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let proto = String::deserialize(deserializer)?
+        .trim()
+        .to_ascii_lowercase();
+    Ok(canonical_upstream_proto(&proto).unwrap_or(proto))
+}
+
 fn deserialize_trimmed_strings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -287,7 +297,7 @@ where
 #[serde(deny_unknown_fields)]
 pub struct PolicyTest {
     pub src: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_policy_test_proto")]
     pub proto: String,
     #[serde(default)]
     pub accept: Vec<String>,
@@ -1350,7 +1360,10 @@ fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<Stri
         }
 
         let proto = test.proto.trim().to_ascii_lowercase();
-        if !proto.is_empty() && !matches!(proto.as_str(), "tcp" | "udp" | "sctp") {
+        let canonical_proto = canonical_upstream_proto(&proto).unwrap_or_else(|_| proto.clone());
+        if !canonical_proto.is_empty()
+            && !matches!(canonical_proto.as_str(), "tcp" | "udp" | "sctp")
+        {
             errs.push(format!(
                 "test {index}: protocol {proto:?} is not allowed in policy tests"
             ));
@@ -3256,6 +3269,22 @@ mod tests {
         assert_eq!(doc.ssh_tests.len(), 1);
         assert_eq!(doc.ssh_tests[0].dst, vec!["autogroup:self"]);
         assert_eq!(doc.ssh_tests[0].check, vec!["admin"]);
+    }
+
+    #[test]
+    fn hujson_accepts_numeric_tcp_policy_test_proto() {
+        let raw = r#"{
+            "tagOwners": {"tag:server": ["alice@"]},
+            "acls": [
+                {"action":"accept","proto":"tcp","src":["alice@"],"dst":["tag:server:22"]}
+            ],
+            "tests": [
+                {"src":"alice@","proto":"6","accept":["tag:server:22"]}
+            ]
+        }"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        assert_eq!(doc.tests.len(), 1);
+        assert_eq!(doc.tests[0].proto, "tcp");
     }
 
     #[test]

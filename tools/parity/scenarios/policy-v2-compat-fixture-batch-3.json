@@ -1,0 +1,411 @@
+{
+  "name": "policy-v2-compat-fixture-batch-3",
+  "policy": {
+    "groups": {
+      "group:admins": [
+        "odin@example.com"
+      ],
+      "group:developers": [
+        "thor@example.org",
+        "odin@example.com"
+      ],
+      "group:monitors": [
+        "freya@example.com"
+      ]
+    },
+    "hosts": {
+      "srv": "100.64.0.16",
+      "webserver": "100.64.0.16"
+    },
+    "tagOwners": {
+      "tag:client": [
+        "odin@example.com"
+      ],
+      "tag:exit": [
+        "odin@example.com"
+      ],
+      "tag:prod": [
+        "odin@example.com"
+      ],
+      "tag:server": [
+        "odin@example.com"
+      ]
+    },
+    "autoApprovers": {
+      "exitNode": [
+        "tag:exit"
+      ]
+    },
+    "nodeAttrs": [
+      {
+        "target": [
+          "*"
+        ],
+        "attr": [
+          "disable-relay-server"
+        ]
+      },
+      {
+        "target": [
+          "tag:server"
+        ],
+        "attr": [
+          "custom:headscale-test"
+        ]
+      },
+      {
+        "target": [
+          "tag:exit"
+        ],
+        "attr": [
+          "suggest-exit-node"
+        ]
+      },
+      {
+        "target": [
+          "autogroup:member"
+        ],
+        "attr": [
+          "randomize-client-port"
+        ]
+      }
+    ],
+    "acls": [
+      {
+        "action": "accept",
+        "src": [
+          "odin@example.com"
+        ],
+        "dst": [
+          "tag:server:22"
+        ]
+      },
+      {
+        "action": "accept",
+        "proto": "6",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "webserver:443"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "webserver:80"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:server:22"
+        ]
+      }
+    ],
+    "grants": [
+      {
+        "src": [
+          "tag:client"
+        ],
+        "dst": [
+          "webserver"
+        ],
+        "ip": [
+          "tcp:80"
+        ]
+      },
+      {
+        "src": [
+          "tag:client"
+        ],
+        "dst": [
+          "fd7a:115c:a1e0::10"
+        ],
+        "ip": [
+          "tcp:22"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "src": "odin@example.com",
+        "accept": [
+          "tag:server:22"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "proto": "6",
+        "accept": [
+          "webserver:443"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "accept": [
+          "webserver:80"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "accept": [
+          "[fd7a:115c:a1e0::10]:22"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "acceptEnv": [
+          "GIT_EDITOR",
+          "TERM"
+        ],
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "root"
+        ]
+      },
+      {
+        "action": "check",
+        "checkPeriod": "24h",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "admin"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "odin@example.com"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "localpart:*@example.com"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:prod"
+        ],
+        "users": [
+          "root"
+        ]
+      }
+    ],
+    "sshTests": [
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "odin@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "odin"
+        ]
+      },
+      {
+        "src": "freya@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "odin",
+      "email": "odin@example.com"
+    },
+    {
+      "id": 2,
+      "name": "thor",
+      "email": "thor@example.org"
+    },
+    {
+      "id": 3,
+      "name": "freya",
+      "email": "freya@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "odin-laptop",
+      "ipv4": "100.64.0.11",
+      "ipv6": "fd7a:115c:a1e0::11"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "thor-laptop",
+      "ipv4": "100.64.0.12",
+      "ipv6": "fd7a:115c:a1e0::12"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "freya-monitor",
+      "ipv4": "100.64.0.13",
+      "ipv6": "fd7a:115c:a1e0::13"
+    },
+    {
+      "id": 4,
+      "user_id": 1,
+      "hostname": "server",
+      "ipv4": "100.64.0.16",
+      "ipv6": "fd7a:115c:a1e0::10",
+      "tags": [
+        "tag:server"
+      ]
+    },
+    {
+      "id": 5,
+      "user_id": 1,
+      "hostname": "client",
+      "ipv4": "100.64.0.17",
+      "ipv6": "fd7a:115c:a1e0::17",
+      "tags": [
+        "tag:client"
+      ]
+    },
+    {
+      "id": 6,
+      "user_id": 1,
+      "hostname": "prod",
+      "ipv4": "100.64.0.18",
+      "ipv6": "fd7a:115c:a1e0::18",
+      "tags": [
+        "tag:prod"
+      ]
+    },
+    {
+      "id": 7,
+      "user_id": 1,
+      "hostname": "exit",
+      "ipv4": "100.64.0.19",
+      "ipv6": "fd7a:115c:a1e0::19",
+      "tags": [
+        "tag:exit"
+      ],
+      "routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ],
+      "approved_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "server-filter-policytests-grants-ssh",
+      "node_id": 4
+    },
+    {
+      "name": "client-filter-ipv6-literal-grant",
+      "node_id": 5
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "server-peer-map-policytests-ssh",
+      "node_id": 4
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "exit-autoapproves-exitnode-field",
+      "node_id": 7,
+      "announced_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "node_attr_checks": [
+    {
+      "name": "member-gets-randomize-and-disable-relay",
+      "node_id": 2
+    },
+    {
+      "name": "server-gets-unknown-attr-not-member-randomize",
+      "node_id": 4
+    },
+    {
+      "name": "exit-gets-suggest-exit-node",
+      "node_id": 7
+    },
+    {
+      "name": "client-tagged-excluded-from-autogroup-member",
+      "node_id": 5
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "server-ssh-tests-accept-check-localpart-deny",
+      "node_id": 4
+    },
+    {
+      "name": "prod-ssh-deny-control",
+      "node_id": 6
+    }
+  ]
+}

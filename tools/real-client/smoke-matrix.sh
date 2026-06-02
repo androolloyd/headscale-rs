@@ -225,6 +225,7 @@ smoke_ids=(
   magicdns-custom-domain
   extra-records
   dns-edge
+  dns-split-live-records
   dns-hot-reload
   magicdns-ipv6-only
   dns-disabled
@@ -425,6 +426,7 @@ smoke_areas=(
   tags
   tags
   tags
+  dns
   dns
   dns
   dns
@@ -633,6 +635,7 @@ smoke_rust_scripts=(
   tools/real-client/magicdns-custom-domain-smoke.sh
   tools/real-client/extra-records-smoke.sh
   tools/real-client/dns-edge-smoke.sh
+  tools/real-client/dns-split-live-records-smoke.sh
   tools/real-client/dns-hot-reload-smoke.sh
   tools/real-client/magicdns-ipv6-only-smoke.sh
   tools/real-client/dns-disabled-smoke.sh
@@ -837,6 +840,7 @@ smoke_go_scripts=(
   tools/real-client/magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/extra-records-headscale-go-smoke.sh
   tools/real-client/dns-edge-headscale-go-smoke.sh
+  tools/real-client/dns-split-live-records-headscale-go-smoke.sh
   tools/real-client/dns-hot-reload-headscale-go-smoke.sh
   tools/real-client/magicdns-ipv6-only-headscale-go-smoke.sh
   tools/real-client/dns-disabled-headscale-go-smoke.sh
@@ -1041,6 +1045,7 @@ smoke_assertions=(
   "custom DNS base domain and peer resolver lookup"
   "extra DNS A record in client netmap and resolver"
   "split DNS route/fallback resolver object shape plus AAAA/CNAME extra records and resolver lookups"
+  "split DNS live resolver A and AAAA stock-client lookups"
   "production extra-records file hot reload in client netmap and resolver"
   "MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup"
   "MagicDNS disabled fallback names"

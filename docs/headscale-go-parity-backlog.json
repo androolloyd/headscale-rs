@@ -133,7 +133,7 @@
       "upstream_evidence": [
         "integration/dns_test.go"
       ],
-      "exit_criteria": "Broaden live resolver client behavior beyond current netmap/DNSConfig and stock-client MagicDNS coverage."
+      "exit_criteria": "Continue broadening live resolver client behavior beyond current netmap/DNSConfig, stock-client MagicDNS, live split-resolver A/AAAA, and extra-record reload coverage."
     }
   ]
 }

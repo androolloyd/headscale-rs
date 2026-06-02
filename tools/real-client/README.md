@@ -225,6 +225,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | DNS | `magicdns-custom-domain` | `magicdns-custom-domain-smoke.sh` | `magicdns-custom-domain-headscale-go-smoke.sh` | Custom DNS base domain and peer resolver lookup |
 | DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap and resolver |
 | DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records and resolver lookups |
+| DNS | `dns-split-live-records` | `dns-split-live-records-smoke.sh` | `dns-split-live-records-headscale-go-smoke.sh` | Split DNS live resolver A and AAAA stock-client lookups |
 | DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap and resolver |
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
@@ -652,6 +653,15 @@ record and CNAME alias through the stock-client resolver:
 ```sh
 tools/real-client/dns-edge-smoke.sh
 tools/real-client/dns-edge-headscale-go-smoke.sh
+```
+
+The split-live-records variant isolates a single split DNS route with a live
+local UDP resolver fixture, then resolves separate A and AAAA names through the
+stock-client resolver:
+
+```sh
+tools/real-client/dns-split-live-records-smoke.sh
+tools/real-client/dns-split-live-records-headscale-go-smoke.sh
 ```
 
 The DNS hot-reload variant starts the production server with

@@ -1777,31 +1777,44 @@ async fn grpc_gateway_path_parser_failures_are_status_json() {
 async fn grpc_gateway_path_uint64_accepts_go_base0_literals() {
     let (app, token) = fixture().await;
 
-    let resp = app
-        .clone()
-        .oneshot(req(
-            Method::POST,
-            "/api/v1/user",
-            Some(&token),
-            Body::from(r#"{"name":"hex-path-user"}"#),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body = body_json(resp).await;
-    assert_eq!(body["user"]["id"], "1");
+    for (name, expected_id, path_literal) in [
+        ("hex-path-user", "1", "0x1"),
+        ("binary-path-user", "2", "0b10"),
+        ("explicit-octal-path-user", "3", "0o3"),
+        ("legacy-octal-path-user", "4", "04"),
+        ("underscore-path-user", "5", "0b1_01"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/user",
+                Some(&token),
+                Body::from(format!(r#"{{"name":"{name}"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "create {name}");
+        let body = body_json(resp).await;
+        assert_eq!(body["user"]["id"], expected_id, "create {name}");
 
-    let resp = app
-        .oneshot(req(
-            Method::DELETE,
-            "/api/v1/user/0x1",
-            Some(&token),
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(body_json(resp).await, serde_json::json!({}));
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::DELETE,
+                &format!("/api/v1/user/{path_literal}"),
+                Some(&token),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "delete {name} via {path_literal}");
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({}),
+            "delete {name} via {path_literal}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1897,3 +1897,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   partial batch that flushes on `recv_timeout`. The test proves the queued write
   does not publish immediately, then the timeout commits one `put`, clears queue
   depth, records batch-size bucket `1`, and publishes exactly one new snapshot.
+
+## 2026-06-02 grpc-gateway base-0 path literal expansion
+
+- Expanded the grpc-gateway path `uint64` e2e to cover the Go base-0 literal
+  forms that the parser already supports: hex, binary, explicit octal,
+  legacy leading-zero octal, and underscore-separated digits. The route-level
+  test now matches the documented parser claim instead of only exercising hex.

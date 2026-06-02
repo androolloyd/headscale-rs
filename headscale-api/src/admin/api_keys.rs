@@ -261,6 +261,7 @@ fn row_to_admin(row: &headscale_db::api_keys::ApiKeyRow) -> ApiKeyAdminKey {
 fn map_db_err(e: headscale_db::DbError) -> ApiKeyAdminError {
     match e {
         headscale_db::DbError::NotFound(_) => ApiKeyAdminError::NotFound,
+        headscale_db::DbError::General(msg) => ApiKeyAdminError::Store(msg),
         other => ApiKeyAdminError::Store(other.to_string()),
     }
 }

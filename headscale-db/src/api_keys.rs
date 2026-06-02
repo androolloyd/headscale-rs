@@ -466,12 +466,14 @@ pub fn parse_display_prefix(display_prefix: &str) -> Result<String> {
     }
     if let Some(rest) = display_prefix.strip_prefix(API_KEY_PREFIX) {
         if rest.len() < API_KEY_PREFIX_LEN {
-            return Err(DbError::General("api key prefix too short".into()));
+            return Err(DbError::General(
+                "failed to parse ApiKey: prefix too short".into(),
+            ));
         }
         let prefix = &rest[..API_KEY_PREFIX_LEN];
         if !is_valid_urlsafe(prefix) {
             return Err(DbError::General(
-                "api key prefix contains invalid characters".into(),
+                "failed to parse ApiKey: prefix contains invalid characters".into(),
             ));
         }
         return Ok(prefix.to_string());

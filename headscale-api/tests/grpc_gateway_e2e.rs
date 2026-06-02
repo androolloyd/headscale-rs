@@ -1926,6 +1926,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_message: "api key not found",
         },
         Case {
+            name: "expire api key prefix too short",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            body: r#"{"prefix":"hskey-api-short"}"#,
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "failed to parse ApiKey: prefix too short",
+        },
+        Case {
             name: "delete api key conflicting selectors",
             method: Method::DELETE,
             uri: "/api/v1/apikey/prefix?id=1",
@@ -1942,6 +1951,15 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             expected_http_status: 500,
             expected_grpc_code: 2,
             expected_message: "api key not found",
+        },
+        Case {
+            name: "delete api key prefix invalid characters",
+            method: Method::DELETE,
+            uri: "/api/v1/apikey/hskey-api-abc!efghijkl-***",
+            body: "",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "failed to parse ApiKey: prefix contains invalid characters",
         },
         Case {
             name: "list nodes missing user",
@@ -2016,6 +2034,149 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             case.name,
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_preauth_missing_ids_are_noop_success() {
+    let (app, token) = fixture().await;
+
+    for (name, method, uri, body) in [
+        (
+            "expire preauth key missing id",
+            Method::POST,
+            "/api/v1/preauthkey/expire",
+            Body::from(r#"{"id":"999"}"#),
+        ),
+        (
+            "delete preauth key missing id",
+            Method::DELETE,
+            "/api/v1/preauthkey?id=999",
+            Body::empty(),
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(method, uri, Some(&token), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{name}");
+        assert_eq!(body_json(resp).await, serde_json::json!({}), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_user_delete_non_empty_status_json() {
+    let (app, token, _registry, _db) = fixture_with_wire_registry().await;
+    let registration_key = "zyxwvutsrqponmlkjihgfedc";
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"owned-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+    let body = body_json(created_user).await;
+    let user_id = body["user"]["id"].as_str().expect("user id");
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/debug/node",
+            Some(&token),
+            Body::from(format!(
+                r#"{{"user":"owned-user","key":"hskey-authreq-{registration_key}","name":"owned-node"}}"#
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            &format!("/api/v1/node/register?user=owned-user&key=hskey-authreq-{registration_key}"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = app
+        .oneshot(req(
+            Method::DELETE,
+            &format!("/api/v1/user/{user_id}"),
+            Some(&token),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_status_json_exact(
+        resp,
+        500,
+        2,
+        "user not empty: node(s) found",
+        "delete user with owned node",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn grpc_gateway_user_rename_raw_errors_are_status_json() {
+    let (app, token) = fixture().await;
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"rename-source"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+    let body = body_json(created_user).await;
+    let source_id = body["user"]["id"].as_str().expect("source id");
+
+    let created_user = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"rename-target"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), 200);
+
+    for (name, uri, expected_message) in [
+        (
+            "rename missing user",
+            "/api/v1/user/404/rename/new-name".to_string(),
+            "user not found",
+        ),
+        (
+            "rename duplicate user",
+            format!("/api/v1/user/{source_id}/rename/rename-target"),
+            "updating user: constraint failed: UNIQUE constraint failed: users.name (2067)",
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(Method::POST, &uri, Some(&token), Body::empty()))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 500, 2, expected_message, name).await;
     }
 }
 

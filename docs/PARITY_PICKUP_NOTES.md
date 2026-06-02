@@ -1926,3 +1926,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   headscale-go's reload ordering where auto-approvals are applied before mapper
   batching, so `Stream:true` observers do not receive a stale no-route map
   before the first post-reload batch tick.
+
+## 2026-06-02 grpc-gateway admin error-shape pins
+
+- Added grpc-gateway coverage for raw user rename errors, non-empty user
+  deletion, preauth missing-ID no-op success, and malformed API-key display
+  prefixes. API-key display-prefix parse errors now surface the headscale-go
+  shaped `failed to parse ApiKey: ...` message instead of the generic
+  `Database operation failed: ...` wrapper.

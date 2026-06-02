@@ -94,6 +94,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-authkey-relogin-deleted` | `postgres-authkey-relogin-deleted-smoke.sh` | `postgres-authkey-relogin-deleted-headscale-go-smoke.sh` | Production Postgres auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Database | `postgres-authkey-relogin-route-preserve` | `postgres-authkey-relogin-route-preserve-smoke.sh` | `postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh` | Production Postgres auth-key same-user relogin preserves approved route state |
 | Database | `postgres-taildrop-capmap` | `postgres-taildrop-capmap-smoke.sh` | `postgres-taildrop-capmap-headscale-go-smoke.sh` | Production Postgres taildrop disabled removes file-sharing from stock-client self CapMap |
+| Database | `postgres-derp-private` | `postgres-derp-private-smoke.sh` | `postgres-derp-private-headscale-go-smoke.sh` | Production Postgres private DERP sidecar, STUN, relay path, and DERP map metadata |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
@@ -182,6 +183,7 @@ upstream commit from `headscale-go-current.sh`.
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
 | SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
 | SSH | `ssh-oidc-check-period-cache` | `ssh-oidc-check-period-cache-smoke.sh` | `ssh-oidc-check-period-cache-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache |
+| SSH | `ssh-oidc-policy-restart` | `ssh-oidc-policy-restart-smoke.sh` | `ssh-oidc-policy-restart-headscale-go-smoke.sh` | OIDC SSH policy mutation survives server restart |
 | SSH | `ssh-oidc-check-period-local-user` | `ssh-oidc-check-period-local-user-smoke.sh` | `ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` is scoped to `local_user` |
 | SSH | `ssh-oidc-check-wrong-user` | `ssh-oidc-check-wrong-user-smoke.sh` | `ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Wrong-user OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
@@ -220,8 +222,10 @@ upstream commit from `headscale-go-current.sh`.
 | Routes | `route-exit-node` | `route-exit-node-smoke.sh` | `route-exit-node-headscale-go-smoke.sh` | Exit-node route advertisement and approval |
 | Routes | `route-via` | `route-via-smoke.sh` | `route-via-headscale-go-smoke.sh` | Current-head `grants[].via` route steering |
 | Routes | `route-via-same-tag` | `route-via-same-tag-smoke.sh` | `route-via-same-tag-headscale-go-smoke.sh` | Current-head same-tag multi-router `grants[].via` election |
+| Routes | `route-via-same-tag-restart` | `route-via-same-tag-restart-smoke.sh` | `route-via-same-tag-restart-headscale-go-smoke.sh` | Current-head same-tag route steering with `grants[].via` survives server restart |
 | Routes | `route-via-health` | `route-via-health-smoke.sh` | `route-via-health-headscale-go-smoke.sh` | Current-head regular-overlap same-tag `grants[].via` route owner follows route-health failover |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
+| Routes | `route-via-reload-restart` | `route-via-reload-restart-smoke.sh` | `route-via-reload-restart-headscale-go-smoke.sh` | Current-head route steering policy reload survives server restart |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
 | Routes | `route-via-multiprefix` | `route-via-multiprefix-smoke.sh` | `route-via-multiprefix-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` route steering |
 | Routes | `route-via-multiprefix-reload` | `route-via-multiprefix-reload-smoke.sh` | `route-via-multiprefix-reload-headscale-go-smoke.sh` | Current-head multi-prefix `grants[].via` policy reload steering |
@@ -239,9 +243,11 @@ upstream commit from `headscale-go-current.sh`.
 | Routes | `route-health-mixed-exit` | `route-health-mixed-exit-smoke.sh` | `route-health-mixed-exit-headscale-go-smoke.sh` | Current-head route-health ignores exit-only routes during HA failover |
 | Routes | `route-health-mixed-exit-reload` | `route-health-mixed-exit-reload-smoke.sh` | `route-health-mixed-exit-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves exit-node separation |
 | Routes | `route-health-mixed-exit-restart` | `route-health-mixed-exit-restart-smoke.sh` | `route-health-mixed-exit-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node separation survives server restart |
+| Routes | `route-health-mixed-exit-reload-restart` | `route-health-mixed-exit-reload-restart-smoke.sh` | `route-health-mixed-exit-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node policy reload survives server restart |
 | Routes | `route-health-mixed-exit-all-unhealthy` | `route-health-mixed-exit-all-unhealthy-smoke.sh` | `route-health-mixed-exit-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention |
 | Routes | `route-health-mixed-exit-all-unhealthy-reload` | `route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention |
 | Routes | `route-health-mixed-exit-all-unhealthy-restart` | `route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart |
+| Routes | `route-health-mixed-exit-all-unhealthy-reload-restart` | `route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable policy reload survives server restart |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
@@ -948,6 +954,8 @@ router as the stock-client route owner for that shared `via` tag:
 ```sh
 tools/real-client/route-via-same-tag-smoke.sh
 tools/real-client/route-via-same-tag-headscale-go-smoke.sh
+tools/real-client/route-via-same-tag-restart-smoke.sh
+tools/real-client/route-via-same-tag-restart-headscale-go-smoke.sh
 ```
 
 The route-via plus route-health variant uses the same two-router `via` tag with
@@ -968,6 +976,8 @@ asserts the stock-client netmap moves that route owner after reload:
 ```sh
 tools/real-client/route-via-reload-smoke.sh
 tools/real-client/route-via-reload-headscale-go-smoke.sh
+tools/real-client/route-via-reload-restart-smoke.sh
+tools/real-client/route-via-reload-restart-headscale-go-smoke.sh
 ```
 
 The route-via restart variant runs the same current-head steering semantics
@@ -992,6 +1002,8 @@ tools/real-client/route-via-multiprefix-reload-smoke.sh
 tools/real-client/route-via-multiprefix-reload-headscale-go-smoke.sh
 tools/real-client/route-via-multiprefix-restart-smoke.sh
 tools/real-client/route-via-multiprefix-restart-headscale-go-smoke.sh
+tools/real-client/route-via-multiprefix-reload-restart-smoke.sh
+tools/real-client/route-via-multiprefix-reload-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited
@@ -1050,6 +1062,8 @@ tools/real-client/route-health-all-unhealthy-reload-smoke.sh
 tools/real-client/route-health-all-unhealthy-reload-headscale-go-smoke.sh
 tools/real-client/route-health-all-unhealthy-restart-smoke.sh
 tools/real-client/route-health-all-unhealthy-restart-headscale-go-smoke.sh
+tools/real-client/route-health-all-unhealthy-reload-restart-smoke.sh
+tools/real-client/route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
 ```
 
 The mixed-exit route-health variants add an exit-only router next to the two
@@ -1065,6 +1079,8 @@ tools/real-client/route-health-mixed-exit-reload-smoke.sh
 tools/real-client/route-health-mixed-exit-reload-headscale-go-smoke.sh
 tools/real-client/route-health-mixed-exit-restart-smoke.sh
 tools/real-client/route-health-mixed-exit-restart-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-reload-restart-smoke.sh
+tools/real-client/route-health-mixed-exit-reload-restart-headscale-go-smoke.sh
 ```
 
 The mixed-exit all-unhealthy variants combine the exit-only separation case
@@ -1080,6 +1096,8 @@ tools/real-client/route-health-mixed-exit-all-unhealthy-reload-smoke.sh
 tools/real-client/route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh
 tools/real-client/route-health-mixed-exit-all-unhealthy-restart-smoke.sh
 tools/real-client/route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
+tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper also defaults to the audited current-head commit
@@ -1136,12 +1154,16 @@ tools/real-client/ssh-oidc-check-smoke.sh
 tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
 tools/real-client/ssh-cli-check-smoke.sh
 tools/real-client/ssh-cli-check-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-check-period-cache-smoke.sh
+tools/real-client/ssh-oidc-check-period-cache-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-period-local-user-smoke.sh
 tools/real-client/ssh-oidc-check-period-local-user-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh
 tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh
+tools/real-client/ssh-oidc-policy-restart-smoke.sh
+tools/real-client/ssh-oidc-policy-restart-headscale-go-smoke.sh
 tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh
 tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh
 tools/real-client/ssh-oidc-check-wrong-user-smoke.sh

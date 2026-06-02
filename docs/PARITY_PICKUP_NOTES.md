@@ -2200,9 +2200,25 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `Health` problem; when the duplicate clears, the remaining session receives an
   empty `Health` clear frame.
 - Focused core, raw DERP, and DERP-over-WebSocket tests pin duplicate health
-  emission and session-specific disconnect. This closes the first production
-  health lifecycle source for native DERP; remaining native DERP lifecycle gaps
-  are server-restart announcements and broader stock-client runtime assertions.
+  emission and session-specific disconnect. This closed the first production
+  health lifecycle source for native DERP and left server-restart announcements
+  plus broader stock-client runtime assertions for follow-on slices.
+
+## 2026-06-02 native DERP server-restart lifecycle slice
+
+- Native DERP now has a production shutdown lifecycle helper that emits the
+  upstream-shaped `Health("server restarting")` problem followed by a
+  `Restarting` advisory with 1s reconnect delay and 5s retry window to active
+  sessions.
+- `headscale serve` now listens for SIGINT/SIGTERM, announces that native DERP
+  shutdown lifecycle before returning from the serve waiter, and gives queued
+  lifecycle frames a short flush grace when any active native DERP session
+  accepted frames.
+- Focused tests prove raw DERP and DERP-over-WebSocket sessions receive the
+  shutdown lifecycle frames, and a server-waiter test proves the frames are
+  emitted from the production shutdown path rather than only direct test API
+  calls. The remaining native DERP row is broader stock-client restart/runtime
+  assertion around reconnect behavior after a production restart.
 
 ## 2026-06-02 NodeStore update-many/delete churn slice
 

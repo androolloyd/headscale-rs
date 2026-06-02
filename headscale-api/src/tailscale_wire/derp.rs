@@ -53,8 +53,25 @@ const WEBSOCKET_UNSUPPORTED_DATA: u16 = 1003;
 const DEFAULT_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_DERP_KEEPALIVE_JITTER: Duration = Duration::from_secs(5);
 const MIN_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(1);
+pub const NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM: &str = "server restarting";
+pub const NATIVE_DERP_SHUTDOWN_RECONNECT_IN: Duration = Duration::from_secs(1);
+pub const NATIVE_DERP_SHUTDOWN_TRY_FOR: Duration = Duration::from_secs(5);
 
 type NativeDerpClientVerifier = Arc<dyn Fn(&[u8; KEY_LEN]) -> bool + Send + Sync>;
+
+/// Delivery counts for server-originated native DERP lifecycle broadcasts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeDerpLifecycleDelivery {
+    pub health: usize,
+    pub restarting: usize,
+}
+
+impl NativeDerpLifecycleDelivery {
+    /// Total frames accepted by active session queues.
+    pub const fn delivered(self) -> usize {
+        self.health + self.restarting
+    }
+}
 
 /// Shared native DERP runtime.
 #[derive(Clone)]
@@ -229,6 +246,22 @@ impl NativeDerpRuntime {
                 try_for_ms: duration_millis_u32(try_for),
             })
             .await
+    }
+
+    /// Announce the production server shutdown/restart lifecycle to active
+    /// native DERP clients.
+    pub async fn announce_server_shutdown(&self) -> NativeDerpLifecycleDelivery {
+        let health = self
+            .set_health_problem(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM)
+            .await;
+        let restarting = self
+            .announce_restarting(
+                NATIVE_DERP_SHUTDOWN_RECONNECT_IN,
+                NATIVE_DERP_SHUTDOWN_TRY_FOR,
+            )
+            .await;
+
+        NativeDerpLifecycleDelivery { health, restarting }
     }
 
     fn current_health_frame(&self) -> Option<Frame> {
@@ -1043,6 +1076,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_sends_server_shutdown_lifecycle() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        assert_eq!(
+            runtime.announce_server_shutdown().await,
+            NativeDerpLifecycleDelivery {
+                health: 1,
+                restarting: 1
+            }
+        );
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Restarting {
+                reconnect_in_ms: NATIVE_DERP_SHUTDOWN_RECONNECT_IN.as_millis() as u32,
+                try_for_ms: NATIVE_DERP_SHUTDOWN_TRY_FOR.as_millis() as u32,
+            }
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_reports_duplicate_connection_health_and_clear() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(NativeDerpRuntime::new(
@@ -1337,6 +1433,65 @@ mod tests {
             Frame::Restarting {
                 reconnect_in_ms: 1,
                 try_for_ms: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_websocket_sends_server_shutdown_lifecycle() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+        wait_for_sent_messages(&sent, 2).await;
+
+        assert_eq!(
+            runtime.announce_server_shutdown().await,
+            NativeDerpLifecycleDelivery {
+                health: 1,
+                restarting: 1
+            }
+        );
+        wait_for_sent_messages(&sent, 4).await;
+        tx.send(Ok(Message::Close(None))).await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_ok());
+
+        let messages = sent.lock().unwrap().clone();
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
+                .expect("shutdown health frame decodes");
+        assert_eq!(
+            frame,
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[3]), MAX_INFO_LEN)
+                .expect("shutdown restarting frame decodes");
+        assert_eq!(
+            frame,
+            Frame::Restarting {
+                reconnect_in_ms: NATIVE_DERP_SHUTDOWN_RECONNECT_IN.as_millis() as u32,
+                try_for_ms: NATIVE_DERP_SHUTDOWN_TRY_FOR.as_millis() as u32,
             }
         );
     }

@@ -131,6 +131,11 @@ pub(crate) struct CliConfig {
     pub(crate) tuning: TuningConfig,
 }
 
+pub(crate) struct DefaultConfigLoad {
+    pub(crate) config: CliConfig,
+    pub(crate) used_defaults: bool,
+}
+
 /// Operator CLI configuration used by upstream `headscale` admin commands.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct AdminCliConfig {
@@ -549,11 +554,25 @@ impl CliConfig {
 
     /// Load the upstream default config search path, returning defaults when
     /// no config file exists.
+    #[allow(dead_code)]
     pub(crate) fn load_default() -> Result<Self> {
-        Self::load_default_from_dirs(default_config_dirs())
+        Ok(Self::load_default_with_source()?.config)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn load_default_from_dirs<I, P>(dirs: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        Ok(Self::load_default_with_source_from_dirs(dirs)?.config)
+    }
+
+    pub(crate) fn load_default_with_source() -> Result<DefaultConfigLoad> {
+        Self::load_default_with_source_from_dirs(default_config_dirs())
+    }
+
+    pub(crate) fn load_default_with_source_from_dirs<I, P>(dirs: I) -> Result<DefaultConfigLoad>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -563,8 +582,12 @@ impl CliConfig {
             for filename in DEFAULT_CONFIG_FILENAMES {
                 let candidate = dir.join(filename);
                 if candidate.is_file() {
-                    return Self::load(&candidate).with_context(|| {
+                    let config = Self::load(&candidate).with_context(|| {
                         format!("failed to load config file {}", candidate.display())
+                    })?;
+                    return Ok(DefaultConfigLoad {
+                        config,
+                        used_defaults: false,
                     });
                 }
             }
@@ -586,7 +609,10 @@ impl CliConfig {
         config.apply_cli_env_overrides_from(std::env::vars())?;
         config.normalize_upstream_aliases();
         config.resolve_oidc_client_secret()?;
-        Ok(config)
+        Ok(DefaultConfigLoad {
+            config,
+            used_defaults: true,
+        })
     }
 
     fn parse(contents: &str, format: ConfigFormat) -> Result<Self> {

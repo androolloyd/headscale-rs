@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -373,6 +374,7 @@ impl From<anyhow::Error> for MainError {
 }
 
 async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
+    let mut used_default_config = false;
     let config = if skip_config_load {
         None
     } else if let Some(config_path) = &cli.config {
@@ -382,11 +384,11 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                 .map_err(MainError::Other)?,
         )
     } else {
-        Some(
-            CliConfig::load_default()
-                .context("Failed to load config")
-                .map_err(MainError::Other)?,
-        )
+        let loaded = CliConfig::load_default_with_source()
+            .context("Failed to load config")
+            .map_err(MainError::Other)?;
+        used_default_config = loaded.used_defaults;
+        Some(loaded.config)
     };
     let connect = merged_connect_args(&cli.connect, config.as_ref());
 
@@ -587,7 +589,9 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             Ok(())
         }
         Commands::Configtest => configtest(config.as_ref()).map_err(MainError::Other),
-        Commands::DumpConfig => dump_config(config.as_ref()).map_err(MainError::Other),
+        Commands::DumpConfig => {
+            dump_config(config.as_ref(), used_default_config).map_err(MainError::Other)
+        }
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -3245,9 +3249,17 @@ fn print_private_key(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn dump_config(config: Option<&CliConfig>) -> Result<()> {
+fn dump_config(config: Option<&CliConfig>, used_default_config: bool) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
+    if used_default_config {
+        print_no_config_default_warning();
+    }
     dump_config_to(config, &PathBuf::from("/etc/headscale/config.dump.yaml"))
+}
+
+fn print_no_config_default_warning() {
+    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+    eprintln!("{timestamp} WRN no config file found, using defaults");
 }
 
 fn dump_config_to(config: &CliConfig, path: &Path) -> Result<()> {

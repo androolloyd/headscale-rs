@@ -136,6 +136,7 @@ smoke_ids=(
   postgres-web-register-route-approve-restart
   postgres-oidc
   postgres-oidc-policy-churn
+  postgres-oidc-policy-churn-restart
   postgres-oidc-restart
   postgres-oidc-route-approve-restart
   postgres-ssh
@@ -382,6 +383,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -524,6 +526,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-web-register-route-approve-restart-smoke.sh
   tools/real-client/postgres-oidc-smoke.sh
   tools/real-client/postgres-oidc-policy-churn-smoke.sh
+  tools/real-client/postgres-oidc-policy-churn-restart-smoke.sh
   tools/real-client/postgres-oidc-restart-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-smoke.sh
   tools/real-client/postgres-ssh-smoke.sh
@@ -718,6 +721,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-web-register-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-policy-churn-headscale-go-smoke.sh
+  tools/real-client/postgres-oidc-policy-churn-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh
   tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-headscale-go-smoke.sh
@@ -912,6 +916,7 @@ smoke_assertions=(
   "production Postgres web registration route approval survives server restart"
   "production Postgres OIDC registration, user profile rows, stock-client netmap, and node state"
   "production Postgres OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer"
+  "production Postgres OIDC policy reload peer/profile map churn survives server restart"
   "production Postgres OIDC registration survives server restart"
   "production Postgres OIDC route approval survives server restart"
   "production Postgres Tailscale SSH allow, deny, and ACL timeout"

@@ -779,6 +779,15 @@ auto-approves the advertised route through CLI node state and `/debug/routes`.
 This adds a focused process-level config-mutation check without duplicating the
 existing database-policy restart or grpc-gateway CRUD smokes.
 
+Recent coverage note (2026-06-02): paired
+`postgres-oidc-policy-churn-restart` stock-client smokes now run the production
+Rust/headscale-go OIDC confirmation flow on temporary Postgres, register an
+auth-key viewer plus OIDC peer under a file policy, reload the policy with
+`SIGHUP` to expose the peer/profile, restart the production server, and assert
+both clients reconnect with the viewer still seeing the OIDC peer/profile. The
+row is wired through `tools/real-client/smoke-matrix.sh --check
+postgres-oidc-policy-churn-restart --both`.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the
@@ -799,7 +808,8 @@ existing database-policy restart or grpc-gateway CRUD smokes.
    edges such as remaining HTTPS/DERP runtime settings.
 5. Broaden production-process restart smokes for web/CLI/OIDC policy and
    map churn beyond the auth-key restart-persistence, OIDC route-approval,
-   web/CLI restart, and default web-registration route-approval rows.
+   web/CLI restart, default web-registration route-approval, and Postgres
+   OIDC policy-churn restart rows.
 6. Finish native Rust DERP relay parity beyond the supported upstream
    `derper` sidecar boundary: broader stock-client restart/runtime assertions
    after keepalive, health, and restarting frames are wired.

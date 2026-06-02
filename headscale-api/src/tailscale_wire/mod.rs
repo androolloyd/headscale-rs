@@ -4555,6 +4555,9 @@ impl MachineRegistry {
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
+                    if rec.approved_routes == routes {
+                        return NodeStoreBoolUpdateOutcome::unchanged(true);
+                    }
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.approved_routes = routes;
                     let clear_unhealthy =
@@ -4642,6 +4645,9 @@ impl MachineRegistry {
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
+                    if rec.available_routes == routes {
+                        return NodeStoreBoolUpdateOutcome::unchanged(true);
+                    }
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.available_routes = routes;
                     NodeStoreBoolUpdateOutcome::changed_for_node(
@@ -7898,6 +7904,50 @@ mod registry_tests {
         assert_eq!(updated.available_routes, vec!["10.1.0.0/24"]);
         assert_eq!(updated.approved_routes, vec!["10.0.0.0/24"]);
         assert!(!reg.set_available_routes("nk-zzz", Vec::new()));
+    }
+
+    #[test]
+    fn nodestore_write_batcher_route_noops_do_not_emit_map_churn() {
+        let reg = Arc::new(MachineRegistry::new());
+        let observer_key = "route-noop-observer";
+        let router_key = "route-noop-router";
+        let route = "10.77.0.0/24";
+        reg.upsert(observer_key.to_string(), mk_record(77));
+        reg.upsert(router_key.to_string(), route_record(router_key, 78, route));
+        let _guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            stable_id_from_key(observer_key),
+            Duration::ZERO,
+        );
+        let _ = reg.drain_pending_map_changes();
+        let history_len = reg.map_change_history().len();
+        let snapshot = reg.snapshot();
+        let generation = reg.subscribe_gen();
+        let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
+
+        assert!(reg.set_available_routes(router_key, vec![route.into()]));
+        assert!(reg.set_approved_routes(router_key, vec![route.into()]));
+
+        let updated = reg.get(router_key).expect("router remains registered");
+        assert_eq!(updated.available_routes, vec![route]);
+        assert_eq!(updated.approved_routes, vec![route]);
+        assert_eq!(
+            reg.map_change_history().len(),
+            history_len,
+            "unchanged route state should not record map changes"
+        );
+        assert!(
+            reg.pending_map_changes().is_empty(),
+            "unchanged route state should not enqueue stream deltas"
+        );
+        assert!(
+            !generation.has_changed().unwrap(),
+            "unchanged route state should not bump the map generation"
+        );
+        assert!(
+            Arc::ptr_eq(&snapshot, &reg.snapshot()),
+            "unchanged route state should not publish a fresh NodeStore snapshot"
+        );
     }
 
     #[test]

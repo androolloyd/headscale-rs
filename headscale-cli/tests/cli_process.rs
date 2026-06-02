@@ -785,6 +785,41 @@ fn write_postgres_serve_config(
     metrics: std::net::SocketAddr,
     grpc: std::net::SocketAddr,
 ) -> std::path::PathBuf {
+    write_postgres_serve_config_with_policy_block(
+        dir,
+        postgres,
+        listen,
+        metrics,
+        grpc,
+        "  mode: database\n",
+    )
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn write_postgres_serve_config_with_policy_file(
+    dir: &Path,
+    postgres: &PostgresServeConfigFields,
+    listen: std::net::SocketAddr,
+    metrics: std::net::SocketAddr,
+    grpc: std::net::SocketAddr,
+    policy_path: &Path,
+) -> std::path::PathBuf {
+    let policy = format!(
+        "  mode: file\n  path: {}\n",
+        yaml_double_quoted(&policy_path.to_string_lossy())
+    );
+    write_postgres_serve_config_with_policy_block(dir, postgres, listen, metrics, grpc, &policy)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn write_postgres_serve_config_with_policy_block(
+    dir: &Path,
+    postgres: &PostgresServeConfigFields,
+    listen: std::net::SocketAddr,
+    metrics: std::net::SocketAddr,
+    grpc: std::net::SocketAddr,
+    policy_block: &str,
+) -> std::path::PathBuf {
     let config = dir.join("config.yaml");
     let socket = dir.join("headscale.sock");
     let noise = dir.join("state").join("noise_private.key");
@@ -813,7 +848,7 @@ database:
     pass: {}
     ssl: {}
 policy:
-  mode: database
+{policy_block}
 "#,
             yaml_double_quoted(&socket.to_string_lossy()),
             yaml_double_quoted(&noise.to_string_lossy()),
@@ -822,7 +857,7 @@ policy:
             yaml_double_quoted(&postgres.name),
             yaml_double_quoted(&postgres.user),
             yaml_double_quoted(&postgres.pass),
-            yaml_double_quoted(&postgres.ssl)
+            yaml_double_quoted(&postgres.ssl),
         ),
     )
     .unwrap();
@@ -846,6 +881,16 @@ fn stop_child(child: &mut Child) {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+#[cfg(all(feature = "postgres-sqlx", unix))]
+fn send_sighup(child: &Child) -> BoxTestResult {
+    let status = Command::new("kill")
+        .arg("-HUP")
+        .arg(child.id().to_string())
+        .status()?;
+    assert!(status.success(), "kill -HUP exited {status:?}");
+    Ok(())
 }
 
 fn normalize_users_list_stdout(text: &str) -> String {
@@ -5346,6 +5391,158 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         let renamed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let renamed = json_output(&renamed);
         assert_eq!(renamed[0]["name"].as_str(), Some("pg-restart-renamed"));
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(all(feature = "postgres-sqlx", unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("policy_file_reload").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let policy_path = dir.path().join("acl.hujson");
+    fs::write(&policy_path, r#"{"acls":[]}"#)?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let metrics_url = format!("http://{metrics}");
+    let config = write_postgres_serve_config_with_policy_file(
+        dir.path(),
+        database.fields(),
+        listen,
+        metrics,
+        grpc,
+        &policy_path,
+    );
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let auth_id = "hskey-authreq-fefefefefefefefefefefefe";
+        let advertised_route = "10.88.1.0/24";
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                auth_id,
+                "--name",
+                "pg-policy-reload-router",
+                "--route",
+                advertised_route,
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let auth_register = headscale_with_config(
+            &config,
+            &["auth", "register", "--user", "alice", "--auth-id", auth_id],
+        );
+        assert!(
+            auth_register.status.success(),
+            "stderr: {}",
+            stderr(&auth_register)
+        );
+        assert_eq!(
+            stdout(&auth_register),
+            "Node pg-policy-reload-router registered\n"
+        );
+        assert_eq!(stderr(&auth_register), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        let nodes = json_output(&nodes);
+        let node = &nodes[0];
+        let node_id_number = node["id"].as_u64().expect("node id");
+        let node_id = node_id_number.to_string();
+        assert_eq!(node["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(
+            node["available_routes"],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(node["approved_routes"], serde_json::json!([]));
+
+        let reloaded_policy = r#"{
+  "autoApprovers": {
+    "routes": {"10.88.0.0/16": ["alice@"]}
+  }
+}"#;
+        fs::write(&policy_path, reloaded_policy)?;
+        send_sighup(&child)?;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let approved_nodes = loop {
+            let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+            assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+            let nodes = json_output(&nodes);
+            if nodes[0]["approved_routes"] == serde_json::json!([advertised_route]) {
+                break nodes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for SIGHUP policy reload to approve route; nodes: {nodes}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            approved_nodes[0]["available_routes"],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(
+            approved_nodes[0]["id"].as_u64().unwrap().to_string(),
+            node_id
+        );
+
+        let policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+        assert!(policy.status.success(), "stderr: {}", stderr(&policy));
+        assert_eq!(stdout(&policy), format!("{reloaded_policy}\n"));
+        assert_eq!(stderr(&policy), "");
+
+        let http = reqwest::Client::new();
+        let debug_routes = http
+            .get(format!("{metrics_url}/debug/routes"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
+        let debug_routes = debug_routes.json::<serde_json::Value>().await?;
+        assert_eq!(
+            debug_routes["available_routes"][&node_id],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(
+            debug_routes["primary_routes"][advertised_route],
+            serde_json::json!(node_id_number)
+        );
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }

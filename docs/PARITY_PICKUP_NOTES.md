@@ -2101,3 +2101,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   through the stock-client resolver in addition to the existing netmap checks;
   split DNS remains asserted at the tailcfg route/fallback resolver layer
   because these smoke rows intentionally configure synthetic split resolvers.
+
+## 2026-06-02 Postgres runtime convergence evidence
+
+- Extended the env-gated production Postgres `serve` restart process smoke in
+  `headscale-cli/tests/cli_process.rs` to mutate user, database-backed policy,
+  route, and tag state through local gRPC/CLI before restarting the real server.
+- After restart, the smoke now checks CLI node/route/policy output plus
+  `/debug/nodestore`, `/debug/routes`, `/debug/policy-manager`, and
+  `/debug/filter` on the metrics/debug listener, proving the Pg rows hydrate
+  into the live registry, route selection, policy manager, and map-response
+  input state. The test remains
+  `postgres-sqlx` feature-gated and skips cleanly when
+  `HEADSCALE_DB_POSTGRES_TEST_URL` is absent.

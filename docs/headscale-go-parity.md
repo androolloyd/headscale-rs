@@ -636,6 +636,14 @@ advertised non-exit subnet routers enqueue full map responses with
 keep the patch-plus-policy lifecycle path. Focused registry and `Stream:true`
 tests pin the queued full update and the emitted full `Node`/`Peers` response.
 
+Recent coverage note (2026-06-02): the env-gated production Postgres `serve`
+restart process smoke now mutates user, database-backed policy, node route, and
+tag state through local gRPC/CLI, restarts the real server, and asserts the
+same route/tag state through CLI output, `/debug/nodestore`,
+`/debug/routes`, `/debug/policy-manager`, and `/debug/filter`. This gives one
+focused process-level convergence check across the Pg DB rows, hydrated live
+registry, loaded policy manager, and map-response inputs after restart.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

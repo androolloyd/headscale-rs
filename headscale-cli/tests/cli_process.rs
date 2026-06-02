@@ -4466,6 +4466,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
     let listen = unused_loopback_addr();
     let metrics = unused_loopback_addr();
     let grpc = unused_loopback_addr();
+    let metrics_url = format!("http://{metrics}");
     let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
     let mut child = spawn_headscale_serve(&config, dir.path())?;
 
@@ -4539,7 +4540,8 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
 
         let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let nodes_json = json_output(&nodes_json);
-        let node_id = nodes_json[0]["id"].as_u64().expect("node id").to_string();
+        let node_id_number = nodes_json[0]["id"].as_u64().expect("node id");
+        let node_id = node_id_number.to_string();
         assert_eq!(nodes_json[0]["user"]["name"].as_str(), Some("alice"));
 
         let approve_routes = headscale_with_config(
@@ -4560,6 +4562,21 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         );
         assert_eq!(stdout(&approve_routes), "Node updated\n");
         assert_eq!(stderr(&approve_routes), "");
+
+        let tag_node = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "tag",
+                "--identifier",
+                &node_id,
+                "--tags",
+                "tag:router",
+            ],
+        );
+        assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
+        assert_eq!(stdout(&tag_node), "Node updated\n");
+        assert_eq!(stderr(&tag_node), "");
 
         stop_child(&mut child);
         child = spawn_headscale_serve(&config, dir.path())?;
@@ -4588,6 +4605,15 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         assert_eq!(nodes[0]["name"].as_str(), Some("pg-restart-node"));
         assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-restart-node"));
         assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes[0]["tags"], serde_json::json!(["tag:router"]));
+        assert_eq!(
+            nodes[0]["available_routes"],
+            serde_json::json!(["10.40.0.0/24"])
+        );
+        assert_eq!(
+            nodes[0]["approved_routes"],
+            serde_json::json!(["10.40.0.0/24"])
+        );
 
         let routes = headscale_with_config(&config, &["nodes", "list-routes"]);
         assert!(routes.status.success(), "stderr: {}", stderr(&routes));
@@ -4597,6 +4623,70 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             "routes stdout: {routes_stdout}"
         );
         assert_eq!(stderr(&routes), "");
+
+        let http = reqwest::Client::new();
+        let nodestore = http
+            .get(format!("{metrics_url}/debug/nodestore"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+        let nodestore = nodestore.json::<serde_json::Value>().await?;
+        let live_node = nodestore
+            .get(&node_id)
+            .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
+        assert_eq!(live_node["hostname"].as_str(), Some("pg-restart-node"));
+        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(live_node["forced_tags"], serde_json::json!(["tag:router"]));
+        assert_eq!(
+            live_node["available_routes"],
+            serde_json::json!(["10.40.0.0/24"])
+        );
+        assert_eq!(
+            live_node["approved_routes"],
+            serde_json::json!(["10.40.0.0/24"])
+        );
+
+        let debug_routes = http
+            .get(format!("{metrics_url}/debug/routes"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
+        let debug_routes = debug_routes.json::<serde_json::Value>().await?;
+        assert_eq!(
+            debug_routes["available_routes"][&node_id],
+            serde_json::json!(["10.40.0.0/24"])
+        );
+        assert_eq!(
+            debug_routes["primary_routes"]["10.40.0.0/24"],
+            serde_json::json!(node_id_number)
+        );
+
+        let policy_manager = http
+            .get(format!("{metrics_url}/debug/policy-manager"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(policy_manager.status(), reqwest::StatusCode::OK);
+        let policy_manager = policy_manager.json::<serde_json::Value>().await?;
+        let policy_manager = policy_manager["content"]
+            .as_str()
+            .expect("policy manager content");
+        assert!(
+            policy_manager.contains("TagOwner (1):")
+                && policy_manager.contains("tag:router")
+                && policy_manager.contains("Compiled filter:"),
+            "policy manager content: {policy_manager}"
+        );
+
+        let filter = http.get(format!("{metrics_url}/debug/filter")).send().await?;
+        assert_eq!(filter.status(), reqwest::StatusCode::OK);
+        let filter = filter.json::<serde_json::Value>().await?;
+        assert!(
+            filter.as_array().is_some_and(|rules| !rules.is_empty()),
+            "debug filter: {filter}"
+        );
 
         let rename_after_restart = headscale_with_config(
             &config,

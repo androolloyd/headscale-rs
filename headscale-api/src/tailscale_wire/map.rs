@@ -8955,6 +8955,71 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_self_lifecycle_policy_companion_stays_quiet_after_batch_tick() {
+        let (state, _dir) = fixture();
+        let a = "a0".repeat(32);
+        let b = "b0".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut b_body = open_zstd_stream(app.clone(), &b).await;
+        let b_first = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(b_first.peers.len(), 1);
+        assert_eq!(b_first.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(b_first.peers[0].online, Some(false));
+        let _ = state.machines.drain_pending_map_changes();
+
+        let mut a_body = open_zstd_stream(app, &a).await;
+        let a_first = next_zstd_map_response(&mut a_body).await;
+        assert_eq!(
+            a_first.node.as_ref().and_then(|node| node.online),
+            Some(true)
+        );
+
+        let a_id = stable_id_from_key(&a);
+        let b_id = stable_id_from_key(&b);
+        let pending = state.machines.pending_map_changes();
+        let a_changes = pending
+            .get(&a_id)
+            .expect("self stream receives its lifecycle companion batch");
+        assert_eq!(
+            a_changes
+                .iter()
+                .map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["node online", "policy change"]]
+        );
+        let b_changes = pending
+            .get(&b_id)
+            .expect("observer stream receives the same lifecycle companion batch");
+        assert_eq!(
+            b_changes
+                .iter()
+                .map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["node online", "policy change"]]
+        );
+
+        publish_test_map_batch().await;
+        assert_no_stream_frame(&mut a_body, Duration::from_millis(50)).await;
+
+        let b_delta = next_zstd_map_response(&mut b_body).await;
+        assert!(b_delta.node.is_none());
+        assert!(b_delta.peers.is_empty());
+        assert!(b_delta.peers_changed.is_empty());
+        assert!(b_delta.peers_removed.is_empty());
+        assert_eq!(b_delta.peers_changed_patch.len(), 1);
+        assert_eq!(b_delta.peers_changed_patch[0].node_id, a_id);
+        assert_eq!(b_delta.peers_changed_patch[0].online, Some(true));
+        assert!(
+            b_delta.dns_config.is_some(),
+            "observer lifecycle companion should retain policy-delta shape"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_subnet_router_lifecycle_emits_full_map_response_like_headscale_go() {
         let (state, _dir) = fixture();
         let observer = "a5".repeat(32);

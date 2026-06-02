@@ -905,6 +905,12 @@ bounded PR/push real-client CI smoke set. It covers production Postgres no-auth
 web registration with a custom MagicDNS base domain and validates the projected
 DNS suffix against Rust and headscale-go.
 
+Recent coverage note (2026-06-02): the existing paired
+`postgres-ssh-profile-subdomain-deny` stock-client row is now selected by the
+bounded PR/push real-client CI smoke set. It extends the required SSH profile
+subdomain-deny edge into the production Postgres process path and asserts the
+same policy-profile denial behavior against Rust and headscale-go.
+
 Recent coverage note (2026-06-02): CI harness metadata now records formal
 verification status through `scripts/check_formal_status.sh`. When
 `proofs/lean` is absent the gate writes

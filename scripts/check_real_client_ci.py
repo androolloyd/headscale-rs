@@ -37,6 +37,7 @@ REQUIRED_PR_SMOKES = {
     "postgres-web-register-custom-domain",
     "postgres-oidc-policy-churn-restart",
     "postgres-policy-rename-restart",
+    "postgres-ssh-profile-subdomain-deny",
     "route-via-multiprefix-reload-restart",
     "route-health-reload-restart",
     "route-edge-current-upstream-audit",

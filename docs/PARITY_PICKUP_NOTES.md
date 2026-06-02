@@ -246,6 +246,11 @@ Recent accepted slices:
   It covers no-auth web registration over production Postgres while projecting
   a custom MagicDNS base domain through stock-client DNS suffix assertions
   against Rust and headscale-go.
+- This slice also promotes the existing paired
+  `postgres-ssh-profile-subdomain-deny` row into the bounded push/PR smoke set.
+  It carries the required SSH profile subdomain-deny edge into the production
+  Postgres stock-client process path, with policy profile matching and
+  Tailscale SSH denial assertions against Rust and headscale-go.
 
 Current multi-agent split:
 

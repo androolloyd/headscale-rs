@@ -34,8 +34,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use headscale_api::policy::{
-    NodeView, PeerMapNode, PolicyAction, PolicyDoc, PolicyRule, PolicyStore, acl_to_filter_rules,
-    build_peer_map_for_doc, parse_hujson_policy,
+    NodeView, PacketFilterNode, PeerMapNode, PolicyAction, PolicyDoc, PolicyRule, PolicyStore,
+    acl_to_filter_rules, build_peer_map_for_doc, parse_hujson_policy,
 };
 
 // ---------------------------------------------------------------------------
@@ -513,6 +513,66 @@ fn node_attrs_and_route_grants_match_secondary_address() {
     assert!(doc.can_access_route(&router, &[], &route_owner, "10.44.8.0/24"));
     assert!(doc.node_attrs_for(&primary_only).is_empty());
     assert!(!doc.can_access_route(&primary_only, &[], &route_owner, "10.44.8.0/24"));
+}
+
+#[test]
+fn per_node_packet_filter_recomputes_after_tag_context_change() {
+    let store = PolicyStore::new();
+    let raw = r#"{
+        "tagOwners": {"tag:server": ["ops@"]},
+        "acls": [
+            {"action":"accept","src":["client@"],"dst":["tag:server:443"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    store.set(doc, raw.to_string());
+
+    let mut nodes = vec![
+        PacketFilterNode {
+            id: 1,
+            user_id: Some(1),
+            user: Some("client".into()),
+            addrs: vec!["100.64.0.1".into()],
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PacketFilterNode {
+            id: 2,
+            user_id: Some(2),
+            user: Some("ops".into()),
+            addrs: vec!["100.64.0.2".into()],
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+    ];
+
+    assert!(
+        store
+            .filter_rules_for_node(&nodes, 2)
+            .expect("policy is loaded")
+            .is_empty(),
+        "first lookup must not cache an empty tag match for later node contexts"
+    );
+
+    nodes[1].tags = vec!["tag:server".into()];
+    let tagged_rules = store
+        .filter_rules_for_node(&nodes, 2)
+        .expect("policy is loaded");
+    assert_eq!(tagged_rules.len(), 1);
+    assert_eq!(tagged_rules[0].src_ips, vec!["100.64.0.1"]);
+    assert_eq!(tagged_rules[0].dst_ports.len(), 1);
+    assert_eq!(tagged_rules[0].dst_ports[0].ip, "100.64.0.2");
+    assert_eq!(tagged_rules[0].dst_ports[0].ports.first, 443);
+    assert_eq!(tagged_rules[0].dst_ports[0].ports.last, 443);
+
+    nodes[1].tags.clear();
+    assert!(
+        store
+            .filter_rules_for_node(&nodes, 2)
+            .expect("policy is loaded")
+            .is_empty(),
+        "removing the tag must also drop the previously allowed matcher"
+    );
 }
 
 // ---------------------------------------------------------------------------

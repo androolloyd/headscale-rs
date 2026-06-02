@@ -789,6 +789,9 @@ Recent coverage note (2026-06-02): residual utility parser stderr coverage now
 pins current-upstream `completion --no-descriptions`, `completion bash
 --no-descriptions -- bad`, and `generate private-key --force -x` one-line
 Cobra errors without adding any Octra-only CLI behavior to the parity ledger.
+Follow-up snapshots now cover the same `--no-descriptions -- bad` separator
+shape for `completion powershell` and `completion zsh`, completing that current
+upstream shell-helper residual matrix beside the existing bash/fish cases.
 
 Recent coverage note (2026-06-02): CLI process snapshots now pin
 current-upstream headscale-go `171fd7a3` default-config warning stderr for

@@ -2594,14 +2594,29 @@ fn residual_current_upstream_parser_edges_match_stderr_snapshots() {
 }
 
 #[test]
-fn completion_fish_no_descriptions_dashdash_unknown_command_matches_current_upstream() {
-    assert_stderr_snapshot(
-        &["completion", "fish", "--no-descriptions", "--", "bad"],
-        1,
-        include_str!(
-            "snapshots/utility_completion_fish_no_descriptions_dashdash_unknown_command.stderr"
+fn completion_no_descriptions_dashdash_unknown_commands_match_current_upstream() {
+    for (args, expected) in [
+        (
+            &["completion", "fish", "--no-descriptions", "--", "bad"][..],
+            include_str!(
+                "snapshots/utility_completion_fish_no_descriptions_dashdash_unknown_command.stderr"
+            ),
         ),
-    );
+        (
+            &["completion", "powershell", "--no-descriptions", "--", "bad"][..],
+            include_str!(
+                "snapshots/utility_completion_powershell_no_descriptions_dashdash_unknown_command.stderr"
+            ),
+        ),
+        (
+            &["completion", "zsh", "--no-descriptions", "--", "bad"][..],
+            include_str!(
+                "snapshots/utility_completion_zsh_no_descriptions_dashdash_unknown_command.stderr"
+            ),
+        ),
+    ] {
+        assert_stderr_snapshot(args, 1, expected);
+    }
 }
 
 #[test]

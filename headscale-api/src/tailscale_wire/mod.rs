@@ -4299,7 +4299,7 @@ impl MachineRegistry {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = expiry;
                     NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
+                        PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
                         node_id,
                     )
                 }
@@ -4359,7 +4359,7 @@ impl MachineRegistry {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = Some(now);
                     NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::origin(MapChangeReason::KeyExpiry, node_id),
+                        PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
                         node_id,
                     )
                 }
@@ -7149,7 +7149,7 @@ mod registry_tests {
             vec![
                 "node added",
                 "route update",
-                "key expiry",
+                "node added",
                 "node online",
                 "node offline",
                 "peers removed",
@@ -7161,7 +7161,7 @@ mod registry_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             types,
-            vec!["peers", "peers", "patch", "policy", "policy", "peers"]
+            vec!["peers", "peers", "peers", "policy", "policy", "peers"]
         );
         assert!(
             changes
@@ -7177,7 +7177,7 @@ mod registry_tests {
         assert_eq!(changes[1].content.peers_changed, vec![node_id]);
         assert_eq!(changes[2].origin_node_id, Some(node_id));
         assert_eq!(changes[2].target_node_id, None);
-        assert_eq!(changes[2].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[2].content.peers_changed, vec![node_id]);
         assert_eq!(changes[3].target_node_id, None);
         assert_eq!(
             changes[3].reason_labels(),

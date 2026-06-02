@@ -572,7 +572,11 @@ active observer `/map` stream with an incremental `PeersChanged` delta for the
 reauthenticated node, without emitting DNS/config, peer-removal, or patch
 payloads. Admin rename churn now mirrors headscale-go's self-map response path:
 the renamed node receives a self `Node` update without peer, DNS, DERP,
-user-profile, packet-filter, or SSH-policy payloads.
+user-profile, packet-filter, or SSH-policy payloads, while connected observers
+receive the upstream `node added`/`PeersChanged` update with the renamed peer.
+Direct admin expiry/logout churn now also follows upstream `SetNodeExpiry` by
+emitting `node added` full peer updates; scheduled expiry scanning remains the
+`key expiry` patch path.
 
 Recent coverage note (2026-06-02): runtime debug/config parity now covers the
 upstream-shaped `derp:` projection, including embedded-region precedence,

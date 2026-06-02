@@ -1627,6 +1627,7 @@ async fn map_inner(
                                     &mapresponse_debug,
                                     public_control_url.as_deref().unwrap_or(""),
                                     PeerDeltaOptions::registry_change(),
+                                    &BTreeSet::new(),
                                 )
                             })
                         }
@@ -1657,6 +1658,7 @@ async fn map_inner(
                             &mapresponse_debug,
                             public_control_url.as_deref().unwrap_or(""),
                             PeerDeltaOptions::policy_change(),
+                            &BTreeSet::new(),
                         )
                     }
                     () = &mut dns_changed => {
@@ -2005,7 +2007,15 @@ fn rebuild_map_batch_chunk(
         mapresponse_debug,
         public_control_url,
         map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
+        &map_batch_forced_full_peer_ids(changes),
     )
+}
+
+fn map_batch_forced_full_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
+    changes
+        .iter()
+        .flat_map(|change| change.content.peers_changed.iter().copied())
+        .collect()
 }
 
 fn rebuild_peer_delta_chunk(
@@ -2023,6 +2033,7 @@ fn rebuild_peer_delta_chunk(
     mapresponse_debug: &MapResponseDebugStore,
     public_control_url: &str,
     options: PeerDeltaOptions,
+    force_full_peer_ids: &BTreeSet<u64>,
 ) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
         return Some((
@@ -2099,6 +2110,10 @@ fn rebuild_peer_delta_chunk(
     let mut peer_patches = Vec::new();
     let mut full_peers_changed = Vec::new();
     for peer in peers_changed {
+        if force_full_peer_ids.contains(&peer.id) {
+            full_peers_changed.push(peer);
+            continue;
+        }
         match last_peer_state.get(&peer.id) {
             None => full_peers_changed.push(peer),
             Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
@@ -6830,7 +6845,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_peer_key_expiry_uses_peer_changed_patch() {
+    async fn stream_true_direct_peer_expiry_uses_full_peer_update() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -6849,20 +6864,16 @@ mod tests {
 
         let mr = next_zstd_map_response(&mut body).await;
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_removed.is_empty());
-        assert_eq!(mr.peers_changed_patch.len(), 1);
-        let patch = &mr.peers_changed_patch[0];
-        assert_eq!(patch.node_id, stable_id_from_key(&a));
-        assert!(patch.endpoints.is_empty());
-        assert_eq!(patch.derp_region, 0);
-        assert!(patch.online.is_none());
-        assert!(patch.last_seen.is_none());
-        assert_eq!(patch.key_expiry, Some(expiry));
+        assert!(mr.peers_changed_patch.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        let peer = &mr.peers_changed[0];
+        assert_eq!(peer.id, stable_id_from_key(&a));
+        assert_eq!(peer.key_expiry, Some(expiry));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_worker_batched_key_expiry_updates_wait_for_map_tick() {
+    async fn stream_true_worker_batched_direct_expiry_updates_wait_for_map_tick() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -6911,7 +6922,7 @@ mod tests {
             .iter()
             .map(MapChange::reason_label)
             .collect::<Vec<_>>();
-        assert_eq!(new_labels, vec!["key expiry", "key expiry"]);
+        assert_eq!(new_labels, vec!["node added", "node added"]);
 
         let observer_id = stable_id_from_key(&observer);
         let pending = state.machines.pending_map_changes();
@@ -6921,7 +6932,7 @@ mod tests {
             .iter()
             .flat_map(MapChange::reason_labels)
             .collect::<Vec<_>>();
-        assert_eq!(pending_labels, vec!["key expiry", "key expiry"]);
+        assert_eq!(pending_labels, vec!["node added", "node added"]);
 
         tokio::task::yield_now().await;
         let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
@@ -6933,15 +6944,15 @@ mod tests {
 
         let mr = next_zstd_map_response(&mut body).await;
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_removed.is_empty());
-        let patches = mr
-            .peers_changed_patch
+        assert!(mr.peers_changed_patch.is_empty());
+        let changed = mr
+            .peers_changed
             .iter()
-            .map(|patch| (patch.node_id, patch.key_expiry))
+            .map(|peer| (peer.id, peer.key_expiry))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            patches,
+            changed,
             BTreeMap::from([
                 (stable_id_from_key(&a), Some(expiry_a)),
                 (stable_id_from_key(&b), Some(expiry_b)),

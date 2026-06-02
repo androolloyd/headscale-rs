@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-01 22:13 ADT
+Updated: 2026-06-02 02:17 ADT
 
 ## Current State
 
@@ -16,6 +16,14 @@ Updated: 2026-06-01 22:13 ADT
 
 Recent accepted slices:
 
+- Current map-churn slice aligns direct admin expiry/logout with
+  headscale-go `SetNodeExpiry`: live observers receive `node added`
+  full-peer updates, while scheduled expiry scanning remains the
+  `key expiry` patch path.
+- Current map-churn slice also aligns admin rename observer churn with
+  headscale-go's persisted-node fallback: the renamed node receives a
+  self-only `Node` update and connected observers receive a `node added`
+  `PeersChanged` update containing the renamed peer.
 - `b7380f6` added a headscale-go-shaped `api_keys` migration for
   feature-gated Postgres work.
 - `b7380f6` added Postgres API-key foundation primitives for create, get/list,

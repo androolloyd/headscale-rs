@@ -2749,3 +2749,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   covers another auth-session plus policy/config map-churn restart path, but
   live execution is intentionally deferred here and broader production-process
   route, API-auth/session, and wider lifecycle mutation breadth still remains.
+
+## 2026-06-02 Postgres prefix-family SSH policy backfill restart slice
+
+- Added paired
+  `postgres-prefix-family-v4-to-dual-backfill-ssh-policy-restart`
+  Rust/headscale-go stock-client rows. The shared prefix-family backfill
+  harness now has a `REAL_CLIENT_PREFIX_MIGRATION_EDGE=ssh-policy-restart`
+  path that loads the production SSH policy, registers two SSH-enabled clients
+  under IPv4-only, restarts into dual-stack, runs `nodes backfillips`, and
+  reasserts dual-stack peer-map addresses plus bidirectional `tailscale ssh`
+  allow behavior after backfill and after the final production restart.
+- This closes `p1-production-backfill-restart-edges`; the backlog now tracks
+  four open parity items.

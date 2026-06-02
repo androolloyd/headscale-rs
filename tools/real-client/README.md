@@ -149,7 +149,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env |
 | Database | `postgres-ssh-localpart` | `postgres-ssh-localpart-smoke.sh` | `postgres-ssh-localpart-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart login users from profile emails |
-| Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants and denial status/stderr |
+| Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and denial status/stderr |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |
@@ -270,7 +270,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
-| SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants and exact denial status/stderr |
+| SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and exact denial status/stderr |
 | SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables |
 
 ## Local and CI Execution

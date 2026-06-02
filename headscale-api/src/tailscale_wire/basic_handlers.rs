@@ -2599,13 +2599,12 @@ fn resolve_debug_ping_node(state: &WireState, query: &str) -> Option<u64> {
 
 fn debug_ping_connected_nodes(state: &WireState) -> Vec<DebugPingConnectedNode> {
     let active = state.machines.active_connections();
-    let now = chrono::Utc::now();
     let snapshot = state.machines.snapshot();
     let mut nodes = snapshot
         .iter()
         .filter_map(|(node_key, rec)| {
             let id = rec.stable_node_id_for_key(node_key);
-            if active.get(&id).copied().unwrap_or(0) == 0 || rec.is_expired_at(now) {
+            if active.get(&id).copied().unwrap_or(0) == 0 {
                 return None;
             }
             let mut ips = Vec::new();
@@ -5788,6 +5787,34 @@ mod tests {
         assert!(body.contains("Ping Node"));
         assert!(body.contains(&format!("/debug/ping?node={node_id}")));
         assert!(body.contains("host-32"));
+        assert_eq!(state.pings.queued_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn debug_ping_get_lists_connected_expired_nodes_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let node_key = "debug-ping-expired-node";
+        let node_id = stable_id_from_key(node_key);
+        let mut rec = record(node_key, 36, &[], &[]);
+        rec.expiry = Some(Utc::now() - chrono::Duration::seconds(1));
+        state.machines.upsert(node_key.to_string(), rec);
+        let _guard = MachineRegistry::track_stream_connection(state.machines.clone(), node_id);
+
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/ping")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(&format!("/debug/ping?node={node_id}")));
+        assert!(body.contains("host-36"));
         assert_eq!(state.pings.queued_len(), 0);
     }
 

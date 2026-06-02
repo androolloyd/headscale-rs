@@ -3647,9 +3647,12 @@ fn grpc_node_identifier_usage_errors_happen_before_connection() {
 
     for args in [
         &["nodes", "expire"][..],
+        &["nodes", "expire", "1"][..],
         &["nodes", "rename", "node-new"][..],
         &["nodes", "tag", "--tags", "tag:prod"][..],
+        &["nodes", "tag", "1", "--tags", "tag:prod"][..],
         &["nodes", "delete"][..],
+        &["nodes", "delete", "1"][..],
         &["nodes", "approve-routes", "--routes", "10.0.0.0/24"][..],
     ] {
         assert_config_stderr_snapshot(&config, args, 1, expected);

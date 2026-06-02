@@ -1052,6 +1052,30 @@ mod tests {
     }
 
     #[test]
+    fn ssh_tests_reject_empty_login_user_in_accept() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:server": ["alice@"]},
+                "ssh": [
+                    {"action": "accept", "src": ["alice@"], "dst": ["tag:server"], "users": ["root"]}
+                ],
+                "sshTests": [
+                    {"src": "alice@", "dst": ["tag:server"], "accept": [""]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "alice", "alice", "100.64.0.1", &[]),
+            node(2, "server", "bob", "100.64.0.2", &["tag:server"]),
+        ];
+
+        let err = check_policy_semantics(&doc, &nodes).unwrap_err();
+
+        assert!(err.contains(r#"alice@/"" -> server: expected ALLOWED, got DENIED"#));
+    }
+
+    #[test]
     fn ssh_tests_report_resolver_and_shape_failures_in_upstream_shape() {
         let nodes = vec![
             node(1, "alice", "alice", "100.64.0.1", &[]),

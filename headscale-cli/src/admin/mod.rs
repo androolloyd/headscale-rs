@@ -765,10 +765,10 @@ pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminEr
 
 fn validate_grpc_node_identifier(cmd: &NodesCmd) -> Result<(), AdminError> {
     let missing = match cmd {
-        NodesCmd::Expire { id, identifier, .. }
-        | NodesCmd::Tags { id, identifier, .. }
-        | NodesCmd::Delete { id, identifier } => id.is_none() && identifier.is_none(),
-        NodesCmd::Rename { identifier, .. } => identifier.is_none(),
+        NodesCmd::Expire { identifier, .. }
+        | NodesCmd::Tags { identifier, .. }
+        | NodesCmd::Rename { identifier, .. }
+        | NodesCmd::Delete { identifier, .. } => identifier.is_none(),
         NodesCmd::ApproveRoutes { id, .. } => id.is_none(),
         NodesCmd::List { .. }
         | NodesCmd::ListRoutes { .. }
@@ -794,18 +794,34 @@ fn validate_grpc_node_id_values(cmd: &NodesCmd) -> Result<(), AdminError> {
         | NodesCmd::ApproveRoutes { id: Some(id), .. } => {
             nodes::parse_node_id(id)?;
         }
-        NodesCmd::Expire { id, identifier, .. }
-        | NodesCmd::Tags { id, identifier, .. }
-        | NodesCmd::Delete { id, identifier } => {
-            if let (None, Some(id)) | (Some(id), None) = (id.as_ref(), identifier.as_ref()) {
-                nodes::parse_node_id(id)?;
-            }
+        NodesCmd::Expire {
+            identifier: Some(id),
+            ..
+        }
+        | NodesCmd::Tags {
+            identifier: Some(id),
+            ..
+        }
+        | NodesCmd::Delete {
+            identifier: Some(id),
+            ..
+        } => {
+            nodes::parse_node_id(id)?;
         }
         NodesCmd::List { .. }
         | NodesCmd::ListRoutes { id: None }
         | NodesCmd::Show { .. }
         | NodesCmd::Register { .. }
         | NodesCmd::BackfillIps { .. }
+        | NodesCmd::Expire {
+            identifier: None, ..
+        }
+        | NodesCmd::Tags {
+            identifier: None, ..
+        }
+        | NodesCmd::Delete {
+            identifier: None, ..
+        }
         | NodesCmd::Rename {
             identifier: None, ..
         }

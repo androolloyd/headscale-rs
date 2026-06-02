@@ -582,6 +582,16 @@ edge behavior for declared message lengths, padded unknown attributes before
 `XOR-MAPPED-ADDRESS`, `MAPPED-ADDRESS` fallback, alternate XOR attribute
 `0x8020`, and truncated binding-request drops.
 
+Recent coverage note (2026-06-02): `sshTests` unit coverage now pins the
+current upstream empty-login-user edge: `accept: [""]` fails closed and renders
+the attempted login user as `""` in the failed assertion body.
+
+Recent coverage note (2026-06-02): CLI/debug parity tightened around two
+upstream-only edges. gRPC `nodes expire`, `nodes tag`, and `nodes delete` now
+reject positional node IDs before any connection attempt and require
+`--identifier`, while `/debug/ping` lists connected nodes from the map-batcher
+view even if their node expiry timestamp has passed.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

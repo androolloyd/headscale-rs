@@ -1700,3 +1700,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   explicit SQLite `database.type` block for Rust production-server rows, closing
   the CI failure observed in the `authkey-relogin-deleted` smoke after stricter
   config validation landed.
+
+## 2026-06-02 route-health policy-delta parity slice
+
+- Route-health primary-route changes now classify as upstream-style policy
+  deltas instead of peer-only route deltas: `RouteHealthUpdate` sets
+  `include_policy` plus `requires_runtime_peer_computation`, matching current
+  headscale-go's HA prober dispatch of `change.PolicyChange()`.
+- The existing `Stream:true` route-health failover regression now asserts the
+  policy-delta wire shape while still proving old and new primary routers are
+  emitted as peer changes with updated `AllowedIPs` and `PrimaryRoutes`.

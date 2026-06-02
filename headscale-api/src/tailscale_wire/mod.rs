@@ -211,8 +211,7 @@ impl MapChangeContent {
             }
             MapChangeReason::NodeAdded
             | MapChangeReason::NodeUpdated
-            | MapChangeReason::RouteUpdate
-            | MapChangeReason::RouteHealthUpdate => {
+            | MapChangeReason::RouteUpdate => {
                 if let Some(node_id) = node_id {
                     content.peers_changed.push(node_id);
                 } else {
@@ -236,7 +235,9 @@ impl MapChangeContent {
                     content.send_all_peers = true;
                 }
             }
-            MapChangeReason::PolicyChange | MapChangeReason::TagUpdate => {
+            MapChangeReason::PolicyChange
+            | MapChangeReason::TagUpdate
+            | MapChangeReason::RouteHealthUpdate => {
                 content.include_policy = true;
                 content.requires_runtime_peer_computation = true;
             }
@@ -7238,6 +7239,22 @@ mod registry_tests {
         assert_eq!(policy_change.change_type(), "policy");
         assert!(!policy_change.content.include_dns);
         assert!(policy_change.content.include_policy);
+
+        let route_health_change =
+            PendingMapChange::broadcast_peer(MapChangeReason::RouteHealthUpdate, node_id)
+                .into_change(9);
+        assert_eq!(
+            route_health_change.reason_labels(),
+            vec!["route health update"]
+        );
+        assert_eq!(route_health_change.change_type(), "policy");
+        assert!(route_health_change.content.peers_changed.is_empty());
+        assert!(route_health_change.content.include_policy);
+        assert!(
+            route_health_change
+                .content
+                .requires_runtime_peer_computation
+        );
 
         let tag_change = PendingMapChange::global(MapChangeReason::TagUpdate).into_change(6);
         assert_eq!(tag_change.reason_labels(), vec!["tag update"]);

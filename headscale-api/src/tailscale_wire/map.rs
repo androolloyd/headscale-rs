@@ -7763,6 +7763,10 @@ mod tests {
         assert!(delta.peers.is_empty());
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "route-health failover uses upstream policy-change delta shape"
+        );
 
         let old_primary = delta
             .peers_changed

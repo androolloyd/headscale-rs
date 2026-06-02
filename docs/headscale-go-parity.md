@@ -43,7 +43,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   `taildrop.enabled` capability gating in `e625727`, upstream
   default log format `text` in `c6c583b`, and current-upstream
   `node.expiry` parsing/env/debug projection plus non-tagged
-  registration default expiry, public `grants`/`nodeAttrs`
+  registration default expiry plus tagged zero-expiry restart
+  preservation, public `grants`/`nodeAttrs`
   parsing, public `ipsets` rejection, user CRUD policy/map refresh wakes, per-viewer
   `grants[].via` route steering, current-upstream config-schema
   parsing/debug projection, SQLite import fixture matrix coverage,
@@ -588,6 +589,13 @@ receive the upstream `node added`/`PeersChanged` update with the renamed peer.
 Direct admin expiry/logout churn now also follows upstream `SetNodeExpiry` by
 emitting `node added` full peer updates; scheduled expiry scanning remains the
 `key expiry` patch path.
+
+Recent coverage note (2026-06-02): tagged existing-node register requests with
+`Auth=nil` and Go zero `Expiry` now follow upstream's tailscaled restart path:
+Rust returns the current tagged `RegisterResponse` identity and preserves nil
+node-key expiry instead of treating the zero timestamp as logout. Focused
+register coverage pins the edge against headscale-go
+`TestTaggedNodeRestartPreservesNilExpiry`.
 
 Recent coverage note (2026-06-02): runtime debug/config parity now covers the
 upstream-shaped `derp:` projection, including embedded-region precedence,

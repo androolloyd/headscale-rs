@@ -209,6 +209,7 @@ async fn register_inner(
     let default_expiry = configured_node_expiry(state.runtime_config.as_ref(), now);
 
     if let Some(expiry) = body.expiry
+        && !is_go_zero_expiry(expiry)
         && expiry <= now
         && let Some(record) = state.machines.get(&node_key_hex)
     {
@@ -238,7 +239,9 @@ async fn register_inner(
                 return Json(node_key_expired_response(false)).into_response();
             }
             if let Some(expiry) = body.expiry {
-                if expiry > now {
+                if is_go_zero_expiry(expiry) {
+                    return Json(register_response_for_record(&record)).into_response();
+                } else if expiry > now {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorBody {
@@ -745,6 +748,15 @@ fn effective_register_expiry(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
     expiry.filter(|expiry| *expiry > now).or(default_expiry)
+}
+
+fn is_go_zero_expiry(expiry: chrono::DateTime<chrono::Utc>) -> bool {
+    expiry
+        == chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+            .expect("valid Go zero date")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid Go zero time")
+            .and_utc()
 }
 
 fn preauth_error_response(err: RedeemError) -> axum::response::Response {
@@ -2129,6 +2141,73 @@ mod tests {
         assert!(
             rec.expiry.is_none(),
             "tagged reauth keeps node-key expiry disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn tagged_existing_node_zero_expiry_restart_preserves_nil_expiry() {
+        let (state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-tagged-zero-restart";
+        redeemer.insert_full(
+            authkey,
+            RedeemOk::for_user("alice").tags(vec!["tag:agent".into()]),
+        );
+        let app = router(state.clone());
+        let node_key_hex = "1f".repeat(32);
+        let body = req_body(&node_key_hex, authkey);
+
+        let first = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.forced_tags, vec!["tag:agent"]);
+        assert!(rec.expiry.is_none());
+
+        let restart_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Expiry": "0001-01-01T00:00:00Z",
+        });
+        let restart = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&restart_body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restart.status(), StatusCode::OK);
+        let raw = to_bytes(restart.into_body(), 8192).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+        assert_eq!(
+            rr.user.id,
+            crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID
+        );
+        assert_eq!(rr.login.login_name, "tagged-devices");
+
+        let rec = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(rec.forced_tags, vec!["tag:agent"]);
+        assert!(!rec.is_expired_at(chrono::Utc::now()));
+        assert!(
+            rec.expiry.is_none(),
+            "tagged node restart must keep nil expiry, not a Go zero timestamp"
         );
     }
 

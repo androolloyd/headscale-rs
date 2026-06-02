@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 09:21 ADT
+Updated: 2026-06-02 09:43 ADT
 
 ## Current State
 
@@ -16,6 +16,10 @@ Updated: 2026-06-02 09:21 ADT
 
 Recent accepted slices:
 
+- Current tag-expiry slice matches headscale-go's tagged-node restart guard:
+  existing tagged nodes that send `Auth=nil` with Go zero `Expiry` return the
+  current tagged register identity and keep nil node-key expiry instead of
+  treating the zero timestamp as logout.
 - Current map-churn slice suppresses stale NodeStore worker upsert churn when a
   same-batch delete removes the node before the batch completes. Upsert-style
   map-change wakes now revalidate final node presence, and focused registry plus

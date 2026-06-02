@@ -191,12 +191,20 @@ Current-head audit overlay, refreshed 2026-05-30:
   native DERP stock-client/runtime parity beyond the now-wired native relay
   config path, registry-backed verify-client admission, raw-TLS fast-start
   dispatch, shutdown health/restarting frames, focused production restart
-  reconnect row, and restart map-stability pin, and remaining production
-  backfill/restart edges beyond the covered restart-persistence row.
+  reconnect row, restart map-stability pin, and Rust-only policy-reload
+  map/health/relay stability row, and remaining production backfill/restart
+  edges beyond the covered restart-persistence row.
 - Remaining P2 current-head gaps from the audit: broader CLI output/error
   snapshots for residual serve/output drift, narrower gRPC/remote/server error
   text matrices, and Octra-side adaptation to consume the generic no-health
   control router instead of hand-picking stock public control routes.
+- Current branch adds `postgres-derp-native-reload` as Rust-only native DERP
+  stock-client coverage: two Postgres-backed clients start under isolated
+  policy, snapshot the native DERP map, reload policy to expose the peer, and
+  then assert stable region metadata, relay ping through the native region, and
+  clear DERP status health. The headscale-go matrix script is an explicit
+  no-equivalent skip so private/sidecar DERP coverage stays separate from
+  headscale-rs native DERP claims.
 - Current branch closes the hidden `dumpConfig` no-config default-warning
   slice: process snapshots now pin headscale-go's timestamped
   `WRN no config file found, using defaults` line before the human,

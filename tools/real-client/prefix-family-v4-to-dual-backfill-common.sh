@@ -485,7 +485,8 @@ assert_status_family_file() {
 wait_for_client_family() {
   local expected="$1"
   local label="$2"
-  local path="${work_dir}/${client_name}.${expected}.status.json"
+  local slug="${label//[^[:alnum:]_.-]/-}"
+  local path="${work_dir}/${client_name}.${slug}.${expected}.status.json"
   wait_for "${label}" "docker exec '${client_name}' tailscale status --json >'${path}' 2>/dev/null && assert_status_family_file '${path}' '${expected}'" || {
     dump_client_debug
     return 1
@@ -531,8 +532,10 @@ run_backfill() {
 
 assert_node_state_family() {
   local expected_family="$1"
-  echo "::group::assert ${target} node state after backfill"
-  headscale_cmd -o json nodes list >"${work_dir}/nodes-after-backfill.json"
+  local label="${2:-after-backfill}"
+  local nodes_path="${work_dir}/nodes-${label}.json"
+  echo "::group::assert ${target} node state ${label}"
+  headscale_cmd -o json nodes list >"${nodes_path}"
   ruby -rjson -e '
     payload = JSON.parse(File.read(ARGV.fetch(0)))
     expected_family = ARGV.fetch(2)
@@ -555,7 +558,7 @@ assert_node_state_family() {
       abort("unsupported expected family #{expected_family.inspect}")
     end
     puts JSON.pretty_generate(node)
-  ' "${work_dir}/nodes-after-backfill.json" "${client_name}" "${expected_family}"
+  ' "${nodes_path}" "${client_name}" "${expected_family}"
 
   local db_row
   case "${database_backend}" in
@@ -636,6 +639,14 @@ echo "::endgroup::"
 
 run_backfill
 wait_for_client_family "${final_family}" "${final_family} client netmap after backfill"
-assert_node_state_family "${final_family}"
+assert_node_state_family "${final_family}" "after-backfill"
+
+echo "::group::restart ${target} server after ${backfill_label} backfill"
+stop_server
+start_server "${final_family}"
+echo "::endgroup::"
+
+wait_for_client_family "${final_family}" "${final_family} client netmap after post-backfill restart"
+assert_node_state_family "${final_family}" "after-backfill-restart"
 
 echo "${target} prefix-family ${migration_case} backfill real-client smoke passed"

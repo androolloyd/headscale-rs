@@ -119,9 +119,9 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-dns-hot-reload` | `postgres-dns-hot-reload-smoke.sh` | `postgres-dns-hot-reload-headscale-go-smoke.sh` | Production Postgres DNS `extra_records` hot reload plus client resolver lookup |
 | Database | `postgres-magicdns-ipv6-only` | `postgres-magicdns-ipv6-only-smoke.sh` | `postgres-magicdns-ipv6-only-headscale-go-smoke.sh` | Production Postgres MagicDNS with IPv6-only prefix-family allocation |
 | Database | `postgres-prefix-family-dual-stack` | `postgres-prefix-family-dual-stack-smoke.sh` | `postgres-prefix-family-dual-stack-headscale-go-smoke.sh` | Production Postgres dual-stack prefix-family allocation |
-| Database | `postgres-prefix-family-v4-to-dual-backfill` | `postgres-prefix-family-v4-to-dual-backfill-smoke.sh` | `postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | Production Postgres IPv4-to-dual-stack backfill after prefix migration |
-| Database | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv4-only backfill after prefix-family removal |
-| Database | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv6-only backfill after prefix-family removal |
+| Database | `postgres-prefix-family-v4-to-dual-backfill` | `postgres-prefix-family-v4-to-dual-backfill-smoke.sh` | `postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | Production Postgres IPv4-to-dual-stack backfill plus post-backfill restart hydration after prefix migration |
+| Database | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv4-only backfill plus post-backfill restart hydration after prefix-family removal |
+| Database | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `postgres-prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Production Postgres dual-stack-to-IPv6-only backfill plus post-backfill restart hydration after prefix-family removal |
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
 | Database | `postgres-prefix-family-ipv6-only` | `postgres-prefix-family-ipv6-only-smoke.sh` | `postgres-prefix-family-ipv6-only-headscale-go-smoke.sh` | Production Postgres IPv6-only prefix-family allocation |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
@@ -229,9 +229,9 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
 | Addresses | `prefix-family-dual-stack` | `prefix-family-dual-stack-smoke.sh` | `prefix-family-dual-stack-headscale-go-smoke.sh` | Dual-stack prefix-family allocation |
-| Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill after prefix migration |
-| Addresses | `prefix-family-dual-stack-to-ipv4-only-backfill` | `prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv4-only backfill after prefix-family removal |
-| Addresses | `prefix-family-dual-stack-to-ipv6-only-backfill` | `prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv6-only backfill after prefix-family removal |
+| Addresses | `prefix-family-v4-to-dual-backfill` | `prefix-family-v4-to-dual-backfill-smoke.sh` | `prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh` | IPv4-to-dual-stack backfill plus post-backfill restart hydration after prefix migration |
+| Addresses | `prefix-family-dual-stack-to-ipv4-only-backfill` | `prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv4-only backfill plus post-backfill restart hydration after prefix-family removal |
+| Addresses | `prefix-family-dual-stack-to-ipv6-only-backfill` | `prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh` | `prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh` | Dual-stack-to-IPv6-only backfill plus post-backfill restart hydration after prefix-family removal |
 | Addresses | `prefix-family-ipv4-only` | `prefix-family-ipv4-only-smoke.sh` | `prefix-family-ipv4-only-headscale-go-smoke.sh` | IPv4-only prefix-family allocation |
 | Addresses | `prefix-family-ipv6-only` | `prefix-family-ipv6-only-smoke.sh` | `prefix-family-ipv6-only-headscale-go-smoke.sh` | IPv6-only prefix-family allocation |
 | ACL | `acl-allow` | `acl-allow-smoke.sh` | `acl-allow-headscale-go-smoke.sh` | Allowed peers visible |
@@ -793,7 +793,9 @@ registration with the custom MagicDNS base-domain config surface over the same
 temporary Postgres process path.
 The `postgres-prefix-family-dual-stack`, `postgres-prefix-family-ipv4-only`,
 and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family
-allocation through the same path:
+allocation through the same path. The paired prefix-family backfill variants
+restart again after `nodes backfillips` and reassert stock-client netmap plus
+database node address family, pinning post-backfill persistent hydration:
 
 ```sh
 tools/real-client/postgres-authkey-nonreusable-smoke.sh
@@ -824,6 +826,12 @@ tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
 tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-smoke.sh
 tools/real-client/postgres-prefix-family-dual-stack-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-v4-to-dual-backfill-smoke.sh
+tools/real-client/postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh
+tools/real-client/postgres-prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
 tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
 tools/real-client/postgres-prefix-family-ipv6-only-smoke.sh

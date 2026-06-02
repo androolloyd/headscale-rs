@@ -91,7 +91,7 @@
       "id": "p1-production-backfill-restart-edges",
       "priority": "P1",
       "lane": "Address allocation and persistent runtime",
-      "status": "open",
+      "status": "in_progress",
       "type": "coverage/evidence",
       "owner_scope": [
         "tools/real-client/*prefix-family*",

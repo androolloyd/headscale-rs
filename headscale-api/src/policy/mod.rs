@@ -317,6 +317,28 @@ impl PolicyStore {
         ))
     }
 
+    /// True iff `viewer_id` is authorized to receive `route` from
+    /// `peer_id`, without treating direct peer node-IP visibility as
+    /// route authorization. Returns `None` when no policy is loaded,
+    /// which callers should treat as the legacy open default.
+    pub fn can_access_route_for_peer(
+        &self,
+        nodes: &[PeerMapNode],
+        viewer_id: u64,
+        peer_id: u64,
+        route: &str,
+    ) -> Option<bool> {
+        let state = self.inner.state.read();
+        let doc = state.doc.as_ref()?;
+        let Some(viewer) = nodes.iter().find(|node| node.id == viewer_id) else {
+            return Some(false);
+        };
+        let Some(peer) = nodes.iter().find(|node| node.id == peer_id) else {
+            return Some(false);
+        };
+        Some(doc.can_access_route(&viewer.view(), &peer.view(), route))
+    }
+
     /// Wake every parked `/map` long-poller without changing the
     /// loaded policy bytes.
     ///

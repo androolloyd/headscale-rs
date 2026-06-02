@@ -1103,6 +1103,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(admin::output::format_error(output_format, &error));
     }
 
+    if let Some(error) = users_rename_required_flag_error(command_parts) {
+        return Some(admin::output::format_error(output_format, &error));
+    }
+
     if users_create_missing_name_error(command_parts) {
         return Some(admin::output::format_error(
             output_format,
@@ -1332,6 +1336,61 @@ fn debug_create_node_required_flag_error(parts: &[&str]) -> Option<String> {
     }
 
     (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))
+}
+
+fn users_rename_required_flag_error(parts: &[&str]) -> Option<String> {
+    let ["users" | "user", "rename" | "mv", tail @ ..] = parts else {
+        return None;
+    };
+
+    let mut saw_new_name = false;
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" => return None,
+            "-r" | "--new-name" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_new_name = true;
+                i += 2;
+            }
+            value if value.starts_with("--new-name=") => {
+                saw_new_name = true;
+                i += 1;
+            }
+            value if value.starts_with("-r") && value.len() > 2 => {
+                saw_new_name = true;
+                i += 1;
+            }
+            "-i" | "--identifier" | "-n" | "--name" | "-c" | "--config" | "-o" | "--output"
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+            }
+            "-i" | "--identifier" | "-n" | "--name" | "-c" | "--config" | "-o" | "--output" => {
+                return None;
+            }
+            "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
+            value
+                if value.starts_with("--identifier=")
+                    || value.starts_with("--name=")
+                    || value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-i") && value.len() > 2
+                    || value.starts_with("-n") && value.len() > 2
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => i += 1,
+        }
+    }
+
+    (!saw_new_name).then(|| r#"required flag(s) "new-name" not set"#.to_string())
 }
 
 fn users_create_missing_name_error(parts: &[&str]) -> bool {

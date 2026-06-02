@@ -52,7 +52,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   restart-persistence smoke wiring with debug batcher state assertions,
   route-withdraw approval
   preservation, paired route-via policy reload/restart and multi-prefix
-  restart stock-client coverage, route-health policy reload stock-client coverage,
+  restart stock-client coverage, viewer-specific route-prefix reduction
+  before peer `AllowedIPs`/`PrimaryRoutes` emission, route-health policy reload stock-client coverage,
   production route-health restart stock-client coverage,
   expanded SSH real-client coverage, current-upstream SSH
   `localpart:*@domain` login-user compiler and `sshTests` semantics,
@@ -127,8 +128,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   utility-command unknown shorthand flag and checked-in OpenAPI
   `disableExpiry` parity are closed in
   `bd73e18`, public gRPC reflection filename/dependency parity is
-  closed in `0f0b943`, and `debug create-node` local required-flag
-  errors now match current upstream. Node `GivenName` handling now mirrors current
+  closed in `0f0b943`, and `debug create-node` plus `users rename`
+  local required-flag errors now match current upstream. Node `GivenName` handling now mirrors current
   upstream's Tailscale DNS-name path: registration preserves the raw
   client `Hostname`, auto-derives DNS labels with
   `dnsname.SanitizeHostname`-style rules plus `node` fallback and
@@ -139,7 +140,7 @@ Current-head audit overlay, refreshed 2026-05-30:
   config fields as current upstream Viper for server URL/listeners, remote
   gRPC security, and local Unix-socket path/permission. `configtest` now wraps
   validation failures with the upstream `configuration error: loading
-  configuration` context and validates absent `server`/`dns` blocks against
+  configuration` context, rejects missing `database.type`, and validates absent `server`/`dns` blocks against
   current-upstream defaults, including the empty `server_url`, missing noise
   private key, and default `dns.override_local_dns=true` nameserver fatal.
   Policy env overrides now match Viper for `HEADSCALE_POLICY_MODE` and

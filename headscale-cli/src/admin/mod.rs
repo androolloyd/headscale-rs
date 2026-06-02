@@ -283,7 +283,7 @@ pub enum UsersCmd {
         name: Option<String>,
         /// New username.
         #[arg(short = 'r', long = "new-name")]
-        new_name: String,
+        new_name: Option<String>,
     },
 }
 
@@ -602,6 +602,12 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
             )),
         };
     }
+    if let UsersCmd::Rename { new_name: None, .. } = cmd {
+        return Err(AdminError::Usage(
+            r#"required flag(s) "new-name" not set"#.into(),
+        ));
+    }
+
     let mut client = conn.build_grpc_client().await?;
     match cmd {
         UsersCmd::Create {
@@ -642,7 +648,16 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
             identifier,
             name,
             new_name,
-        } => users::rename_grpc(&mut client, *identifier, name.as_deref(), new_name, fmt).await,
+        } => {
+            users::rename_grpc(
+                &mut client,
+                *identifier,
+                name.as_deref(),
+                new_name.as_deref().unwrap_or_default(),
+                fmt,
+            )
+            .await
+        }
     }
 }
 
@@ -1519,7 +1534,7 @@ mod tests {
             .unwrap()
             .action,
             UsersCmd::Rename { name, new_name, .. }
-                if name.as_deref() == Some("alice") && new_name == "bob"
+                if name.as_deref() == Some("alice") && new_name.as_deref() == Some("bob")
         ));
     }
 

@@ -385,6 +385,16 @@ fn select_routes_for_viewer(
     let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
     let viewer_id = node_id_for_key(snapshot, self_node_key);
     let peer_id = node_id_for_key(snapshot, peer_node_key);
+
+    let route_allowed_by_policy = |route: &String| {
+        route_is_exit_default(route)
+            || policy
+                .can_access_route_for_peer(&nodes, viewer_id, peer_id, route)
+                .unwrap_or(true)
+    };
+    selected_primary.retain(route_allowed_by_policy);
+    allowed_routes.retain(route_allowed_by_policy);
+
     if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
         selected_primary.retain(|route| !via.exclude.contains(route));
         allowed_routes.retain(|route| !via.exclude.contains(route));
@@ -3181,6 +3191,65 @@ mod tests {
                 .allowed_ips
                 .iter()
                 .any(|route| route == "10.10.1.0/24")
+        );
+    }
+
+    #[tokio::test]
+    async fn map_response_reduces_peer_routes_by_viewer_policy() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["100.64.0.11:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "ad".repeat(32);
+        let router_key = "be".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            routed_record(&router_key, "router", 11, vec!["10.10.1.0/24".into()]),
+        );
+        let _router_guard = MachineRegistry::track_stream_connection(
+            state.machines.clone(),
+            stable_id_from_key(&router_key),
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{alice}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(mr.peers.len(), 1);
+        let peer = &mr.peers[0];
+        assert_eq!(peer.name, "router");
+        assert!(peer.allowed_ips.contains(&"100.64.0.11/32".to_string()));
+        assert!(
+            !peer.allowed_ips.contains(&"10.10.1.0/24".to_string()),
+            "node visibility must not grant route visibility"
+        );
+        assert!(
+            !peer.primary_routes.contains(&"10.10.1.0/24".to_string()),
+            "PrimaryRoutes must be reduced independently from peer visibility"
         );
     }
 

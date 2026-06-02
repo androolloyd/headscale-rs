@@ -3487,6 +3487,11 @@ fn implemented_admin_local_errors_match_snapshots() {
         include_str!("snapshots/users_create_missing_name.stderr"),
     );
     assert_stderr_snapshot(
+        &["users", "rename", "--name", "alice"],
+        1,
+        include_str!("snapshots/users_rename_missing_new_name.stderr"),
+    );
+    assert_stderr_snapshot(
         &["preauthkeys", "expire"],
         1,
         include_str!("snapshots/preauthkeys_missing_id.stderr"),

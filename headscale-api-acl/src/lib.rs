@@ -1885,6 +1885,21 @@ impl AclDoc {
             .any(|grant| self.grant_matches_node_or_route(grant, src, dst, dst_routes, port))
     }
 
+    /// Return true when `viewer` is authorized to use one route prefix
+    /// served by `peer`, without considering direct node-IP visibility.
+    ///
+    /// This is the route-prefix half of upstream `Node.CanAccessRoute`.
+    /// Map peer visibility can be granted by node IP access, but
+    /// peer `AllowedIPs`/`PrimaryRoutes` must be reduced independently.
+    pub fn can_access_route(
+        &self,
+        viewer: &NodeView<'_>,
+        peer: &NodeView<'_>,
+        route: &str,
+    ) -> bool {
+        self.regular_policy_allows_route(viewer, peer, route)
+    }
+
     /// Return the routes that `peer` should include or exclude for
     /// `viewer` because of upstream `grants[*].via` route steering.
     pub fn via_routes_for_peer(

@@ -1443,7 +1443,6 @@ impl CliConfig {
     pub(crate) fn validate_for_configtest(&self) -> Result<()> {
         self.oidc.validate().context("invalid OIDC configuration")?;
         self.validate_trusted_proxies()?;
-        self.validate_upstream_database_config()?;
         self.validate_policy_config()?;
 
         let default_server = ServerConfig::default();
@@ -1508,6 +1507,8 @@ impl CliConfig {
             }
         }
 
+        self.validate_upstream_database_config()?;
+
         Ok(())
     }
 
@@ -1548,12 +1549,10 @@ impl CliConfig {
 
     fn validate_upstream_database_config(&self) -> Result<()> {
         let Some(database) = &self.database else {
-            return Ok(());
+            bail!("database.type is required; supported values are sqlite, sqlite3, postgres");
         };
         let Some(database_type) = database.database_type.as_deref() else {
-            bail!(
-                "database.type is required when database is configured; supported values are sqlite, sqlite3, postgres"
-            );
+            bail!("database.type is required; supported values are sqlite, sqlite3, postgres");
         };
         match database_type {
             "sqlite" | "sqlite3" => {
@@ -3607,6 +3606,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: file
   path: policy.hujson
@@ -3630,6 +3631,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#;
@@ -3858,6 +3861,9 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   type: postgres
   postgres:
@@ -3930,10 +3936,23 @@ database:
     }
 
     #[test]
-    fn configtest_rejects_database_block_without_type() {
+    fn configtest_rejects_missing_database_type() {
         for source in [
             r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+            r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   postgres:
     host: localhost
@@ -3941,6 +3960,11 @@ database:
 "#,
             r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   sqlite:
     path: /var/lib/headscale/db.sqlite
@@ -3957,6 +3981,11 @@ database:
     fn configtest_rejects_postgresql_database_type_alias() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 database:
   type: postgresql
 "#;
@@ -4000,6 +4029,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 acme_url: "https://acme.example/directory"
 acme_email: "ops@example.com"
 tls_letsencrypt_hostname: "headscale.example"
@@ -4040,6 +4071,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_cache_dir: "/var/lib/headscale/acme-cache"
 tls_letsencrypt_listen: ":http"
@@ -4081,6 +4114,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_listen: "not-a-socket"
 tls_letsencrypt_challenge_type: "HTTP-01"
@@ -4104,6 +4139,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_listen: "not-a-socket"
 tls_letsencrypt_challenge_type: "TLS-ALPN-01"
@@ -4760,6 +4797,9 @@ private_key_path = "noise_private.key"
 magic_dns = true
 override_local_dns = false
 base_domain = "tail.example.org"
+
+[database]
+type = "sqlite"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -4782,6 +4822,9 @@ private_key_path = "noise_private.key"
 magic_dns = true
 override_local_dns = false
 base_domain = "tail.example.org"
+
+[database]
+type = "sqlite"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
@@ -4804,6 +4847,9 @@ private_key_path = "noise_private.key"
 magic_dns = true
 override_local_dns = false
 base_domain = "tail.example.org"
+
+[database]
+type = "sqlite"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();

@@ -2294,6 +2294,7 @@ struct NodeStoreManyUpdateOutcome {
     missing_node_keys: Vec<String>,
     affected_node_keys: Vec<String>,
     affected_node_ids: Vec<u64>,
+    final_presence_node_ids: Vec<u64>,
 }
 
 impl NodeStoreManyUpdateOutcome {
@@ -2306,7 +2307,45 @@ impl NodeStoreManyUpdateOutcome {
             missing_node_keys: Vec::new(),
             affected_node_keys: Vec::new(),
             affected_node_ids: Vec::new(),
+            final_presence_node_ids: Vec::new(),
         }
+    }
+
+    fn revalidate_final_presence_after_batch(
+        &mut self,
+        final_snapshot: &HashMap<String, MachineRecord>,
+    ) {
+        if self.final_presence_node_ids.is_empty() {
+            return;
+        }
+
+        let present = self
+            .final_presence_node_ids
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                final_snapshot
+                    .iter()
+                    .any(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == *node_id)
+            })
+            .collect::<BTreeSet<_>>();
+        if present.is_empty() {
+            self.mark_absent_after_batch();
+            return;
+        }
+
+        self.applied = self.applied.min(present.len());
+        self.clear_unhealthy_route_states
+            .retain(|node_id| present.contains(node_id));
+        self.final_presence_node_ids
+            .retain(|node_id| present.contains(node_id));
+    }
+
+    fn mark_absent_after_batch(&mut self) {
+        self.applied = 0;
+        self.publish_snapshot = false;
+        self.change = None;
+        self.clear_unhealthy_route_states.clear();
     }
 }
 
@@ -3245,6 +3284,9 @@ impl MachineRegistry {
                         .any(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
                 {
                     outcome.mark_absent_after_batch();
+                }
+                if let NodeStoreWriteCompletion::UpdateMany { outcome, .. } = completion {
+                    outcome.revalidate_final_presence_after_batch(&next);
                 }
             }
             if publish_snapshot {
@@ -4604,6 +4646,7 @@ impl MachineRegistry {
 
                 let mut applied = 0usize;
                 let mut clear_unhealthy_route_states = Vec::new();
+                let mut final_presence_node_ids = Vec::new();
 
                 for (node_key_hex, routes) in updates {
                     let Some(rec) = map.get_mut(&node_key_hex) else {
@@ -4617,6 +4660,7 @@ impl MachineRegistry {
                         {
                             clear_unhealthy_route_states.push(node_id);
                         }
+                        final_presence_node_ids.push(node_id);
                         applied += 1;
                     }
                 }
@@ -4630,6 +4674,7 @@ impl MachineRegistry {
                     missing_node_keys: Vec::new(),
                     affected_node_keys: Vec::new(),
                     affected_node_ids: Vec::new(),
+                    final_presence_node_ids,
                 }
             }),
         );
@@ -4716,6 +4761,7 @@ impl MachineRegistry {
                     missing_node_keys: Vec::new(),
                     affected_node_keys,
                     affected_node_ids,
+                    final_presence_node_ids: Vec::new(),
                 }
             }),
         );
@@ -6759,6 +6805,82 @@ mod registry_tests {
                 .unwrap_or_default(),
             1
         );
+    }
+
+    #[test]
+    fn nodestore_write_batcher_update_many_deleted_same_batch_returns_zero() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(1);
+        rec.node_key_hex = "node-update-many-delete".into();
+        rec.available_routes = vec!["10.9.0.0/24".into()];
+        let node_id = rec.stable_node_id_for_key(&rec.node_key_hex);
+        reg.upsert(rec.node_key_hex.clone(), rec);
+        let history_len = reg.map_change_history().len();
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let batch_size_before = reg.nodestore_batch_size_metrics();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || {
+            first_reg.set_approved_routes_many(vec![(
+                "node-update-many-delete".into(),
+                vec!["10.9.0.0/24".into()],
+            )])
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first update-many did not enqueue before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            reg.get("node-update-many-delete")
+                .unwrap()
+                .approved_routes
+                .is_empty(),
+            "first update-many should wait for another item or the timeout"
+        );
+
+        assert!(reg.delete("node-update-many-delete"));
+        let (changed, missing) = first
+            .join()
+            .expect("queued update-many should finish after same-batch delete");
+        assert_eq!(
+            changed, 0,
+            "update-many completion should reflect final absence after same-batch delete"
+        );
+        assert!(missing.is_empty());
+
+        assert!(reg.get("node-update-many-delete").is_none());
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("update_multi")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("delete")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, batch_size_before.count + 1);
+        assert_eq!(batch_size.bucket("2"), batch_size_before.bucket("2") + 1);
+
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_label(), "peers removed");
+        assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
+        assert!(new_changes[0].content.peers_changed.is_empty());
+        assert!(new_changes[0].content.peer_patches.is_empty());
     }
 
     #[test]

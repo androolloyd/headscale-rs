@@ -566,7 +566,9 @@ Recent coverage note (2026-06-02): process-level `serve` startup validation
 snapshots now cover YAML output in addition to human, JSON, and JSON-line for
 missing Noise private-key config and the SQLite-only unsupported-Postgres
 runtime guard. This closes another residual server/output formatter edge in the
-CLI parity stream.
+CLI parity stream. A follow-up process snapshot now covers current-upstream
+`serve` unknown-flag stderr with `json`, `json-line`, `yaml`, and unknown-output
+fallback formatting before server startup.
 
 Recent coverage note (2026-06-02): map-stream churn coverage now proves
 same-key auth completion records the upstream `node added` reason and wakes an

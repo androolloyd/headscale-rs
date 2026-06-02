@@ -1896,6 +1896,33 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn serve_unknown_flags_honor_output_format_like_current_upstream() {
+    assert_stderr_snapshot(
+        &["serve", "-o", "json", "--bad"],
+        1,
+        include_str!("snapshots/serve_unknown_flag_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["serve", "--output", "json-line", "--bad"],
+        1,
+        include_str!("snapshots/serve_unknown_flag_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["serve", "-oyaml", "--bad"],
+        1,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/serve_unknown_flag_yaml.stderr")
+        ),
+    );
+    assert_stderr_snapshot(
+        &["serve", "--output", "weird", "--bad"],
+        1,
+        include_str!("snapshots/serve_unknown_flag_unknown_output.stderr"),
+    );
+}
+
+#[test]
 fn utility_missing_global_flag_values_match_current_upstream_cobra() {
     assert_stderr_snapshot(
         &["version", "--output"],

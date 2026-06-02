@@ -491,6 +491,14 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                 ),
                 logtail_enabled: config.as_ref().is_some_and(|c| c.logtail.enabled),
                 auto_update_enabled: config.as_ref().is_some_and(|c| c.auto_update.enabled),
+                logging: config
+                    .as_ref()
+                    .and_then(|c| c.logging.clone())
+                    .unwrap_or_default(),
+                cli: config
+                    .as_ref()
+                    .and_then(|c| c.cli.clone())
+                    .unwrap_or_default(),
                 tuning: config
                     .as_ref()
                     .map_or_else(config::TuningConfig::default, |c| c.tuning.clone()),

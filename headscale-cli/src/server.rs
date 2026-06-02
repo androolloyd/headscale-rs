@@ -60,8 +60,8 @@ use crate::acme_issuer::{
     spawn_tls_alpn_renewal_task,
 };
 use crate::config::{
-    PolicyConfig, TuningConfig, UpstreamDatabaseConfig, UpstreamPostgresConfig,
-    server_url_hostname, validate_server_url_base_domain,
+    AdminCliConfig, LoggingConfig, PolicyConfig, TuningConfig, UpstreamDatabaseConfig,
+    UpstreamPostgresConfig, server_url_hostname, validate_server_url_base_domain,
 };
 use crate::derp_config::DerpConfig;
 use headscale_db::{Database, DatabaseBackend, SqliteOpenOptions};
@@ -103,6 +103,8 @@ pub(crate) struct RunServerConfig {
     pub taildrop_enabled: bool,
     pub logtail_enabled: bool,
     pub auto_update_enabled: bool,
+    pub logging: LoggingConfig,
+    pub cli: AdminCliConfig,
     pub tuning: TuningConfig,
     pub ephemeral_node_inactivity_timeout: Duration,
 }
@@ -1174,6 +1176,16 @@ fn runtime_config_snapshot(
         snapshot.database.postgres.conn_max_idle_time_secs = postgres.conn_max_idle_time_secs();
     }
     snapshot.disable_update_check = cfg.disable_check_updates;
+    snapshot.log.level.clone_from(&cfg.logging.level);
+    snapshot.log.format.clone_from(&cfg.logging.format);
+    snapshot.cli.address = cfg.cli.address.clone().unwrap_or_default();
+    snapshot.cli.api_key = cfg.cli.api_key.clone().unwrap_or_default();
+    snapshot.cli.insecure = cfg.cli.insecure.unwrap_or(false);
+    snapshot.cli.timeout = duration_nanos(Duration::from_secs(
+        cfg.cli
+            .timeout
+            .unwrap_or_else(crate::config::default_cli_timeout_secs),
+    ));
 
     if let Some(derp) = &cfg.derp {
         snapshot.derp.server_enabled = derp.server.enabled;
@@ -2995,6 +3007,8 @@ mod tests {
             taildrop_enabled: true,
             logtail_enabled: false,
             auto_update_enabled: false,
+            logging: LoggingConfig::default(),
+            cli: AdminCliConfig::default(),
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         }
@@ -4400,6 +4414,8 @@ database:
             taildrop_enabled: true,
             logtail_enabled: false,
             auto_update_enabled: false,
+            logging: LoggingConfig::default(),
+            cli: AdminCliConfig::default(),
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
@@ -4461,6 +4477,8 @@ database:
             taildrop_enabled: true,
             logtail_enabled: false,
             auto_update_enabled: false,
+            logging: LoggingConfig::default(),
+            cli: AdminCliConfig::default(),
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         };
@@ -4952,6 +4970,8 @@ database:
             taildrop_enabled: false,
             logtail_enabled: false,
             auto_update_enabled: false,
+            logging: LoggingConfig::default(),
+            cli: AdminCliConfig::default(),
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(180),
         };
@@ -5153,6 +5173,16 @@ logtail:
 auto_update:
   enabled: true
 
+log:
+  level: debug
+  format: json
+
+cli:
+  address: "headscale.example:50443"
+  api_key: "hskey-api-debug-projection-secret"
+  insecure: true
+  timeout: 12
+
 tuning:
   notifier_send_timeout: 900ms
   batch_change_delay: 700ms
@@ -5185,6 +5215,10 @@ database:
     max_open_conns: 11
     max_idle_conns: 7
     conn_max_idle_time_secs: 120
+
+policy:
+  mode: database
+  path: "ignored-policy.hujson"
 "#,
         )
         .unwrap();
@@ -5198,6 +5232,9 @@ database:
         cfg.database = parsed.database;
         cfg.logtail_enabled = parsed.logtail.enabled;
         cfg.auto_update_enabled = parsed.auto_update.enabled;
+        cfg.logging = parsed.logging.unwrap_or_default();
+        cfg.cli = parsed.cli.unwrap_or_default();
+        cfg.policy = parsed.policy;
         cfg.tuning = parsed.tuning;
 
         let dns = DnsStore::new();
@@ -5205,12 +5242,22 @@ database:
 
         assert_eq!(snapshot.trusted_proxies, ["127.0.0.1/32"]);
         assert!(snapshot.disable_update_check);
+        assert_eq!(snapshot.log.level, "debug");
+        assert_eq!(snapshot.log.format, "json");
+        assert_eq!(snapshot.cli.address, "headscale.example:50443");
+        assert_eq!(snapshot.cli.api_key, "hskey-api-debug-projection-secret");
+        assert!(snapshot.cli.insecure);
+        assert_eq!(snapshot.cli.timeout, 12_000_000_000);
         assert!(snapshot.log_tail.enabled);
         assert!(snapshot.auto_update.enabled);
+        assert_eq!(snapshot.policy.mode, "database");
+        assert_eq!(snapshot.policy.path, "ignored-policy.hujson");
         assert_eq!(snapshot.database.database_type, "sqlite3");
         assert!(snapshot.database.debug);
         assert!(snapshot.database.gorm.debug);
         assert_eq!(snapshot.database.gorm.slow_threshold, 1_000_000_000);
+        assert!(snapshot.database.gorm.skip_err_record_not_found);
+        assert!(snapshot.database.gorm.parameterized_queries);
         assert!(snapshot.database.gorm.prepare_stmt);
         assert_eq!(
             snapshot.database.sqlite.path,
@@ -5219,11 +5266,20 @@ database:
         assert!(!snapshot.database.sqlite.write_ahead_log);
         assert_eq!(snapshot.database.sqlite.wal_auto_check_point, 250);
         assert_eq!(snapshot.database.postgres.host, "localhost");
+        assert_eq!(snapshot.database.postgres.port, 5432);
+        assert_eq!(snapshot.database.postgres.name, "headscale");
+        assert_eq!(snapshot.database.postgres.user, "headscale");
         assert_eq!(snapshot.database.postgres.ssl, "false");
         assert_eq!(snapshot.database.postgres.max_open_connections, 11);
+        assert_eq!(snapshot.database.postgres.max_idle_connections, 7);
+        assert_eq!(snapshot.database.postgres.conn_max_idle_time_secs, 120);
         assert_eq!(snapshot.tuning.notifier_send_timeout, 900_000_000);
+        assert_eq!(snapshot.tuning.batch_change_delay, 700_000_000);
         assert_eq!(snapshot.tuning.node_map_session_buffered_chan_size, 42);
+        assert_eq!(snapshot.tuning.batcher_workers, 2);
+        assert_eq!(snapshot.tuning.register_cache_expiration, 300_000_000_000);
         assert_eq!(snapshot.tuning.register_cache_max_entries, 2048);
+        assert_eq!(snapshot.tuning.node_store_batch_size, 128);
         assert_eq!(snapshot.tuning.node_store_batch_timeout, 250_000_000);
     }
 
@@ -5275,6 +5331,8 @@ database:
             taildrop_enabled: true,
             logtail_enabled: false,
             auto_update_enabled: false,
+            logging: LoggingConfig::default(),
+            cli: AdminCliConfig::default(),
             tuning: TuningConfig::default(),
             ephemeral_node_inactivity_timeout: Duration::from_secs(120),
         })

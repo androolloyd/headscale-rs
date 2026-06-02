@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
     body::to_bytes,
     extract::{Path, RawQuery, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, delete, get, post},
@@ -75,7 +75,10 @@ pub fn router(service: HeadscaleAdminService) -> Router {
         .route("/api/v1/apikey/expire", post(expire_api_key))
         .route("/api/v1/apikey/:prefix", delete(delete_api_key))
         .route("/api/v1/debug/node", post(debug_create_node))
-        .route("/api/v1/node", get(list_nodes))
+        .route(
+            "/api/v1/node",
+            get(list_nodes).post(list_nodes_form_fallback),
+        )
         .route("/api/v1/node/register", post(register_node))
         .route("/api/v1/node/backfillips", post(backfill_node_ips))
         .route("/api/v1/node/:node_id", get(get_node).delete(delete_node))
@@ -604,6 +607,34 @@ async fn list_nodes(
         Ok(query) => query,
         Err(status) => return status_response(&status),
     };
+    list_nodes_response(state, headers, query).await
+}
+
+async fn list_nodes_form_fallback(
+    State(state): State<GatewayState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    if !is_path_length_form_fallback(&headers) {
+        return grpc_gateway_method_not_allowed().await;
+    }
+    let values = match parse_form_fallback_query(raw_query.as_deref(), request).await {
+        Ok(values) => values,
+        Err(status) => return status_response(&status),
+    };
+    let query = match list_nodes_query_from_values(&values) {
+        Ok(query) => query,
+        Err(status) => return status_response(&status),
+    };
+    list_nodes_response(state, headers, query).await
+}
+
+async fn list_nodes_response(
+    state: GatewayState,
+    headers: HeaderMap,
+    query: ListNodesQuery,
+) -> Response {
     match state
         .service
         .list_nodes(tonic_request(
@@ -1040,6 +1071,12 @@ fn parse_register_node_query(query: Option<&str>) -> Result<RegisterNodeQuery, S
 
 fn parse_list_nodes_query(query: Option<&str>) -> Result<ListNodesQuery, Status> {
     let values = parse_query_values(query)?;
+    list_nodes_query_from_values(&values)
+}
+
+fn list_nodes_query_from_values(
+    values: &BTreeMap<String, Vec<String>>,
+) -> Result<ListNodesQuery, Status> {
     Ok(ListNodesQuery {
         user: query_string(&values, &["user"], "user")?.unwrap_or_default(),
     })
@@ -1050,6 +1087,41 @@ fn parse_backfill_node_ips_query(query: Option<&str>) -> Result<BackfillNodeIpsQ
     Ok(BackfillNodeIpsQuery {
         confirmed: query_bool(&values, &["confirmed"], "confirmed")?,
     })
+}
+
+fn is_path_length_form_fallback(headers: &HeaderMap) -> bool {
+    headers.get(header::CONTENT_TYPE)
+        == Some(&HeaderValue::from_static(
+            "application/x-www-form-urlencoded",
+        ))
+}
+
+async fn parse_form_fallback_query(
+    raw_query: Option<&str>,
+    request: Request,
+) -> Result<BTreeMap<String, Vec<String>>, Status> {
+    let body = to_bytes(request.into_body(), BODY_LIMIT)
+        .await
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    let mut values = if body.is_empty() {
+        BTreeMap::new()
+    } else {
+        let body =
+            std::str::from_utf8(&body).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        parse_query_values(Some(body))?
+    };
+    let query_values = parse_query_values(raw_query)?;
+    merge_query_values(&mut values, query_values);
+    Ok(values)
+}
+
+fn merge_query_values(
+    values: &mut BTreeMap<String, Vec<String>>,
+    additional: BTreeMap<String, Vec<String>>,
+) {
+    for (key, mut incoming) in additional {
+        values.entry(key).or_default().append(&mut incoming);
+    }
 }
 
 fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String>>, Status> {

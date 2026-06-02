@@ -185,12 +185,22 @@ async fn fixture_with_failing_health() -> (Router, String) {
 }
 
 fn req(method: Method, uri: &str, token: Option<&str>, body: impl Into<Body>) -> Request<Body> {
+    req_with_content_type(method, uri, token, "application/json", body)
+}
+
+fn req_with_content_type(
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    content_type: &'static str,
+    body: impl Into<Body>,
+) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
     builder
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_TYPE, content_type)
         .body(body.into())
         .unwrap()
 }
@@ -807,6 +817,115 @@ async fn grpc_gateway_routing_errors_are_status_json_after_auth() {
             .await
             .unwrap();
         assert_status_json_exact(resp, 501, 12, "Method Not Allowed", case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_post_form_path_length_fallback_matches_current_upstream() {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        expected_http_status: u16,
+        expected_grpc_code: Option<i64>,
+        expected_message: Option<&'static str>,
+    }
+
+    let (app, token) = fixture().await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(r#"{"name":"form-fallback-user"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for case in [
+        Case {
+            name: "form body becomes list-nodes query",
+            uri: "/api/v1/node",
+            content_type: "application/x-www-form-urlencoded",
+            body: "user=form-fallback-user",
+            expected_http_status: 200,
+            expected_grpc_code: None,
+            expected_message: None,
+        },
+        Case {
+            name: "form body values precede URL query values",
+            uri: "/api/v1/node?user=query-user",
+            content_type: "application/x-www-form-urlencoded",
+            body: "user=body-user",
+            expected_http_status: 400,
+            expected_grpc_code: Some(3),
+            expected_message: Some(r#"too many values for field "user": body-user, query-user"#),
+        },
+        Case {
+            name: "form body uses same nested scalar query parser",
+            uri: "/api/v1/node",
+            content_type: "application/x-www-form-urlencoded",
+            body: "user.name=form-fallback-user",
+            expected_http_status: 400,
+            expected_grpc_code: Some(3),
+            expected_message: Some(r#"invalid path: "user" is not a message"#),
+        },
+        Case {
+            name: "JSON POST remains method mismatch",
+            uri: "/api/v1/node",
+            content_type: "application/json",
+            body: "user=form-fallback-user",
+            expected_http_status: 501,
+            expected_grpc_code: Some(12),
+            expected_message: Some("Method Not Allowed"),
+        },
+        Case {
+            name: "form content type with parameters does not fallback",
+            uri: "/api/v1/node",
+            content_type: "application/x-www-form-urlencoded; charset=utf-8",
+            body: "user=form-fallback-user",
+            expected_http_status: 501,
+            expected_grpc_code: Some(12),
+            expected_message: Some("Method Not Allowed"),
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req_with_content_type(
+                Method::POST,
+                case.uri,
+                Some(&token),
+                case.content_type,
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+
+        if let (Some(expected_grpc_code), Some(expected_message)) =
+            (case.expected_grpc_code, case.expected_message)
+        {
+            assert_status_json_exact(
+                resp,
+                case.expected_http_status,
+                expected_grpc_code,
+                expected_message,
+                case.name,
+            )
+            .await;
+        } else {
+            assert_eq!(
+                resp.status().as_u16(),
+                case.expected_http_status,
+                "{}: HTTP status",
+                case.name
+            );
+            let body = body_json(resp).await;
+            assert_eq!(body["nodes"], serde_json::json!([]), "{}", case.name);
+        }
     }
 }
 

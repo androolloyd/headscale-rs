@@ -2354,6 +2354,7 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
     assert_eq!(body_json(resp).await, serde_json::json!({}));
 
     let resp = app
+        .clone()
         .oneshot(req(
             Method::POST,
             "/api/v1/auth/reject",
@@ -2364,6 +2365,17 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/approve",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"{approve_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_status_json(resp, 400, 3, "invalid auth_id", "auth approve bare id").await;
 }
 
 #[tokio::test]

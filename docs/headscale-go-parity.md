@@ -855,6 +855,12 @@ workspace is restored it fails on missing `lake`, missing `.lean` sources,
 `sorry`/`admit` placeholders, or `lake build` failure instead of silently
 skipping formal proof status.
 
+Recent coverage note (2026-06-02): grpc-gateway auth approve/reject malformed
+auth ID handling now has exact HTTP status JSON envelope coverage for missing,
+bare, and short `hskey-authreq-` IDs. This pins the current-upstream split where
+auth register reports malformed IDs as gRPC `Unknown` while approve/reject
+return `InvalidArgument`.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

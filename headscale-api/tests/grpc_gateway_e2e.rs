@@ -2895,6 +2895,57 @@ async fn grpc_gateway_auth_register_invalid_auth_ids_match_upstream_unknown() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_auth_approve_reject_malformed_auth_ids_are_exact() {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+        body: &'static str,
+        expected_message: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "auth approve missing auth id",
+            uri: "/api/v1/auth/approve",
+            body: "{}",
+            expected_message: r#"invalid auth_id: auth ID has invalid prefix: expected prefix "hskey-authreq-""#,
+        },
+        Case {
+            name: "auth approve bare auth id",
+            uri: "/api/v1/auth/approve",
+            body: r#"{"authId":"abcdefghijklmnopqrstuvwx"}"#,
+            expected_message: r#"invalid auth_id: auth ID has invalid prefix: expected prefix "hskey-authreq-""#,
+        },
+        Case {
+            name: "auth reject missing auth id",
+            uri: "/api/v1/auth/reject",
+            body: "{}",
+            expected_message: r#"invalid auth_id: auth ID has invalid prefix: expected prefix "hskey-authreq-""#,
+        },
+        Case {
+            name: "auth reject prefixed short auth id",
+            uri: "/api/v1/auth/reject",
+            body: r#"{"auth_id":"hskey-authreq-short"}"#,
+            expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 19",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                Method::POST,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     let (app, token, registry, _db) = fixture_with_wire_registry().await;
     let registration_key = "abcdefghijklmnopqrstuvwx";

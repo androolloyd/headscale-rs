@@ -695,11 +695,11 @@ pub mod upstream {
                 .get(&body.user)
                 .await
                 .map_err(user_error_to_status)?
-                .ok_or_else(|| Status::not_found("user not found"))?;
+                .ok_or_else(|| Status::unknown("looking up user: user not found"))?;
             let pending = self
                 .registration_cache
                 .get(&registration_id)
-                .ok_or_else(|| Status::not_found("registration not found"))?;
+                .ok_or_else(|| Status::unknown("node not found in registration cache"))?;
             let mut record = wire_record_to_machine_admin(pending.clone());
             record.user = user.name;
             record.register_method = RegisterMethod::Cli as i32;
@@ -3502,7 +3502,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), "node not found in registration cache");
     }
 
     #[tokio::test]
@@ -3714,6 +3715,82 @@ mod upstream_tests {
             err.message(),
             "auth ID has invalid length: expected 38, got 19"
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_register_grpc_missing_user_and_cache_errors_match_headscale_go() {
+        let (service, _machines) = admin_service_with_machines().await;
+        const REGISTRATION_ID: &str = "missingregister123456789";
+        const AUTH_ID: &str = "hskey-authreq-missingregister123456789";
+        assert_eq!(REGISTRATION_ID.len(), 24);
+
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        enum Call {
+            RegisterNode,
+            AuthRegister,
+        }
+
+        struct Case {
+            name: &'static str,
+            call: Call,
+            user: &'static str,
+            expected_message: &'static str,
+        }
+
+        for case in [
+            Case {
+                name: "register node missing user",
+                call: Call::RegisterNode,
+                user: "missing",
+                expected_message: "looking up user: user not found",
+            },
+            Case {
+                name: "register node missing cache entry",
+                call: Call::RegisterNode,
+                user: "alice",
+                expected_message: "node not found in registration cache",
+            },
+            Case {
+                name: "auth register missing user",
+                call: Call::AuthRegister,
+                user: "missing",
+                expected_message: "looking up user: user not found",
+            },
+            Case {
+                name: "auth register missing cache entry",
+                call: Call::AuthRegister,
+                user: "alice",
+                expected_message: "node not found in registration cache",
+            },
+        ] {
+            let err = match case.call {
+                Call::RegisterNode => service
+                    .register_node(Request::new(RegisterNodeRequest {
+                        user: case.user.into(),
+                        key: AUTH_ID.into(),
+                    }))
+                    .await
+                    .unwrap_err(),
+                Call::AuthRegister => service
+                    .auth_register(Request::new(AuthRegisterRequest {
+                        user: case.user.into(),
+                        auth_id: AUTH_ID.into(),
+                    }))
+                    .await
+                    .unwrap_err(),
+            };
+            assert_eq!(err.code(), tonic::Code::Unknown, "{}", case.name);
+            assert_eq!(err.message(), case.expected_message, "{}", case.name);
+        }
     }
 
     #[tokio::test]

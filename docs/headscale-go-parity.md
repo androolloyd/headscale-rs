@@ -230,6 +230,12 @@ Current-head audit overlay, refreshed 2026-05-30:
   `tailscale status --json` peer relay projection: the base and policy-reload
   Rust-only native DERP rows require `Peer[].Relay` to include the advertised
   native DERP region code after forced relay traffic succeeds.
+- NodeStore hostname/GivenName collision handling now retries auto-derived
+  names after concurrent unique-index races on create and auth-path update,
+  with SQLite concurrency tests and feature-gated Postgres helper coverage.
+- Route primary parity now pins the Go property-test sequence for sticky
+  primary ownership, unhealthy failover, non-stealing recovery, withdrawal
+  failback, stale-primary clearing, and reverse primary-route lookup.
 - Recent coverage closes the hidden `dumpConfig` no-config default-warning
   slice: process snapshots now pin headscale-go's timestamped
   `WRN no config file found, using defaults` line before the human,

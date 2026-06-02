@@ -18,6 +18,7 @@ use sqlx::{PgConnection, PgPool};
 pub const REGISTER_METHOD_AUTH_KEY: &str = "authkey";
 pub const REGISTER_METHOD_CLI: &str = "cli";
 pub const REGISTER_METHOD_OIDC: &str = "oidc";
+const AUTO_GIVEN_NAME_RETRY_LIMIT: usize = 64;
 
 const NODE_COLUMNS: &str = r"
         id,
@@ -493,15 +494,31 @@ async fn auth_path_postgres_given_name(
 }
 
 pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<HeadscaleNodeRow> {
-    let given_name = create_given_name(pool, &params).await?;
+    let retry_auto_given_name = params.given_name.is_empty();
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = create_given_name(pool, &params).await?;
+        match create_with_given_name(pool, &params, &given_name).await {
+            Ok(node) => return Ok(node),
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) => return Err(map_non_retry_write_err(e)),
+        }
+    }
 
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
+async fn create_with_given_name(
+    pool: &SqlitePool,
+    params: &CreateParams,
+    given_name: &str,
+) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
-    let tags = normalize_tags(params.tags);
+    let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -572,9 +589,14 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
     .bind(now)
     .fetch_one(pool)
     .await
-    .map_err(map_sqlx_err)?;
+    .map_err(DbError::from)?;
 
-    get_by_id(pool, id).await
+    let query = node_select("WHERE id = ? AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::from)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -588,15 +610,32 @@ pub async fn create_postgres_on_connection(
     conn: &mut PgConnection,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    let given_name = create_postgres_given_name(conn, &params).await?;
+    let retry_auto_given_name = params.given_name.is_empty();
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = create_postgres_given_name(conn, &params).await?;
+        match create_postgres_with_given_name(conn, &params, &given_name).await {
+            Ok(node) => return Ok(node),
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) => return Err(map_non_retry_write_err(e)),
+        }
+    }
 
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn create_postgres_with_given_name(
+    conn: &mut PgConnection,
+    params: &CreateParams,
+    given_name: &str,
+) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
-    let tags = normalize_tags(params.tags);
+    let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -671,9 +710,14 @@ pub async fn create_postgres_on_connection(
     .bind(now)
     .fetch_one(&mut *conn)
     .await
-    .map_err(map_sqlx_err)?;
+    .map_err(DbError::from)?;
 
-    get_postgres_by_id_on_connection(conn, id).await
+    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::from)
 }
 
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
@@ -856,14 +900,31 @@ pub async fn update_from_auth_path(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    let given_name = auth_path_given_name(pool, id, &params).await?;
+    let retry_auto_given_name = params.given_name.is_empty();
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = auth_path_given_name(pool, id, &params).await?;
+        match update_from_auth_path_with_given_name(pool, id, &params, &given_name).await {
+            Ok(node) => return Ok(node),
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) => return Err(map_non_retry_write_err(e)),
+        }
+    }
 
-    let tags = normalize_tags(params.tags);
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
+async fn update_from_auth_path_with_given_name(
+    pool: &SqlitePool,
+    id: i64,
+    params: &CreateParams,
+    given_name: &str,
+) -> Result<HeadscaleNodeRow> {
+    let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -911,12 +972,17 @@ pub async fn update_from_auth_path(
     .bind(id)
     .execute(pool)
     .await
-    .map_err(map_sqlx_err)?
+    .map_err(DbError::from)?
     .rows_affected();
     if affected == 0 {
         return Err(DbError::NotFound(format!("node id={id}")));
     }
-    get_by_id(pool, id).await
+    let query = node_select("WHERE id = ? AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::from)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -935,14 +1001,32 @@ pub async fn update_postgres_from_auth_path_on_connection(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
-    let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
+    let retry_auto_given_name = params.given_name.is_empty();
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
+        match update_postgres_from_auth_path_with_given_name(conn, id, &params, &given_name).await {
+            Ok(node) => return Ok(node),
+            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => continue,
+            Err(e) => return Err(map_non_retry_write_err(e)),
+        }
+    }
 
-    let tags = normalize_tags(params.tags);
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn update_postgres_from_auth_path_with_given_name(
+    conn: &mut PgConnection,
+    id: i64,
+    params: &CreateParams,
+    given_name: &str,
+) -> Result<HeadscaleNodeRow> {
+    let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
     let endpoints = json_array(&params.endpoints)?;
     let host_info = json_object_or_value(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes))?;
+    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
     let now = now_unix();
     let affected = sqlx::query(
         "
@@ -994,12 +1078,17 @@ pub async fn update_postgres_from_auth_path_on_connection(
     .bind(id)
     .execute(&mut *conn)
     .await
-    .map_err(map_sqlx_err)?
+    .map_err(DbError::from)?
     .rows_affected();
     if affected == 0 {
         return Err(DbError::NotFound(format!("node id={id}")));
     }
-    get_postgres_by_id_on_connection(conn, id).await
+    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::from)
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
@@ -1822,6 +1911,26 @@ fn map_sqlx_err(e: sqlx::Error) -> DbError {
     }
 }
 
+fn is_given_name_unique_violation(e: &DbError) -> bool {
+    let DbError::Sqlx(sqlx::Error::Database(db)) = e else {
+        return false;
+    };
+    if !db.is_unique_violation() {
+        return false;
+    }
+
+    db.constraint() == Some("idx_nodes_given_name")
+        || db.message().contains("idx_nodes_given_name")
+        || db.message().contains("nodes.given_name")
+}
+
+fn map_non_retry_write_err(e: DbError) -> DbError {
+    match e {
+        DbError::Sqlx(e) => map_sqlx_err(e),
+        e => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1831,6 +1940,7 @@ mod tests {
         users::{self, CreateParams as UserCreateParams},
     };
     use sqlx::Row;
+    use std::collections::BTreeSet;
 
     async fn fresh_db() -> Database {
         let db = Database::in_memory().await.expect("open in-memory");
@@ -1898,6 +2008,28 @@ mod tests {
             last_seen: Some(1_700_000_000),
             approved_routes: vec!["10.0.0.0/24".into()],
         }
+    }
+
+    fn unique_node_params(
+        user_id: i64,
+        auth_key_id: i64,
+        index: usize,
+        hostname: &str,
+        given_name: &str,
+    ) -> CreateParams {
+        let mut params = node_params(user_id, auth_key_id);
+        params.machine_key = format!("mkey:{index}");
+        params.node_key = format!("nodekey:{index}");
+        params.disco_key = format!("discokey:{index}");
+        params.hostname = hostname.into();
+        params.given_name = given_name.into();
+        params.host_info = json!({
+            "Hostname": hostname,
+            "OS": "linux",
+        });
+        params.ipv4 = Some(format!("100.64.0.{}", index + 1));
+        params.ipv6 = Some(format!("fd7a:115c:a1e0::{}", index + 1));
+        params
     }
 
     fn assert_foreign_key_violation(err: DbError) {
@@ -2026,6 +2158,44 @@ mod tests {
         empty_params.given_name.clear();
         let empty = create(db.pool(), empty_params).await.unwrap();
         assert_eq!(empty.given_name, "node");
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_auto_given_names_are_unique_like_headscale_go() {
+        const NODE_COUNT: usize = 20;
+
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+
+        let mut tasks = Vec::with_capacity(NODE_COUNT);
+        for index in 0..NODE_COUNT {
+            let pool = db.pool().clone();
+            let params = unique_node_params(user_id, auth_key_id, index, "laptop", "");
+            tasks.push(tokio::spawn(async move { create(&pool, params).await }));
+        }
+
+        let mut names = BTreeSet::new();
+        for task in tasks {
+            let node = task.await.unwrap().unwrap();
+            assert!(
+                names.insert(node.given_name),
+                "concurrent create returned duplicate GivenName"
+            );
+        }
+
+        assert_eq!(names.len(), NODE_COUNT);
+        for index in 0..NODE_COUNT {
+            let expected = if index == 0 {
+                "laptop".to_string()
+            } else {
+                format!("laptop-{index}")
+            };
+            assert!(
+                names.contains(&expected),
+                "missing expected GivenName {expected}, got {names:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2328,6 +2498,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.given_name, "alice-laptop-1");
+    }
+
+    #[tokio::test]
+    async fn concurrent_update_from_auth_path_auto_given_names_are_unique() {
+        const NODE_COUNT: usize = 12;
+
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+
+        let mut node_ids = Vec::with_capacity(NODE_COUNT);
+        for index in 0..NODE_COUNT {
+            let params = unique_node_params(
+                user_id,
+                auth_key_id,
+                index,
+                &format!("phone-{index}"),
+                &format!("phone-{index}"),
+            );
+            node_ids.push(create(db.pool(), params).await.unwrap().id);
+        }
+
+        let mut tasks = Vec::with_capacity(NODE_COUNT);
+        for (index, id) in node_ids.into_iter().enumerate() {
+            let pool = db.pool().clone();
+            let mut params = unique_node_params(user_id, auth_key_id, index, "laptop", "");
+            params.node_key = format!("nodekey:reauth-{index}");
+            params.disco_key = format!("discokey:reauth-{index}");
+            tasks.push(tokio::spawn(async move {
+                update_from_auth_path(&pool, id, params).await
+            }));
+        }
+
+        let mut names = BTreeSet::new();
+        for task in tasks {
+            let node = task.await.unwrap().unwrap();
+            assert!(
+                names.insert(node.given_name),
+                "concurrent update returned duplicate GivenName"
+            );
+        }
+
+        assert_eq!(names.len(), NODE_COUNT);
+        for index in 0..NODE_COUNT {
+            let expected = if index == 0 {
+                "laptop".to_string()
+            } else {
+                format!("laptop-{index}")
+            };
+            assert!(
+                names.contains(&expected),
+                "missing expected GivenName {expected}, got {names:?}"
+            );
+        }
     }
 
     #[tokio::test]

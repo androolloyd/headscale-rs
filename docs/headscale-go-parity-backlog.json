@@ -9,9 +9,9 @@
   },
   "summary": {
     "open_p0": 6,
-    "open_p1": 8,
+    "open_p1": 6,
     "open_p2": 4,
-    "total_open": 18
+    "total_open": 16
   },
   "open_items": [
     {
@@ -117,22 +117,6 @@
       "exit_criteria": "Broaden exact stock-client SSH status, stdout, and stderr snapshots outside the already covered allow/deny/check/profile rows."
     },
     {
-      "id": "p1-nodestore-hostname-concurrency",
-      "priority": "P1",
-      "lane": "Register, map, NodeStore, and batcher churn",
-      "status": "in_progress",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "headscale-db/src/headscale_nodes.rs",
-        "headscale-api/src/tailscale_wire/register.rs"
-      ],
-      "upstream_evidence": [
-        "hscontrol/state/node_store_hostname_test.go",
-        "hscontrol/state/node_store_test.go"
-      ],
-      "exit_criteria": "Broaden hostname/GivenName collision and concurrent NodeStore update parity tests."
-    },
-    {
       "id": "p1-ephemeral-node-races",
       "priority": "P1",
       "lane": "Register, map, NodeStore, and batcher churn",
@@ -146,21 +130,6 @@
         "hscontrol/state/ephemeral_test.go"
       ],
       "exit_criteria": "Expand ephemeral node deletion/logout race coverage across in-memory and persistent paths."
-    },
-    {
-      "id": "p1-route-primary-property-invariants",
-      "priority": "P1",
-      "lane": "Routes, HA, and grants via",
-      "status": "in_progress",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "headscale-api/src/tailscale_wire/routes.rs",
-        "headscale-api/tests/**"
-      ],
-      "upstream_evidence": [
-        "hscontrol/state/primaries_property_test.go"
-      ],
-      "exit_criteria": "Mirror route primary randomized/property invariants for owner selection, failover, withdrawal, and degraded-primary retention."
     },
     {
       "id": "p1-route-via-health-edge-coverage",

@@ -974,6 +974,12 @@ network retry, DERP verify, and native DERP backlog rows. Companion cap grants
 now expand range-style source IP sets to CIDRs so current-head cap-grant
 companions are not dropped when upstream policies aggregate source ranges.
 
+Recent coverage note (2026-06-02): additional subagent edge coverage now pins
+config-file `unix_socket` CLI connection wrapping, real tonic transport auth
+gRPC status/message envelopes, the current-head multi-address
+SSH/DNS/route-policy fixture's SSH principals plus `acceptEnv`, and raw native
+DERP packet relay followed by `PeerGone(Disconnected)` on source drop.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the
@@ -1001,8 +1007,9 @@ companions are not dropped when upstream policies aggregate source ranges.
    registration policy-churn, and Postgres OIDC policy-churn restart rows.
 6. Finish native Rust DERP relay parity beyond the supported upstream
    `derper` sidecar boundary: broader stock-client restart/runtime assertions
-   after keepalive and duplicate reconnect cases beyond the focused status-health,
-   duplicate-health reconnect, and restart map-stability pins are wired.
+   after keepalive, raw packet relay, duplicate reconnect, and source-disconnect
+   `PeerGone` cases beyond the focused status-health, duplicate-health
+   reconnect, and restart map-stability pins are wired.
 7. Extend CI/fuzz/golden enforcement: broaden selected real-client rows on PRs,
    scheduled full matrix, current-head pin checks, and parity golden diffs. The
    formal-verification status gate is now explicit and records the current

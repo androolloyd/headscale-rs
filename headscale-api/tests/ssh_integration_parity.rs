@@ -9,6 +9,9 @@ use headscale_api::policy::{
 use headscale_api::tailscale_wire::wire::{SshPolicy, SshRule};
 use headscale_api::tailscale_wire::{AuthWaitOutcome, RegistrationCache, SshCheckBinding};
 
+const CURRENT_HEAD_FIXTURES: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/current-head");
+
 fn user_node(id: u64, user: &str, ip: u8) -> SshPolicyNode {
     SshPolicyNode {
         id,
@@ -53,6 +56,16 @@ fn packet_nodes(nodes: &[SshPolicyNode]) -> Vec<PacketFilterNode> {
 
 fn doc(raw: &str) -> PolicyDoc {
     parse_hujson_policy(raw).unwrap()
+}
+
+fn current_head_policy_doc(name: &str) -> PolicyDoc {
+    let path = format!("{CURRENT_HEAD_FIXTURES}/{name}");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
+    let scenario: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {path}: {e}"));
+    let policy_raw = serde_json::to_string(&scenario["policy"])
+        .unwrap_or_else(|e| panic!("serialize fixture policy {path}: {e}"));
+    parse_hujson_policy(&policy_raw).unwrap_or_else(|e| panic!("parse fixture policy {path}: {e}"))
 }
 
 fn base_nodes() -> Vec<SshPolicyNode> {
@@ -222,6 +235,41 @@ fn test_ssh_is_blocked_in_acl() {
             .all(|dst| !(dst.ports.first <= 22 && 22 <= dst.ports.last))),
         "SSH policy may allow the session, but the ACL packet filter must still block TCP/22"
     );
+}
+
+#[test]
+fn current_head_multi_address_fixture_compiles_ssh_principals_and_accept_env() {
+    let doc = current_head_policy_doc("multi-address-policy-ssh-dns-route-matrix.json");
+    let nodes = vec![
+        SshPolicyNode {
+            id: 1,
+            user: Some("alice@example.com".into()),
+            user_id: Some(1),
+            addrs: vec!["100.64.44.10".into(), "fd7a:115c:a1e0::10".into()],
+            tags: Vec::new(),
+        },
+        SshPolicyNode {
+            id: 2,
+            user: Some("ops@example.com".into()),
+            user_id: Some(2),
+            addrs: vec!["100.64.44.20".into(), "fd7a:115c:a1e0::20".into()],
+            tags: vec!["tag:server".into()],
+        },
+    ];
+
+    let policy = compile_ssh_policy(&doc, &nodes, 2).unwrap();
+
+    assert_eq!(policy.rules.len(), 1);
+    assert_eq!(
+        rule_ips(&policy.rules[0]),
+        vec!["100.64.44.10", "fd7a:115c:a1e0::10"]
+    );
+    assert_eq!(
+        policy.rules[0].ssh_users,
+        BTreeMap::from([("root".to_string(), "root".to_string())])
+    );
+    assert_eq!(policy.rules[0].accept_env, vec!["LANG"]);
+    assert_accept(&policy.rules[0]);
 }
 
 #[test]

@@ -647,12 +647,15 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
             .or(Some(config::default_cli_timeout_secs()));
     }
     if merged.unix_socket.is_none() {
-        merged.unix_socket = config.unix_socket.clone().or_else(|| {
-            config
+        if let Some(unix_socket) = config.unix_socket.clone() {
+            merged.unix_socket = Some(unix_socket);
+            merged.wrap_grpc_connect_error = true;
+        } else {
+            merged.unix_socket = config
                 .server
                 .as_ref()
-                .map(|server| server.unix_socket.clone())
-        });
+                .map(|server| server.unix_socket.clone());
+        }
     }
     if merged.direct_database.is_none() {
         merged.direct_database = Some(direct_policy_database_from_config(config));

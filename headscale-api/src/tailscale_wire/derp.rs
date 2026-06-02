@@ -858,7 +858,8 @@ mod tests {
     use axum::routing::any;
     use headscale_core::derp::native::DUPLICATE_CONNECTION_HEALTH;
     use headscale_core::derp::protocol::{
-        ClientInfo, FrameType, encode_client_info_frame, encode_raw_frame, open_server_info,
+        ClientInfo, FrameType, PeerGoneReason, encode_client_info_frame, encode_raw_frame,
+        open_server_info,
     };
     use http_body_util::BodyExt;
     use std::io;
@@ -958,6 +959,128 @@ mod tests {
         drop(client_writer);
         drop(client_reader);
         assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_routes_packet_and_reports_source_disconnect() {
+        let source_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let source_public = source_key.public_key();
+        let destination_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let destination_public = destination_key.public_key();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let (source_client_io, source_server_io) = tokio::io::duplex(4096);
+        let source_server_runtime = runtime.clone();
+        let source_server = tokio::spawn(async move {
+            drive_native_derp(source_server_runtime, source_server_io).await
+        });
+        let (mut source_reader, mut source_writer) = tokio::io::split(source_client_io);
+        let mut source_decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut source_reader, &mut source_decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected source server-key frame");
+        };
+        let source_info =
+            encode_client_info_frame(&source_key, &server_public, &ClientInfo::regular()).unwrap();
+        source_writer.write_all(&source_info).await.unwrap();
+        source_writer.flush().await.unwrap();
+        let server_info_frame = read_next_frame(&mut source_reader, &mut source_decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&source_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let (destination_client_io, destination_server_io) = tokio::io::duplex(4096);
+        let destination_server_runtime = runtime.clone();
+        let destination_server = tokio::spawn(async move {
+            drive_native_derp(destination_server_runtime, destination_server_io).await
+        });
+        let (mut destination_reader, mut destination_writer) =
+            tokio::io::split(destination_client_io);
+        let mut destination_decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: destination_server_public,
+            ..
+        } = read_next_frame(&mut destination_reader, &mut destination_decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected destination server-key frame");
+        };
+        assert_eq!(destination_server_public, server_public);
+        let destination_info =
+            encode_client_info_frame(&destination_key, &server_public, &ClientInfo::regular())
+                .unwrap();
+        destination_writer
+            .write_all(&destination_info)
+            .await
+            .unwrap();
+        destination_writer.flush().await.unwrap();
+        let server_info_frame = read_next_frame(&mut destination_reader, &mut destination_decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&destination_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let packet = b"native derp packet over raw runtime".to_vec();
+        let send_packet = encode_frame(&Frame::SendPacket {
+            destination: destination_public,
+            packet: packet.clone(),
+        })
+        .unwrap();
+        source_writer.write_all(&send_packet).await.unwrap();
+        source_writer.flush().await.unwrap();
+
+        let received = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_next_frame(&mut destination_reader, &mut destination_decoder),
+        )
+        .await
+        .expect("timed out waiting for relayed DERP packet")
+        .unwrap();
+        assert_eq!(
+            received,
+            Frame::RecvPacket {
+                source: source_public,
+                packet
+            }
+        );
+
+        drop(source_writer);
+        drop(source_reader);
+        assert!(source_server.await.unwrap().is_ok());
+
+        let gone = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_next_frame(&mut destination_reader, &mut destination_decoder),
+        )
+        .await
+        .expect("timed out waiting for source disconnect PeerGone")
+        .unwrap();
+        assert_eq!(
+            gone,
+            Frame::PeerGone {
+                peer: source_public,
+                reason: PeerGoneReason::Disconnected,
+            }
+        );
+
+        drop(destination_writer);
+        drop(destination_reader);
+        assert!(destination_server.await.unwrap().is_ok());
     }
 
     #[tokio::test]

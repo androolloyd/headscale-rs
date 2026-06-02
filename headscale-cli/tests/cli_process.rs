@@ -4594,6 +4594,23 @@ fn local_unix_socket_connection_warnings_match_current_upstream_snapshots() {
         include_str!("snapshots/grpc_env_unix_socket_connection_failure.stderr"),
         "env Unix socket connection failure",
     );
+
+    let socket = "/tmp/headscale-missing-parity-config.sock";
+    let _ = fs::remove_file(socket);
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = config_dir.path().join("config.yaml");
+    fs::write(
+        &config,
+        format!("unix_socket: \"{socket}\"\ncli:\n  timeout: \"1s\"\n"),
+    )
+    .unwrap();
+    let config_socket = headscale_with_config(&config, &["users", "list"]);
+    assert_process_stderr_snapshot(
+        &config_socket,
+        1,
+        include_str!("snapshots/grpc_config_unix_socket_connection_failure.stderr"),
+        "config Unix socket connection failure",
+    );
 }
 
 #[test]

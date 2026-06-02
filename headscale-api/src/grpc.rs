@@ -2224,6 +2224,7 @@ mod upstream_tests {
         ApiKeyAdmin, ApiKeyMintRequest, MachineAdminRecord, PersistentApiKeyAdmin,
         PersistentMachineAdmin, PersistentPreauthAdmin, PersistentUserAdmin, WireMachineAdmin,
     };
+    use crate::generated::headscale_service_client::HeadscaleServiceClient;
     use crate::generated::headscale_service_server::HeadscaleService;
     use crate::generated::{
         AuthApproveRequest, AuthRegisterRequest, AuthRejectRequest, BackfillNodeIPsRequest,
@@ -3430,6 +3431,76 @@ mod upstream_tests {
         drop(client);
         let _ = shutdown_tx.send(());
         server.await.expect("reflection server task joins");
+    }
+
+    #[tokio::test]
+    async fn upstream_auth_grpc_transport_error_envelopes_match_headscale_go() {
+        let service = admin_service().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind headscale grpc listener");
+        let local_addr = listener.local_addr().expect("local headscale grpc address");
+        let incoming = stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((socket, _addr)) => Some((Ok::<_, std::io::Error>(socket), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_service_server())
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("headscale grpc server exits cleanly");
+        });
+
+        let mut client = HeadscaleServiceClient::connect(format!("http://{local_addr}"))
+            .await
+            .expect("connect headscale grpc client");
+
+        let err = client
+            .auth_register(Request::new(AuthRegisterRequest {
+                user: "alice".into(),
+                auth_id: "short".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(
+            err.message(),
+            "auth ID has invalid prefix: expected prefix \"hskey-authreq-\""
+        );
+
+        let err = client
+            .auth_approve(Request::new(AuthApproveRequest {
+                auth_id: "hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(
+            err.message(),
+            "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+
+        let err = client
+            .auth_reject(Request::new(AuthRejectRequest {
+                auth_id: "hskey-authreq-short".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.message(),
+            "invalid auth_id: auth ID has invalid length: expected 38, got 19"
+        );
+
+        drop(client);
+        let _ = shutdown_tx.send(());
+        server.await.expect("headscale grpc server task joins");
     }
 
     #[tokio::test]

@@ -2453,3 +2453,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   timed out pulling `postgres:16` before checkout. The same push's CI failure
   was a clippy `collapsible_if` in `merged_connect_args`; this batch collapses
   that branch and passes the exact workspace clippy command locally.
+
+## 2026-06-02 third subagent parity edge adoption
+
+- Added config-file `unix_socket` CLI coverage. Top-level config-provided
+  sockets now wrap connection setup failures as `connecting to headscale:`,
+  matching current upstream behavior for config-derived local gRPC dialing.
+- Added a direct tonic transport test for auth gRPC error envelopes, proving
+  malformed `AuthRegister`, missing-session `AuthApprove`, and malformed
+  `AuthReject` status codes/messages survive the real server/client boundary.
+- Added current-head SSH fixture coverage for the multi-address
+  SSH/DNS/route-policy matrix, proving dual-stack source principals and
+  `acceptEnv` survive `tag:server` target compilation.
+- Added native DERP raw runtime relay coverage: two admitted sessions now
+  prove `SendPacket` routes as `RecvPacket`, and the destination observes
+  `PeerGone(Disconnected)` when the source session drops.

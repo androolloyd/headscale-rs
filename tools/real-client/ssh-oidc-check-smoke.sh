@@ -1125,20 +1125,48 @@ ssh_auth_url_present() {
     "${work_dir}/${prefix}.stderr"
 }
 
+assert_ssh_stdout_is_target() {
+  local label="$1"
+  local stdout_path="$2"
+  local target_name="$3"
+  local actual_stdout
+  actual_stdout="$(sed 's/\r$//' "${stdout_path}")"
+  if [[ "${actual_stdout}" != "${target_name}" ]]; then
+    echo "expected ${label} stdout '${target_name}', got:" >&2
+    cat "${stdout_path}" >&2 || true
+    exit 1
+  fi
+}
+
+assert_ssh_stderr_empty() {
+  local label="$1"
+  local stderr_path="$2"
+  if [[ -s "${stderr_path}" ]]; then
+    echo "expected ${label} stderr to be empty, got:" >&2
+    cat "${stderr_path}" >&2 || true
+    exit 1
+  fi
+}
+
 run_cached_ssh_check() {
   local target_addr="$1"
   echo "::group::verify cached Tailscale SSH checkPeriod"
-  if ! docker exec "${client_one}" sh -ceu \
+  local ssh_status=0
+  docker exec "${client_one}" sh -ceu \
     'timeout "$1" tailscale ssh "$2@$3" hostname' \
     sh "${attempt_timeout}" "${ssh_user}" "${target_addr}" \
     >"${work_dir}/ssh-check-cache.stdout" \
-    2>"${work_dir}/ssh-check-cache.stderr"; then
-    echo "cached SSH checkPeriod attempt failed" >&2
+    2>"${work_dir}/ssh-check-cache.stderr" ||
+    ssh_status="$?"
+  printf '%s\n' "${ssh_status}" >"${work_dir}/ssh-check-cache.status"
+  if ((ssh_status != 0)); then
+    echo "expected cached SSH checkPeriod status 0, got ${ssh_status}" >&2
     cat "${work_dir}/ssh-check-cache.stdout" >&2 || true
     cat "${work_dir}/ssh-check-cache.stderr" >&2 || true
     exit 1
   fi
-  grep -Fxq "${client_two}" "${work_dir}/ssh-check-cache.stdout"
+  assert_ssh_stdout_is_target "cached SSH checkPeriod" "${work_dir}/ssh-check-cache.stdout" "${client_two}"
+  assert_ssh_stderr_empty "cached SSH checkPeriod" "${work_dir}/ssh-check-cache.stderr"
   if ssh_auth_url_present "ssh-check-cache"; then
     echo "cached SSH checkPeriod attempt unexpectedly emitted a new auth URL" >&2
     cat "${work_dir}/ssh-check-cache.stdout" >&2 || true
@@ -1312,9 +1340,17 @@ run_ssh_check() {
   else
     approve_ssh_check_with_oidc "${auth_id}"
   fi
-  wait_pid_with_timeout "tailscale ssh check completion" "${ssh_pid}"
+  local ssh_status=0
+  wait_pid_with_timeout "tailscale ssh check completion" "${ssh_pid}" || ssh_status="$?"
   ssh_pid=""
-  grep -Fxq "${client_two}" "${work_dir}/ssh-check.stdout"
+  printf '%s\n' "${ssh_status}" >"${work_dir}/ssh-check.status"
+  if ((ssh_status != 0)); then
+    echo "expected approved Tailscale SSH check status 0, got ${ssh_status}" >&2
+    cat "${work_dir}/ssh-check.stdout" >&2 || true
+    cat "${work_dir}/ssh-check.stderr" >&2 || true
+    exit 1
+  fi
+  assert_ssh_stdout_is_target "approved Tailscale SSH check" "${work_dir}/ssh-check.stdout" "${client_two}"
   echo "approved_auth_id=${auth_id}"
   echo "::endgroup::"
   if ((check_period_cache_flag)); then

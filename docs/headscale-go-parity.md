@@ -189,17 +189,13 @@ Current-head audit overlay, refreshed 2026-05-30:
 - Active P0 default-scenario regressions against the current-head executable
   baseline: none known from the 2026-05-23 audit. Full replacement parity still
   has P0 backlog led by broader production Postgres process-level
-  serve/mutation coverage beyond the CI-backed paired stock-client matrix,
-  change-merge/filter semantics, native DERP stock-client runtime breadth, and
-  broader stock-client SSH status coverage. Current-upstream
+  serve/mutation coverage beyond the CI-backed paired stock-client matrix and
+  native DERP stock-client runtime breadth. Current-upstream
   route-via/route-health row mirroring is guarded by the checked-in
   `route-edge-current-upstream-audit` row; remaining route work is new upstream
   semantics rather than another default/Postgres mirror row.
-- Remaining P1 current-head gaps from the audit: broader SSH
-  client-facing status/stderr and profile-variant edges beyond the
-  covered `localpart:*@domain` compiler/checker plus localpart/profile
-  stock-client allow/deny snapshots,
-  broader TLS-ALPN live-CA ACME smoke coverage beyond the controlled local CA
+- Remaining P1 current-head gaps from the audit: broader TLS-ALPN live-CA ACME
+  smoke coverage beyond the controlled local CA
   issuer/reloader tests and HTTP-01/TLS-ALPN production-listener process smokes,
   remaining broader production Postgres process-level serve/mutation coverage,
   native DERP stock-client/runtime parity beyond the now-wired native relay

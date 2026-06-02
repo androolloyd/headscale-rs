@@ -2569,3 +2569,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p1-policy-v2-compat-fixtures` backlog row remains open because this is
   a representative pinned slice, not an exhaustive audit of the upstream
   ACL/grants/routes/SSH compatibility corpus.
+
+## 2026-06-02 SSH stock-client exactness closure
+
+- Broadened paired stock-client SSH success assertions across the shared
+  auth-key, Postgres/common, and OIDC check-period harnesses. Default
+  `hostname` allow paths now require status `0`, stdout exactly equal to the
+  target stock-client hostname, and empty stderr unless an explicit exact
+  stderr override is configured.
+- OIDC SSH `checkPeriod` cache replay now records and asserts status `0`,
+  exact target-hostname stdout, empty stderr, and no second dynamic auth URL.
+  The initial browser-approved check still keeps the pre-approval auth URL
+  stderr non-exact because the URL is intentionally dynamic.
+- Removed `p0-broader-ssh-client-status` from the open backlog. Remaining
+  non-exact SSH paths are dynamic auth URL and bounded timeout cases rather
+  than stable deterministic status/stdout/stderr gaps.

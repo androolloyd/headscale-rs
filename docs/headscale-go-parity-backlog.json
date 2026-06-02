@@ -8,10 +8,10 @@
     "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
   },
   "summary": {
-    "open_p0": 3,
+    "open_p0": 2,
     "open_p1": 4,
     "open_p2": 2,
-    "total_open": 9
+    "total_open": 8
   },
   "open_items": [
     {
@@ -49,22 +49,6 @@
         "tailscale.com/derp/derpserver"
       ],
       "exit_criteria": "Broaden stock-client native DERP runtime assertions beyond focused restart/policy-reload rows, including verify-client coverage over raw DERP and DERP-over-WebSocket where applicable."
-    },
-    {
-      "id": "p0-broader-ssh-client-status",
-      "priority": "P0",
-      "lane": "SSH and SSH check flow",
-      "status": "in_progress",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "tools/real-client/ssh-*.sh",
-        "headscale-api/src/tailscale_wire/ssh.rs"
-      ],
-      "upstream_evidence": [
-        "integration/ssh_test.go",
-        "hscontrol/noise.go"
-      ],
-      "exit_criteria": "Broaden exact stock-client SSH status, stdout, and stderr snapshots outside the already covered allow/deny/check/profile rows."
     },
     {
       "id": "p1-route-via-health-edge-coverage",

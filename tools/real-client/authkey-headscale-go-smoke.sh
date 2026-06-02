@@ -88,11 +88,17 @@ ssh_user="${REAL_CLIENT_SSH_USER:-}"
 expected_ssh_matrix="${REAL_CLIENT_EXPECT_SSH_MATRIX:-}"
 ssh_command="${REAL_CLIENT_SSH_COMMAND:-hostname}"
 ssh_expected_stdout="${REAL_CLIENT_EXPECT_SSH_STDOUT:-}"
+ssh_expect_allow_stdout="${REAL_CLIENT_EXPECT_SSH_ALLOW_STDOUT:-}"
+if [[ -z "${ssh_expect_allow_stdout}" && "${ssh_command}" == "hostname" ]]; then
+  ssh_expect_allow_stdout="target-hostname"
+fi
 ssh_expect_allow_stderr=false
 ssh_expected_allow_stderr=""
 if [[ ${REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR+x} ]]; then
   ssh_expect_allow_stderr=true
   ssh_expected_allow_stderr="${REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR}"
+elif [[ "${ssh_command}" == "hostname" ]]; then
+  ssh_expect_allow_stderr=true
 fi
 ssh_send_env="${REAL_CLIENT_SSH_SEND_ENV:-}"
 ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
@@ -348,6 +354,13 @@ if [[ -n "${ssh_timeout_status}" && "${ssh_timeout_status}" != "any" && ! "${ssh
   echo "REAL_CLIENT_EXPECT_SSH_TIMEOUT_STATUS must be empty, any, or a non-negative integer, got ${ssh_timeout_status}" >&2
   exit 2
 fi
+case "${ssh_expect_allow_stdout}" in
+  "" | target-hostname) ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_SSH_ALLOW_STDOUT must be empty or target-hostname, got ${ssh_expect_allow_stdout}" >&2
+    exit 2
+    ;;
+esac
 ssh_env_args=()
 if [[ -n "${ssh_send_env}" ]]; then
   IFS=',' read -r -a ssh_send_env_entries <<<"${ssh_send_env}"
@@ -1117,13 +1130,29 @@ tailscale_ssh_succeeded() {
   local stdout_path="${work_dir}/ssh-${source_name}-to-${target_name}.stdout"
   local stderr_path="${work_dir}/ssh-${source_name}-to-${target_name}.stderr"
   tailscale_ssh_attempt "${source_name}" "${target_name}" "${stdout_path}" "${stderr_path}" || return 1
+  assert_ssh_allow_stdout "${target_name}" "${stdout_path}"
+}
+
+assert_ssh_allow_stdout() {
+  local target_name="$1"
+  local stdout_path="$2"
+  local expected_stdout=""
   if [[ -n "${ssh_expected_stdout}" ]]; then
-    local actual_stdout
-    actual_stdout="$(sed 's/\r$//' "${stdout_path}")"
-    [[ "${actual_stdout}" == "${ssh_expected_stdout}" ]]
+    expected_stdout="${ssh_expected_stdout}"
+  elif [[ "${ssh_expect_allow_stdout}" == "target-hostname" ]]; then
+    expected_stdout="${target_name}"
+  else
+    grep -Fxq "${target_name}" "${stdout_path}"
     return
   fi
-  grep -Fxq "${target_name}" "${stdout_path}"
+
+  local actual_stdout
+  actual_stdout="$(sed 's/\r$//' "${stdout_path}")"
+  if [[ "${actual_stdout}" != "${expected_stdout}" ]]; then
+    echo "expected allowed tailscale ssh stdout '${expected_stdout}', got:" >&2
+    cat "${stdout_path}" >&2 || true
+    return 1
+  fi
 }
 
 assert_ssh_allow_stderr() {

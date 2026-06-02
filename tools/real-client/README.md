@@ -143,18 +143,18 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-oidc-policy-churn-restart` | `postgres-oidc-policy-churn-restart-smoke.sh` | `postgres-oidc-policy-churn-restart-headscale-go-smoke.sh` | Production Postgres OIDC policy reload peer/profile map churn survives server restart |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
-| Database | `postgres-ssh` | `postgres-ssh-smoke.sh` | `postgres-ssh-headscale-go-smoke.sh` | Production Postgres Tailscale SSH allow, deny, and ACL timeout |
+| Database | `postgres-ssh` | `postgres-ssh-smoke.sh` | `postgres-ssh-headscale-go-smoke.sh` | Production Postgres Tailscale SSH allow/check-period exact success status/stdout/stderr plus deny and ACL timeout |
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
-| Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache |
-| Database | `postgres-ssh-oidc-check-period-local-user` | `postgres-ssh-oidc-check-period-local-user-smoke.sh` | `postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` is scoped to `local_user` |
+| Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache with exact cached replay status/stdout/stderr |
+| Database | `postgres-ssh-oidc-check-period-local-user` | `postgres-ssh-oidc-check-period-local-user-smoke.sh` | `postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache exactness and `local_user` scoping |
 | Database | `postgres-ssh-oidc-policy-restart` | `postgres-ssh-oidc-policy-restart-smoke.sh` | `postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh` | Production Postgres OIDC SSH policy mutation survives server restart |
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env with exact success status/stdout/stderr |
-| Database | `postgres-ssh-localpart` | `postgres-ssh-localpart-smoke.sh` | `postgres-ssh-localpart-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart login users from profile emails |
-| Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and denial status/stderr |
+| Database | `postgres-ssh-localpart` | `postgres-ssh-localpart-smoke.sh` | `postgres-ssh-localpart-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart login users from profile emails with exact stable success status/stdout/stderr |
+| Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants, exact stable success status/stdout/stderr, case-insensitive localpart domains, and denial status/stderr |
 | Database | `postgres-ssh-profile-subdomain-deny` | `postgres-ssh-profile-subdomain-deny-smoke.sh` | `postgres-ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
@@ -205,9 +205,9 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Lifecycle | `oidc-policy-churn-restart` | `oidc-policy-churn-restart-smoke.sh` | `oidc-policy-churn-restart-headscale-go-smoke.sh` | Production OIDC policy reload peer/profile map churn survives server restart |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
 | SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
-| SSH | `ssh-oidc-check-period-cache` | `ssh-oidc-check-period-cache-smoke.sh` | `ssh-oidc-check-period-cache-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache |
+| SSH | `ssh-oidc-check-period-cache` | `ssh-oidc-check-period-cache-smoke.sh` | `ssh-oidc-check-period-cache-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache with exact cached replay status/stdout/stderr |
 | SSH | `ssh-oidc-policy-restart` | `ssh-oidc-policy-restart-smoke.sh` | `ssh-oidc-policy-restart-headscale-go-smoke.sh` | OIDC SSH policy mutation survives server restart |
-| SSH | `ssh-oidc-check-period-local-user` | `ssh-oidc-check-period-local-user-smoke.sh` | `ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` is scoped to `local_user` |
+| SSH | `ssh-oidc-check-period-local-user` | `ssh-oidc-check-period-local-user-smoke.sh` | `ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache exactness and `local_user` scoping |
 | SSH | `ssh-oidc-check-wrong-user` | `ssh-oidc-check-wrong-user-smoke.sh` | `ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Wrong-user OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-deny` | `ssh-oidc-check-deny-smoke.sh` | `ssh-oidc-check-deny-headscale-go-smoke.sh` | Expired OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
 | SSH | `ssh-oidc-check-cancel` | `ssh-oidc-check-cancel-smoke.sh` | `ssh-oidc-check-cancel-headscale-go-smoke.sh` | Cancelled OIDC-backed Tailscale SSH `check` denial status/stdout/stderr |
@@ -274,9 +274,9 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-health-mixed-exit-all-unhealthy-reload-restart` | `route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable policy reload survives server restart |
 | Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health default and Postgres matrix symmetry audit |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
-| SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
-| SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
-| SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and exact denial status/stderr |
+| SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow/check-period exact success status/stdout/stderr plus deny and ACL timeout |
+| SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails with exact stable success status/stdout/stderr |
+| SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants, exact stable success status/stdout/stderr, case-insensitive localpart domains, and exact denial status/stderr |
 | SSH | `ssh-profile-subdomain-deny` | `ssh-profile-subdomain-deny-smoke.sh` | `ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
 | SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables with exact success status/stdout/stderr |
 
@@ -1216,7 +1216,10 @@ OpenSSH client package inside the client containers, creates the local
 `ssh-it-user`, and runs actual `tailscale ssh` commands. The first pass checks
 same-user `autogroup:self` success plus cross-user policy denial; the second
 pass keeps the SSH policy but blocks port 22 in ACLs and expects the SSH
-attempt to time out.
+attempt to time out. Stable `hostname` success attempts assert status `0`,
+stdout exactly equal to the target stock-client hostname, and empty stderr.
+The ACL-blocked timeout path still asserts nonzero status and empty stdout but
+keeps stderr text non-exact because client/kernel timeout wording varies.
 
 ```sh
 tools/real-client/ssh-smoke.sh
@@ -1225,8 +1228,10 @@ tools/real-client/ssh-headscale-go-smoke.sh
 
 The OIDC and CLI `check` wrappers drive the stock client through the Headscale
 SSH `HoldAndDelegate` path. The OIDC approval row follows the browser
-`/auth/{auth_id}` flow and expects hostname output. The CLI approval row uses
-`headscale auth approve --auth-id ...` against the same pending check request.
+`/auth/{auth_id}` flow and expects status `0` plus exact hostname stdout. The
+CLI approval row uses `headscale auth approve --auth-id ...` against the same
+pending check request. Approval stderr is intentionally not exact because the
+stock client emits a dynamic auth URL before approval completes.
 The wrong-user row authenticates the `/auth/{auth_id}` flow as a different OIDC
 user, expects the auth callback to be denied, then asserts the nonzero SSH
 exit, empty stdout, first stderr line, and access-denied stderr regex. The
@@ -1239,6 +1244,11 @@ shape. The Postgres policy-restart row starts from a database policy with no SSH
 rules, proves ordinary peer connectivity remains available, mutates the
 database policy to the OIDC SSH check policy, restarts the server on the same
 ports, and then completes the browser-approved stock-client SSH check.
+The `checkPeriod` cache rows then rerun the approved SSH command inside the
+policy cache window and assert status `0`, exact hostname stdout, empty stderr,
+and no second auth URL. The `local_user` row intentionally keeps the second
+local-user hold stderr non-exact because it emits a fresh dynamic auth URL and
+then exits through the bounded timeout path.
 
 ```sh
 tools/real-client/ssh-oidc-check-smoke.sh
@@ -1267,9 +1277,10 @@ tools/real-client/ssh-oidc-check-cancel-headscale-go-smoke.sh
 
 The current-head localpart wrappers exercise `localpart:*@domain` login users
 with profile emails. The profile-variant row also checks split username/email
-profiles against headscale-go, wrong-domain profile emails, bare usernames with
-no profile email, exact denied status `255`, empty denied stdout, and the
-stable first denial stderr line. The `ssh-accept-env` row runs a tagged target
+profiles against headscale-go, exact stable success status/stdout/stderr,
+wrong-domain profile emails, bare usernames with no profile email, exact denied
+status `255`, empty denied stdout, and the stable first denial stderr line. The
+`ssh-accept-env` row runs a tagged target
 with policy `acceptEnv: ["LANG", "LC_*"]`, passes `LANG` and `LC_ACCEPT_ENV_SMOKE`
 through the stock client command environment, and asserts the remote command
 exits with status `0`, prints those accepted values on stdout, and emits empty
@@ -1289,8 +1300,12 @@ Useful knobs:
 - `REAL_CLIENT_SSH_USER` defaults to `ssh-it-user`.
 - `REAL_CLIENT_EXPECT_SSH_MATRIX` defaults to
   `1:2:allow,2:1:allow,1:3:deny,3:1:deny` for the first pass.
-- `REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR` opts successful SSH checks into exact
-  stderr matching; set it to an empty value to require empty stderr.
+- `REAL_CLIENT_EXPECT_SSH_ALLOW_STDOUT=target-hostname` asserts successful
+  default `hostname` SSH stdout exactly equals each matrix target hostname; this
+  is the default when `REAL_CLIENT_SSH_COMMAND=hostname`.
+- `REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR` asserts successful SSH stderr exactly;
+  default `hostname` checks require empty stderr unless this is set to another
+  exact value.
 - `REAL_CLIENT_TIMEOUT_EXPECT_SSH_MATRIX` defaults to `1:2:timeout` for the
   ACL-blocked pass.
 - `REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS` defaults to `12`.
@@ -1310,7 +1325,7 @@ Useful knobs:
   `headscale auth approve --auth-id ...` instead of the browser flow.
 - `REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE=true` reruns the approved SSH
   command inside the policy `checkPeriod` window and asserts no second auth URL
-  is emitted.
+  is emitted, status is `0`, stdout is the target hostname, and stderr is empty.
 - `REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER=true` uses a two-local-user
   `checkPeriod` policy, approves the first login user, and asserts a different
   allowed local user on the same source/destination emits a fresh auth URL.

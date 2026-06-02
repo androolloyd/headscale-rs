@@ -1812,3 +1812,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 - gRPC and gateway health checks now wrap database ping failures as
   `pinging database: <err>`, matching headscale-go's `Health` RPC error text.
+
+## 2026-06-02 initial route auto-approval churn proof
+
+- Initial `Stream:true` map requests that introduce auto-approved
+  `Hostinfo.RoutableIPs` now have focused batcher-path coverage proving the
+  upstream-shaped churn sequence: subnet-router lifecycle full update first,
+  followed by the deferred `policy change` route auto-approval.
+- The observer's pending batch and resulting route-aware map response are pinned
+  in `stream_true_initial_routable_ips_wake_peer_with_allowed_ips`.

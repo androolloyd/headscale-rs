@@ -7448,7 +7448,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_true_initial_routable_ips_wake_peer_with_allowed_ips() {
         let (state, _dir) = fixture();
         let policy = r#"{
@@ -7475,6 +7475,7 @@ mod tests {
             router_key.clone(),
             policy_record(&router_key, "router", 11, "router", Vec::new()),
         );
+        let _map_batcher = start_test_map_batcher(&state).await;
 
         let app = router(state.clone());
         let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
@@ -7483,6 +7484,8 @@ mod tests {
             alice_first.peers.is_empty(),
             "router is hidden until its initial stream request advertises an allowed route"
         );
+        let _ = state.machines.drain_pending_map_changes();
+        let history_len = state.machines.map_change_history().len();
 
         let router_req = serde_json::json!({
             "Stream": true,
@@ -7522,6 +7525,41 @@ mod tests {
             "router self node should be route-aware in its first stream response"
         );
 
+        let router_id = stable_id_from_key(&router_key);
+        let alice_id = stable_id_from_key(&alice);
+        let changes = state.machines.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(
+            new_changes.len(),
+            2,
+            "initial stream route auto-approval should record lifecycle plus deferred policy changes"
+        );
+        let online_change = &new_changes[0];
+        assert_eq!(online_change.reason_labels(), vec!["subnet router online"]);
+        assert_eq!(online_change.change_type(), "full");
+        assert!(online_change.is_full());
+        assert_eq!(online_change.origin_node_id, Some(router_id));
+        let policy_change = &new_changes[1];
+        assert_eq!(policy_change.reason_labels(), vec!["policy change"]);
+        assert_eq!(policy_change.change_type(), "policy");
+        assert!(policy_change.content.include_policy);
+        assert!(policy_change.content.requires_runtime_peer_computation);
+        assert_eq!(policy_change.origin_node_id, Some(router_id));
+        assert!(!policy_change.is_full());
+
+        let pending = state.machines.pending_map_changes();
+        let alice_changes = pending
+            .get(&alice_id)
+            .expect("observer receives initial route auto-approval changes");
+        assert_eq!(
+            alice_changes
+                .iter()
+                .map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["subnet router online"], vec!["policy change"]]
+        );
+
+        publish_test_map_batch().await;
         let alice_delta = tokio::time::timeout(
             Duration::from_secs(1),
             next_zstd_map_response(&mut alice_body),

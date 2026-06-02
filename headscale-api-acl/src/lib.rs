@@ -1199,9 +1199,6 @@ fn validate_acl_src_dst_combination(rule: &AclRule, errs: &mut Vec<String>) {
 }
 
 fn validate_grant_src_alias(alias: &str, errs: &mut Vec<String>) {
-    if alias == "autogroup:danger-all" {
-        return;
-    }
     validate_acl_src_alias(alias, errs);
 }
 
@@ -1218,12 +1215,12 @@ fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
             r#""autogroup:self" used in source, it can only be used in ACL destinations"#
                 .to_string(),
         ),
-        "member" | "tagged" => {}
+        "member" | "tagged" | "danger-all" => {}
         "nonroot" => errs.push(format!(
-            "autogroup {alias:?} is not supported for ACL sources, can be [autogroup:member autogroup:tagged]"
+            "autogroup {alias:?} is not supported for ACL sources, can be [autogroup:member autogroup:tagged autogroup:danger-all]"
         )),
         _ => errs.push(format!(
-            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self autogroup:danger-all]"
         )),
     }
 }
@@ -1233,12 +1230,13 @@ fn validate_acl_dst_alias(alias: &str, errs: &mut Vec<String>) {
         return;
     };
     match ag {
+        "danger-all" => errs.push("cannot use autogroup:danger-all as a dst".to_string()),
         "internet" | "member" | "tagged" | "self" => {}
         "nonroot" => errs.push(format!(
             "autogroup {alias:?} is not supported for ACL destinations, can be [autogroup:internet autogroup:member autogroup:tagged autogroup:self]"
         )),
         _ => errs.push(format!(
-            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self]"
+            "AutoGroup is invalid, got: {alias:?}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self autogroup:danger-all]"
         )),
     }
 }
@@ -2263,13 +2261,11 @@ impl AclDoc {
             return Vec::new();
         }
         if let Some(ag) = token.strip_prefix("autogroup:") {
-            if ag == "internet" {
-                return internet_filter_cidrs();
+            match ag {
+                "internet" => return internet_filter_cidrs(),
+                "member" | "danger-all" => return wildcard_filter_cidrs(),
+                _ => return Vec::new(),
             }
-            if ag == "member" {
-                return wildcard_filter_cidrs();
-            }
-            return Vec::new();
         }
         if let Some(cidr) = self.hosts.get(token) {
             return vec![cidr.clone()];
@@ -2498,7 +2494,7 @@ fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
 }
 
 fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeView<'_>>) -> bool {
-    if kind == "internet" {
+    if kind == "internet" || kind == "danger-all" {
         return true;
     }
     if kind == "member" {
@@ -4327,6 +4323,46 @@ mod tests {
     }
 
     #[test]
+    fn accepts_acl_autogroup_danger_all_source_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["autogroup:danger-all"],
+                "dst": ["10.0.0.1:*"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(doc.rules[0].src, vec!["autogroup:danger-all"]);
+        assert_eq!(
+            doc.expand_principal("autogroup:danger-all"),
+            wildcard_filter_cidrs()
+        );
+        assert_eq!(
+            doc.decide("198.51.100.7", "10.0.0.1", PortRef::any()),
+            AclAction::Accept
+        );
+    }
+
+    #[test]
+    fn rejects_acl_autogroup_danger_all_destination_like_headscale_go() {
+        let err = parse_hujson_policy(
+            r#"{
+              "acls": [{
+                "action": "accept",
+                "src": ["*"],
+                "dst": ["autogroup:danger-all:*"]
+              }]
+            }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot use autogroup:danger-all as a dst"));
+    }
+
+    #[test]
     fn rejects_acl_tag_source_to_autogroup_self_destination_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{
@@ -4783,6 +4819,11 @@ mod tests {
                 "app-to-internet",
                 r#"{"grants":[{"src":["*"],"dst":["autogroup:internet"],"app":{"example.com/cap/use":[]}}]}"#,
                 "cannot use app grants with autogroup:internet",
+            ),
+            (
+                "danger-all-destination",
+                r#"{"grants":[{"src":["*"],"dst":["autogroup:danger-all"],"ip":["*"]}]}"#,
+                "cannot use autogroup:danger-all as a dst",
             ),
             (
                 "bad-cap-url",

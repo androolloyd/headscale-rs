@@ -34,7 +34,7 @@
 //!
 //! `expand_principal` (on the canonical [`PolicyDoc`]) handles the
 //! SrcIP / DstIP token expansion for groups, hosts, and the flattenable
-//! autogroups (`internet`, `member`). The
+//! autogroups (`internet`, `member`, `danger-all`). The
 //! non-flattenable autogroups (`self`, `nonroot`, `tagged`, `tag:*`)
 //! need per-evaluation NodeView context and cannot be expressed in
 //! a static `FilterRule.SrcIPs` list — they're silently dropped from
@@ -423,6 +423,12 @@ fn resolve_principals(
     self_node: Option<&PacketFilterNode>,
     position: PrincipalPosition,
 ) -> Vec<String> {
+    if position == PrincipalPosition::Source
+        && tokens.iter().any(|token| token == "autogroup:danger-all")
+    {
+        return vec!["*".to_string()];
+    }
+
     let mut out = Vec::new();
     for token in tokens {
         let resolved = resolve_principal(doc, token, nodes, self_node, position);
@@ -502,6 +508,7 @@ fn resolve_principal(
     if let Some(kind) = token.strip_prefix("autogroup:") {
         return match kind {
             "internet" => headscale_api_acl::internet_filter_cidrs(),
+            "danger-all" if position == PrincipalPosition::Source => vec!["*".to_string()],
             "member" => nodes
                 .iter()
                 .filter(|node| is_untagged_user_owned(node))
@@ -1468,6 +1475,35 @@ mod tests {
     }
 
     #[test]
+    fn autogroup_danger_all_acl_source_emits_wildcard_src_ips() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "acls": [{
+                    "action": "accept",
+                    "src": ["autogroup:danger-all"],
+                    "dst": ["100.64.0.2:443"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![PacketFilterNode {
+            id: 2,
+            user_id: Some(2),
+            user: Some("server".into()),
+            addrs: vec!["100.64.0.2".into()],
+            tags: Vec::new(),
+            routes: Vec::new(),
+        }];
+
+        let rs = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].src_ips, vec!["*"]);
+        assert_eq!(rs[0].dst_ports[0].ip, "100.64.0.2");
+        assert_eq!(rs[0].dst_ports[0].ports.first, 443);
+        assert_eq!(rs[0].dst_ports[0].ports.last, 443);
+    }
+
+    #[test]
     fn src_by_user_passes_through_literal() {
         let d = doc(
             vec![PolicyRule {
@@ -1777,5 +1813,35 @@ mod tests {
 
         let client_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
         assert!(client_rules.is_empty());
+    }
+
+    #[test]
+    fn autogroup_danger_all_via_grant_source_emits_wildcard_src_ips() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:router": ["router@"]},
+                "grants": [{
+                    "src": ["autogroup:danger-all"],
+                    "dst": ["10.10.0.0/16"],
+                    "ip": ["tcp:443"],
+                    "via": ["tag:router"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![PacketFilterNode {
+            id: 2,
+            user_id: Some(2),
+            user: Some("router".into()),
+            addrs: vec!["100.64.0.2".into()],
+            tags: vec!["tag:router".into()],
+            routes: vec!["10.10.1.0/24".into()],
+        }];
+
+        let router_rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(router_rules.len(), 1);
+        assert_eq!(router_rules[0].src_ips, vec!["*"]);
+        assert_eq!(router_rules[0].dst_ports[0].ip, "10.10.0.0/16");
+        assert_eq!(router_rules[0].dst_ports[0].ports.first, 443);
     }
 }

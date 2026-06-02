@@ -53,6 +53,12 @@ expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_peer_count_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD:-}"
 expected_peer_counts_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD:-}"
 rename_node_after_login="${REAL_CLIENT_RENAME_NODE_AFTER_LOGIN:-}"
+user_node_lifecycle_restart="${REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART:-false}"
+rename_user_after_login="${REAL_CLIENT_RENAME_USER_AFTER_LOGIN:-}"
+expire_node_index="${REAL_CLIENT_EXPIRE_NODE_INDEX:-}"
+delete_node_index="${REAL_CLIENT_DELETE_NODE_INDEX:-}"
+destroy_user_after_node_delete="${REAL_CLIENT_DESTROY_USER_AFTER_NODE_DELETE:-}"
+expected_users_after_lifecycle_restart="${REAL_CLIENT_EXPECT_USERS_AFTER_LIFECYCLE_RESTART:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 client_user_emails_csv="${REAL_CLIENT_CLIENT_USER_EMAILS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
@@ -124,7 +130,7 @@ expected_derp_native_raw_allowed_min="${REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_ALLOW
 expected_derp_native_raw_denied_max="${REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_DENIED_MAX:-}"
 expected_derp_native_websocket_allowed_min="${REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_ALLOWED_MIN:-}"
 expected_derp_native_websocket_denied_max="${REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_DENIED_MAX:-}"
-restart_after_assertions="${REAL_CLIENT_RESTART_AFTER_ASSERTIONS:-${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}}"
+restart_after_assertions="${REAL_CLIENT_RESTART_AFTER_ASSERTIONS:-${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-${user_node_lifecycle_restart}}}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
@@ -609,6 +615,30 @@ case "${restart_after_assertions}" in
     exit 2
     ;;
 esac
+case "${user_node_lifecycle_restart}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    user_node_lifecycle_restart_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    user_node_lifecycle_restart_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART must be true or false, got ${user_node_lifecycle_restart}" >&2
+    exit 2
+    ;;
+esac
+if ((user_node_lifecycle_restart_flag)) && [[ "${login_mode}" != "authkey" ]]; then
+  echo "REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART requires REAL_CLIENT_LOGIN_MODE=authkey" >&2
+  exit 2
+fi
+if ((user_node_lifecycle_restart_flag)) && [[ -n "${expected_authkey_failure_indexes}" ]]; then
+  echo "REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART cannot be combined with expected auth-key login failures" >&2
+  exit 2
+fi
+if ((user_node_lifecycle_restart_flag && restart_after_assertions_flag == 0)); then
+  echo "REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART requires restart assertions" >&2
+  exit 2
+fi
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
   echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
   exit 2
@@ -963,6 +993,60 @@ if [[ -n "${preauth_tags_by_client}" ]]; then
   done
 fi
 client_name="${client_names[0]}"
+
+if ((user_node_lifecycle_restart_flag)); then
+  if ((client_count < 3)); then
+    echo "REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART requires at least three clients" >&2
+    exit 2
+  fi
+  expire_node_index="${expire_node_index:-2}"
+  delete_node_index="${delete_node_index:-3}"
+  if ! [[ "${expire_node_index}" =~ ^[0-9]+$ ]] ||
+    ((expire_node_index < 1 || expire_node_index > client_count)); then
+    echo "REAL_CLIENT_EXPIRE_NODE_INDEX must be in 1..${client_count}, got ${expire_node_index}" >&2
+    exit 2
+  fi
+  if ! [[ "${delete_node_index}" =~ ^[0-9]+$ ]] ||
+    ((delete_node_index < 1 || delete_node_index > client_count)); then
+    echo "REAL_CLIENT_DELETE_NODE_INDEX must be in 1..${client_count}, got ${delete_node_index}" >&2
+    exit 2
+  fi
+  if ((expire_node_index == delete_node_index)); then
+    echo "REAL_CLIENT_EXPIRE_NODE_INDEX and REAL_CLIENT_DELETE_NODE_INDEX must select different clients" >&2
+    exit 2
+  fi
+  rename_user_after_login="${rename_user_after_login:-${client_users[0]}:${client_users[0]}-renamed}"
+  if [[ "${rename_user_after_login}" != *:* ]]; then
+    echo "REAL_CLIENT_RENAME_USER_AFTER_LOGIN must be old:new, got ${rename_user_after_login}" >&2
+    exit 2
+  fi
+  rename_user_old="${rename_user_after_login%%:*}"
+  rename_user_new="${rename_user_after_login#*:}"
+  if [[ -z "${rename_user_old}" || -z "${rename_user_new}" ]]; then
+    echo "REAL_CLIENT_RENAME_USER_AFTER_LOGIN must include non-empty old and new names, got ${rename_user_after_login}" >&2
+    exit 2
+  fi
+  destroy_user_after_node_delete="${destroy_user_after_node_delete:-${client_users[$((delete_node_index - 1))]}}"
+  if [[ -z "${destroy_user_after_node_delete}" ]]; then
+    echo "REAL_CLIENT_DESTROY_USER_AFTER_NODE_DELETE must not be empty" >&2
+    exit 2
+  fi
+  if [[ -z "${expected_users_after_lifecycle_restart}" ]]; then
+    expected_lifecycle_users=()
+    for user in "${client_users[@]}"; do
+      [[ "${user}" == "${destroy_user_after_node_delete}" ]] && continue
+      if [[ "${user}" == "${rename_user_old}" ]]; then
+        user="${rename_user_new}"
+      fi
+      already_expected=0
+      for expected_user in "${expected_lifecycle_users[@]}"; do
+        [[ "${expected_user}" == "${user}" ]] && already_expected=1
+      done
+      ((already_expected == 0)) && expected_lifecycle_users+=("${user}")
+    done
+    expected_users_after_lifecycle_restart="$(IFS=,; echo "${expected_lifecycle_users[*]}")"
+  fi
+fi
 
 if [[ -z "${policy_json}" ]]; then
   policy_json="$(
@@ -3868,6 +3952,253 @@ node_id_for_client() {
   ' "${path}" "${client_name}"
 }
 
+node_id_for_client_name() {
+  local path="$1"
+  local lookup_client_name="$2"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    nodes = payload.is_a?(Array) ? payload : (payload["nodes"] || payload["machines"] || [])
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).any? { |name| name == client_name || name.include?(client_name) }
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    id = node["id"] || node["ID"] || node["nodeId"] || node["node_id"]
+    abort("expected node id in #{node.inspect}") if id.nil? || id.to_s.empty?
+    puts id
+  ' "${path}" "${lookup_client_name}"
+}
+
+assert_user_node_lifecycle_files() {
+  local nodes_path="$1"
+  local users_path="$2"
+  local renamed_node_name="$3"
+  local renamed_user="$4"
+  local expired_node_name="$5"
+  local deleted_node_name="$6"
+  local destroyed_user="$7"
+  local expected_users="$8"
+  local expected_node_count="$9"
+  ruby -rjson -rtime -e '
+    def rows(path, key)
+      payload = JSON.parse(File.read(path))
+      return [] if payload.nil?
+      return payload if payload.is_a?(Array)
+
+      Array(payload[key] || payload[key.capitalize] || payload[key.to_sym] || [])
+    end
+
+    def node_names(node)
+      [
+        node["givenName"],
+        node["given_name"],
+        node["name"],
+        node["hostname"],
+      ].compact.map(&:to_s)
+    end
+
+    def user_name(node)
+      user = node["user"] || node["User"]
+      if user.is_a?(Hash)
+        user["name"] || user["loginName"] || user["login_name"] || user["username"]
+      elsif !user.nil?
+        user.to_s
+      else
+        node["userName"] || node["user_name"] || node["username"]
+      end
+    end
+
+    def user_row_name(user)
+      user["name"] || user["Name"] || user["username"] || user["loginName"] || user["login_name"]
+    end
+
+    def expiry_value(node)
+      node["expiry"] || node["Expiry"] || node["expiration"] || node["Expiration"] || node["expiresAt"] || node["expires_at"]
+    end
+
+    def expiry_epoch(value)
+      case value
+      when Hash
+        seconds = value["seconds"] || value[:seconds]
+        nanos = value["nanos"] || value[:nanos] || 0
+        seconds.nil? ? nil : seconds.to_f + nanos.to_f / 1_000_000_000.0
+      when String
+        text = value.strip
+        return nil if text.empty? || text == "0001-01-01T00:00:00Z"
+
+        Time.parse(text).to_f
+      else
+        nil
+      end
+    end
+
+    def expired_node?(node)
+      explicit = node["expired"]
+      explicit = node["Expired"] if explicit.nil?
+      return explicit == true if !explicit.nil?
+
+      epoch = expiry_epoch(expiry_value(node))
+      epoch && epoch <= Time.now.to_f + 10
+    end
+
+    nodes = rows(ARGV.fetch(0), "nodes")
+    users = rows(ARGV.fetch(1), "users")
+    renamed_node_name = ARGV.fetch(2)
+    renamed_user = ARGV.fetch(3)
+    expired_node_name = ARGV.fetch(4)
+    deleted_node_name = ARGV.fetch(5)
+    destroyed_user = ARGV.fetch(6)
+    expected_users = ARGV.fetch(7).split(",").reject(&:empty?).sort
+    expected_node_count = Integer(ARGV.fetch(8))
+
+    abort("expected #{expected_node_count} nodes, got #{nodes.length}: #{nodes.inspect}") unless nodes.length == expected_node_count
+
+    actual_users = users.map { |user| user_row_name(user).to_s }.reject(&:empty?).sort
+    abort("expected users #{expected_users.inspect}, got #{actual_users.inspect}: #{users.inspect}") unless actual_users == expected_users
+
+    renamed_node = nodes.find { |node| node_names(node).any? { |name| name == renamed_node_name || name.include?(renamed_node_name) } }
+    abort("missing renamed-user node #{renamed_node_name.inspect}: #{nodes.inspect}") unless renamed_node
+    actual_renamed_user = user_name(renamed_node).to_s
+    abort("expected #{renamed_node_name.inspect} to belong to #{renamed_user.inspect}, got #{actual_renamed_user.inspect}: #{renamed_node.inspect}") unless actual_renamed_user == renamed_user
+
+    expired_node = nodes.find { |node| node_names(node).any? { |name| name == expired_node_name || name.include?(expired_node_name) } }
+    abort("missing expired node #{expired_node_name.inspect}: #{nodes.inspect}") unless expired_node
+    abort("expected #{expired_node_name.inspect} to be expired, got #{expired_node.inspect}") unless expired_node?(expired_node)
+
+    deleted_node = nodes.find { |node| node_names(node).any? { |name| name == deleted_node_name || name.include?(deleted_node_name) } }
+    abort("deleted node #{deleted_node_name.inspect} is still listed: #{deleted_node.inspect}") if deleted_node
+
+    if actual_users.include?(destroyed_user)
+      abort("destroyed user #{destroyed_user.inspect} is still listed: #{users.inspect}")
+    end
+
+    puts JSON.pretty_generate({
+      nodes: nodes.length,
+      users: actual_users,
+      renamed_node: renamed_node_name,
+      renamed_user: actual_renamed_user,
+      expired_node: expired_node_name,
+      deleted_node_absent: deleted_node_name,
+      destroyed_user_absent: destroyed_user,
+    })
+  ' \
+    "${nodes_path}" \
+    "${users_path}" \
+    "${renamed_node_name}" \
+    "${renamed_user}" \
+    "${expired_node_name}" \
+    "${deleted_node_name}" \
+    "${destroyed_user}" \
+    "${expected_users}" \
+    "${expected_node_count}"
+}
+
+assert_user_node_lifecycle_state() {
+  local label="$1"
+  local safe_label="${label//[^a-zA-Z0-9_-]/-}"
+  local nodes_path="${work_dir}/nodes-user-node-lifecycle-${safe_label}.json"
+  local users_path="${work_dir}/users-user-node-lifecycle-${safe_label}.json"
+  local output_path="${work_dir}/user-node-lifecycle-${safe_label}.json"
+  local rename_user_new="${rename_user_after_login#*:}"
+  local expired_client_name="${client_names[$((expire_node_index - 1))]}"
+  local deleted_client_name="${client_names[$((delete_node_index - 1))]}"
+  local expected_node_count=$((client_count - 1))
+
+  headscale_cmd -o json nodes list >"${nodes_path}" &&
+    headscale_cmd -o json users list >"${users_path}" &&
+    assert_user_node_lifecycle_files \
+      "${nodes_path}" \
+      "${users_path}" \
+      "${client_names[0]}" \
+      "${rename_user_new}" \
+      "${expired_client_name}" \
+      "${deleted_client_name}" \
+      "${destroy_user_after_node_delete}" \
+      "${expected_users_after_lifecycle_restart}" \
+      "${expected_node_count}" >"${output_path}"
+}
+
+mutate_user_node_lifecycle_if_requested() {
+  ((user_node_lifecycle_restart_flag)) || return 0
+  echo "::group::user/node lifecycle mutations"
+  local rename_user_old="${rename_user_after_login%%:*}"
+  local rename_user_new="${rename_user_after_login#*:}"
+  local rename_user_id destroy_user_id
+  local nodes_path="${work_dir}/nodes-before-user-node-lifecycle.json"
+  local expired_client_name="${client_names[$((expire_node_index - 1))]}"
+  local deleted_client_name="${client_names[$((delete_node_index - 1))]}"
+  local expired_node_id deleted_node_id idx retained_client_names=()
+
+  rename_user_id="$(user_id_for_name "${rename_user_old}")" || {
+    echo "missing created user ${rename_user_old} for lifecycle rename" >&2
+    echo "::endgroup::"
+    return 1
+  }
+  destroy_user_id="$(user_id_for_name "${destroy_user_after_node_delete}")" || {
+    echo "missing created user ${destroy_user_after_node_delete} for lifecycle destroy" >&2
+    echo "::endgroup::"
+    return 1
+  }
+
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  expired_node_id="$(node_id_for_client_name "${nodes_path}" "${expired_client_name}")"
+  deleted_node_id="$(node_id_for_client_name "${nodes_path}" "${deleted_client_name}")"
+
+  headscale_cmd -o json users rename --identifier "${rename_user_id}" --new-name "${rename_user_new}" \
+    >"${work_dir}/user-node-lifecycle-rename-user.json"
+  for idx in "${!created_user_names[@]}"; do
+    if [[ "${created_user_names[$idx]}" == "${rename_user_old}" ]]; then
+      created_user_names[$idx]="${rename_user_new}"
+    fi
+  done
+
+  headscale_cmd -o json nodes expire --identifier "${expired_node_id}" \
+    >"${work_dir}/user-node-lifecycle-expire-node.json"
+  headscale_cmd --force -o json nodes delete --identifier "${deleted_node_id}" \
+    >"${work_dir}/user-node-lifecycle-delete-node.json"
+  headscale_cmd --force -o json users destroy --identifier "${destroy_user_id}" \
+    >"${work_dir}/user-node-lifecycle-destroy-user.json"
+
+  wait_for "user/node lifecycle mutations" "assert_user_node_lifecycle_state 'after-mutations'" || {
+    dump_debug
+    echo "::endgroup::"
+    return 1
+  }
+  cat "${work_dir}/user-node-lifecycle-after-mutations.json"
+
+  for idx in "${!successful_client_names[@]}"; do
+    if ((idx == expire_node_index - 1 || idx == delete_node_index - 1)); then
+      continue
+    fi
+    retained_client_names+=("${successful_client_names[$idx]}")
+  done
+  successful_client_names=("${retained_client_names[@]}")
+  if ((${#successful_client_names[@]} == 0)); then
+    echo "user/node lifecycle restart needs at least one unexpired, undeleted client" >&2
+    echo "::endgroup::"
+    return 1
+  fi
+  client_name="${successful_client_names[0]}"
+  echo "::endgroup::"
+}
+
+assert_user_node_lifecycle_after_restart_if_requested() {
+  ((user_node_lifecycle_restart_flag)) || return 0
+  echo "::group::assert user/node lifecycle state after restart"
+  wait_for "user/node lifecycle state after restart" "assert_user_node_lifecycle_state 'after-restart'" || {
+    dump_debug
+    echo "::endgroup::"
+    return 1
+  }
+  cat "${work_dir}/user-node-lifecycle-after-restart.json"
+  echo "::endgroup::"
+}
+
 assert_node_routes_file() {
   local path="$1"
   local expected_available="$2"
@@ -4161,12 +4492,14 @@ snapshot_derp_map_before_policy_reload_if_requested
 reload_policy_if_requested
 assert_post_reload_peer_visibility_if_requested
 rename_node_if_requested
+mutate_user_node_lifecycle_if_requested
 assert_derp_map_if_requested
 assert_derp_map_stable_after_policy_reload_if_requested
 assert_derp_ping_if_requested
 assert_derp_status_properties_if_requested
 assert_native_derp_admissions_if_requested
 assert_restart_if_requested
+assert_user_node_lifecycle_after_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
 assert_self_capmap_keys_if_requested

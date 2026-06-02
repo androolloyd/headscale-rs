@@ -117,7 +117,9 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | Database | `postgres-policy-churn` | `postgres-policy-churn-smoke.sh` | `postgres-policy-churn-headscale-go-smoke.sh` | Production Postgres auth-key registration plus database policy mutation wakes live peer maps |
 | Database | `postgres-web-register-policy-churn` | `postgres-web-register-policy-churn-smoke.sh` | `postgres-web-register-policy-churn-headscale-go-smoke.sh` | Production Postgres web registration plus database policy mutation wakes live peer maps |
 | Database | `postgres-web-register-policy-churn-restart` | `postgres-web-register-policy-churn-restart-smoke.sh` | `postgres-web-register-policy-churn-restart-headscale-go-smoke.sh` | Production Postgres web-registration policy map churn survives server restart |
+| Database | `postgres-web-register-policy-config-map-churn-restart` | `postgres-web-register-policy-config-map-churn-restart-smoke.sh` | `postgres-web-register-policy-config-map-churn-restart-headscale-go-smoke.sh` | Production Postgres web-registration policy/config map churn, MagicDNS peer resolution, and restart persistence |
 | Database | `postgres-node-rename` | `postgres-node-rename-smoke.sh` | `postgres-node-rename-headscale-go-smoke.sh` | Production Postgres admin node rename wakes live peer maps and preserves lifecycle state |
+| Database | `postgres-user-node-lifecycle-restart` | `postgres-user-node-lifecycle-restart-smoke.sh` | `postgres-user-node-lifecycle-restart-headscale-go-smoke.sh` | Production Postgres stock-client user rename, node expire/delete, user destroy, and restart persistence |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup |
@@ -568,6 +570,26 @@ tools/real-client/online-lastseen-headscale-go-smoke.sh
 The helper accepts headscale-go protobuf JSON that omits the default `online:
 false` field after disconnect, while still requiring an explicit connected
 online state.
+
+The Postgres user/node lifecycle restart variant runs three stock auth-key
+clients, renames one user, expires one node, deletes another node, destroys the
+deleted node's user, restarts the server against the same Postgres database,
+and reasserts the durable user/node state:
+
+```sh
+tools/real-client/postgres-user-node-lifecycle-restart-smoke.sh
+tools/real-client/postgres-user-node-lifecycle-restart-headscale-go-smoke.sh
+```
+
+Useful knobs:
+
+- `REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART=true` enables the mutation path.
+- `REAL_CLIENT_RENAME_USER_AFTER_LOGIN` defaults to `alice:alice-renamed`.
+- `REAL_CLIENT_EXPIRE_NODE_INDEX` and `REAL_CLIENT_DELETE_NODE_INDEX` default
+  to clients `2` and `3`.
+- `REAL_CLIENT_DESTROY_USER_AFTER_NODE_DELETE` defaults to `carol`.
+- `REAL_CLIENT_EXPECT_USERS_AFTER_LIFECYCLE_RESTART` defaults to
+  `alice-renamed,bob`.
 
 ## Tagged Preauth Smoke
 

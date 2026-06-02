@@ -114,6 +114,7 @@ smoke_ids=(
   postgres-web-register-policy-config-map-churn-restart
   postgres-node-rename
   postgres-policy-rename-restart
+  postgres-user-node-lifecycle-restart
   postgres-magicdns
   postgres-magicdns-custom-domain
   postgres-extra-records
@@ -413,6 +414,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -540,6 +542,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-web-register-policy-config-map-churn-restart-smoke.sh
   tools/real-client/postgres-node-rename-smoke.sh
   tools/real-client/postgres-policy-rename-restart-smoke.sh
+  tools/real-client/postgres-user-node-lifecycle-restart-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-smoke.sh
   tools/real-client/postgres-extra-records-smoke.sh
@@ -753,6 +756,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-web-register-policy-config-map-churn-restart-headscale-go-smoke.sh
   tools/real-client/postgres-node-rename-headscale-go-smoke.sh
   tools/real-client/postgres-policy-rename-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-user-node-lifecycle-restart-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/postgres-extra-records-headscale-go-smoke.sh
@@ -966,6 +970,7 @@ smoke_assertions=(
   "production Postgres web-registration policy/config map churn and MagicDNS peer resolution survive server restart"
   "production Postgres admin node rename wakes live peer maps and preserves lifecycle state"
   "production Postgres policy reload plus node rename map churn survives server restart"
+  "production Postgres stock-client user rename, node expire/delete, user destroy, and restart persistence"
   "production Postgres default MagicDNS suffix"
   "production Postgres custom MagicDNS base domain"
   "production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup"

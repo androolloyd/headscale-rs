@@ -11,7 +11,7 @@
 #![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -3242,13 +3242,21 @@ fn dump_config(config: Option<&CliConfig>) -> Result<()> {
     dump_config_to(config, &PathBuf::from("/etc/headscale/config.dump.yaml"))
 }
 
-fn dump_config_to(config: &CliConfig, path: &PathBuf) -> Result<()> {
+fn dump_config_to(config: &CliConfig, path: &Path) -> Result<()> {
     let contents = serde_yaml::to_string(config)?;
-    if let Err(err) = std::fs::write(path, contents) {
-        println!("Failed to dump config");
-        return Err(err).with_context(|| format!("write config dump to {}", path.display()));
-    }
+    std::fs::write(path, contents)
+        .map_err(|err| anyhow::anyhow!("{}", go_style_open_error("dumping config", path, &err)))?;
     Ok(())
+}
+
+fn go_style_open_error(context: &str, path: &Path, err: &std::io::Error) -> String {
+    let message = match err.kind() {
+        std::io::ErrorKind::NotFound => "no such file or directory".to_string(),
+        std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+        std::io::ErrorKind::AlreadyExists => "file exists".to_string(),
+        _ => err.to_string(),
+    };
+    format!("{context}: open {}: {message}", path.display())
 }
 
 fn print_structured_value<T: serde::Serialize>(

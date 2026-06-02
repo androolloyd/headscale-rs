@@ -1949,3 +1949,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   exposes upstream headscale routes: Octra-only legacy node/register/status,
   balance, and transfer aliases return the standard HTTP 404/code 5 `Not Found`
   status JSON instead of being accepted by the headscale replacement gateway.
+
+## 2026-06-02 dumpConfig v0.29 error-shape pin
+
+- Updated hidden `dumpConfig` execution to match the pinned headscale-go
+  v0.29 error prefix for an unwritable/missing `/etc/headscale` dump target:
+  no legacy `Failed to dump config` stdout, and `dumping config: open ...` in
+  the formatted error path.
+- Added guarded process snapshots for human, JSON, json-line, and YAML
+  `dumpConfig` failures when `/etc/headscale` is absent. The remaining
+  upstream CLI drift is the timestamped default-config warning that
+  headscale-go logs before the Cobra error when no config file is found.

@@ -88,7 +88,11 @@ pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Resul
         .list_pre_auth_keys()
         .await?
         .into_iter()
-        .map(PreauthOutput::from)
+        .map(|key| {
+            let mut output = PreauthOutput::from(key);
+            output.key = short_prefix(&output.key);
+            output
+        })
         .collect();
     if fmt.is_structured() {
         print_structured(fmt, &keys)?;

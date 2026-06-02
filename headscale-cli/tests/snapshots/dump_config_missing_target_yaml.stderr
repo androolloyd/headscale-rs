@@ -1,0 +1,2 @@
+error: 'dumping config: open /etc/headscale/config.dump.yaml: no such file or directory'
+

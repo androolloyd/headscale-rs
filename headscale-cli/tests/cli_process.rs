@@ -2096,6 +2096,43 @@ dns:
 }
 
 #[test]
+fn dump_config_missing_target_matches_current_upstream_snapshots() {
+    if Path::new("/etc/headscale").exists() {
+        eprintln!("skipping dumpConfig missing-target snapshot: /etc/headscale exists");
+        return;
+    }
+
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    for (args, expected, label) in [
+        (
+            &["dumpConfig"][..],
+            include_str!("snapshots/dump_config_missing_target.stderr"),
+            "dumpConfig missing target",
+        ),
+        (
+            &["-o", "json", "dumpConfig"][..],
+            include_str!("snapshots/dump_config_missing_target_json.stderr"),
+            "dumpConfig missing target json",
+        ),
+        (
+            &["-ojson-line", "dumpConfig"][..],
+            include_str!("snapshots/dump_config_missing_target_json_line.stderr"),
+            "dumpConfig missing target json-line",
+        ),
+        (
+            &["-oyaml", "dumpConfig"][..],
+            include_str!("snapshots/dump_config_missing_target_yaml.stderr"),
+            "dumpConfig missing target yaml",
+        ),
+    ] {
+        let output = headscale_in(args, cwd.path(), home.path());
+        assert_process_stderr_snapshot(&output, 1, expected, label);
+    }
+}
+
+#[test]
 fn configtest_rejects_env_invalid_grpc_listen_addr() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

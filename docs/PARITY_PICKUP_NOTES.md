@@ -2022,9 +2022,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Tests cover missing-upgrade `426` body parity, websocket-without-DERP-protocol
   rejection, and an in-memory native DERP login plus ping/pong stream.
 - Remaining native DERP runtime gaps: `Derp-Fast-Start` no-response hijack,
-  actual DERP-over-WebSocket transport, verify-client admission through the
-  headscale registry, keepalive/restarting/health runtime scheduling, and
-  stock-client native DERP smokes.
+  verify-client admission through the headscale registry,
+  keepalive/restarting/health runtime scheduling, and stock-client native DERP
+  smokes.
 
 ## 2026-06-02 native DERP config/runtime enablement
 
@@ -2040,3 +2040,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   binary, sidecar validation preservation, native runtime attachment, Noise-key
   collision rejection, native relay startup without spawning a sidecar, and
   DERP key create/reload/malformed-key paths.
+
+## 2026-06-02 native DERP WebSocket transport
+
+- Added true DERP-over-WebSocket handling for native `/derp`: `Upgrade:
+  websocket` is accepted only when the client offers the `derp` subprotocol,
+  the 101 response negotiates `Sec-WebSocket-Protocol: derp`, and DERP frames
+  are carried as a binary-message byte stream like Tailscale's `wsconn`.
+- WebSocket text messages now fail closed with an unsupported-data close frame,
+  while ping/pong/close control messages are handled separately from DERP frame
+  bytes. `Derp-Fast-Start` remains raw-DERP-only and is still open for the raw
+  upgrade path.
+- Focused tests cover WebSocket login, encrypted server info, ping/pong relay,
+  and unsupported text-frame rejection.

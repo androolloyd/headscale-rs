@@ -789,6 +789,163 @@ fn normalize_generated_secret_stdout(text: &str) -> String {
     replace_human_second_timestamps(&text)
 }
 
+fn normalize_generated_private_key_stdout(text: &str) -> String {
+    replace_full_hex_key_bodies(text, "privkey:", 64)
+}
+
+fn normalize_version_stdout(text: &str) -> String {
+    let mut normalized = text.to_string();
+    let version = env!("CARGO_PKG_VERSION");
+    let dirty = option_env!("HEADSCALE_RS_DIRTY").is_some_and(|value| value == "true");
+    let human_version = if dirty {
+        format!("{version}-dirty")
+    } else {
+        version.to_string()
+    };
+    let commit = option_env!("HEADSCALE_RS_COMMIT").unwrap_or("unknown");
+    let build_time = option_env!("HEADSCALE_RS_BUILD_TIME").unwrap_or("unknown");
+    let runtime_version = option_env!("RUSTC_VERSION").unwrap_or("unknown");
+    let os = test_go_os_label(std::env::consts::OS);
+    let arch = test_go_arch_label(std::env::consts::ARCH);
+
+    for (from, to) in [
+        (
+            format!("headscale version {human_version}"),
+            "headscale version <version>".to_string(),
+        ),
+        (
+            format!("\"version\": \"{version}\""),
+            "\"version\": \"<version>\"".to_string(),
+        ),
+        (
+            format!("\"version\":\"{version}\""),
+            "\"version\":\"<version>\"".to_string(),
+        ),
+        (
+            format!("version: {version}"),
+            "version: <version>".to_string(),
+        ),
+        (format!("commit: {commit}"), "commit: <commit>".to_string()),
+        (
+            format!("\"commit\": \"{commit}\""),
+            "\"commit\": \"<commit>\"".to_string(),
+        ),
+        (
+            format!("\"commit\":\"{commit}\""),
+            "\"commit\":\"<commit>\"".to_string(),
+        ),
+        (
+            format!("build time: {build_time}"),
+            "build time: <build-time>".to_string(),
+        ),
+        (
+            format!("buildtime: {build_time}"),
+            "buildtime: <build-time>".to_string(),
+        ),
+        (
+            format!("\"buildTime\": \"{build_time}\""),
+            "\"buildTime\": \"<build-time>\"".to_string(),
+        ),
+        (
+            format!("\"buildTime\":\"{build_time}\""),
+            "\"buildTime\":\"<build-time>\"".to_string(),
+        ),
+        (
+            format!("built with: {runtime_version} {os}/{arch}"),
+            "built with: <runtime-version> <go-os>/<go-arch>".to_string(),
+        ),
+        (
+            format!("    version: {runtime_version}"),
+            "    version: <runtime-version>".to_string(),
+        ),
+        (
+            format!("  version: {runtime_version}"),
+            "  version: <runtime-version>".to_string(),
+        ),
+        (
+            format!("\"version\": \"{runtime_version}\""),
+            "\"version\": \"<runtime-version>\"".to_string(),
+        ),
+        (
+            format!("\"version\":\"{runtime_version}\""),
+            "\"version\":\"<runtime-version>\"".to_string(),
+        ),
+        (format!("    os: {os}"), "    os: <go-os>".to_string()),
+        (format!("  os: {os}"), "  os: <go-os>".to_string()),
+        (
+            format!("\"os\": \"{os}\""),
+            "\"os\": \"<go-os>\"".to_string(),
+        ),
+        (format!("\"os\":\"{os}\""), "\"os\":\"<go-os>\"".to_string()),
+        (
+            format!("    arch: {arch}"),
+            "    arch: <go-arch>".to_string(),
+        ),
+        (format!("  arch: {arch}"), "  arch: <go-arch>".to_string()),
+        (
+            format!("\"arch\": \"{arch}\""),
+            "\"arch\": \"<go-arch>\"".to_string(),
+        ),
+        (
+            format!("\"arch\":\"{arch}\""),
+            "\"arch\":\"<go-arch>\"".to_string(),
+        ),
+        (
+            "\"dirty\": true".to_string(),
+            "\"dirty\": false".to_string(),
+        ),
+        ("\"dirty\":true".to_string(), "\"dirty\":false".to_string()),
+        ("dirty: true".to_string(), "dirty: false".to_string()),
+    ] {
+        normalized = normalized.replace(&from, &to);
+    }
+
+    normalized
+}
+
+fn test_go_os_label(os: &str) -> &'static str {
+    match os {
+        "macos" => "darwin",
+        "windows" => "windows",
+        "linux" => "linux",
+        "freebsd" => "freebsd",
+        "openbsd" => "openbsd",
+        "netbsd" => "netbsd",
+        _ => "unknown",
+    }
+}
+
+fn test_go_arch_label(arch: &str) -> &'static str {
+    match arch {
+        "x86" => "386",
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        _ => "unknown",
+    }
+}
+
+fn replace_full_hex_key_bodies(text: &str, prefix: &str, body_len: usize) -> String {
+    let placeholder = "0".repeat(body_len);
+    let mut normalized = text.to_string();
+    let mut start = 0;
+    while let Some(relative) = normalized[start..].find(prefix) {
+        let body_start = start + relative + prefix.len();
+        let body_end = body_start + body_len;
+        if body_end <= normalized.len()
+            && normalized[body_start..body_end]
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit())
+        {
+            normalized.replace_range(body_start..body_end, &placeholder);
+            start = body_end;
+        } else {
+            start = body_start;
+        }
+    }
+    normalized
+}
+
 fn replace_short_key_bodies(text: &str, prefix: &str) -> String {
     let mut normalized = text.to_string();
     let mut start = 0;
@@ -1340,6 +1497,50 @@ fn generate_private_key_ignores_extra_positionals_like_upstream_cobra() {
 }
 
 #[test]
+fn generate_private_key_structured_outputs_match_current_upstream_snapshots() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    for (args, expected) in [
+        (
+            &["-o", "json", "generate", "private-key"][..],
+            include_str!("snapshots/generate_private_key_json.stdout"),
+        ),
+        (
+            &["-ojson-line", "generate", "private-key"][..],
+            include_str!("snapshots/generate_private_key_json_line.stdout"),
+        ),
+        (
+            &["-oyaml", "generate", "private-key"][..],
+            include_str!("snapshots/generate_private_key_yaml.stdout"),
+        ),
+    ] {
+        let output = headscale_in(args, cwd.path(), home.path());
+        assert!(
+            output.status.success(),
+            "args: {args:?}; stderr: {}",
+            stderr(&output)
+        );
+        let normalized =
+            trim_line_end_spaces(&normalize_generated_private_key_stdout(&stdout(&output)));
+        let expected = trim_line_end_spaces(expected);
+        assert_eq!(
+            normalized.trim_end_matches('\n'),
+            expected.trim_end_matches('\n'),
+            "stdout snapshot for {args:?}"
+        );
+        if args.iter().any(|arg| *arg == "-oyaml") {
+            assert!(
+                stdout(&output).ends_with("\n\n"),
+                "yaml stdout should keep upstream trailing blank line for {args:?}: {}",
+                stdout(&output)
+            );
+        }
+        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+    }
+}
+
+#[test]
 fn version_human_uses_upstream_headscale_label() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -1406,6 +1607,51 @@ fn version_json_line_is_machine_readable() {
 }
 
 #[test]
+fn version_outputs_match_current_upstream_snapshots() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(cwd.path().join("config.yaml"), ":\n:not-yaml\n").unwrap();
+
+    for (args, expected) in [
+        (&["version"][..], include_str!("snapshots/version.stdout")),
+        (
+            &["version", "-o", "json"][..],
+            include_str!("snapshots/version_json.stdout"),
+        ),
+        (
+            &["version", "-ojson-line"][..],
+            include_str!("snapshots/version_json_line.stdout"),
+        ),
+        (
+            &["version", "-oyaml"][..],
+            include_str!("snapshots/version_yaml.stdout"),
+        ),
+    ] {
+        let output = headscale_in(args, cwd.path(), home.path());
+        assert!(
+            output.status.success(),
+            "args: {args:?}; stderr: {}",
+            stderr(&output)
+        );
+        let normalized = trim_line_end_spaces(&normalize_version_stdout(&stdout(&output)));
+        let expected = trim_line_end_spaces(expected);
+        assert_eq!(
+            normalized.trim_end_matches('\n'),
+            expected.trim_end_matches('\n'),
+            "stdout snapshot for {args:?}"
+        );
+        if args.iter().any(|arg| *arg == "-oyaml") {
+            assert!(
+                stdout(&output).ends_with("\n\n"),
+                "yaml stdout should keep upstream trailing blank line for {args:?}: {}",
+                stdout(&output)
+            );
+        }
+        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+    }
+}
+
+#[test]
 fn version_yaml_uses_upstream_go_yaml_shape() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -1427,11 +1673,11 @@ fn version_yaml_uses_upstream_go_yaml_shape() {
     assert!(out.contains("\nbuildtime: "), "stdout: {out}");
     assert!(!out.contains("buildTime:"), "stdout: {out}");
     assert!(
-        out.contains(&format!("\n  os: {expected_os}\n")),
+        out.contains(&format!("\n    os: {expected_os}\n")),
         "stdout: {out}"
     );
     assert!(
-        out.contains(&format!("\n  arch: {expected_arch}\n")),
+        out.contains(&format!("\n    arch: {expected_arch}\n")),
         "stdout: {out}"
     );
 }

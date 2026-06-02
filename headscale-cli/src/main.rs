@@ -3265,17 +3265,37 @@ fn print_structured_value<T: serde::Serialize>(
 ) -> Result<()> {
     match fmt {
         headscale_cli::admin::OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(value)?);
+            println!("{}", go_style_json_string(value)?);
         }
         headscale_cli::admin::OutputFormat::JsonLine => {
             println!("{}", serde_json::to_string(value)?);
         }
         headscale_cli::admin::OutputFormat::Yaml => {
-            print!("{}", serde_yaml::to_string(value)?);
+            println!("{}", go_style_yaml_string(value)?);
         }
         headscale_cli::admin::OutputFormat::Table => unreachable!(),
     }
     Ok(())
+}
+
+fn go_style_json_string<T: serde::Serialize>(value: &T) -> Result<String> {
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut ser)?;
+    Ok(String::from_utf8(buf)?)
+}
+
+fn go_style_yaml_string<T: serde::Serialize>(value: &T) -> Result<String> {
+    let yaml = serde_yaml::to_string(value)?;
+    let mut formatted = String::with_capacity(yaml.len());
+    for line in yaml.lines() {
+        let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+        formatted.push_str(&" ".repeat(leading_spaces * 2));
+        formatted.push_str(&line[leading_spaces..]);
+        formatted.push('\n');
+    }
+    Ok(formatted)
 }
 
 fn generate_machine_private_key() -> String {

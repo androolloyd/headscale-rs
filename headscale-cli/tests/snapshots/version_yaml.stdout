@@ -1,0 +1,8 @@
+version: <version>
+commit: <commit>
+buildtime: <build-time>
+go:
+    version: <runtime-version>
+    os: <go-os>
+    arch: <go-arch>
+dirty: false

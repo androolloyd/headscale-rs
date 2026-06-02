@@ -364,6 +364,24 @@ async fn full_map_tags(
     machine_key: &str,
     request_tags: &[&str],
 ) -> Vec<String> {
+    let value = full_map_value(state, node_key, machine_key, request_tags).await;
+    value["Node"]["Tags"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn full_map_value(
+    state: &WireState,
+    node_key: &str,
+    machine_key: &str,
+    request_tags: &[&str],
+) -> serde_json::Value {
     let mut body = json!({ "Version": 113 });
     if !request_tags.is_empty() {
         body["Hostinfo"] = json!({ "RequestTags": request_tags });
@@ -379,16 +397,7 @@ async fn full_map_tags(
     let resp = map_router(state.clone()).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    value["Node"]["Tags"]
-        .as_array()
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 #[tokio::test]
@@ -547,6 +556,39 @@ async fn tagsauthkeywithtagnoadvertiseflag() {
     assert!(
         record.expiry.is_none(),
         "tagged auth-key nodes do not expire"
+    );
+
+    registry.upsert(key(0x2e), node_record(0x2e, 0xa3, TAG_USER, "peer"));
+    let map = full_map_value(&state, &key(0x19), &key(0x95), &[]).await;
+    assert_tags(
+        &map["Node"]["Tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        &["tag:valid-owned"],
+    );
+    assert_eq!(map["Node"]["User"], 2_147_455_555u64);
+    assert!(
+        map["Node"].get("KeyExpiry").is_none(),
+        "tagged auth-key map node should omit KeyExpiry"
+    );
+    assert!(
+        map["Node"].get("Expired").is_none(),
+        "tagged auth-key map node should omit false Expired"
+    );
+    assert!(
+        map["UserProfiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|profile| {
+                profile["ID"] == 2_147_455_555u64
+                    && profile["LoginName"] == "tagged-devices"
+                    && profile["DisplayName"] == "Tagged Devices"
+            }),
+        "tagged auth-key map should use the synthetic tagged devices profile: {map}"
     );
 }
 

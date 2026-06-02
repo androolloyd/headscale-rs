@@ -33,6 +33,7 @@ REQUIRED_PR_SMOKES = {
     "acl-autogroup-self",
     "derp-private",
     "postgres-web-register-policy-churn",
+    "postgres-web-register-policy-churn-restart",
     "postgres-policy-rename-restart",
     "route-via-multiprefix-reload-restart",
     "route-health-reload-restart",

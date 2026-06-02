@@ -4970,6 +4970,146 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
     result
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_runtime_projects_upstream_derp_and_explicit_https_without_acme() -> BoxTestResult {
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let https = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let metrics_url = format!("http://{metrics}");
+    let https_url = format!("https://{https}");
+
+    let config = dir.path().join("config.yaml");
+    let socket = dir.path().join("headscale.sock");
+    let noise = dir.path().join("state").join("noise_private.key");
+    let db = dir.path().join("db.sqlite");
+    let derp_key = dir.path().join("derp_server_private.key");
+    fs::write(
+        &config,
+        format!(
+            r#"
+server_url: "https://headscale.example:8443"
+listen_addr: "{listen}"
+metrics_listen_addr: "{metrics}"
+grpc_listen_addr: "{grpc}"
+grpc_allow_insecure: true
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  https_listen: "{https}"
+  unix_socket: {}
+derp:
+  server:
+    enabled: true
+    region_id: 901
+    region_code: "hs"
+    region_name: "Headscale Runtime DERP"
+    verify_clients: true
+    stun_listen_addr: "127.0.0.1:0"
+    private_key_path: {}
+    automatically_add_embedded_derp_region: true
+    ipv4: "198.51.100.44"
+    ipv6: "2001:db8::44"
+  urls: []
+  paths: []
+  auto_update_enabled: false
+  update_frequency: 3h
+"#,
+            yaml_double_quoted(&noise.to_string_lossy()),
+            yaml_double_quoted(&db.to_string_lossy()),
+            yaml_double_quoted(&socket.to_string_lossy()),
+            yaml_double_quoted(&derp_key.to_string_lossy()),
+        ),
+    )?;
+
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let https_client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        let https_health = https_client
+            .get(format!("{https_url}/health"))
+            .send()
+            .await?;
+        assert_eq!(https_health.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            https_health.json::<serde_json::Value>().await?,
+            serde_json::json!({ "status": "pass" })
+        );
+
+        let http = reqwest::Client::new();
+        let debug_config = http
+            .get(format!("{metrics_url}/debug/config"))
+            .send()
+            .await?;
+        assert_eq!(debug_config.status(), reqwest::StatusCode::OK);
+        let debug_config = debug_config.json::<serde_json::Value>().await?;
+
+        assert_eq!(debug_config["ServerURL"], "https://headscale.example:8443");
+        assert_eq!(debug_config["Addr"], listen.to_string());
+        assert_eq!(debug_config["MetricsAddr"], metrics.to_string());
+        assert_eq!(debug_config["GRPCAddr"], grpc.to_string());
+        assert_eq!(debug_config["DERP"]["ServerEnabled"], true);
+        assert_eq!(
+            debug_config["DERP"]["AutomaticallyAddEmbeddedDerpRegion"],
+            true
+        );
+        assert_eq!(debug_config["DERP"]["ServerRegionID"], 901);
+        assert_eq!(debug_config["DERP"]["ServerRegionCode"], "hs");
+        assert_eq!(
+            debug_config["DERP"]["ServerRegionName"],
+            "Headscale Runtime DERP"
+        );
+        assert_eq!(debug_config["DERP"]["ServerVerifyClients"], true);
+        assert_eq!(debug_config["DERP"]["STUNAddr"], "127.0.0.1:0");
+        assert_eq!(debug_config["DERP"]["AutoUpdate"], false);
+        assert_eq!(
+            debug_config["DERP"]["UpdateFrequency"],
+            10_800_000_000_000i64
+        );
+        assert_eq!(debug_config["DERP"]["IPv4"], "198.51.100.44");
+        assert_eq!(debug_config["DERP"]["IPv6"], "2001:db8::44");
+
+        let projected_region = &debug_config["DERP"]["DERPMap"]["Regions"]["901"];
+        assert_eq!(projected_region["RegionID"], 901);
+        assert_eq!(projected_region["RegionCode"], "hs");
+        assert_eq!(projected_region["RegionName"], "Headscale Runtime DERP");
+        assert_eq!(projected_region["Nodes"][0]["Name"], "901");
+        assert_eq!(
+            projected_region["Nodes"][0]["HostName"],
+            "headscale.example"
+        );
+        assert_eq!(projected_region["Nodes"][0]["DERPPort"], 8443);
+        assert_eq!(projected_region["Nodes"][0]["IPv4"], "198.51.100.44");
+        assert_eq!(projected_region["Nodes"][0]["IPv6"], "2001:db8::44");
+        assert_eq!(debug_config["TLS"]["LetsEncrypt"]["Hostname"], "");
+        assert_eq!(
+            debug_config["TLS"]["LetsEncrypt"]["ChallengeType"],
+            "HTTP-01"
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    result
+}
+
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResult {
@@ -9454,6 +9594,26 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
         &["-o", "yaml", "users", "create", "remote"],
         6,
         include_str!("snapshots/grpc_remote_duplicate_user_yaml.stderr"),
+    );
+
+    let missing_auth_id = "hskey-authreq-eeeeeeeeeeeeeeeeeeeeeeee";
+    assert_config_stderr_snapshot(
+        &config,
+        &["auth", "approve", "--auth-id", missing_auth_id],
+        5,
+        include_str!("snapshots/grpc_remote_auth_missing.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-ojson-line",
+            "auth",
+            "approve",
+            "--auth-id",
+            missing_auth_id,
+        ],
+        5,
+        include_str!("snapshots/grpc_remote_auth_missing_json_line.stderr"),
     );
 
     let bad_config_dir = tempfile::tempdir().unwrap();

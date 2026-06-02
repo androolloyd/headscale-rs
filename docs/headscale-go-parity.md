@@ -965,8 +965,9 @@ node/user IDs for auth-key and web/OIDC completion paths, preventing map peer
 ID churn relative to headscale-go. Additional breadth coverage pins native DERP
 health replay before keepalive, `auth reject --output=yaml` missing
 `--auth-id`, and TLS-ALPN explicit `server.https_listen` pre-issuance bind
-failure. The real-client PR matrix now selects 155 deterministic rows,
-including `postgres-policy-rename-restart`.
+failure. The real-client PR matrix now selects 156 deterministic rows,
+including `postgres-policy-rename-restart` and
+`postgres-web-register-policy-churn-restart`.
 
 Recent coverage note (2026-06-02): focused exact-name Rust evidence was added
 for the former tags, ACL, route/DNS, CLI/API auth, SSH, auth/OIDC/lifecycle,
@@ -980,11 +981,19 @@ gRPC status/message envelopes, the current-head multi-address
 SSH/DNS/route-policy fixture's SSH principals plus `acceptEnv`, and raw native
 DERP packet relay followed by `PeerGone(Disconnected)` on source drop.
 
+Recent coverage note (2026-06-02): the next parity edge batch now pins tagged
+auth-key `/map` identity/expiry shape, native DERP mixed WebSocket/raw packet
+relay plus source-disconnect `PeerGone`, remote TLS gRPC `auth approve`
+missing-session CLI errors, and real `headscale serve` projection for
+upstream-shaped `derp.server` config with explicit self-signed HTTPS. The PR
+real-client set now includes `postgres-web-register-policy-churn-restart`.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the
    CI-backed paired stock-client matrix and the grpc-gateway/remote-gRPC admin
-   topology smoke, especially registration/config mutation rows, before
+   topology smoke, especially additional registration/config mutation rows
+   beyond the now-PR-gated web-registration policy-churn restart case, before
    claiming full database parity.
 2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for
@@ -999,17 +1008,19 @@ DERP packet relay followed by `PeerGone(Disconnected)` on source drop.
 4. Finish config-runtime gaps: HTTP-01/TLS-ALPN now have production-listener
    controlled-CA process coverage, HTTP-01 challenge-listener bind failure is
    pinned without public-CA traffic, and TLS-ALPN public-CA-shaped startup
-   avoids cache writes before deterministic listener failure; continue with
-   remaining HTTPS/DERP runtime settings.
+   avoids cache writes before deterministic listener failure. Runtime
+   `derp.server` projection plus explicit self-signed HTTPS serve health are
+   pinned; continue with broader public-CA drift checks and remaining config
+   combinations.
 5. Broaden production-process restart smokes for web/CLI/OIDC policy and
    map churn beyond the auth-key restart-persistence, OIDC route-approval,
    web/CLI restart, default web-registration route-approval, Postgres web
    registration policy-churn, and Postgres OIDC policy-churn restart rows.
 6. Finish native Rust DERP relay parity beyond the supported upstream
    `derper` sidecar boundary: broader stock-client restart/runtime assertions
-   after keepalive, raw packet relay, duplicate reconnect, and source-disconnect
-   `PeerGone` cases beyond the focused status-health, duplicate-health
-   reconnect, and restart map-stability pins are wired.
+   after keepalive, raw and mixed-transport packet relay, duplicate reconnect,
+   and source-disconnect `PeerGone` cases beyond the focused status-health,
+   duplicate-health reconnect, and restart map-stability pins are wired.
 7. Extend CI/fuzz/golden enforcement: broaden selected real-client rows on PRs,
    scheduled full matrix, current-head pin checks, and parity golden diffs. The
    formal-verification status gate is now explicit and records the current

@@ -2468,3 +2468,25 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added native DERP raw runtime relay coverage: two admitted sessions now
   prove `SendPacket` routes as `RecvPacket`, and the destination observes
   `PeerGone(Disconnected)` when the source session drops.
+
+## 2026-06-02 fourth subagent parity edge adoption
+
+- Added wire-level tag/expiry parity coverage for tagged auth-key
+  registration. A tagged node now proves the `/map` self node uses the
+  synthetic Tagged Devices identity, carries the forced tag, and omits
+  `KeyExpiry`/false `Expired` even when the registration body carried a client
+  expiry.
+- Added native DERP mixed-transport relay coverage in both directions:
+  WebSocket-to-raw and raw-to-WebSocket sessions now prove `SendPacket`
+  becomes `RecvPacket`, and the destination receives
+  `PeerGone(Disconnected)` when the source drops.
+- Added remote TLS gRPC CLI snapshots for `auth approve` missing-session
+  server errors in human and JSON-line output, extending local Unix-socket
+  auth error coverage to the remote config path.
+- Added a real `headscale serve` runtime projection test for upstream-shaped
+  `derp.server` config and explicit self-signed `server.https_listen`; it
+  asserts `/debug/config` DERP fields/DERPMap and HTTPS `/health` without ACME,
+  public CA traffic, or Docker.
+- Added `postgres-web-register-policy-churn-restart` to the deterministic
+  PR/push real-client set and CI metadata guard. The checked PR matrix now
+  reports 156 deterministic rows.

@@ -1084,6 +1084,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_derp_mixed_transport_routes_websocket_packet_to_raw_and_reports_disconnect() {
+        let source_key = DerpNodeKeyPair::from_private_key([6u8; KEY_LEN]).unwrap();
+        let source_public = source_key.public_key();
+        let destination_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let destination_public = destination_key.public_key();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let source = start_websocket_derp_client(runtime.clone(), &source_key).await;
+        let mut destination = start_raw_derp_client(runtime.clone(), &destination_key).await;
+
+        let packet = b"native derp packet from websocket to raw runtime".to_vec();
+        let send_packet = encode_frame(&Frame::SendPacket {
+            destination: destination_public,
+            packet: packet.clone(),
+        })
+        .unwrap();
+        source
+            .tx
+            .send(Ok(Message::Binary(send_packet)))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            Duration::from_millis(500),
+            read_next_frame(&mut destination.reader, &mut destination.decoder),
+        )
+        .await
+        .expect("timed out waiting for websocket-to-raw relayed DERP packet")
+        .unwrap();
+        assert_eq!(
+            received,
+            Frame::RecvPacket {
+                source: source_public,
+                packet
+            }
+        );
+
+        source.tx.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(source.server.await.unwrap().is_ok());
+
+        let gone = tokio::time::timeout(
+            Duration::from_millis(500),
+            read_next_frame(&mut destination.reader, &mut destination.decoder),
+        )
+        .await
+        .expect("timed out waiting for websocket source disconnect PeerGone")
+        .unwrap();
+        assert_eq!(
+            gone,
+            Frame::PeerGone {
+                peer: source_public,
+                reason: PeerGoneReason::Disconnected,
+            }
+        );
+
+        drop(destination.writer);
+        drop(destination.reader);
+        assert!(destination.server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn native_derp_mixed_transport_routes_raw_packet_to_websocket_and_reports_disconnect() {
+        let source_key = DerpNodeKeyPair::from_private_key([6u8; KEY_LEN]).unwrap();
+        let source_public = source_key.public_key();
+        let destination_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let destination_public = destination_key.public_key();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let mut source = start_raw_derp_client(runtime.clone(), &source_key).await;
+        let destination = start_websocket_derp_client(runtime.clone(), &destination_key).await;
+
+        let packet = b"native derp packet from raw to websocket runtime".to_vec();
+        let send_packet = encode_frame(&Frame::SendPacket {
+            destination: destination_public,
+            packet: packet.clone(),
+        })
+        .unwrap();
+        source.writer.write_all(&send_packet).await.unwrap();
+        source.writer.flush().await.unwrap();
+
+        wait_for_sent_messages(&destination.sent, 3).await;
+        let received = decode_websocket_sent_frame(
+            &destination.sent,
+            2,
+            "raw-to-websocket relayed packet decodes",
+        );
+        assert_eq!(
+            received,
+            Frame::RecvPacket {
+                source: source_public,
+                packet
+            }
+        );
+
+        drop(source.writer);
+        drop(source.reader);
+        assert!(source.server.await.unwrap().is_ok());
+
+        wait_for_sent_messages(&destination.sent, 4).await;
+        let gone = decode_websocket_sent_frame(
+            &destination.sent,
+            3,
+            "raw source disconnect PeerGone decodes",
+        );
+        assert_eq!(
+            gone,
+            Frame::PeerGone {
+                peer: source_public,
+                reason: PeerGoneReason::Disconnected,
+            }
+        );
+
+        destination.tx.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(destination.server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_sends_scheduled_keepalive() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(
@@ -2386,6 +2509,106 @@ mod tests {
             panic!("expected binary websocket message, got {message:?}");
         };
         bytes
+    }
+
+    struct RawDerpClient {
+        reader: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        decoder: FrameDecoder,
+        server: tokio::task::JoinHandle<Result<(), WireError>>,
+    }
+
+    async fn start_raw_derp_client(
+        runtime: Arc<NativeDerpRuntime>,
+        client_key: &DerpNodeKeyPair,
+    ) -> RawDerpClient {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut reader, mut writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut reader, &mut decoder).await.unwrap()
+        else {
+            panic!("expected raw server-key frame");
+        };
+        assert_eq!(server_public, runtime.public_key());
+        let client_info =
+            encode_client_info_frame(client_key, &server_public, &ClientInfo::regular()).unwrap();
+        writer.write_all(&client_info).await.unwrap();
+        writer.flush().await.unwrap();
+        let server_info_frame = read_next_frame(&mut reader, &mut decoder).await.unwrap();
+        assert_eq!(
+            open_server_info(client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        RawDerpClient {
+            reader,
+            writer,
+            decoder,
+            server,
+        }
+    }
+
+    struct WebsocketDerpClient {
+        tx: mpsc::Sender<Result<Message, io::Error>>,
+        sent: Arc<Mutex<Vec<Message>>>,
+        server: tokio::task::JoinHandle<Result<(), WireError>>,
+    }
+
+    async fn start_websocket_derp_client(
+        runtime: Arc<NativeDerpRuntime>,
+        client_key: &DerpNodeKeyPair,
+    ) -> WebsocketDerpClient {
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+        wait_for_sent_messages(&sent, 2).await;
+        let frame = decode_websocket_sent_frame(&sent, 0, "websocket server-key frame decodes");
+        let Frame::ServerKey { key, extra } = frame else {
+            panic!("expected websocket server-key frame");
+        };
+        assert_eq!(key, server_public);
+        assert!(extra.is_empty());
+        let server_info_frame =
+            decode_websocket_sent_frame(&sent, 1, "websocket server-info frame decodes");
+        assert_eq!(
+            open_server_info(client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        WebsocketDerpClient { tx, sent, server }
+    }
+
+    fn decode_websocket_sent_frame(
+        sent: &Arc<Mutex<Vec<Message>>>,
+        index: usize,
+        expected: &str,
+    ) -> Frame {
+        let messages = sent.lock().unwrap().clone();
+        let (frame, _) = headscale_core::derp::protocol::decode_frame(
+            binary_frame(&messages[index]),
+            MAX_INFO_LEN,
+        )
+        .unwrap_or_else(|err| panic!("{expected}: {err}"));
+        frame
     }
 
     fn test_state_with_native_derp() -> WireState {

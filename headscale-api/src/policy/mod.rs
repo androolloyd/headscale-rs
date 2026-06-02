@@ -98,10 +98,29 @@ impl PolicyStore {
         self.set_at(doc, raw, now_unix());
     }
 
+    /// Replace the policy without notifying parked `/map` pollers.
+    ///
+    /// Callers that need to apply dependent runtime state, such as route
+    /// auto-approvals, should call this and then [`Self::notify_change`]
+    /// after the dependent updates complete.
+    pub fn set_quiet(&self, doc: PolicyDoc, raw: String) {
+        self.set_at_quiet(doc, raw, now_unix());
+    }
+
     /// Same as [`Self::set`], but preserves the caller supplied
     /// update timestamp. DB-backed policy mode uses this to keep the
     /// in-memory cache and latest `policies.updated_at` row aligned.
     pub fn set_at(&self, doc: PolicyDoc, raw: String, updated_at: i64) {
+        self.set_at_inner(doc, raw, updated_at);
+        self.notify_change();
+    }
+
+    /// Same as [`Self::set_at`], but leaves stream notification to the caller.
+    pub fn set_at_quiet(&self, doc: PolicyDoc, raw: String, updated_at: i64) {
+        self.set_at_inner(doc, raw, updated_at);
+    }
+
+    fn set_at_inner(&self, doc: PolicyDoc, raw: String, updated_at: i64) {
         let packet_filter_default_allow = filter::raw_policy_omits_packet_filter_rules(&raw);
         let filters = if packet_filter_default_allow {
             allow_all_filter_rules()
@@ -116,6 +135,10 @@ impl PolicyStore {
             g.filters = filters;
             g.packet_filter_default_allow = packet_filter_default_allow;
         }
+    }
+
+    /// Notify parked `/map` pollers after a policy update is fully observable.
+    pub fn notify_change(&self) {
         self.inner.notify.notify_waiters();
     }
 

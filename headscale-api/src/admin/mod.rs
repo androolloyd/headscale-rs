@@ -1377,18 +1377,20 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
     match crate::policy::parse_hujson_policy(&raw) {
         Ok(doc) => {
             let n_rules = doc.rules.len();
-            s.policy.set(doc, raw);
-            let auto_approved_nodes =
-                match machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await {
-                    Ok(count) => count,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": e.to_string()})),
-                        )
-                            .into_response();
-                    }
-                };
+            s.policy.set_quiet(doc, raw);
+            let auto_approval_result =
+                machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await;
+            s.policy.notify_change();
+            let auto_approved_nodes = match auto_approval_result {
+                Ok(count) => count,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            };
             (
                 StatusCode::OK,
                 Json(json!({

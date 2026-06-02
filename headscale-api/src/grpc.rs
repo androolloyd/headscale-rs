@@ -429,7 +429,8 @@ pub mod upstream {
             let doc = parse_hujson_policy(&policy.policy).map_err(|e| {
                 Status::invalid_argument(format!("loading policy from database: {e}"))
             })?;
-            self.policy.set_at(doc, policy.policy, policy.updated_at);
+            self.policy
+                .set_at_quiet(doc, policy.policy, policy.updated_at);
             Ok(true)
         }
 
@@ -457,7 +458,7 @@ pub mod upstream {
                     })?;
                     self.validate_candidate_policy(&doc, "reloading policy")
                         .await?;
-                    self.policy.set(doc, raw);
+                    self.policy.set_quiet(doc, raw);
                     true
                 }
                 PolicyMode::Database => self.load_policy_from_persistence().await?,
@@ -465,12 +466,13 @@ pub mod upstream {
             };
 
             if loaded {
-                crate::admin::machines::apply_policy_auto_approvals(
+                let auto_approvals = crate::admin::machines::apply_policy_auto_approvals(
                     &self.policy,
                     self.machines.as_ref(),
                 )
-                .await
-                .map_err(machine_error_to_status)?;
+                .await;
+                self.policy.notify_change();
+                auto_approvals.map_err(machine_error_to_status)?;
             }
 
             Ok(loaded)
@@ -1400,11 +1402,11 @@ pub mod upstream {
                         Status::unknown(format!("persisting policy to database: {e}"))
                     })?;
                     self.policy
-                        .set_at(doc, persisted.policy.clone(), persisted.updated_at);
+                        .set_at_quiet(doc, persisted.policy.clone(), persisted.updated_at);
                     (persisted.policy, persisted.updated_at)
                 }
                 PolicyMode::Memory => {
-                    self.policy.set(doc, policy.clone());
+                    self.policy.set_quiet(doc, policy.clone());
                     (
                         policy,
                         self.policy.updated_at().unwrap_or_else(current_unix_i64),
@@ -1412,12 +1414,13 @@ pub mod upstream {
                 }
                 PolicyMode::File { .. } => unreachable!("file mode returned before parsing"),
             };
-            crate::admin::machines::apply_policy_auto_approvals(
+            let auto_approvals = crate::admin::machines::apply_policy_auto_approvals(
                 &self.policy,
                 self.machines.as_ref(),
             )
-            .await
-            .map_err(machine_error_to_status)?;
+            .await;
+            self.policy.notify_change();
+            auto_approvals.map_err(machine_error_to_status)?;
             Ok(Response::new(SetPolicyResponse {
                 policy,
                 updated_at: Some(unix_to_timestamp(updated_at)),

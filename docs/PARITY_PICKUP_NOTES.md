@@ -1028,8 +1028,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   reason to `policy change` while preserving the stored approval and stale
   unhealthy-route cleanup behavior; a focused unit test now pins the bounded
   reason/type/content shape.
-- Remaining runtime churn work: persistent wire-registry sync, map-request
-  auto-approval reasons, and the broader NodeStore worker batching semantics.
+- Remaining runtime churn work: persistent wire-registry sync and broader
+  NodeStore reason/state edge coverage.
 
 ## 2026-06-01 Postgres route-health mixed-exit no-restart slice
 

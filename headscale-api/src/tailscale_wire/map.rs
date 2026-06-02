@@ -1639,28 +1639,37 @@ async fn map_inner(
                         // rather than a full map whose empty Peers list
                         // would serialize away and leave clients with
                         // stale peers/routes.
-                        machines.record_unbatched_map_change(
-                            MapChangeReason::PolicyChange,
-                            Some(self_node_id),
-                            None,
-                        );
-                        rebuild_peer_delta_chunk(
-                            &machines,
-                            &policy,
-                            &self_node_key,
-                            &dns,
-                            cap_version,
-                            taildrop_enabled,
-                            auto_update_enabled,
-                            compression,
-                            last_self_node.as_ref(),
-                            &last_peer_state,
-                            &initial_peer_ids,
-                            &mapresponse_debug,
-                            public_control_url.as_deref().unwrap_or(""),
-                            PeerDeltaOptions::policy_change(),
-                            &BTreeSet::new(),
-                        )
+                        if machines.map_batcher_enabled() {
+                            machines.record_observed_map_change(
+                                MapChangeReason::PolicyChange,
+                                Some(self_node_id),
+                                None,
+                            );
+                            None
+                        } else {
+                            machines.record_unbatched_map_change(
+                                MapChangeReason::PolicyChange,
+                                Some(self_node_id),
+                                None,
+                            );
+                            rebuild_peer_delta_chunk(
+                                &machines,
+                                &policy,
+                                &self_node_key,
+                                &dns,
+                                cap_version,
+                                taildrop_enabled,
+                                auto_update_enabled,
+                                compression,
+                                last_self_node.as_ref(),
+                                &last_peer_state,
+                                &initial_peer_ids,
+                                &mapresponse_debug,
+                                public_control_url.as_deref().unwrap_or(""),
+                                PeerDeltaOptions::policy_change(),
+                                &BTreeSet::new(),
+                            )
+                        }
                     }
                     () = &mut dns_changed => {
                         // Extra-records file edited (or DnsStore.set_spec
@@ -6601,6 +6610,126 @@ mod tests {
                 .and_then(|rules| rules.as_ref())
                 .is_some_and(Vec::is_empty),
             "loaded empty ACL should keep the base packet filter empty"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_policy_reload_auto_approval_waits_for_batch_tick() {
+        let (state, _dir) = fixture();
+        let initial_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.88.0.0/16:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(initial_policy).unwrap(),
+            initial_policy.into(),
+        );
+
+        let alice = "88".repeat(32);
+        let router_key = "89".repeat(32);
+        let route = "10.88.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        let mut router_record = policy_record(&router_key, "router", 11, "router", Vec::new());
+        router_record.available_routes = vec![route.to_string()];
+        state.machines.upsert(router_key.clone(), router_record);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let _router_first = next_zstd_map_response(&mut router_body).await;
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+        let first_mr = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            first_mr.peers.is_empty(),
+            "unapproved advertised route must not make router visible"
+        );
+        let _ = state.machines.drain_pending_map_changes();
+        let history_len = state.machines.map_change_history().len();
+
+        let reloaded_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.88.0.0/16:*"]}
+            ],
+            "autoApprovers": {
+                "routes": {"10.88.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set_quiet(
+            crate::policy::parse_hujson_policy(reloaded_policy).unwrap(),
+            reloaded_policy.into(),
+        );
+        let router_record = state
+            .machines
+            .get(&router_key)
+            .expect("router remains registered");
+        let approved_routes = auto_approved_routes_for_node(
+            &state.policy,
+            &router_record.primary_addr_string().unwrap_or_default(),
+            Some(router_record.user.as_str()),
+            &router_record.forced_tags,
+            &router_record.approved_routes,
+            &router_record.available_routes,
+        )
+        .unwrap();
+        let (approved, missing) = state
+            .machines
+            .set_approved_routes_many(vec![(router_key.clone(), approved_routes)]);
+        assert_eq!(approved, 1);
+        assert!(missing.is_empty());
+        state.policy.notify_change();
+        assert_eq!(
+            state
+                .machines
+                .get(&router_key)
+                .expect("router remains registered")
+                .approved_routes,
+            vec![route.to_string()]
+        );
+
+        let changes = state.machines.map_change_history();
+        let approval_change = changes
+            .get(history_len)
+            .expect("policy reload auto-approval records a map change");
+        assert_eq!(approval_change.reason_labels(), vec!["policy change"]);
+        assert_eq!(approval_change.change_type(), "policy");
+        assert!(approval_change.content.include_policy);
+        assert!(approval_change.content.requires_runtime_peer_computation);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut alice_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "policy reload must not emit a stale pre-auto-approval frame before the map-batch tick"
+        );
+        let pending = state.machines.pending_map_changes();
+        assert!(
+            pending.contains_key(&stable_id_from_key(&alice)),
+            "observer should have a queued policy batch after reload notification"
+        );
+
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            delta.node.is_none(),
+            "batched policy reload should be a peer delta, not a full map"
+        );
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "policy reload deltas should carry policy-derived DNS updates"
+        );
+        let peer = changed_peer(&delta, "router").expect("router peer delta");
+        assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
+        assert!(
+            peer.primary_routes.iter().any(|primary| primary == route),
+            "first policy reload frame should already include route auto-approval state"
         );
     }
 

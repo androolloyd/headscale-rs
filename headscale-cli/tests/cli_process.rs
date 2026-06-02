@@ -200,6 +200,26 @@ fn trim_line_end_spaces(text: &str) -> String {
     out
 }
 
+fn normalize_localhost_port(text: &str) -> String {
+    let mut normalized = text.to_string();
+    let mut start = 0;
+    const PREFIX: &str = "http://127.0.0.1:";
+    while let Some(relative) = normalized[start..].find(PREFIX) {
+        let port_start = start + relative + PREFIX.len();
+        let port_end = normalized[port_start..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map(|offset| port_start + offset)
+            .unwrap_or(normalized.len());
+        if port_start == port_end {
+            start = port_end;
+            continue;
+        }
+        normalized.replace_range(port_start..port_end, "<port>");
+        start = port_start + "<port>".len();
+    }
+    normalized
+}
+
 fn assert_stdout_snapshot(args: &[&str], expected: &str) {
     let output = headscale_clean(args);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -1550,7 +1570,7 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
     assert_stderr_snapshot(
         &["mockoidc", "--config", "missing.yaml", "--help"],
         1,
-        "Error: unknown flag: --config\n",
+        include_str!("snapshots/utility_mockoidc_late_config_flag.stderr"),
     );
     assert_stderr_snapshot(
         &["completion", "--bad"],
@@ -1709,8 +1729,6 @@ fn utility_skip_config_commands_reject_late_global_flags_like_current_upstream_c
 
 #[test]
 fn server_alias_matches_current_upstream_unknown_command() {
-    let expected =
-        "Error: unknown command \"server\" for \"headscale\"\n\nDid you mean this?\n\tserve\n\n";
     for args in [
         &["server"][..],
         &["server", "--help"][..],
@@ -1718,7 +1736,11 @@ fn server_alias_matches_current_upstream_unknown_command() {
         &["server", "-x"][..],
         &["server", "ignored"][..],
     ] {
-        assert_stderr_snapshot(args, 1, expected);
+        assert_stderr_snapshot(
+            args,
+            1,
+            include_str!("snapshots/utility_server_unknown_command.stderr"),
+        );
     }
 }
 
@@ -1727,51 +1749,51 @@ fn removed_hidden_compatibility_aliases_match_current_upstream_unknown_commands(
     for (args, expected) in [
         (
             &["namespace"][..],
-            "Error: unknown command \"namespace\" for \"headscale\"\n",
+            include_str!("snapshots/utility_namespace_unknown_command.stderr"),
         ),
         (
             &["namespace", "--help"][..],
-            "Error: unknown command \"namespace\" for \"headscale\"\n",
+            include_str!("snapshots/utility_namespace_unknown_command.stderr"),
         ),
         (
             &["namespaces", "--help"][..],
-            "Error: unknown command \"namespaces\" for \"headscale\"\n",
+            include_str!("snapshots/utility_namespaces_unknown_command.stderr"),
         ),
         (
             &["ns", "users"][..],
-            "Error: unknown command \"ns\" for \"headscale\"\n",
+            include_str!("snapshots/utility_ns_unknown_command.stderr"),
         ),
         (
             &["machine", "--help"][..],
-            "Error: unknown command \"machine\" for \"headscale\"\n",
+            include_str!("snapshots/utility_machine_unknown_command.stderr"),
         ),
         (
             &["machines", "--help"][..],
-            "Error: unknown command \"machines\" for \"headscale\"\n",
+            include_str!("snapshots/utility_machines_unknown_command.stderr"),
         ),
         (
             &["tailnet"][..],
-            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+            include_str!("snapshots/utility_tailnet_unknown_command.stderr"),
         ),
         (
             &["tailnet", "--help"][..],
-            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+            include_str!("snapshots/utility_tailnet_unknown_command.stderr"),
         ),
         (
             &["tailnet", "status", "--help"][..],
-            "Error: unknown command \"tailnet\" for \"headscale\"\n",
+            include_str!("snapshots/utility_tailnet_unknown_command.stderr"),
         ),
         (
             &["init-config"][..],
-            "Error: unknown command \"init-config\" for \"headscale\"\n",
+            include_str!("snapshots/utility_init_config_unknown_command.stderr"),
         ),
         (
             &["init-config", "--help"][..],
-            "Error: unknown command \"init-config\" for \"headscale\"\n",
+            include_str!("snapshots/utility_init_config_unknown_command.stderr"),
         ),
         (
             &["init-config", "--output", "headscale.toml"][..],
-            "Error: unknown command \"init-config\" for \"headscale\"\n",
+            include_str!("snapshots/utility_init_config_unknown_command.stderr"),
         ),
     ] {
         assert_stderr_snapshot(args, 1, expected);
@@ -6854,14 +6876,10 @@ async fn hidden_status_probe_uses_failure_exit_codes() {
     drop(listener);
     let output = headscale_clean(&["status", "--server", &refused_url]);
     assert_status_command_failed(&output);
-    let err = stderr(&output);
-    assert!(
-        err.contains("Error: failed to connect to control plane"),
-        "stderr: {err}"
-    );
-    assert!(
-        err.contains(&format!("{refused_url}/health")),
-        "stderr: {err}"
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        normalize_localhost_port(&stderr(&output)),
+        include_str!("snapshots/status_connection_refused.stderr")
     );
 }
 
@@ -6890,10 +6908,10 @@ fn explicit_missing_config_still_fails_as_file_load_error() {
         home.path(),
     );
 
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("Failed to load config file"),
-        "stderr: {}",
-        stderr(&output)
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/explicit_missing_config.stderr"),
+        "explicit missing config",
     );
 }

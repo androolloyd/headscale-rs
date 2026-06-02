@@ -767,6 +767,15 @@ same route/tag state through CLI output, `/debug/nodestore`,
 focused process-level convergence check across the Pg DB rows, hydrated live
 registry, loaded policy manager, and map-response inputs after restart.
 
+Recent coverage note (2026-06-02):
+`serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke` now starts
+the real env-gated production Postgres `serve` binary, creates and registers a
+node through local gRPC/CLI against persistent Pg state, renames it while the
+server stays live, and asserts both Pg-backed CLI JSON and `/debug/nodestore`
+show the renamed node. This adds a focused live admin/map mutation row distinct
+from the existing grpc-gateway/remote-gRPC topology and policy-file SIGHUP
+smokes.
+
 Recent coverage note (2026-06-02): `configtest` now snapshots invalid
 `server.https_listen` parsing, matching the already-covered `serve` startup
 guard so explicit HTTPS listener mistakes are caught before runtime state is

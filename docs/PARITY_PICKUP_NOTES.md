@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 19:31 ADT
+Updated: 2026-06-02 20:11 ADT
 
 ## Current State
 
@@ -2557,6 +2557,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   YAML and matched upstream YAML success output trailing-blank-line behavior.
   The lower-priority CLI residual row remains open for remaining utility and
   process-level output drift.
+- This P2 CLI residual slice adds current-upstream process snapshots for
+  lower-priority top-level/utility parser surfaces that were not part of the
+  recent completion or `generate private-key` work: `help help`, multi-word
+  unknown help topics, root `--config`/`-c` missing-value errors, invalid
+  `--force=<bad>` values, and real upstream top-level typo suggestions for
+  `auth`, `nodes`, `policy`, `serve`, and `users`. The P2 row remains open for
+  broader live-server/process-level output drift.
 - Closed `p0-change-merge-filter-semantics`: map-change content flags now pin
   targeted/full/self updates, PingRequest preservation, policy/runtime peer
   computation, DNS/DERP/domain inclusion, and scoped peer-patch filtering.

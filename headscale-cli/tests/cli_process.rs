@@ -2212,6 +2212,16 @@ fn utility_missing_global_flag_values_match_current_upstream_cobra() {
     let top_level_missing_output = include_str!("snapshots/utility_top_level_json_flag.stderr")
         .replace("unknown flag: --json", "flag needs an argument: --output");
     assert_stderr_snapshot(&["--output"], 1, &top_level_missing_output);
+    assert_stderr_snapshot(
+        &["--config"],
+        1,
+        include_str!("snapshots/utility_top_level_missing_config_value.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["-c"],
+        1,
+        include_str!("snapshots/utility_top_level_missing_config_shorthand_value.stderr"),
+    );
 }
 
 #[test]
@@ -2438,6 +2448,39 @@ fn help_unknown_topics_match_current_upstream_snapshots() {
         0,
         include_str!("snapshots/help_status_unknown_topic.stderr"),
     );
+    assert_stderr_no_config_warning_snapshot(
+        &["help", "unknown", "extra"],
+        0,
+        include_str!("snapshots/help_unknown_extra_topic.stderr"),
+    );
+}
+
+#[test]
+fn help_command_and_extra_operator_topics_match_current_upstream_snapshots() {
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "help"],
+        include_str!("snapshots/help_help.stdout"),
+    );
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "help", "extra"],
+        include_str!("snapshots/help_help.stdout"),
+    );
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "serve", "extra"],
+        include_str!("snapshots/serve_help.stdout"),
+    );
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "health", "extra"],
+        include_str!("snapshots/health_help.stdout"),
+    );
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "configtest", "extra"],
+        include_str!("snapshots/configtest_help.stdout"),
+    );
+    assert_stdout_no_config_warning_snapshot(
+        &["help", "dumpConfig", "extra"],
+        include_str!("snapshots/dump_config_help.stdout"),
+    );
 }
 
 #[test]
@@ -2473,6 +2516,60 @@ fn utility_top_level_unknown_flags_match_upstream_stderr_snapshots() {
     let unknown_shorthand = include_str!("snapshots/utility_top_level_json_flag.stderr")
         .replace("unknown flag: --json", "unknown shorthand flag: 'x' in -x");
     assert_stderr_snapshot(&["-x"], 1, &unknown_shorthand);
+}
+
+#[test]
+fn utility_top_level_unknown_commands_match_upstream_suggestions() {
+    for (args, expected) in [
+        (
+            &["servee"][..],
+            include_str!("snapshots/utility_top_level_servee_suggestion.stderr"),
+        ),
+        (
+            &["servee", "--help"][..],
+            include_str!("snapshots/utility_top_level_servee_suggestion.stderr"),
+        ),
+        (
+            &["userss"][..],
+            include_str!("snapshots/utility_top_level_userss_suggestion.stderr"),
+        ),
+        (
+            &["nodez"][..],
+            include_str!("snapshots/utility_top_level_nodez_suggestion.stderr"),
+        ),
+        (
+            &["auths"][..],
+            include_str!("snapshots/utility_top_level_auths_suggestion.stderr"),
+        ),
+        (
+            &["policyy"][..],
+            include_str!("snapshots/utility_top_level_policyy_suggestion.stderr"),
+        ),
+    ] {
+        assert_stderr_snapshot(args, 1, expected);
+    }
+}
+
+#[test]
+fn utility_invalid_global_bool_values_match_current_upstream_cobra() {
+    assert_stderr_snapshot(
+        &["--force=maybe"],
+        1,
+        include_str!("snapshots/utility_top_level_invalid_force_bool.stderr"),
+    );
+
+    for args in [
+        &["health", "--force=maybe", "--help"][..],
+        &["serve", "--force=maybe", "--help"][..],
+        &["configtest", "--force=maybe", "--help"][..],
+        &["dumpConfig", "--force=maybe", "--help"][..],
+    ] {
+        assert_stderr_snapshot(
+            args,
+            1,
+            include_str!("snapshots/utility_invalid_force_bool.stderr"),
+        );
+    }
 }
 
 #[test]

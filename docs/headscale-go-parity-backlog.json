@@ -8,10 +8,10 @@
     "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
   },
   "summary": {
-    "open_p0": 2,
+    "open_p0": 1,
     "open_p1": 3,
     "open_p2": 2,
-    "total_open": 7
+    "total_open": 6
   },
   "open_items": [
     {
@@ -31,24 +31,6 @@
         "integration/api_auth_test.go"
       ],
       "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage beyond the current selected stock-client matrix and focused API-key/preauth-key restart smokes, especially remaining users, nodes, policy, routes, auth sessions, and config/map-churn cases."
-    },
-    {
-      "id": "p0-native-derp-stock-client-runtime",
-      "priority": "P0",
-      "lane": "Native DERP/STUN replacement",
-      "status": "in_progress",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "tools/real-client/*derp-native*",
-        "headscale-api/src/tailscale_wire/derp.rs",
-        "headscale-core/src/derp.rs"
-      ],
-      "upstream_evidence": [
-        "hscontrol/derp/server/derp_server.go",
-        "integration/embedded_derp_test.go",
-        "tailscale.com/derp/derpserver"
-      ],
-      "exit_criteria": "Broaden stock-client native DERP runtime assertions beyond focused restart/policy-reload rows, including verify-client coverage over raw DERP and DERP-over-WebSocket where applicable."
     },
     {
       "id": "p1-route-via-health-edge-coverage",

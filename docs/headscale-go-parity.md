@@ -738,6 +738,11 @@ same route/tag state through CLI output, `/debug/nodestore`,
 focused process-level convergence check across the Pg DB rows, hydrated live
 registry, loaded policy manager, and map-response inputs after restart.
 
+Recent coverage note (2026-06-02): `configtest` now snapshots invalid
+`server.https_listen` parsing, matching the already-covered `serve` startup
+guard so explicit HTTPS listener mistakes are caught before runtime state is
+opened.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

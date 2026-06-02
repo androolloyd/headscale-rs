@@ -2949,6 +2949,21 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+server:
+  https_listen: "not-a-socket"
+"#,
+        include_str!("snapshots/configtest_invalid_https_listen.stderr"),
+        "configtest invalid HTTPS listener",
+    );
+
+    assert_configtest_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 derp:
   server:
     enabled: true

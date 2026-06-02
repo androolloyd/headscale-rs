@@ -87,6 +87,87 @@ dns_live_resolver_track_pid() {
   dns_live_resolver_pids+=("${pid}")
 }
 
+dns_live_resolver_split_nameservers_json() {
+  local suffix="$1"
+  shift
+  ruby -rjson -e '
+    suffix = ARGV.shift.to_s.sub(/\.\z/, "")
+    abort("missing DNS split suffix") if suffix.empty?
+    resolvers = ARGV.map(&:to_s)
+    abort("missing DNS resolver list for #{suffix}") if resolvers.empty? || resolvers.any?(&:empty?)
+    puts JSON.generate({suffix => resolvers})
+  ' "${suffix}" "$@"
+}
+
+dns_live_resolver_search_domains_json() {
+  ruby -rjson -e '
+    domains = ARGV.map { |domain| domain.to_s.sub(/\.\z/, "") }
+    abort("missing DNS search domain list") if domains.empty? || domains.any?(&:empty?)
+    puts JSON.generate(domains)
+  ' "$@"
+}
+
+dns_live_resolver_plan_search_row() {
+  local base_domain="$1"
+  local search_suffix="$2"
+  local resolver_addr="$3"
+  local resolve_expectation="$4"
+
+  base_domain="${base_domain%.}"
+  search_suffix="${search_suffix%.}"
+  if [[ -z "${base_domain}" || -z "${search_suffix}" || -z "${resolver_addr}" || -z "${resolve_expectation}" ]]; then
+    echo "dns_live_resolver_plan_search_row requires base domain, search suffix, resolver address, and resolve expectation" >&2
+    return 2
+  fi
+  if [[ "${resolve_expectation}" != *=* ]]; then
+    echo "DNS live search resolve expectation must be name=ip4:value or name=ip6:value, got ${resolve_expectation}" >&2
+    return 2
+  fi
+
+  DNS_LIVE_SEARCH_SPLIT_NAMESERVERS_JSON="$(dns_live_resolver_split_nameservers_json "${search_suffix}" "${resolver_addr}")"
+  DNS_LIVE_SEARCH_DOMAINS_JSON="$(dns_live_resolver_search_domains_json "${search_suffix}")"
+  DNS_LIVE_SEARCH_EXPECT_DNS_DOMAINS="${base_domain},${search_suffix}"
+  DNS_LIVE_SEARCH_EXPECT_DNS_ROUTES="${search_suffix}=${resolver_addr}"
+  DNS_LIVE_SEARCH_EXPECT_DNS_DEBUG_RESOLVES="${resolve_expectation}"
+  export DNS_LIVE_SEARCH_SPLIT_NAMESERVERS_JSON
+  export DNS_LIVE_SEARCH_DOMAINS_JSON
+  export DNS_LIVE_SEARCH_EXPECT_DNS_DOMAINS
+  export DNS_LIVE_SEARCH_EXPECT_DNS_ROUTES
+  export DNS_LIVE_SEARCH_EXPECT_DNS_DEBUG_RESOLVES
+}
+
+dns_live_resolver_plan_multi_fallback_row() {
+  local split_suffix="$1"
+  local failure_resolver_addr="$2"
+  local answer_resolver_addr="$3"
+  local resolve_expectation="$4"
+
+  split_suffix="${split_suffix%.}"
+  if [[ -z "${split_suffix}" || -z "${failure_resolver_addr}" || -z "${answer_resolver_addr}" || -z "${resolve_expectation}" ]]; then
+    echo "dns_live_resolver_plan_multi_fallback_row requires split suffix, failure resolver, answer resolver, and resolve expectation" >&2
+    return 2
+  fi
+  if [[ "${failure_resolver_addr}" == "${answer_resolver_addr}" ]]; then
+    echo "DNS live multi-resolver fallback requires distinct failure and answer resolvers" >&2
+    return 2
+  fi
+  if [[ "${resolve_expectation}" != *=* ]]; then
+    echo "DNS live multi-resolver resolve expectation must be name=ip4:value or name=ip6:value, got ${resolve_expectation}" >&2
+    return 2
+  fi
+
+  DNS_LIVE_MULTI_SPLIT_NAMESERVERS_JSON="$(dns_live_resolver_split_nameservers_json "${split_suffix}" "${failure_resolver_addr}" "${answer_resolver_addr}")"
+  DNS_LIVE_MULTI_EXPECT_DNS_ROUTES="${split_suffix}=${failure_resolver_addr}|${answer_resolver_addr}"
+  DNS_LIVE_MULTI_EXPECT_DNS_DEBUG_RESOLVES="${resolve_expectation}"
+  DNS_LIVE_MULTI_FAILURE_RESOLVER_ADDR="${failure_resolver_addr}"
+  DNS_LIVE_MULTI_ANSWER_RESOLVER_ADDR="${answer_resolver_addr}"
+  export DNS_LIVE_MULTI_SPLIT_NAMESERVERS_JSON
+  export DNS_LIVE_MULTI_EXPECT_DNS_ROUTES
+  export DNS_LIVE_MULTI_EXPECT_DNS_DEBUG_RESOLVES
+  export DNS_LIVE_MULTI_FAILURE_RESOLVER_ADDR
+  export DNS_LIVE_MULTI_ANSWER_RESOLVER_ADDR
+}
+
 start_dns_live_split_resolver() {
   local image="$1"
   local work_dir="$2"

@@ -80,6 +80,12 @@ Validate smoke IDs, target names, and script paths without Docker:
 tools/real-client/smoke-matrix.sh --check --all --both
 ```
 
+Validate DNS live-resolver expectation construction without Docker:
+
+```sh
+tools/real-client/dns-live-resolver-harness-check.sh
+```
+
 | Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |
@@ -691,6 +697,12 @@ cannot answer the name:
 tools/real-client/dns-multi-resolver-fallback-smoke.sh
 tools/real-client/dns-multi-resolver-fallback-headscale-go-smoke.sh
 ```
+
+Both live-resolver rows use `dns-live-resolver-common.sh` to build the
+split-nameserver JSON, search-domain JSON, ordered route expectations, and
+resolver lookup expectations. `dns-live-resolver-harness-check.sh` covers that
+deterministically without Docker, including the failure-first resolver order for
+the multi-resolver fallback row.
 
 The DNS hot-reload variant starts the production server with
 `dns.extra_records_path`, logs in a stock client, edits the JSON records file,

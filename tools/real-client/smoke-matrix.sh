@@ -106,6 +106,7 @@ smoke_ids=(
   postgres-online-lastseen
   postgres-ping-lifecycle
   postgres-policy-churn
+  postgres-node-rename
   postgres-magicdns
   postgres-magicdns-custom-domain
   postgres-extra-records
@@ -371,6 +372,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -480,6 +482,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
   tools/real-client/postgres-policy-churn-smoke.sh
+  tools/real-client/postgres-node-rename-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-smoke.sh
   tools/real-client/postgres-extra-records-smoke.sh
@@ -667,6 +670,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/postgres-policy-churn-headscale-go-smoke.sh
+  tools/real-client/postgres-node-rename-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
   tools/real-client/postgres-extra-records-headscale-go-smoke.sh
@@ -854,6 +858,7 @@ smoke_assertions=(
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"
   "production Postgres auth-key registration plus database policy mutation wakes live peer maps"
+  "production Postgres admin node rename wakes live peer maps and preserves lifecycle state"
   "production Postgres default MagicDNS suffix"
   "production Postgres custom MagicDNS base domain"
   "production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup"

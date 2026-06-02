@@ -4,10 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-# Rust does not implement the DERP relay protocol natively. This parity row
-# intentionally proves the supported compatibility boundary: headscale-rs
-# owns DERP map generation, STUN, and verify-client admission while relay bytes
-# flow through the upstream derper sidecar.
+# This parity row intentionally proves the supported sidecar compatibility
+# boundary: headscale-rs owns DERP map generation, STUN, and verify-client
+# admission while relay bytes flow through the upstream derper sidecar. Native
+# relay stock-client coverage is wired by postgres-derp-native.
 
 tailscale_version="${TAILSCALE_DERPER_VERSION:-v1.94.1}"
 bin_dir="${repo_root}/target/real-client/bin"

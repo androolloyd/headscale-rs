@@ -88,6 +88,7 @@ rust_derp_stun_addr="${REAL_CLIENT_RUST_DERP_STUN_ADDR:-${HSRS_HARNESS_EMBEDDED_
 rust_derp_omit_default_regions="${REAL_CLIENT_RUST_DERP_OMIT_DEFAULT_REGIONS:-${REAL_CLIENT_DERP_OMIT_DEFAULT_REGIONS:-${HSRS_HARNESS_EMBEDDED_DERP_OMIT_DEFAULT_REGIONS:-true}}}"
 rust_derp_insecure_for_tests="${REAL_CLIENT_RUST_DERP_INSECURE_FOR_TESTS:-${REAL_CLIENT_DERP_INSECURE_FOR_TESTS:-${HSRS_HARNESS_EMBEDDED_DERP_INSECURE_FOR_TESTS:-true}}}"
 rust_derp_verify_clients="${REAL_CLIENT_RUST_DERP_VERIFY_CLIENTS:-${HSRS_HARNESS_EMBEDDED_DERP_VERIFY_CLIENTS:-true}}"
+rust_derp_relay_mode="${REAL_CLIENT_RUST_DERP_RELAY_MODE:-${HSRS_HARNESS_EMBEDDED_DERP_RELAY_MODE:-sidecar}}"
 rust_derper_binary="${REAL_CLIENT_RUST_DERPER_BINARY:-${REAL_CLIENT_DERPER_BIN:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_BINARY:-}}}"
 rust_derper_listen_addr="${REAL_CLIENT_RUST_DERPER_LISTEN_ADDR:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_LISTEN_ADDR:-}}"
 rust_derper_cert_mode="${REAL_CLIENT_RUST_DERPER_CERT_MODE:-${HSRS_HARNESS_EMBEDDED_DERP_DERPER_CERT_MODE:-manual}}"
@@ -433,6 +434,13 @@ case "${rust_derp_verify_clients}" in
     exit 2
     ;;
 esac
+case "${rust_derp_relay_mode}" in
+  sidecar | native) ;;
+  *)
+    echo "REAL_CLIENT_RUST_DERP_RELAY_MODE must be sidecar or native, got ${rust_derp_relay_mode}" >&2
+    exit 2
+    ;;
+esac
 case "${headscale_go_embedded_derp}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     use_headscale_go_embedded_derp=1
@@ -489,15 +497,15 @@ if ((use_rust_embedded_derp)) && [[ -z "${rust_derp_stun_addr}" ]]; then
   echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERP_STUN_ADDR or HSRS_HARNESS_EMBEDDED_DERP_STUN_ADDR" >&2
   exit 2
 fi
-if ((use_rust_embedded_derp)) && [[ -z "${rust_derp_port}" ]]; then
+if ((use_rust_embedded_derp)) && [[ "${rust_derp_relay_mode}" == "sidecar" && -z "${rust_derp_port}" ]]; then
   echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERP_PORT or REAL_CLIENT_DERP_PORT" >&2
   exit 2
 fi
-if ((use_rust_embedded_derp)) && [[ -z "${rust_derper_binary}" ]]; then
+if ((use_rust_embedded_derp)) && [[ "${rust_derp_relay_mode}" == "sidecar" && -z "${rust_derper_binary}" ]]; then
   echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERPER_BINARY or REAL_CLIENT_DERPER_BIN" >&2
   exit 2
 fi
-if ((use_rust_embedded_derp)) && [[ -z "${rust_derper_listen_addr}" ]]; then
+if ((use_rust_embedded_derp)) && [[ "${rust_derp_relay_mode}" == "sidecar" && -z "${rust_derper_listen_addr}" ]]; then
   echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERPER_LISTEN_ADDR" >&2
   exit 2
 fi
@@ -815,6 +823,7 @@ postgres_user=""
 postgres_pass=""
 postgres_sslmode=""
 postgres_database_created=0
+rust_derp_effective_port="${rust_derp_port}"
 
 cleanup() {
   local cleanup_client_name
@@ -1691,11 +1700,16 @@ append_dns_nameservers_config() {
 
 configure_derp_expectations() {
   if ((use_rust_embedded_derp)); then
+    if [[ "${rust_derp_relay_mode}" == "native" ]]; then
+      rust_derp_effective_port="${https_port}"
+    else
+      rust_derp_effective_port="${rust_derp_port}"
+    fi
     expected_derp_region_id="${REAL_CLIENT_EXPECT_DERP_REGION_ID:-${rust_derp_region_id}}"
     expected_derp_region_code="${REAL_CLIENT_EXPECT_DERP_REGION_CODE:-${rust_derp_region_code}}"
     expected_derp_region_name="${REAL_CLIENT_EXPECT_DERP_REGION_NAME:-${rust_derp_region_name}}"
     expected_derp_host="${REAL_CLIENT_EXPECT_DERP_HOST:-${rust_derp_host}}"
-    expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-${rust_derp_port}}"
+    expected_derp_port="${REAL_CLIENT_EXPECT_DERP_PORT:-${rust_derp_effective_port}}"
     if [[ -n "${REAL_CLIENT_EXPECT_DERP_STUN_PORT:-}" ]]; then
       expected_derp_stun_port="${REAL_CLIENT_EXPECT_DERP_STUN_PORT}"
     else
@@ -1728,23 +1742,28 @@ append_rust_embedded_derp_config() {
   embedded_derp:
     enabled: true
     host_name: $(yaml_string "${rust_derp_host}")
-    derp_port: ${rust_derp_port}
+    derp_port: ${rust_derp_effective_port}
     stun_addr: $(yaml_string "${rust_derp_stun_addr}")
     stun_only: false
+    relay_mode: $(yaml_string "${rust_derp_relay_mode}")
     region_id: ${rust_derp_region_id}
     region_code: $(yaml_string "${rust_derp_region_code}")
     region_name: $(yaml_string "${rust_derp_region_name}")
     omit_default_regions: ${rust_derp_omit_default_regions_bool}
     insecure_for_tests: ${rust_derp_insecure_for_tests_bool}
-    derper_binary: $(yaml_string "${rust_derper_binary}")
-    derper_listen_addr: $(yaml_string "${rust_derper_listen_addr}")
     derper_config_path: $(yaml_string "${work_dir}/derper.key")
-    derper_cert_mode: $(yaml_string "${rust_derper_cert_mode}")
     verify_client_url: $(yaml_string "${local_control_url}/verify")
     verify_clients: ${rust_derp_verify_clients_bool}
 EOF
-  if [[ -n "${rust_derper_cert_dir}" ]]; then
-    printf '    derper_cert_dir: %s\n' "$(yaml_string "${rust_derper_cert_dir}")" >>"${config_path}"
+  if [[ "${rust_derp_relay_mode}" == "sidecar" ]]; then
+    cat >>"${config_path}" <<EOF
+    derper_binary: $(yaml_string "${rust_derper_binary}")
+    derper_listen_addr: $(yaml_string "${rust_derper_listen_addr}")
+    derper_cert_mode: $(yaml_string "${rust_derper_cert_mode}")
+EOF
+    if [[ -n "${rust_derper_cert_dir}" ]]; then
+      printf '    derper_cert_dir: %s\n' "$(yaml_string "${rust_derper_cert_dir}")" >>"${config_path}"
+    fi
   fi
 }
 

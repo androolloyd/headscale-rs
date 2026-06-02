@@ -395,7 +395,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all ninety Pg rows, including
+  all ninety-two Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -403,7 +403,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-authkey-relogin-deleted`,
   `postgres-authkey-relogin-route-preserve`,
   `postgres-taildrop-capmap`, `postgres-randomize-client-port`,
-  `postgres-derp-private`,
+  `postgres-derp-private`, `postgres-derp-native`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
@@ -1607,7 +1607,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `tailscale debug netmap`, and asserts the self `CapMap` contains
   `randomize-client-port`.
 - This pins the current-head policy/runtime projection through the real client;
-  the Postgres stock-client matrix now has ninety rows.
+  the Postgres stock-client matrix now has ninety-one rows.
 
 ## 2026-06-02 CLI consumed-help value parity slice
 
@@ -2075,3 +2075,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused tests cover fast-start request detection, WebSocket rejection, query
   strings, and preserving an already-pipelined encrypted `ClientInfo` frame
   across the raw-TLS peek buffer.
+
+## 2026-06-02 native DERP real-client smoke row
+
+- Added `REAL_CLIENT_RUST_DERP_RELAY_MODE=sidecar|native` to
+  `tools/real-client/online-lastseen-common.sh`; sidecar remains the default,
+  while native mode advertises the Rust HTTPS listener as the DERP port and omits
+  sidecar-only `derper` config fields.
+- Added the paired `postgres-derp-native` row over the production Postgres
+  stock-client harness. The Rust side uses native embedded DERP relay mode, and
+  the headscale-go side reuses its embedded-DERP wrapper for the same STUN,
+  DERP-map, and forced-DERP ping assertions.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to ninety-two rows.

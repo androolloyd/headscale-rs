@@ -369,6 +369,32 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
     let after_delete = next_stream_map(&mut body).await;
     delete.await.expect("delete task");
     assert_policy_filter_mentions_bob(&after_delete);
+    assert!(
+        after_delete.node.is_some(),
+        "user deletion should trigger a full self+peers map response"
+    );
+    assert!(
+        after_delete
+            .peers
+            .iter()
+            .any(|peer| peer.name == "alice-node"),
+        "full user-removed update should carry the current peer snapshot: {:?}",
+        after_delete.peers
+    );
+    assert!(
+        after_delete.peers_changed.is_empty(),
+        "user-removed full update must not be encoded as PeersChanged"
+    );
+    assert!(
+        after_delete.peers_changed_patch.is_empty(),
+        "user-removed full update must not be encoded as PeersChangedPatch"
+    );
+    let last_change = registry
+        .map_change_history()
+        .pop()
+        .expect("delete records a map change");
+    assert_eq!(last_change.reason_labels(), vec!["user removed"]);
+    assert_eq!(last_change.change_type(), "full");
 }
 
 #[cfg(feature = "full")]

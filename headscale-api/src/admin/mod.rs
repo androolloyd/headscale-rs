@@ -632,7 +632,7 @@ async fn post_users_delete(
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    if s.users.delete(&name).await.is_ok() {
+    if s.users.delete(&name).await.is_ok() && !s.machines.notify_user_removed_full_update() {
         s.policy.refresh();
     }
     Redirect::to("/admin/users").into_response()
@@ -873,7 +873,9 @@ async fn api_users_delete(
     }
     match s.users.delete(&name).await {
         Ok(()) => {
-            s.policy.refresh();
+            if !s.machines.notify_user_removed_full_update() {
+                s.policy.refresh();
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),

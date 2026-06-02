@@ -1675,3 +1675,20 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `Stream:true` regression proving observers receive full `Node`/`Peers` map
   responses instead of `PeersChanged` or `PeersChangedPatch` chunks when a
   subnet router connects and disconnects.
+
+## 2026-06-02 user deletion map-stream parity slice
+
+- User deletion now matches the current headscale-go fallback
+  `change.UserRemoved()` behavior for policy-neutral deletes: successful
+  gRPC/admin deletes enqueue a full map update with the upstream
+  `user removed` reason when a live wire registry is available.
+- Create and rename continue to use policy refresh wakes; delete falls back to
+  that legacy policy refresh only for machine-admin backends with no live
+  registry.
+- Added registry, admin-route, and `Stream:true` gRPC lifecycle coverage so
+  connected clients receive a full self/peer map response rather than a
+  `PeersChanged` or `PeersChangedPatch` chunk after user deletion.
+- Fixed the shared online/LastSeen real-client config writer to emit the
+  explicit SQLite `database.type` block for Rust production-server rows, closing
+  the CI failure observed in the `authkey-relogin-deleted` smoke after stricter
+  config validation landed.

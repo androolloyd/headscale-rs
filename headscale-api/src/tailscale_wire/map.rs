@@ -1375,6 +1375,7 @@ async fn map_inner(
         // started the batch task.
         let machines = state.machines.clone();
         let gen_rx = state.machines.subscribe_gen();
+        let last_seen_generation = *gen_rx.borrow();
         let map_batch_rx = state.machines.subscribe_map_batch_events();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
@@ -1395,6 +1396,7 @@ async fn map_inner(
                 Some(first),
                 machines,
                 gen_rx,
+                last_seen_generation,
                 map_batch_rx,
                 policy,
                 self_node_key,
@@ -1417,6 +1419,7 @@ async fn map_inner(
                 first_opt,
                 machines,
                 mut gen_rx,
+                mut last_seen_generation,
                 mut map_batch_rx,
                 policy,
                 self_node_key,
@@ -1442,6 +1445,7 @@ async fn map_inner(
                             None,
                             machines,
                             gen_rx,
+                            last_seen_generation,
                             map_batch_rx,
                             policy,
                             self_node_key,
@@ -1476,6 +1480,7 @@ async fn map_inner(
                             None,
                             machines,
                             gen_rx,
+                            last_seen_generation,
                             map_batch_rx,
                             policy,
                             self_node_key,
@@ -1577,24 +1582,53 @@ async fn map_inner(
                         } else if machines.get(&self_node_key).is_none() {
                             return None;
                         } else if machines.map_batcher_enabled() {
+                            last_seen_generation = *gen_rx.borrow();
                             None
                         } else {
-                            rebuild_peer_delta_chunk(
+                            let current_generation = *gen_rx.borrow();
+                            let changes = map_changes_for_generation_range(
+                                &machines,
+                                last_seen_generation,
+                                current_generation,
+                                self_node_id,
+                            );
+                            last_seen_generation = current_generation;
+                            rebuild_map_batch_chunk(
                                 &machines,
                                 &policy,
                                 &self_node_key,
+                                &machines_derp_map,
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
                                 auto_update_enabled,
+                                disable_log_tail,
                                 compression,
                                 last_self_node.as_ref(),
                                 &last_peer_state,
                                 &initial_peer_ids,
                                 &mapresponse_debug,
                                 public_control_url.as_deref().unwrap_or(""),
-                                PeerDeltaOptions::registry_change(),
+                                &changes,
                             )
+                            .or_else(|| {
+                                rebuild_peer_delta_chunk(
+                                    &machines,
+                                    &policy,
+                                    &self_node_key,
+                                    &dns,
+                                    cap_version,
+                                    taildrop_enabled,
+                                    auto_update_enabled,
+                                    compression,
+                                    last_self_node.as_ref(),
+                                    &last_peer_state,
+                                    &initial_peer_ids,
+                                    &mapresponse_debug,
+                                    public_control_url.as_deref().unwrap_or(""),
+                                    PeerDeltaOptions::registry_change(),
+                                )
+                            })
                         }
                     }
                     () = &mut policy_changed => {
@@ -1727,6 +1761,7 @@ async fn map_inner(
                         None,
                         machines,
                         gen_rx,
+                        last_seen_generation,
                         map_batch_rx,
                         policy,
                         self_node_key,
@@ -1818,6 +1853,23 @@ fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
 /// add/remove/update events instead of replacing the full peer list on
 /// every wake.
 type PeerDeltaChunk = (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>);
+
+fn map_changes_for_generation_range(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    after_generation: u64,
+    through_generation: u64,
+    self_node_id: u64,
+) -> Vec<MapChange> {
+    machines
+        .map_change_history()
+        .into_iter()
+        .filter(|change| {
+            change.generation > after_generation
+                && change.generation <= through_generation
+                && change.should_send_to_node(self_node_id)
+        })
+        .collect()
+}
 
 fn map_batch_requires_full_response(changes: &[MapChange]) -> bool {
     changes.iter().any(|change| {

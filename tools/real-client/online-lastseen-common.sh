@@ -1588,15 +1588,13 @@ generate_headscale_go_tls() {
 write_database_config() {
   case "${database_backend}" in
     sqlite)
-      if [[ "${target}" == "headscale-go" ]]; then
-        cat <<EOF
+      cat <<EOF
 
 database:
   type: sqlite
   sqlite:
     path: ${db_path}
 EOF
-      fi
       ;;
     postgres)
       cat <<EOF

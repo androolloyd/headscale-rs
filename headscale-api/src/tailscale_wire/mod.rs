@@ -127,6 +127,7 @@ pub enum MapChangeReason {
     NodeOffline,
     SubnetRouterOnline,
     SubnetRouterOffline,
+    UserRemoved,
     EndpointDerpUpdate,
     KeyExpiry,
     PolicyChange,
@@ -151,6 +152,7 @@ impl MapChangeReason {
             Self::NodeOffline => "node offline",
             Self::SubnetRouterOnline => "subnet router online",
             Self::SubnetRouterOffline => "subnet router offline",
+            Self::UserRemoved => "user removed",
             Self::EndpointDerpUpdate => "endpoint/DERP update",
             Self::KeyExpiry => "key expiry",
             Self::PolicyChange => "policy change",
@@ -198,7 +200,8 @@ impl MapChangeContent {
             MapChangeReason::FullUpdate
             | MapChangeReason::FullSelfUpdate
             | MapChangeReason::SubnetRouterOnline
-            | MapChangeReason::SubnetRouterOffline => {
+            | MapChangeReason::SubnetRouterOffline
+            | MapChangeReason::UserRemoved => {
                 content = Self::full();
             }
             MapChangeReason::NodeAdded
@@ -3211,6 +3214,12 @@ impl MachineRegistry {
 
     pub(crate) fn wake_node_change(&self, reason: MapChangeReason, node_id: u64) {
         self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
+    }
+
+    /// Wake all live map streams with an upstream-style `user removed`
+    /// full update.
+    pub fn wake_user_removed_full_update(&self) {
+        self.wake_waiters_with(PendingMapChange::global(MapChangeReason::UserRemoved));
     }
 
     /// Snapshot all known machines as a single `Arc<HashMap>`. The
@@ -7217,6 +7226,12 @@ mod registry_tests {
             PendingMapChange::global(MapChangeReason::DnsConfigUpdate).into_change(4);
         assert_eq!(config_change.change_type(), "config");
 
+        let user_removed_change =
+            PendingMapChange::global(MapChangeReason::UserRemoved).into_change(8);
+        assert_eq!(user_removed_change.reason_labels(), vec!["user removed"]);
+        assert_eq!(user_removed_change.change_type(), "full");
+        assert!(user_removed_change.is_full());
+
         let policy_change = PendingMapChange::global(MapChangeReason::PolicyChange).into_change(5);
         assert_eq!(policy_change.change_type(), "policy");
         assert!(!policy_change.content.include_dns);
@@ -7342,6 +7357,41 @@ mod registry_tests {
                 .iter()
                 .any(MapChange::is_full)
         );
+    }
+
+    #[test]
+    fn user_removed_queues_full_update_for_live_streams() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = stable_id_from_key("user-removed-a");
+        let node_b = stable_id_from_key("user-removed-b");
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+        let history_len = reg.map_change_history().len();
+        let _ = reg.drain_pending_map_changes();
+
+        reg.wake_user_removed_full_update();
+
+        let changes = reg.map_change_history();
+        let change = &changes[history_len];
+        assert_eq!(change.reason_labels(), vec!["user removed"]);
+        assert_eq!(change.change_type(), "full");
+        assert!(change.is_full());
+
+        let pending = reg.pending_map_changes();
+        for node_id in [node_a, node_b] {
+            let changes = pending.get(&node_id).expect("stream receives full update");
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].reason_labels(), vec!["user removed"]);
+            assert!(changes[0].is_full());
+        }
     }
 
     #[test]

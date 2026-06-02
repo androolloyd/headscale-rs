@@ -26,7 +26,9 @@ use tower::ServiceExt;
 
 const BEARER: &str = "admin-bearer-coverage";
 
-fn fixture_state_with_policy(policy: PolicyStore) -> AdminState {
+fn fixture_state_with_policy_and_registry(
+    policy: PolicyStore,
+) -> (AdminState, Arc<MachineRegistry>) {
     let reg = Arc::new(MachineRegistry::new());
     reg.upsert(
         "aa".repeat(32),
@@ -40,14 +42,19 @@ fn fixture_state_with_policy(policy: PolicyStore) -> AdminState {
             false,
         ),
     );
-    AdminState::builder()
+    let state = AdminState::builder()
         .bearer_token(BEARER)
         .users(UserRegistry::new())
-        .machines(Arc::new(WireMachineAdmin::new(reg)))
+        .machines(Arc::new(WireMachineAdmin::new(reg.clone())))
         .preauth(Arc::new(InMemoryPreauthAdmin::new()))
         .derp_regions(1)
         .policy(policy)
-        .build()
+        .build();
+    (state, reg)
+}
+
+fn fixture_state_with_policy(policy: PolicyStore) -> AdminState {
+    fixture_state_with_policy_and_registry(policy).0
 }
 
 fn fixture_state() -> AdminState {
@@ -931,7 +938,7 @@ async fn api_users_full_crud_round_trip() {
 }
 
 #[tokio::test]
-async fn api_user_create_delete_refresh_policy_waiters() {
+async fn api_user_create_refreshes_policy_and_delete_emits_full_user_removed() {
     let policy = PolicyStore::new();
     let raw = r#"{
         "groups": {"group:users": ["carol@"]},
@@ -940,7 +947,8 @@ async fn api_user_create_delete_refresh_policy_waiters() {
         ]
     }"#;
     policy.set(parse_hujson_policy(raw).unwrap(), raw.to_string());
-    let app = router(fixture_state_with_policy(policy.clone()));
+    let (state, registry) = fixture_state_with_policy_and_registry(policy.clone());
+    let app = router(state);
 
     let (ready, parked) = tokio::sync::oneshot::channel();
     let waiter = tokio::spawn({
@@ -968,26 +976,17 @@ async fn api_user_create_delete_refresh_policy_waiters() {
         .expect("user create refreshes policy waiters")
         .expect("waiter task succeeds");
 
-    let (ready, parked) = tokio::sync::oneshot::channel();
-    let waiter = tokio::spawn({
-        let policy = policy.clone();
-        async move {
-            let changed = policy.wait_for_change();
-            tokio::pin!(changed);
-            let _ = ready.send(());
-            changed.await;
-        }
-    });
-    parked.await.expect("delete waiter parks");
+    let history_len = registry.map_change_history().len();
     let r = app
         .oneshot(req_authed(Method::DELETE, "/api/v1/users/carol"))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
-    tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-        .await
-        .expect("user delete refreshes policy waiters")
-        .expect("waiter task succeeds");
+    let changes = registry.map_change_history();
+    let change = &changes[history_len];
+    assert_eq!(change.reason_labels(), vec!["user removed"]);
+    assert_eq!(change.change_type(), "full");
+    assert!(change.is_full());
 }
 
 #[tokio::test]

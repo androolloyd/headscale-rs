@@ -149,7 +149,9 @@ Current-head audit overlay, refreshed 2026-05-30:
   `HEADSCALE_DNS_BASE_DOMAIN`, `HEADSCALE_DNS_OVERRIDE_LOCAL_DNS`,
   `HEADSCALE_DNS_NAMESERVERS_GLOBAL`, `HEADSCALE_DNS_NAMESERVERS_SPLIT`,
   `HEADSCALE_DNS_SEARCH_DOMAINS`, `HEADSCALE_DNS_EXTRA_RECORDS`, and
-  `HEADSCALE_DNS_EXTRA_RECORDS_PATH`. DERP and ephemeral lifecycle env
+  `HEADSCALE_DNS_EXTRA_RECORDS_PATH`. User deletion now emits an
+  upstream-style `user removed` full map update when a live wire registry is
+  available. DERP and ephemeral lifecycle env
   overrides now match Viper for the upstream `HEADSCALE_DERP_*` DERP source
   and embedded-region keys, `HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT`, and
   deprecated `HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT`. NodeStore tuning

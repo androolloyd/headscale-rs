@@ -253,6 +253,17 @@ pub trait MachineAdmin: Send + Sync {
     ) -> Result<Vec<String>, MachineAdminError> {
         Ok(Vec::new())
     }
+    /// Wake live map streams after a user has been removed.
+    ///
+    /// Headscale-go emits `change.UserRemoved()` as a full update when
+    /// deleting a user does not otherwise produce a policy-manager
+    /// change. Implementations with access to the live wire registry
+    /// should forward that full-map wake and return true. Backends with
+    /// no live registry keep the default false so callers can fall back
+    /// to the legacy policy refresh.
+    fn notify_user_removed_full_update(&self) -> bool {
+        false
+    }
     /// Mark a machine deleted. Same sidecar story as `expire`. The
     /// record disappears from `list()` once flagged.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
@@ -2239,6 +2250,14 @@ impl MachineAdmin for PersistentMachineAdmin {
         Ok(changes)
     }
 
+    fn notify_user_removed_full_update(&self) -> bool {
+        let Some(registry) = &self.wire_registry else {
+            return false;
+        };
+        registry.wake_user_removed_full_update();
+        true
+    }
+
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
         let row = self.row_by_slug(id).await?;
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
@@ -2523,6 +2542,14 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
             }
         }
         Ok(changes)
+    }
+
+    fn notify_user_removed_full_update(&self) -> bool {
+        let Some(registry) = &self.wire_registry else {
+            return false;
+        };
+        registry.wake_user_removed_full_update();
+        true
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
@@ -2810,6 +2837,11 @@ impl MachineAdmin for WireMachineAdmin {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
+    }
+
+    fn notify_user_removed_full_update(&self) -> bool {
+        self.registry.wake_user_removed_full_update();
+        true
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {

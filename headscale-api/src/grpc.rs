@@ -512,6 +512,14 @@ pub mod upstream {
             self
         }
 
+        fn notify_user_removed_full_update(&self) {
+            if let Some(registry) = &self.wire_registry {
+                registry.wake_user_removed_full_update();
+            } else if !self.machines.notify_user_removed_full_update() {
+                self.policy.refresh();
+            }
+        }
+
         pub fn into_service_server(self) -> HeadscaleServiceServer<Self> {
             HeadscaleServiceServer::new(self)
         }
@@ -816,7 +824,7 @@ pub mod upstream {
                 .delete_by_id(id)
                 .await
                 .map_err(direct_user_error_to_status)?;
-            self.policy.refresh();
+            self.notify_user_removed_full_update();
             Ok(Response::new(DeleteUserResponse {}))
         }
 

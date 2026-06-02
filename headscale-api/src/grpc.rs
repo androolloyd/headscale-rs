@@ -3795,6 +3795,72 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_auth_grpc_terminal_error_text_matches_headscale_go() {
+        let service = admin_service().await;
+
+        enum Call {
+            Approve,
+            Reject,
+        }
+
+        struct Case {
+            name: &'static str,
+            call: Call,
+            auth_id: &'static str,
+            expected_code: tonic::Code,
+            expected_message: &'static str,
+        }
+
+        for case in [
+            Case {
+                name: "approve missing pending session",
+                call: Call::Approve,
+                auth_id: "hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
+                expected_code: tonic::Code::NotFound,
+                expected_message: "no pending auth session for auth_id hskey-authreq-aaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+            Case {
+                name: "reject missing pending session",
+                call: Call::Reject,
+                auth_id: "hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb",
+                expected_code: tonic::Code::NotFound,
+                expected_message: "no pending auth session for auth_id hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            Case {
+                name: "approve invalid prefixed auth id",
+                call: Call::Approve,
+                auth_id: "hskey-authreq-short",
+                expected_code: tonic::Code::InvalidArgument,
+                expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 19",
+            },
+            Case {
+                name: "reject bare auth id",
+                call: Call::Reject,
+                auth_id: "cccccccccccccccccccccccc",
+                expected_code: tonic::Code::InvalidArgument,
+                expected_message: "invalid auth_id: auth ID has invalid prefix: expected prefix \"hskey-authreq-\"",
+            },
+        ] {
+            let err = match case.call {
+                Call::Approve => service
+                    .auth_approve(Request::new(AuthApproveRequest {
+                        auth_id: case.auth_id.into(),
+                    }))
+                    .await
+                    .unwrap_err(),
+                Call::Reject => service
+                    .auth_reject(Request::new(AuthRejectRequest {
+                        auth_id: case.auth_id.into(),
+                    }))
+                    .await
+                    .unwrap_err(),
+            };
+            assert_eq!(err.code(), case.expected_code, "{}", case.name);
+            assert_eq!(err.message(), case.expected_message, "{}", case.name);
+        }
+    }
+
+    #[tokio::test]
     async fn upstream_auth_grpc_approve_and_reject_signal_pending_cache() {
         let db = headscale_db::Database::in_memory()
             .await

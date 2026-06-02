@@ -5765,6 +5765,215 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
     result
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("db_policy_live").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let metrics_url = format!("http://{metrics}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let auth_id = "hskey-authreq-dadadadadadadadadadadada";
+        let advertised_route = "10.89.1.0/24";
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                auth_id,
+                "--name",
+                "pg-db-policy-router",
+                "--route",
+                advertised_route,
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let auth_register = headscale_with_config(
+            &config,
+            &["auth", "register", "--user", "alice", "--auth-id", auth_id],
+        );
+        assert!(
+            auth_register.status.success(),
+            "stderr: {}",
+            stderr(&auth_register)
+        );
+        assert_eq!(
+            stdout(&auth_register),
+            "Node pg-db-policy-router registered\n"
+        );
+        assert_eq!(stderr(&auth_register), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        let nodes = json_output(&nodes);
+        let node = &nodes[0];
+        let node_id_number = node["id"].as_u64().expect("node id");
+        let node_id = node_id_number.to_string();
+        assert_eq!(node["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(
+            node["available_routes"],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(node["approved_routes"], serde_json::json!([]));
+
+        let policy_path = dir.path().join("db-policy-live.hujson");
+        let policy = r#"{
+  "acls": [
+    {"action": "accept", "src": ["*"], "dst": ["*:*"]}
+  ],
+  "autoApprovers": {
+    "routes": {"10.89.0.0/16": ["alice@"]}
+  }
+}"#;
+        fs::write(&policy_path, policy)?;
+        let policy_path = policy_path.to_string_lossy().to_string();
+        let set_policy = headscale_with_config(&config, &["policy", "set", "--file", &policy_path]);
+        assert!(
+            set_policy.status.success(),
+            "stderr: {}",
+            stderr(&set_policy)
+        );
+        assert_eq!(stdout(&set_policy), "Policy updated.\n");
+        assert_eq!(stderr(&set_policy), "");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let approved_nodes = loop {
+            let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+            assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+            let nodes = json_output(&nodes);
+            if nodes[0]["approved_routes"] == serde_json::json!([advertised_route]) {
+                break nodes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for database policy set to auto-approve route; nodes: {nodes}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            approved_nodes[0]["id"].as_u64().unwrap().to_string(),
+            node_id
+        );
+        assert_eq!(
+            approved_nodes[0]["available_routes"],
+            serde_json::json!([advertised_route])
+        );
+
+        let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+        assert!(
+            get_policy.status.success(),
+            "stderr: {}",
+            stderr(&get_policy)
+        );
+        assert_eq!(stdout(&get_policy), format!("{policy}\n"));
+        assert_eq!(stderr(&get_policy), "");
+
+        let http = reqwest::Client::new();
+        let nodestore = http
+            .get(format!("{metrics_url}/debug/nodestore"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+        let nodestore = nodestore.json::<serde_json::Value>().await?;
+        let live_node = nodestore
+            .get(&node_id)
+            .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
+        assert_eq!(live_node["hostname"].as_str(), Some("pg-db-policy-router"));
+        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(
+            live_node["available_routes"],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(
+            live_node["approved_routes"],
+            serde_json::json!([advertised_route])
+        );
+
+        let debug_routes = http
+            .get(format!("{metrics_url}/debug/routes"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
+        let debug_routes = debug_routes.json::<serde_json::Value>().await?;
+        assert_eq!(
+            debug_routes["available_routes"][&node_id],
+            serde_json::json!([advertised_route])
+        );
+        assert_eq!(
+            debug_routes["primary_routes"][advertised_route],
+            serde_json::json!(node_id_number)
+        );
+
+        let policy_manager = http
+            .get(format!("{metrics_url}/debug/policy-manager"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(policy_manager.status(), reqwest::StatusCode::OK);
+        let policy_manager = policy_manager.json::<serde_json::Value>().await?;
+        let policy_manager = policy_manager["content"]
+            .as_str()
+            .expect("policy manager content");
+        assert!(
+            policy_manager.contains("AutoApprover (1):")
+                && policy_manager.contains("10.89.0.0/16")
+                && policy_manager.contains("alice@")
+                && policy_manager.contains("Compiled filter:"),
+            "policy manager content: {policy_manager}"
+        );
+
+        let filter = http
+            .get(format!("{metrics_url}/debug/filter"))
+            .send()
+            .await?;
+        assert_eq!(filter.status(), reqwest::StatusCode::OK);
+        let filter = filter.json::<serde_json::Value>().await?;
+        assert!(
+            filter.as_array().is_some_and(|rules| !rules.is_empty()),
+            "debug filter: {filter}"
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
 #[cfg(all(feature = "postgres-sqlx", unix))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -> BoxTestResult {

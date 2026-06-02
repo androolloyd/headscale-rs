@@ -1798,6 +1798,20 @@ fn debug_create_node_required_flag_errors_match_current_upstream() {
 }
 
 #[test]
+fn nodes_register_required_flag_errors_match_current_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("missing.sock");
+    let config = write_unix_socket_config(dir.path(), &socket);
+
+    assert_config_stderr_snapshot(
+        &config,
+        &["nodes", "register", "--user", "alice"],
+        1,
+        "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead\nError: required flag(s) \"key\" not set\n",
+    );
+}
+
+#[test]
 fn serve_help_with_extra_args_matches_current_upstream_snapshot() {
     assert_stdout_snapshot(
         &["serve", "ignored", "--help"],

@@ -1099,6 +1099,13 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         return Some(admin::output::format_error(output_format, &error));
     }
 
+    if let Some(error) = nodes_register_required_flag_error(command_parts) {
+        return Some(format!(
+            "{UPSTREAM_NODES_REGISTER_DEPRECATED}{}",
+            admin::output::format_error(output_format, &error)
+        ));
+    }
+
     if let Some(error) = auth_required_flag_error(command_parts) {
         return Some(admin::output::format_error(output_format, &error));
     }
@@ -1333,6 +1340,75 @@ fn debug_create_node_required_flag_error(parts: &[&str]) -> Option<String> {
     }
     if !saw_key {
         missing.push(r#""key""#);
+    }
+
+    (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))
+}
+
+fn nodes_register_required_flag_error(parts: &[&str]) -> Option<String> {
+    let ["nodes" | "node", "register", tail @ ..] = parts else {
+        return None;
+    };
+
+    let mut saw_user = false;
+    let mut saw_key = false;
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "-h" | "--help" => return None,
+            "-u" | "--user" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_user = true;
+                i += 2;
+            }
+            value if value.starts_with("--user=") => {
+                saw_user = true;
+                i += 1;
+            }
+            value if value.starts_with("-u") && value.len() > 2 => {
+                saw_user = true;
+                i += 1;
+            }
+            "-k" | "--key" => {
+                if i + 1 >= tail.len() {
+                    return None;
+                }
+                saw_key = true;
+                i += 2;
+            }
+            value if value.starts_with("--key=") => {
+                saw_key = true;
+                i += 1;
+            }
+            value if value.starts_with("-k") && value.len() > 2 => {
+                saw_key = true;
+                i += 1;
+            }
+            "-c" | "--config" | "-o" | "--output" if i + 1 < tail.len() => i += 2,
+            "-c" | "--config" | "-o" | "--output" => return None,
+            "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
+            value
+                if value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => i += 1,
+        }
+    }
+
+    let mut missing = Vec::new();
+    if !saw_key {
+        missing.push(r#""key""#);
+    }
+    if !saw_user {
+        missing.push(r#""user""#);
     }
 
     (!missing.is_empty()).then(|| format!("required flag(s) {} not set", missing.join(", ")))
@@ -3584,6 +3660,13 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["auth", "approve"]),
             Some("Error: required flag(s) \"auth-id\" not set\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["nodes", "register", "--user", "alice"]),
+            Some(
+                "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead\nError: required flag(s) \"key\" not set\n"
+                    .to_string()
+            )
         );
         assert_eq!(
             upstream_exact_error(&["users", "create", "--display-name", "Alice"]),

@@ -109,6 +109,7 @@ smoke_ids=(
   postgres-ping-lifecycle
   postgres-policy-churn
   postgres-web-register-policy-churn
+  postgres-web-register-policy-churn-restart
   postgres-node-rename
   postgres-policy-rename-restart
   postgres-magicdns
@@ -154,6 +155,7 @@ smoke_ids=(
   postgres-ssh-accept-env
   postgres-ssh-localpart
   postgres-ssh-profile-variants
+  postgres-ssh-profile-subdomain-deny
   postgres-web-register-restart
   postgres-restart-persistence
   postgres-tagged-preauth
@@ -391,6 +393,8 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
   registration
   registration
   registration
@@ -507,6 +511,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-ping-lifecycle-smoke.sh
   tools/real-client/postgres-policy-churn-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-smoke.sh
+  tools/real-client/postgres-web-register-policy-churn-restart-smoke.sh
   tools/real-client/postgres-node-rename-smoke.sh
   tools/real-client/postgres-policy-rename-restart-smoke.sh
   tools/real-client/postgres-magicdns-smoke.sh
@@ -552,6 +557,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-ssh-accept-env-smoke.sh
   tools/real-client/postgres-ssh-localpart-smoke.sh
   tools/real-client/postgres-ssh-profile-variants-smoke.sh
+  tools/real-client/postgres-ssh-profile-subdomain-deny-smoke.sh
   tools/real-client/postgres-web-register-restart-smoke.sh
   tools/real-client/postgres-restart-persistence-smoke.sh
   tools/real-client/postgres-tagged-preauth-smoke.sh
@@ -706,6 +712,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
   tools/real-client/postgres-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-policy-churn-restart-headscale-go-smoke.sh
   tools/real-client/postgres-node-rename-headscale-go-smoke.sh
   tools/real-client/postgres-policy-rename-restart-headscale-go-smoke.sh
   tools/real-client/postgres-magicdns-headscale-go-smoke.sh
@@ -751,6 +758,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-ssh-accept-env-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-localpart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-profile-variants-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-profile-subdomain-deny-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-restart-headscale-go-smoke.sh
   tools/real-client/postgres-restart-persistence-headscale-go-smoke.sh
   tools/real-client/postgres-tagged-preauth-headscale-go-smoke.sh
@@ -905,6 +913,7 @@ smoke_assertions=(
   "production Postgres debug PingRequest lifecycle and online/LastSeen"
   "production Postgres auth-key registration plus database policy mutation wakes live peer maps"
   "production Postgres web registration plus database policy mutation wakes live peer maps"
+  "production Postgres web-registration policy map churn survives server restart"
   "production Postgres admin node rename wakes live peer maps and preserves lifecycle state"
   "production Postgres policy reload plus node rename map churn survives server restart"
   "production Postgres default MagicDNS suffix"
@@ -950,6 +959,7 @@ smoke_assertions=(
   "production Postgres current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
   "production Postgres current-head Tailscale SSH localpart login users from profile emails"
   "production Postgres current-head Tailscale SSH profile email variants and denial status/stderr"
+  "production Postgres current-head Tailscale SSH localpart profile email subdomain denial status/stderr"
   "production Postgres web registration survives server restart"
   "production Postgres restart persistence and route/tag map churn"
   "production Postgres preauth key with ACL tag owners"

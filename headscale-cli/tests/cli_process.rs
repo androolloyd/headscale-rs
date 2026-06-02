@@ -9210,6 +9210,37 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             include_str!("snapshots/grpc_live_auth_missing_yaml.stderr")
         ),
     );
+    for (args, expected) in [
+        (
+            vec!["auth", "reject", "--auth-id", missing_auth_id],
+            include_str!("snapshots/grpc_live_auth_reject_missing.stderr"),
+        ),
+        (
+            vec!["-o", "json", "auth", "reject", "--auth-id", missing_auth_id],
+            include_str!("snapshots/grpc_live_auth_reject_missing_json.stderr"),
+        ),
+        (
+            vec![
+                "-ojson-line",
+                "auth",
+                "reject",
+                "--auth-id",
+                missing_auth_id,
+            ],
+            include_str!("snapshots/grpc_live_auth_reject_missing_json_line.stderr"),
+        ),
+    ] {
+        assert_config_stderr_snapshot(&config, &args, 5, expected);
+    }
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "yaml", "auth", "reject", "--auth-id", missing_auth_id],
+        5,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/grpc_live_auth_reject_missing_yaml.stderr")
+        ),
+    );
     assert_config_stderr_snapshot(
         &config,
         &["-ojson-line", "nodes", "expire", "--identifier", "404"],

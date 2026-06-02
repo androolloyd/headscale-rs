@@ -108,6 +108,8 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-policy-churn` | `postgres-policy-churn-smoke.sh` | `postgres-policy-churn-headscale-go-smoke.sh` | Production Postgres auth-key registration plus database policy mutation wakes live peer maps |
+| Database | `postgres-web-register-policy-churn` | `postgres-web-register-policy-churn-smoke.sh` | `postgres-web-register-policy-churn-headscale-go-smoke.sh` | Production Postgres web registration plus database policy mutation wakes live peer maps |
+| Database | `postgres-web-register-policy-churn-restart` | `postgres-web-register-policy-churn-restart-smoke.sh` | `postgres-web-register-policy-churn-restart-headscale-go-smoke.sh` | Production Postgres web-registration policy map churn survives server restart |
 | Database | `postgres-node-rename` | `postgres-node-rename-smoke.sh` | `postgres-node-rename-headscale-go-smoke.sh` | Production Postgres admin node rename wakes live peer maps and preserves lifecycle state |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
@@ -152,6 +154,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env |
 | Database | `postgres-ssh-localpart` | `postgres-ssh-localpart-smoke.sh` | `postgres-ssh-localpart-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart login users from profile emails |
 | Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and denial status/stderr |
+| Database | `postgres-ssh-profile-subdomain-deny` | `postgres-ssh-profile-subdomain-deny-smoke.sh` | `postgres-ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
 | Database | `postgres-web-register-restart` | `postgres-web-register-restart-smoke.sh` | `postgres-web-register-restart-headscale-go-smoke.sh` | Production Postgres web registration survives server restart |
 | Database | `postgres-restart-persistence` | `postgres-restart-persistence-smoke.sh` | `postgres-restart-persistence-headscale-go-smoke.sh` | Production Postgres restart persistence and route/tag map churn |
 | Database | `postgres-tagged-preauth` | `postgres-tagged-preauth-smoke.sh` | `postgres-tagged-preauth-headscale-go-smoke.sh` | Production Postgres preauth key with ACL tag owners |
@@ -273,6 +276,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
 | SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and exact denial status/stderr |
+| SSH | `ssh-profile-subdomain-deny` | `ssh-profile-subdomain-deny-smoke.sh` | `ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
 | SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables |
 
 ## Local and CI Execution
@@ -840,6 +844,19 @@ set. The route row additionally asserts CLI route state and approved-route
 netmap projection; the primary-route variants exercise primary selection,
 restart owner preservation, unapproval failover, sticky owner retention, and
 advertised-route withdrawal over the production Postgres harness.
+
+The Postgres web-registration policy churn rows run two no-auth stock clients
+through production Postgres web/CLI approval under an isolating database policy,
+mutate the database policy live, and assert both clients' peer maps converge
+from zero to one visible peer. The restart variant then restarts the same
+production server URL and reasserts the post-reload peer visibility:
+
+```sh
+tools/real-client/postgres-web-register-policy-churn-smoke.sh
+tools/real-client/postgres-web-register-policy-churn-headscale-go-smoke.sh
+tools/real-client/postgres-web-register-policy-churn-restart-smoke.sh
+tools/real-client/postgres-web-register-policy-churn-restart-headscale-go-smoke.sh
+```
 
 The Postgres OIDC scenario runs the production OIDC confirmation flow against
 Rust and headscale-go with a temporary Postgres database:

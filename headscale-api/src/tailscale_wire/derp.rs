@@ -1818,6 +1818,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_derp_mixed_transport_duplicate_reconnect_reissues_health() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let (raw_client_io, raw_server_io) = tokio::io::duplex(4096);
+        let raw_server_runtime = runtime.clone();
+        let raw_server =
+            tokio::spawn(async move { drive_native_derp(raw_server_runtime, raw_server_io).await });
+        let (mut raw_reader, mut raw_writer) = tokio::io::split(raw_client_io);
+        let mut raw_decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut raw_reader, &mut raw_decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected raw server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        raw_writer.write_all(&client_info).await.unwrap();
+        raw_writer.flush().await.unwrap();
+        let server_info_frame = read_next_frame(&mut raw_reader, &mut raw_decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let duplicate = Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string());
+
+        let (tx_one, rx_one) = mpsc::channel(8);
+        let sent_one = Arc::new(Mutex::new(Vec::new()));
+        let server_one_sent = sent_one.clone();
+        let server_one_runtime = runtime.clone();
+        let server_one = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_one_runtime,
+                CollectWebsocketSink {
+                    sent: server_one_sent,
+                },
+                MpscMessageStream { rx: rx_one },
+            )
+            .await
+        });
+        tx_one
+            .send(Ok(Message::Binary(client_info.clone())))
+            .await
+            .unwrap();
+        wait_for_sent_messages(&sent_one, 3).await;
+
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            duplicate
+        );
+        let messages_one = sent_one.lock().unwrap().clone();
+        let (frame, _) = headscale_core::derp::protocol::decode_frame(
+            binary_frame(&messages_one[2]),
+            MAX_INFO_LEN,
+        )
+        .expect("first websocket duplicate health frame decodes");
+        assert_eq!(frame, duplicate);
+
+        tx_one.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(server_one.await.unwrap().is_ok());
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            Frame::Health(String::new())
+        );
+
+        let (tx_two, rx_two) = mpsc::channel(8);
+        let sent_two = Arc::new(Mutex::new(Vec::new()));
+        let server_two_sent = sent_two.clone();
+        let server_two_runtime = runtime.clone();
+        let server_two = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_two_runtime,
+                CollectWebsocketSink {
+                    sent: server_two_sent,
+                },
+                MpscMessageStream { rx: rx_two },
+            )
+            .await
+        });
+        tx_two
+            .send(Ok(Message::Binary(client_info.clone())))
+            .await
+            .unwrap();
+        wait_for_sent_messages(&sent_two, 3).await;
+
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            duplicate
+        );
+        let messages_two = sent_two.lock().unwrap().clone();
+        let (frame, _) = headscale_core::derp::protocol::decode_frame(
+            binary_frame(&messages_two[2]),
+            MAX_INFO_LEN,
+        )
+        .expect("reconnected websocket duplicate health frame decodes");
+        assert_eq!(frame, duplicate);
+
+        tx_two.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(server_two.await.unwrap().is_ok());
+        assert_eq!(
+            read_next_frame(&mut raw_reader, &mut raw_decoder)
+                .await
+                .unwrap(),
+            Frame::Health(String::new())
+        );
+
+        drop(raw_writer);
+        drop(raw_reader);
+        assert!(raw_server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_rejects_unverified_clients() {
         let runtime = Arc::new(
             NativeDerpRuntime::new(

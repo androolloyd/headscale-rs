@@ -226,6 +226,12 @@ Recent accepted slices:
   stock-client rows. They exercise exit-node advertisement through stock
   `tailscaled`, Pg-backed CLI approval, netmap projection, and online/LastSeen
   assertions against Rust and headscale-go.
+- This slice adds paired `postgres-web-register-policy-churn-restart` production
+  Postgres stock-client rows. They reuse the two-client web-registration
+  database-policy churn path, assert peer maps move from `0,0` to `1,1`, restart
+  the same production server URL, and assert the post-reload peer visibility
+  remains hydrated after reconnect. The checked-in Postgres stock-client matrix
+  now has one hundred one rows.
 
 Current multi-agent split:
 
@@ -2356,3 +2362,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added paired `ssh-profile-subdomain-deny` and
   `postgres-policy-rename-restart` real-client rows; the Postgres row is now in
   PR real-client CI, bringing deterministic PR selection to 155 rows.
+
+## 2026-06-02 Postgres SSH profile subdomain denial
+
+- Added paired `postgres-ssh-profile-subdomain-deny` real-client rows. They run
+  the current-head `localpart:*@example.com` profile policy against clients with
+  `ssh-it-user@sub.example.com` profile emails and assert the denied stock-client
+  status `255`, empty stdout, and stable first stderr line against both
+  headscale-rs and current headscale-go.

@@ -8,10 +8,16 @@
 
 use std::{
     borrow::Cow,
+    collections::hash_map::DefaultHasher,
     fmt, fs,
+    hash::{Hash, Hasher},
     io::{ErrorKind, Write},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use axum::{
@@ -44,6 +50,9 @@ const DERP_PUBLIC_KEY_HEADER: &str = "Derp-Public-Key";
 const READ_BUF_LEN: usize = 16 * 1024;
 const DERP_PRIVATE_KEY_PREFIX: &str = "privkey:";
 const WEBSOCKET_UNSUPPORTED_DATA: u16 = 1003;
+const DEFAULT_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_DERP_KEEPALIVE_JITTER: Duration = Duration::from_secs(5);
+const MIN_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(1);
 
 type NativeDerpClientVerifier = Arc<dyn Fn(&[u8; KEY_LEN]) -> bool + Send + Sync>;
 
@@ -53,6 +62,10 @@ pub struct NativeDerpRuntime {
     server_key: Arc<DerpNodeKeyPair>,
     relay: NativeDerpRelay,
     client_verifier: Option<NativeDerpClientVerifier>,
+    keepalive_interval: Duration,
+    keepalive_jitter: Duration,
+    connection_sequence: Arc<AtomicU64>,
+    health_problem: Arc<Mutex<Option<String>>>,
 }
 
 impl fmt::Debug for NativeDerpRuntime {
@@ -64,6 +77,8 @@ impl fmt::Debug for NativeDerpRuntime {
                 "client_verifier",
                 &self.client_verifier.as_ref().map(|_| "<configured>"),
             )
+            .field("keepalive_interval", &self.keepalive_interval)
+            .field("keepalive_jitter", &self.keepalive_jitter)
             .finish()
     }
 }
@@ -117,6 +132,10 @@ impl NativeDerpRuntime {
             server_key: Arc::new(server_key),
             relay,
             client_verifier: None,
+            keepalive_interval: DEFAULT_DERP_KEEPALIVE_INTERVAL,
+            keepalive_jitter: DEFAULT_DERP_KEEPALIVE_JITTER,
+            connection_sequence: Arc::new(AtomicU64::new(0)),
+            health_problem: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -138,6 +157,25 @@ impl NativeDerpRuntime {
         self
     }
 
+    /// Override the native DERP keepalive interval.
+    ///
+    /// Tailscale DERP sends server-originated keepalives at least every 60s,
+    /// with a small per-connection jitter. Tests may lower this interval.
+    pub fn with_keepalive_interval(mut self, interval: Duration) -> Self {
+        self.keepalive_interval = if interval.is_zero() {
+            MIN_DERP_KEEPALIVE_INTERVAL
+        } else {
+            interval
+        };
+        self
+    }
+
+    /// Override the maximum per-connection keepalive jitter.
+    pub fn with_keepalive_jitter(mut self, jitter: Duration) -> Self {
+        self.keepalive_jitter = jitter;
+        self
+    }
+
     /// Whether a native DERP client verifier is configured.
     pub fn client_verification_enabled(&self) -> bool {
         self.client_verifier.is_some()
@@ -150,6 +188,78 @@ impl NativeDerpRuntime {
             None => true,
         }
     }
+
+    /// Set the current server health problem and broadcast it to active
+    /// sessions. Passing an empty string clears the health problem.
+    pub async fn set_health_problem(&self, problem: impl Into<String>) -> usize {
+        let problem = problem.into();
+        let should_broadcast = {
+            let mut guard = self
+                .health_problem
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let had_problem = guard.is_some();
+            if problem.is_empty() {
+                *guard = None;
+                had_problem
+            } else {
+                *guard = Some(problem.clone());
+                true
+            }
+        };
+
+        if should_broadcast {
+            self.relay.broadcast_frame(Frame::Health(problem)).await
+        } else {
+            0
+        }
+    }
+
+    /// Clear the current server health problem and notify active sessions that
+    /// previously saw a problem.
+    pub async fn clear_health_problem(&self) -> usize {
+        self.set_health_problem(String::new()).await
+    }
+
+    /// Broadcast a server-restarting advisory to active DERP sessions.
+    pub async fn announce_restarting(&self, reconnect_in: Duration, try_for: Duration) -> usize {
+        self.relay
+            .broadcast_frame(Frame::Restarting {
+                reconnect_in_ms: duration_millis_u32(reconnect_in),
+                try_for_ms: duration_millis_u32(try_for),
+            })
+            .await
+    }
+
+    fn current_health_frame(&self) -> Option<Frame> {
+        self.health_problem
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .map(Frame::Health)
+    }
+
+    fn next_keepalive_delay(&self, client_public: &[u8; KEY_LEN]) -> Duration {
+        let max_jitter_nanos = self.keepalive_jitter.as_nanos();
+        if max_jitter_nanos == 0 {
+            return self.keepalive_interval;
+        }
+
+        let connection_id = self.connection_sequence.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = DefaultHasher::new();
+        client_public.hash(&mut hasher);
+        connection_id.hash(&mut hasher);
+
+        let jitter_bound = max_jitter_nanos.min(u128::from(u64::MAX - 1)) as u64;
+        let jitter = Duration::from_nanos(hasher.finish() % (jitter_bound + 1));
+        self.keepalive_interval
+            .checked_add(jitter)
+            .unwrap_or(self.keepalive_interval)
+    }
+}
+
+fn duration_millis_u32(duration: Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
 }
 
 fn parse_derp_private_key(path: &Path, contents: &str) -> Result<DerpNodeKeyPair, WireError> {
@@ -352,8 +462,12 @@ where
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
     writer.write_all(&server_info).await?;
     writer.flush().await?;
+    if let Some(frame) = runtime.current_health_frame() {
+        write_derp_frame(&mut writer, &frame).await?;
+    }
 
-    let result = run_relay_loop(session, reader, writer, decoder).await;
+    let keepalive_delay = runtime.next_keepalive_delay(&client_public);
+    let result = run_relay_loop(session, reader, writer, decoder, keepalive_delay).await;
     runtime.relay.disconnect(&client_public).await;
     result
 }
@@ -397,8 +511,12 @@ where
         encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
     send_websocket_binary(&mut writer, server_info).await?;
+    if let Some(frame) = runtime.current_health_frame() {
+        send_websocket_derp_frame(&mut writer, &frame).await?;
+    }
 
-    let result = run_websocket_relay_loop(session, reader, writer, decoder).await;
+    let keepalive_delay = runtime.next_keepalive_delay(&client_public);
+    let result = run_websocket_relay_loop(session, reader, writer, decoder, keepalive_delay).await;
     runtime.relay.disconnect(&client_public).await;
     result
 }
@@ -408,12 +526,21 @@ async fn run_relay_loop<R, W>(
     mut reader: R,
     mut writer: W,
     mut decoder: FrameDecoder,
+    keepalive_delay: Duration,
 ) -> Result<(), WireError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    enum RelayLoopEvent {
+        Read(std::io::Result<usize>),
+        Outbound(Option<Frame>),
+        KeepAlive,
+    }
+
     let mut buf = vec![0u8; READ_BUF_LEN];
+    let keepalive_sleep = tokio::time::sleep(keepalive_delay);
+    tokio::pin!(keepalive_sleep);
     loop {
         while let Some(frame) = decoder
             .next_frame()
@@ -425,23 +552,31 @@ where
                 .map_err(|err| WireError::Internal(format!("DERP relay: {err}")))?;
         }
 
-        tokio::select! {
-            read = reader.read(&mut buf) => {
+        let event = tokio::select! {
+            read = reader.read(&mut buf) => RelayLoopEvent::Read(read),
+            outbound = session.recv() => RelayLoopEvent::Outbound(outbound),
+            _ = &mut keepalive_sleep => RelayLoopEvent::KeepAlive,
+        };
+
+        match event {
+            RelayLoopEvent::Read(read) => {
                 let n = read?;
                 if n == 0 {
                     return Ok(());
                 }
                 decoder.push(&buf[..n]);
             }
-            outbound = session.recv() => {
+            RelayLoopEvent::Outbound(outbound) => {
                 let Some(frame) = outbound else {
                     return Ok(());
                 };
-                let encoded = encode_frame(&frame).map_err(|err| {
-                    WireError::Internal(format!("DERP protocol: {err}"))
-                })?;
-                writer.write_all(&encoded).await?;
-                writer.flush().await?;
+                write_derp_frame(&mut writer, &frame).await?;
+            }
+            RelayLoopEvent::KeepAlive => {
+                write_derp_frame(&mut writer, &Frame::KeepAlive).await?;
+                keepalive_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + keepalive_delay);
             }
         }
     }
@@ -452,6 +587,7 @@ async fn run_websocket_relay_loop<R, W, RE, WE>(
     mut reader: R,
     mut writer: W,
     mut decoder: FrameDecoder,
+    keepalive_delay: Duration,
 ) -> Result<(), WireError>
 where
     R: Stream<Item = Result<Message, RE>> + Unpin,
@@ -459,6 +595,14 @@ where
     W: Sink<Message, Error = WE> + Unpin,
     WE: std::fmt::Display,
 {
+    enum WebsocketRelayLoopEvent {
+        Incoming(Result<WebsocketInput, WireError>),
+        Outbound(Option<Frame>),
+        KeepAlive,
+    }
+
+    let keepalive_sleep = tokio::time::sleep(keepalive_delay);
+    tokio::pin!(keepalive_sleep);
     loop {
         while let Some(frame) = decoder
             .next_frame()
@@ -470,36 +614,56 @@ where
                 .map_err(|err| WireError::Internal(format!("DERP relay: {err}")))?;
         }
 
-        tokio::select! {
+        let event = tokio::select! {
             incoming = next_websocket_input(&mut reader) => {
-                match incoming? {
-                    WebsocketInput::Binary(bytes) => decoder.push(&bytes),
-                    WebsocketInput::Control => {}
-                    WebsocketInput::Closed => return Ok(()),
-                    WebsocketInput::Unsupported => {
-                        let _ = send_websocket_close(
-                            &mut writer,
-                            WEBSOCKET_UNSUPPORTED_DATA,
-                            "DERP websocket requires binary messages",
-                        )
-                        .await;
-                        return Err(WireError::Internal(
-                            "DERP websocket requires binary messages".into(),
-                        ));
-                    }
-                }
+                WebsocketRelayLoopEvent::Incoming(incoming)
             }
-            outbound = session.recv() => {
+            outbound = session.recv() => WebsocketRelayLoopEvent::Outbound(outbound),
+            _ = &mut keepalive_sleep => WebsocketRelayLoopEvent::KeepAlive,
+        };
+
+        match event {
+            WebsocketRelayLoopEvent::Incoming(incoming) => match incoming? {
+                WebsocketInput::Binary(bytes) => decoder.push(&bytes),
+                WebsocketInput::Control => {}
+                WebsocketInput::Closed => return Ok(()),
+                WebsocketInput::Unsupported => {
+                    let _ = send_websocket_close(
+                        &mut writer,
+                        WEBSOCKET_UNSUPPORTED_DATA,
+                        "DERP websocket requires binary messages",
+                    )
+                    .await;
+                    return Err(WireError::Internal(
+                        "DERP websocket requires binary messages".into(),
+                    ));
+                }
+            },
+            WebsocketRelayLoopEvent::Outbound(outbound) => {
                 let Some(frame) = outbound else {
                     return Ok(());
                 };
-                let encoded = encode_frame(&frame).map_err(|err| {
-                    WireError::Internal(format!("DERP protocol: {err}"))
-                })?;
-                send_websocket_binary(&mut writer, encoded).await?;
+                send_websocket_derp_frame(&mut writer, &frame).await?;
+            }
+            WebsocketRelayLoopEvent::KeepAlive => {
+                send_websocket_derp_frame(&mut writer, &Frame::KeepAlive).await?;
+                keepalive_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + keepalive_delay);
             }
         }
     }
+}
+
+async fn write_derp_frame<W>(writer: &mut W, frame: &Frame) -> Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let encoded =
+        encode_frame(frame).map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+    writer.write_all(&encoded).await?;
+    writer.flush().await?;
+    Ok(())
 }
 
 async fn read_next_frame<R>(reader: &mut R, decoder: &mut FrameDecoder) -> Result<Frame, WireError>
@@ -588,6 +752,16 @@ where
         .map_err(|err| WireError::Internal(format!("DERP websocket: {err}")))
 }
 
+async fn send_websocket_derp_frame<W, WE>(writer: &mut W, frame: &Frame) -> Result<(), WireError>
+where
+    W: Sink<Message, Error = WE> + Unpin,
+    WE: std::fmt::Display,
+{
+    let encoded =
+        encode_frame(frame).map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+    send_websocket_binary(writer, encoded).await
+}
+
 async fn send_websocket_close<W, WE>(
     writer: &mut W,
     code: u16,
@@ -638,6 +812,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex;
     use std::task::{Context, Poll};
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tower::ServiceExt;
 
@@ -726,6 +901,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pong, Frame::Pong(*b"12345678"));
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_sends_scheduled_keepalive() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_keepalive_interval(Duration::from_millis(20))
+            .with_keepalive_jitter(Duration::ZERO),
+        );
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        let keepalive = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_next_frame(&mut client_reader, &mut decoder),
+        )
+        .await
+        .expect("timed out waiting for DERP keepalive")
+        .unwrap();
+        assert_eq!(keepalive, Frame::KeepAlive);
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_sends_health_state_and_restart_advisory() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        assert_eq!(runtime.set_health_problem("BAD").await, 0);
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Health("BAD".to_string())
+        );
+
+        assert_eq!(runtime.clear_health_problem().await, 1);
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Health(String::new())
+        );
+
+        assert_eq!(
+            runtime
+                .announce_restarting(Duration::from_millis(1), Duration::from_millis(2))
+                .await,
+            1
+        );
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Restarting {
+                reconnect_in_ms: 1,
+                try_for_ms: 2,
+            }
+        );
 
         drop(client_writer);
         drop(client_reader);
@@ -832,6 +1133,47 @@ mod tests {
             headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
                 .expect("pong frame decodes");
         assert_eq!(frame, Frame::Pong(*b"12345678"));
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_websocket_sends_scheduled_keepalive() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_keepalive_interval(Duration::from_millis(20))
+            .with_keepalive_jitter(Duration::ZERO),
+        );
+        let server_public = runtime.public_key();
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+        wait_for_sent_messages(&sent, 3).await;
+        tx.send(Ok(Message::Close(None))).await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_ok());
+
+        let messages = sent.lock().unwrap().clone();
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
+                .expect("keepalive frame decodes");
+        assert_eq!(frame, Frame::KeepAlive);
     }
 
     #[tokio::test]

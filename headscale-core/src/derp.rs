@@ -1681,6 +1681,28 @@ pub mod native {
             self.inner.read().await.sessions.len()
         }
 
+        /// Broadcast a server-originated control frame to all active sessions.
+        ///
+        /// This is used by the native runtime for connection-level DERP
+        /// advisories such as health changes and restart notices.
+        pub async fn broadcast_frame(&self, frame: Frame) -> usize {
+            let senders = self
+                .inner
+                .read()
+                .await
+                .sessions
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut delivered = 0;
+            for tx in senders {
+                if tx.send(frame.clone()).await.is_ok() {
+                    delivered += 1;
+                }
+            }
+            delivered
+        }
+
         async fn handle_from(
             &self,
             source: [u8; KEY_LEN],
@@ -1903,6 +1925,29 @@ pub mod native {
             assert_eq!(
                 recv_frame(&mut alice).await,
                 Frame::Pong([0, 1, 2, 3, 4, 5, 6, 7])
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_broadcasts_runtime_control_frames() {
+            let relay = NativeDerpRelay::new();
+            let mut alice = relay.connect([1u8; KEY_LEN]).await;
+            let mut bob = relay.connect([2u8; KEY_LEN]).await;
+
+            assert_eq!(
+                relay
+                    .broadcast_frame(Frame::Health("restart soon".to_string()))
+                    .await,
+                2
+            );
+
+            assert_eq!(
+                recv_frame(&mut alice).await,
+                Frame::Health("restart soon".to_string())
+            );
+            assert_eq!(
+                recv_frame(&mut bob).await,
+                Frame::Health("restart soon".to_string())
             );
         }
 

@@ -73,12 +73,74 @@ impl NativeDerpLifecycleDelivery {
     }
 }
 
+/// Admission counts for native DERP verify-client checks by transport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeDerpAdmissionSnapshot {
+    pub raw_allowed: u64,
+    pub raw_denied: u64,
+    pub websocket_allowed: u64,
+    pub websocket_denied: u64,
+}
+
+impl NativeDerpAdmissionSnapshot {
+    /// Total admitted native DERP handshakes.
+    pub const fn allowed(self) -> u64 {
+        self.raw_allowed + self.websocket_allowed
+    }
+
+    /// Total rejected native DERP handshakes.
+    pub const fn denied(self) -> u64 {
+        self.raw_denied + self.websocket_denied
+    }
+
+    /// Total native DERP verify-client decisions.
+    pub const fn total(self) -> u64 {
+        self.allowed() + self.denied()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NativeDerpAdmissionCounters {
+    raw_allowed: AtomicU64,
+    raw_denied: AtomicU64,
+    websocket_allowed: AtomicU64,
+    websocket_denied: AtomicU64,
+}
+
+impl NativeDerpAdmissionCounters {
+    fn record(&self, transport: NativeDerpTransport, admitted: bool) {
+        let counter = match (transport, admitted) {
+            (NativeDerpTransport::Raw, true) => &self.raw_allowed,
+            (NativeDerpTransport::Raw, false) => &self.raw_denied,
+            (NativeDerpTransport::WebSocket, true) => &self.websocket_allowed,
+            (NativeDerpTransport::WebSocket, false) => &self.websocket_denied,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> NativeDerpAdmissionSnapshot {
+        NativeDerpAdmissionSnapshot {
+            raw_allowed: self.raw_allowed.load(Ordering::Relaxed),
+            raw_denied: self.raw_denied.load(Ordering::Relaxed),
+            websocket_allowed: self.websocket_allowed.load(Ordering::Relaxed),
+            websocket_denied: self.websocket_denied.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NativeDerpTransport {
+    Raw,
+    WebSocket,
+}
+
 /// Shared native DERP runtime.
 #[derive(Clone)]
 pub struct NativeDerpRuntime {
     server_key: Arc<DerpNodeKeyPair>,
     relay: NativeDerpRelay,
     client_verifier: Option<NativeDerpClientVerifier>,
+    admissions: Arc<NativeDerpAdmissionCounters>,
     keepalive_interval: Duration,
     keepalive_jitter: Duration,
     connection_sequence: Arc<AtomicU64>,
@@ -94,6 +156,7 @@ impl fmt::Debug for NativeDerpRuntime {
                 "client_verifier",
                 &self.client_verifier.as_ref().map(|_| "<configured>"),
             )
+            .field("admission_snapshot", &self.admission_snapshot())
             .field("keepalive_interval", &self.keepalive_interval)
             .field("keepalive_jitter", &self.keepalive_jitter)
             .field(
@@ -154,6 +217,7 @@ impl NativeDerpRuntime {
             server_key: Arc::new(server_key),
             relay,
             client_verifier: None,
+            admissions: Arc::new(NativeDerpAdmissionCounters::default()),
             keepalive_interval: DEFAULT_DERP_KEEPALIVE_INTERVAL,
             keepalive_jitter: DEFAULT_DERP_KEEPALIVE_JITTER,
             connection_sequence: Arc::new(AtomicU64::new(0)),
@@ -209,6 +273,21 @@ impl NativeDerpRuntime {
             Some(verifier) => verifier(client_public),
             None => true,
         }
+    }
+
+    /// Current native DERP verify-client decision counts by transport.
+    pub fn admission_snapshot(&self) -> NativeDerpAdmissionSnapshot {
+        self.admissions.snapshot()
+    }
+
+    fn verify_client_for_transport(
+        &self,
+        transport: NativeDerpTransport,
+        client_public: &[u8; KEY_LEN],
+    ) -> bool {
+        let admitted = self.admit_client(client_public);
+        self.admissions.record(transport, admitted);
+        admitted
     }
 
     /// Set the current server health problem and broadcast it to active
@@ -488,7 +567,7 @@ where
     let first = read_next_frame(&mut reader, &mut decoder).await?;
     let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
         .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    if !runtime.admit_client(&client_public) {
+    if !runtime.verify_client_for_transport(NativeDerpTransport::Raw, &client_public) {
         return Err(WireError::Internal(
             "DERP client was not admitted by verifier".into(),
         ));
@@ -545,7 +624,7 @@ where
     let first = read_next_websocket_frame(&mut reader, &mut decoder).await?;
     let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
         .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    if !runtime.admit_client(&client_public) {
+    if !runtime.verify_client_for_transport(NativeDerpTransport::WebSocket, &client_public) {
         return Err(WireError::Internal(
             "DERP client was not admitted by verifier".into(),
         ));
@@ -959,6 +1038,47 @@ mod tests {
         drop(client_writer);
         drop(client_reader);
         assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn native_derp_verify_client_counts_raw_and_websocket_admissions() {
+        let raw_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let raw_public = raw_key.public_key();
+        let websocket_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let websocket_public = websocket_key.public_key();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_client_verifier(move |client_public| {
+                client_public == &raw_public || client_public == &websocket_public
+            }),
+        );
+
+        let raw = start_raw_derp_client(runtime.clone(), &raw_key).await;
+        let websocket = start_websocket_derp_client(runtime.clone(), &websocket_key).await;
+
+        assert_eq!(
+            runtime.admission_snapshot(),
+            NativeDerpAdmissionSnapshot {
+                raw_allowed: 1,
+                raw_denied: 0,
+                websocket_allowed: 1,
+                websocket_denied: 0,
+            }
+        );
+        assert_eq!(runtime.admission_snapshot().allowed(), 2);
+        assert_eq!(runtime.admission_snapshot().denied(), 0);
+        assert_eq!(runtime.admission_snapshot().total(), 2);
+        assert_eq!(runtime.relay.session_count().await, 2);
+
+        drop(raw.writer);
+        drop(raw.reader);
+        assert!(raw.server.await.unwrap().is_ok());
+
+        websocket.tx.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(websocket.server.await.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -1663,6 +1783,16 @@ mod tests {
             format!("{err:#}").contains("DERP client was not admitted by verifier"),
             "{err:#}"
         );
+        assert_eq!(
+            runtime.admission_snapshot(),
+            NativeDerpAdmissionSnapshot {
+                raw_allowed: 0,
+                raw_denied: 1,
+                websocket_allowed: 0,
+                websocket_denied: 0,
+            }
+        );
+        assert_eq!(runtime.relay.session_count().await, 0);
     }
 
     #[tokio::test]
@@ -1723,6 +1853,15 @@ mod tests {
             headscale_core::derp::protocol::decode_frame(binary_frame(&messages[2]), MAX_INFO_LEN)
                 .expect("pong frame decodes");
         assert_eq!(frame, Frame::Pong(*b"12345678"));
+        assert_eq!(
+            runtime.admission_snapshot(),
+            NativeDerpAdmissionSnapshot {
+                raw_allowed: 0,
+                raw_denied: 0,
+                websocket_allowed: 1,
+                websocket_denied: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -2444,9 +2583,10 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let sent = Arc::new(Mutex::new(Vec::new()));
         let server_sent = sent.clone();
+        let server_runtime = runtime.clone();
         let server = tokio::spawn(async move {
             drive_native_derp_websocket_parts(
-                runtime,
+                server_runtime,
                 CollectWebsocketSink { sent: server_sent },
                 MpscMessageStream { rx },
             )
@@ -2470,6 +2610,16 @@ mod tests {
             headscale_core::derp::protocol::decode_frame(binary_frame(&messages[0]), MAX_INFO_LEN)
                 .expect("server key frame decodes");
         assert!(matches!(frame, Frame::ServerKey { .. }));
+        assert_eq!(
+            runtime.admission_snapshot(),
+            NativeDerpAdmissionSnapshot {
+                raw_allowed: 0,
+                raw_denied: 0,
+                websocket_allowed: 0,
+                websocket_denied: 1,
+            }
+        );
+        assert_eq!(runtime.relay.session_count().await, 0);
     }
 
     #[tokio::test]

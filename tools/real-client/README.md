@@ -152,7 +152,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-deny` | `postgres-ssh-oidc-check-deny-smoke.sh` | `postgres-ssh-oidc-check-deny-headscale-go-smoke.sh` | Production Postgres expired OIDC-backed Tailscale SSH `check` denial |
 | Database | `postgres-ssh-oidc-check-cancel` | `postgres-ssh-oidc-check-cancel-smoke.sh` | `postgres-ssh-oidc-check-cancel-headscale-go-smoke.sh` | Production Postgres cancelled OIDC-backed Tailscale SSH `check` denial |
-| Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env |
+| Database | `postgres-ssh-accept-env` | `postgres-ssh-accept-env-smoke.sh` | `postgres-ssh-accept-env-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` env with exact success status/stdout/stderr |
 | Database | `postgres-ssh-localpart` | `postgres-ssh-localpart-smoke.sh` | `postgres-ssh-localpart-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart login users from profile emails |
 | Database | `postgres-ssh-profile-variants` | `postgres-ssh-profile-variants-smoke.sh` | `postgres-ssh-profile-variants-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and denial status/stderr |
 | Database | `postgres-ssh-profile-subdomain-deny` | `postgres-ssh-profile-subdomain-deny-smoke.sh` | `postgres-ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Production Postgres current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
@@ -278,7 +278,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |
 | SSH | `ssh-profile-variants` | `ssh-profile-variants-smoke.sh` | `ssh-profile-variants-headscale-go-smoke.sh` | Current-head Tailscale SSH profile email variants, case-insensitive localpart domains, and exact denial status/stderr |
 | SSH | `ssh-profile-subdomain-deny` | `ssh-profile-subdomain-deny-smoke.sh` | `ssh-profile-subdomain-deny-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart profile email subdomain denial status/stderr |
-| SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables |
+| SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables with exact success status/stdout/stderr |
 
 ## Local and CI Execution
 
@@ -642,9 +642,10 @@ tools/real-client/extra-records-smoke.sh
 tools/real-client/extra-records-headscale-go-smoke.sh
 ```
 
-The DNS edge variant also asserts split DNS route and fallback resolver
-projection in the client netmap, then resolves the configured AAAA record and
-its CNAME alias through the stock-client resolver:
+The DNS edge variant also points the split DNS route at a live local UDP
+resolver fixture, asserts split route and fallback resolver projection in the
+client netmap, then resolves a split-suffix A record plus the configured AAAA
+record and CNAME alias through the stock-client resolver:
 
 ```sh
 tools/real-client/dns-edge-smoke.sh
@@ -1271,7 +1272,8 @@ no profile email, exact denied status `255`, empty denied stdout, and the
 stable first denial stderr line. The `ssh-accept-env` row runs a tagged target
 with policy `acceptEnv: ["LANG", "LC_*"]`, passes `LANG` and `LC_ACCEPT_ENV_SMOKE`
 through the stock client command environment, and asserts the remote command
-prints those accepted values:
+exits with status `0`, prints those accepted values on stdout, and emits empty
+stderr:
 
 ```sh
 tools/real-client/ssh-localpart-smoke.sh
@@ -1287,6 +1289,8 @@ Useful knobs:
 - `REAL_CLIENT_SSH_USER` defaults to `ssh-it-user`.
 - `REAL_CLIENT_EXPECT_SSH_MATRIX` defaults to
   `1:2:allow,2:1:allow,1:3:deny,3:1:deny` for the first pass.
+- `REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR` opts successful SSH checks into exact
+  stderr matching; set it to an empty value to require empty stderr.
 - `REAL_CLIENT_TIMEOUT_EXPECT_SSH_MATRIX` defaults to `1:2:timeout` for the
   ACL-blocked pass.
 - `REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS` defaults to `12`.

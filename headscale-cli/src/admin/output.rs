@@ -76,7 +76,7 @@ pub fn print_structured<T: Serialize>(fmt: OutputFormat, value: &T) -> Result<()
         OutputFormat::Yaml => {
             let s = serde_yaml::to_string(value)
                 .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
-            print!("{s}");
+            println!("{s}");
             Ok(())
         }
     }

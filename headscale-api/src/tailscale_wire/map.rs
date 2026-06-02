@@ -1675,6 +1675,7 @@ async fn map_inner(
                                     public_control_url.as_deref().unwrap_or(""),
                                     PeerDeltaOptions::registry_change(),
                                     &BTreeSet::new(),
+                                    None,
                                 )
                             })
                         }
@@ -1727,6 +1728,7 @@ async fn map_inner(
                                 public_control_url.as_deref().unwrap_or(""),
                                 PeerDeltaOptions::policy_change(),
                                 &BTreeSet::new(),
+                                None,
                             )
                         }
                     }
@@ -2061,6 +2063,7 @@ fn rebuild_map_batch_chunk(
         ));
     }
 
+    let peer_filter_ids = map_batch_peer_filter_ids(changes);
     rebuild_peer_delta_chunk(
         machines,
         policy,
@@ -2077,6 +2080,7 @@ fn rebuild_map_batch_chunk(
         public_control_url,
         map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
         &map_batch_forced_full_peer_ids(changes),
+        peer_filter_ids.as_ref(),
     )
 }
 
@@ -2085,6 +2089,29 @@ fn map_batch_forced_full_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
         .iter()
         .flat_map(|change| change.content.peers_changed.iter().copied())
         .collect()
+}
+
+fn map_batch_peer_filter_ids(changes: &[MapChange]) -> Option<BTreeSet<u64>> {
+    if changes.iter().any(|change| {
+        change.content.send_all_peers || change.content.requires_runtime_peer_computation
+    }) {
+        return None;
+    }
+
+    Some(
+        changes
+            .iter()
+            .flat_map(|change| {
+                change
+                    .content
+                    .peers_changed
+                    .iter()
+                    .chain(change.content.peers_removed.iter())
+                    .chain(change.content.peer_patches.iter())
+                    .copied()
+            })
+            .collect(),
+    )
 }
 
 fn rebuild_peer_delta_chunk(
@@ -2103,6 +2130,7 @@ fn rebuild_peer_delta_chunk(
     public_control_url: &str,
     options: PeerDeltaOptions,
     force_full_peer_ids: &BTreeSet<u64>,
+    filter_peer_ids: Option<&BTreeSet<u64>>,
 ) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
         return Some((
@@ -2172,23 +2200,46 @@ fn rebuild_peer_delta_chunk(
     let current_peer_state = peer_state_from_nodes(&peers_changed);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
     let previous_peer_ids = last_peer_state.keys().copied().collect::<BTreeSet<_>>();
+    let peer_in_scope = |peer_id: u64| filter_peer_ids.is_none_or(|ids| ids.contains(&peer_id));
     let peers_removed = previous_peer_ids
         .difference(&current_peer_ids)
+        .filter(|peer_id| peer_in_scope(**peer_id))
         .copied()
         .collect::<Vec<_>>();
+    let mut next_peer_state = if filter_peer_ids.is_some() {
+        last_peer_state.clone()
+    } else {
+        current_peer_state.clone()
+    };
+    for peer_id in &peers_removed {
+        next_peer_state.remove(peer_id);
+    }
     let mut peer_patches = Vec::new();
     let mut full_peers_changed = Vec::new();
     for peer in peers_changed {
+        if !peer_in_scope(peer.id) {
+            continue;
+        }
         if force_full_peer_ids.contains(&peer.id) {
+            next_peer_state.insert(peer.id, peer.clone());
             full_peers_changed.push(peer);
             continue;
         }
         match last_peer_state.get(&peer.id) {
-            None => full_peers_changed.push(peer),
+            None => {
+                next_peer_state.insert(peer.id, peer.clone());
+                full_peers_changed.push(peer);
+            }
             Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
             Some(previous) => match peer_patch_if_only_patchable_fields_changed(previous, &peer) {
-                Some(patch) => peer_patches.push(patch),
-                None => full_peers_changed.push(peer),
+                Some(patch) => {
+                    next_peer_state.insert(peer.id, peer.clone());
+                    peer_patches.push(patch);
+                }
+                None => {
+                    next_peer_state.insert(peer.id, peer.clone());
+                    full_peers_changed.push(peer);
+                }
             },
         }
     }
@@ -2243,7 +2294,7 @@ fn rebuild_peer_delta_chunk(
     record_mapresponse_debug(mapresponse_debug, self_node_id, options.debug_type, &mr);
     Some((
         build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
-        current_peer_state,
+        next_peer_state,
         current_self_node,
     ))
 }
@@ -9592,6 +9643,98 @@ mod tests {
         assert!(patch.disco_key.is_none());
         assert!(patch.online.is_none());
         assert!(patch.last_seen.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_peer_patch_filters_to_change_reason_scope() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+        let mut peer_a = MachineRecord::new_at(
+            chrono::Utc::now(),
+            a.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "peer-a".into(),
+            Ipv4Addr::new(100, 64, 0, 10),
+            false,
+        );
+        peer_a.home_derp = 1;
+        state.machines.upsert(a.clone(), peer_a);
+        insert_peer(&state, &b, "peer-b", 11);
+        let mut peer_c = MachineRecord::new_at(
+            chrono::Utc::now(),
+            c.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "peer-c".into(),
+            Ipv4Addr::new(100, 64, 0, 12),
+            false,
+        );
+        peer_c.home_derp = 1;
+        state.machines.upsert(c.clone(), peer_c);
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        let initial_derps = first_mr
+            .peers
+            .iter()
+            .map(|peer| (peer.id, peer.home_derp))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            initial_derps,
+            BTreeMap::from([(stable_id_from_key(&a), 1), (stable_id_from_key(&c), 1)])
+        );
+        let _ = state.machines.drain_pending_map_changes();
+
+        let peer_a_id = stable_id_from_key(&a);
+        let peer_c_id = stable_id_from_key(&c);
+        let mut peer_a = state.machines.get(&a).expect("peer-a registered");
+        peer_a.home_derp = 7;
+        state.machines.upsert_quiet(a.clone(), peer_a);
+        let mut peer_c = state.machines.get(&c).expect("peer-c registered");
+        peer_c.home_derp = 9;
+        state.machines.upsert_quiet(c.clone(), peer_c);
+        state
+            .machines
+            .wake_node_change(MapChangeReason::EndpointDerpUpdate, peer_a_id);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "scoped peer patches must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let first_delta = next_zstd_map_response(&mut body).await;
+        assert!(first_delta.peers.is_empty());
+        assert!(first_delta.peers_changed.is_empty());
+        assert!(first_delta.peers_removed.is_empty());
+        assert_eq!(first_delta.peers_changed_patch.len(), 1);
+        assert_eq!(first_delta.peers_changed_patch[0].node_id, peer_a_id);
+        assert_eq!(first_delta.peers_changed_patch[0].derp_region, 7);
+
+        state
+            .machines
+            .wake_node_change(MapChangeReason::EndpointDerpUpdate, peer_c_id);
+        tokio::task::yield_now().await;
+        publish_test_map_batch().await;
+
+        let second_delta = next_zstd_map_response(&mut body).await;
+        assert!(second_delta.peers.is_empty());
+        assert!(second_delta.peers_changed.is_empty());
+        assert!(second_delta.peers_removed.is_empty());
+        assert_eq!(
+            second_delta.peers_changed_patch.len(),
+            1,
+            "unscoped peer state must not be treated as delivered by the previous batch"
+        );
+        assert_eq!(second_delta.peers_changed_patch[0].node_id, peer_c_id);
+        assert_eq!(second_delta.peers_changed_patch[0].derp_region, 9);
     }
 
     #[tokio::test(start_paused = true)]

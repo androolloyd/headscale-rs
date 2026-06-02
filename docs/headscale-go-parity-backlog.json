@@ -8,10 +8,10 @@
     "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
   },
   "summary": {
-    "open_p0": 4,
+    "open_p0": 3,
     "open_p1": 4,
     "open_p2": 3,
-    "total_open": 11
+    "total_open": 10
   },
   "open_items": [
     {
@@ -31,21 +31,6 @@
         "integration/api_auth_test.go"
       ],
       "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage for users, preauth keys, API keys, nodes, policy, routes, and auth sessions beyond the current selected stock-client matrix."
-    },
-    {
-      "id": "p0-change-merge-filter-semantics",
-      "priority": "P0",
-      "lane": "Register, map, NodeStore, and batcher churn",
-      "status": "open",
-      "type": "implementation/evidence",
-      "owner_scope": [
-        "headscale-api/src/tailscale_wire/map.rs",
-        "tools/parity/scenarios/wire-map-response-deltas-control.json"
-      ],
-      "upstream_evidence": [
-        "hscontrol/types/change/change.go"
-      ],
-      "exit_criteria": "Pin targeted updates, self-only updates, PingRequest preservation, policy/runtime peer computation, DNS/DERP/domain inclusion, and peer patch reason filtering."
     },
     {
       "id": "p0-native-derp-stock-client-runtime",

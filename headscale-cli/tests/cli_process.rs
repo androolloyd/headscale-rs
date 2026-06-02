@@ -393,6 +393,27 @@ fn assert_process_stderr_snapshot(
     );
 }
 
+fn assert_process_stdout_snapshot(
+    output: &Output,
+    expected_status: i32,
+    expected: &str,
+    label: &str,
+) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "unexpected status for {label}; stdout: {}; stderr: {}",
+        stdout(output),
+        stderr(output)
+    );
+    assert_eq!(
+        trim_line_end_spaces(&stdout(output)),
+        trim_line_end_spaces(expected),
+        "stdout snapshot for {label}"
+    );
+    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
+}
+
 fn assert_process_no_config_warning_stderr_snapshot(
     output: &Output,
     expected_status: i32,
@@ -7922,8 +7943,38 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(stderr(&health), "");
 
     let health_json = headscale_with_config(&config, &["-o", "json", "health"]);
+    assert_process_stdout_snapshot(
+        &health_json,
+        0,
+        include_str!("snapshots/grpc_live_health_json.stdout"),
+        "health JSON",
+    );
     let health_json = json_output(&health_json);
     assert_eq!(health_json["database_connectivity"].as_bool(), Some(true));
+
+    let health_json_line = headscale_with_config(&config, &["-ojson-line", "health"]);
+    assert_process_stdout_snapshot(
+        &health_json_line,
+        0,
+        include_str!("snapshots/grpc_live_health_json_line.stdout"),
+        "health JSON-line",
+    );
+    let health_json_line: serde_json::Value =
+        serde_json::from_slice(&health_json_line.stdout).unwrap();
+    assert_eq!(
+        health_json_line["database_connectivity"].as_bool(),
+        Some(true)
+    );
+
+    let health_yaml = headscale_with_config(&config, &["-o", "yaml", "health"]);
+    assert_process_stdout_snapshot(
+        &health_yaml,
+        0,
+        concat!(include_str!("snapshots/grpc_live_health_yaml.stdout"), "\n"),
+        "health YAML",
+    );
+    let health_yaml = yaml_output(&health_yaml);
+    assert_eq!(health_yaml["database_connectivity"].as_bool(), Some(true));
 
     let create_user = headscale_with_config(
         &config,

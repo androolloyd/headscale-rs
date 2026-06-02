@@ -78,6 +78,12 @@ ssh_user="${REAL_CLIENT_SSH_USER:-}"
 expected_ssh_matrix="${REAL_CLIENT_EXPECT_SSH_MATRIX:-}"
 ssh_command="${REAL_CLIENT_SSH_COMMAND:-hostname}"
 ssh_expected_stdout="${REAL_CLIENT_EXPECT_SSH_STDOUT:-}"
+ssh_expect_allow_stderr=false
+ssh_expected_allow_stderr=""
+if [[ ${REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR+x} ]]; then
+  ssh_expect_allow_stderr=true
+  ssh_expected_allow_stderr="${REAL_CLIENT_EXPECT_SSH_ALLOW_STDERR}"
+fi
 ssh_send_env="${REAL_CLIENT_SSH_SEND_ENV:-}"
 ssh_attempt_timeout_secs="${REAL_CLIENT_SSH_ATTEMPT_TIMEOUT_SECS:-12}"
 ssh_host_key_timeout_secs="${REAL_CLIENT_SSH_HOST_KEY_TIMEOUT_SECS:-30}"
@@ -987,6 +993,28 @@ tailscale_ssh_succeeded() {
     return
   fi
   grep -Fxq "${target_name}" "${stdout_path}"
+}
+
+assert_ssh_allow_stderr() {
+  local stderr_path="$1"
+  local actual_stderr
+  if [[ "${ssh_expect_allow_stderr}" != true ]]; then
+    return 0
+  fi
+  if [[ -z "${ssh_expected_allow_stderr}" ]]; then
+    if [[ -s "${stderr_path}" ]]; then
+      echo "expected allowed tailscale ssh stderr to be empty, got:" >&2
+      cat "${stderr_path}" >&2 || true
+      return 1
+    fi
+    return 0
+  fi
+  actual_stderr="$(sed 's/\r$//' "${stderr_path}")"
+  if [[ "${actual_stderr}" != "${ssh_expected_allow_stderr}" ]]; then
+    echo "expected allowed tailscale ssh stderr '${ssh_expected_allow_stderr}', got:" >&2
+    cat "${stderr_path}" >&2 || true
+    return 1
+  fi
 }
 
 tailscale_peer_has_ssh_host_keys() {
@@ -2542,6 +2570,7 @@ if [[ -n "${expected_ssh_matrix}" ]]; then
         cp "${work_dir}/ssh-${source_name}-to-${target_name}.stdout" "${stdout_path}"
         cp "${work_dir}/ssh-${source_name}-to-${target_name}.stderr" "${stderr_path}"
         printf '0\n' >"${status_path}"
+        assert_ssh_allow_stderr "${stderr_path}" || exit 1
         ;;
       deny)
         ssh_status=0

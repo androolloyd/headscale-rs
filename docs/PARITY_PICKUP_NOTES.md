@@ -2509,3 +2509,24 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added `postgres-web-register-policy-churn-restart` to the deterministic
   PR/push real-client set and CI metadata guard. The checked PR matrix now
   reports 156 deterministic rows.
+
+## 2026-06-02 fifth subagent parity edge adoption
+
+- Adopted native DERP verify-client admission counters split by raw DERP and
+  DERP-over-WebSocket, plus restart-row `Peer[].Relay` status assertions for
+  `postgres-derp-native-restart`. The native DERP stock-client row remains
+  open for broader runtime and transport-forcing coverage.
+- Adopted exact successful Tailscale SSH stderr assertions for the paired
+  `ssh-accept-env` and `postgres-ssh-accept-env` rows. Broader SSH
+  status/stdout/stderr coverage remains open.
+- Adopted live local-gRPC `health` stdout snapshots for JSON, JSON-line, and
+  YAML and matched upstream YAML success output trailing-blank-line behavior.
+  The lower-priority CLI residual row remains open for remaining utility and
+  process-level output drift.
+- Closed `p0-change-merge-filter-semantics`: map-change content flags now pin
+  targeted/full/self updates, PingRequest preservation, policy/runtime peer
+  computation, DNS/DERP/domain inclusion, and scoped peer-patch filtering.
+  Filtered peer deltas no longer advance unrelated peer baseline state.
+- Adopted the DNS-edge live split-resolver fixture and paired DNS-edge smoke
+  assertions for a real split-suffix A lookup. The DNS row remains open until
+  the paired Docker stock-client rows are run successfully.

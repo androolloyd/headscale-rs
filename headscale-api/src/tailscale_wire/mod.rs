@@ -7794,6 +7794,56 @@ mod registry_tests {
     }
 
     #[test]
+    fn map_change_content_flags_match_upstream_constructors() {
+        let node_id = 42;
+        let full = PendingMapChange::global(MapChangeReason::FullUpdate).into_change(1);
+        assert!(full.content.include_self);
+        assert!(full.content.include_derp_map);
+        assert!(full.content.include_dns);
+        assert!(full.content.include_domain);
+        assert!(full.content.include_policy);
+        assert!(full.content.send_all_peers);
+        assert!(full.is_full());
+
+        let full_self =
+            PendingMapChange::target(MapChangeReason::FullSelfUpdate, node_id).into_change(2);
+        assert!(full_self.is_full());
+        assert_eq!(full_self.target_node_id, Some(node_id));
+        assert!(full_self.should_send_to_node(node_id));
+        assert!(!full_self.should_send_to_node(node_id + 1));
+
+        let self_only =
+            PendingMapChange::target(MapChangeReason::SelfUpdate, node_id).into_change(3);
+        assert!(self_only.content.include_self);
+        assert!(!self_only.content.include_derp_map);
+        assert!(!self_only.content.include_dns);
+        assert!(!self_only.content.include_domain);
+        assert!(!self_only.content.include_policy);
+        assert!(self_only.is_self_only());
+
+        let policy = PendingMapChange::global(MapChangeReason::PolicyChange).into_change(4);
+        assert!(policy.content.include_policy);
+        assert!(policy.content.requires_runtime_peer_computation);
+        assert!(!policy.content.include_dns);
+
+        let dns = PendingMapChange::global(MapChangeReason::DnsConfigUpdate).into_change(5);
+        assert!(dns.content.include_dns);
+        assert!(!dns.content.include_derp_map);
+        assert!(!dns.content.include_domain);
+
+        let derp = PendingMapChange::global(MapChangeReason::DerpMapUpdate).into_change(6);
+        assert!(derp.content.include_derp_map);
+        assert!(!derp.content.include_dns);
+        assert!(!derp.content.include_domain);
+
+        let ping = PendingMapChange::target(MapChangeReason::PingNode, node_id).into_change(7);
+        assert!(ping.content.ping_request);
+        assert_eq!(ping.target_node_id, Some(node_id));
+        assert!(ping.should_send_to_node(node_id));
+        assert!(!ping.should_send_to_node(node_id + 1));
+    }
+
+    #[test]
     fn map_change_merge_combines_reasons_and_state() {
         let node_id = 42;
         let peers =
@@ -7965,21 +8015,70 @@ mod registry_tests {
         );
 
         let pending = reg.pending_map_changes();
-        let node_a_labels = pending
+        let node_a_changes = pending
             .get(&node_a)
-            .expect("target node has pending changes")
+            .expect("target node has pending changes");
+        assert_eq!(node_a_changes.len(), 2);
+        assert!(node_a_changes[0].content.ping_request);
+        assert!(!node_a_changes[0].content.include_policy);
+        assert!(node_a_changes[1].content.include_policy);
+        assert!(node_a_changes[1].content.requires_runtime_peer_computation);
+        let node_a_labels = node_a_changes
             .iter()
             .flat_map(MapChange::reason_labels)
             .collect::<Vec<_>>();
         assert_eq!(node_a_labels, vec!["ping node", "policy change"]);
 
-        let node_b_labels = pending
+        let node_b_changes = pending
             .get(&node_b)
-            .expect("broadcast node has pending changes")
+            .expect("broadcast node has pending changes");
+        assert_eq!(node_b_changes.len(), 1);
+        assert!(!node_b_changes[0].content.ping_request);
+        assert!(node_b_changes[0].content.include_policy);
+        assert!(node_b_changes[0].content.requires_runtime_peer_computation);
+        let node_b_labels = node_b_changes
             .iter()
             .flat_map(MapChange::reason_labels)
             .collect::<Vec<_>>();
         assert_eq!(node_b_labels, vec!["policy change"]);
+    }
+
+    #[test]
+    fn map_change_batcher_preserves_targeted_self_only_update() {
+        let reg = Arc::new(MachineRegistry::new());
+        let node_a = 2101;
+        let node_b = 2102;
+        let _guard_a = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_a,
+            Duration::ZERO,
+        );
+        let _guard_b = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            node_b,
+            Duration::ZERO,
+        );
+        let _ = reg.drain_pending_map_changes();
+
+        reg.enqueue_map_change(
+            PendingMapChange::target(MapChangeReason::SelfUpdate, node_a).into_change(1),
+        );
+
+        let pending = reg.pending_map_changes();
+        let node_a_changes = pending
+            .get(&node_a)
+            .expect("target node receives self update");
+        assert_eq!(node_a_changes.len(), 1);
+        assert!(node_a_changes[0].is_self_only());
+        assert_eq!(node_a_changes[0].change_type(), "self");
+        assert!(node_a_changes[0].content.include_self);
+        assert!(node_a_changes[0].content.peers_changed.is_empty());
+        assert!(node_a_changes[0].content.peers_removed.is_empty());
+        assert!(node_a_changes[0].content.peer_patches.is_empty());
+        assert!(
+            !pending.contains_key(&node_b),
+            "self-only changes must not leak to broadcast observers"
+        );
     }
 
     #[test]

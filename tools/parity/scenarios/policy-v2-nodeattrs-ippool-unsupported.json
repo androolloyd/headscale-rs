@@ -1,0 +1,19 @@
+{
+  "name": "policy-v2-nodeattrs-ippool-unsupported",
+  "expect_policy_error": "nodeAttrs ipPool requires the IP allocator",
+  "policy": {
+    "nodeAttrs": [
+      {
+        "target": [
+          "autogroup:member"
+        ],
+        "attr": [
+          "randomize-client-port"
+        ],
+        "ipPool": [
+          "100.86.0.0/16"
+        ]
+      }
+    ]
+  }
+}

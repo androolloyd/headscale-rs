@@ -2592,6 +2592,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   a representative pinned slice, not an exhaustive audit of the upstream
   ACL/grants/routes/SSH compatibility corpus.
 
+## 2026-06-02 policy compat fixture batch 2
+
+- Added `policy-v2-compat-fixture-batch-2` to the pinned Go/Rust differential
+  suite for nodeAttrs host targets, grouped tag owners, `autoApprovers.exitNode`,
+  broader-CIDR `grants[].via`, policy `tests`, `sshTests`, and overlapping SSH
+  accept/check rules.
+- Added `policy-v2-nodeattrs-ippool-unsupported` to pin the current
+  headscale-go rejection for parsed-but-unimplemented `nodeAttrs[].ipPool`.
+- Added `hscontrol/policy/v2/tailscale_nodeattrs_compat_test.go` to the P1
+  backlog evidence list. The row remains open because the upstream ACL,
+  grants, nodeAttrs, route, policyTest, and sshTest captures are not exhausted.
+
 ## 2026-06-02 SSH stock-client exactness closure
 
 - Broadened paired stock-client SSH success assertions across the shared
@@ -2698,3 +2710,28 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p0-production-postgres-process-mutations` row remains open. This slice
   adds a user/node owner restart mutation but does not close remaining
   policy/route/auth-session/config-map-churn breadth.
+
+## 2026-06-02 DNS multi-resolver fallback live smoke
+
+- Added paired `dns-multi-resolver-fallback` Rust/headscale-go stock-client
+  smokes. The row starts a SERVFAIL UDP resolver and a live answering UDP
+  resolver, installs them in that order for one split-DNS suffix, asserts the
+  client-observed split route order, then resolves the live record through
+  `tailscale debug resolve`.
+- The shared DNS live fixture now tracks multiple resolver processes and can
+  start an explicit failure resolver for deterministic fallback coverage.
+- The `p2-dns-live-resolver-behavior` row remains open because both the
+  search-domain row and this fallback row still need passing live executions.
+
+## 2026-06-02 Postgres prefix-family MagicDNS backfill restart slice
+
+- Added paired `postgres-prefix-family-v4-to-dual-backfill-magicdns-restart`
+  Rust/headscale-go stock-client rows. The shared prefix-family backfill
+  harness now has a `REAL_CLIENT_PREFIX_MIGRATION_EDGE=magicdns-peer-restart`
+  path that registers two MagicDNS-enabled clients under IPv4-only, restarts
+  into dual-stack, runs `nodes backfillips`, and reasserts peer MagicDNS A and
+  AAAA resolution after backfill and after the final production restart.
+- The `p1-production-backfill-restart-edges` backlog row remains open: route
+  preservation and DNS/MagicDNS multi-address restart behavior are now covered,
+  but SSH/policy multi-address behavior after backfill/restart still needs
+  bounded paired rows before closure.

@@ -1661,6 +1661,644 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-compat-fixture-batch-2",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.11-100.64.0.12",
+          "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.20",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "100.64.0.20",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::20",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::20",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.11-100.64.0.12",
+          "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.20/32",
+              "fd7a:115c:a1e0::20/128"
+            ],
+            "CapMap": {
+              "example.com/cap/admin": [
+                {
+                  "role": "admin"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.13",
+          "fd7a:115c:a1e0::13"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.20/32",
+              "fd7a:115c:a1e0::20/128"
+            ],
+            "CapMap": {
+              "example.com/cap/audit": [
+                {
+                  "level": "read",
+                  "scope": [
+                    "ssh",
+                    "route"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.21",
+          "fd7a:115c:a1e0::21"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.20",
+            "Ports": {
+              "First": 53,
+              "Last": 53
+            }
+          }
+        ],
+        "IPProto": [
+          17
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.21",
+          "fd7a:115c:a1e0::21"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.20",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ],
+        "IPProto": [
+          1
+        ]
+      },
+      {
+        "SrcIPs": [
+          "10.33.0.0/16"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.20",
+            "Ports": {
+              "First": 8443,
+              "Last": 8443
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::20",
+            "Ports": {
+              "First": 8443,
+              "Last": 8443
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-filter-protos-grants-and-route-source",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.11-100.64.0.12",
+              "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::20",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.11-100.64.0.12",
+              "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.20/32",
+                  "fd7a:115c:a1e0::20/128"
+                ],
+                "CapMap": {
+                  "example.com/cap/admin": [
+                    {
+                      "role": "admin"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.13",
+              "fd7a:115c:a1e0::13"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.20/32",
+                  "fd7a:115c:a1e0::20/128"
+                ],
+                "CapMap": {
+                  "example.com/cap/audit": [
+                    {
+                      "level": "read",
+                      "scope": [
+                        "ssh",
+                        "route"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.21",
+              "fd7a:115c:a1e0::21"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 53,
+                  "Last": 53
+                }
+              }
+            ],
+            "IPProto": [
+              17
+            ]
+          },
+          {
+            "SrcIPs": [
+              "100.64.0.21",
+              "fd7a:115c:a1e0::21"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ],
+            "IPProto": [
+              1
+            ]
+          },
+          {
+            "SrcIPs": [
+              "10.33.0.0/16"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.0.20",
+                "Ports": {
+                  "First": 8443,
+                  "Last": 8443
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::20",
+                "Ports": {
+                  "First": 8443,
+                  "Last": 8443
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "router-filter-via-broader-cidr",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.24",
+              "fd7a:115c:a1e0::24"
+            ],
+            "DstPorts": [
+              {
+                "IP": "10.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "developer-peer-map-policytests-and-ssh",
+        "peers": [
+          4
+        ]
+      },
+      {
+        "name": "client-peer-map-udp-icmp",
+        "peers": [
+          4
+        ]
+      },
+      {
+        "name": "group-a-peer-map-via-router",
+        "peers": [
+          7
+        ]
+      },
+      {
+        "name": "server-peer-map-app-caps-and-ssh",
+        "peers": [
+          1,
+          2,
+          3,
+          5,
+          7
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "router-autoapproves-office-route",
+        "approved_routes": [
+          "10.33.0.0/16"
+        ],
+        "changed": true
+      },
+      {
+        "name": "exit-autoapproves-exitnode-field",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "group-a-uses-router-for-broader-corp-grant",
+        "include": [
+          "10.33.0.0/16"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "developer-does-not-use-group-a-via-grant",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ],
+    "tag_checks": [
+      {
+        "name": "odin-can-claim-server",
+        "allowed": true
+      },
+      {
+        "name": "thor-cannot-claim-server",
+        "allowed": false
+      },
+      {
+        "name": "thor-can-claim-client-through-group",
+        "allowed": true
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "developer-gets-nextdns-merge-and-randomize",
+        "attrs": [
+          "nextdns:abc111",
+          "nextdns:def222",
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "server-host-gets-host-target-and-tagged-attrs",
+        "attrs": [
+          "disable-captive-portal-detection",
+          "https://example.com/cap/test?value=42",
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "client-gets-tagged-attrs-only",
+        "attrs": [
+          "disable-captive-portal-detection",
+          "randomize-client-port"
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-ssh-accept-check-order-localpart-nonroot",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "admin": "admin",
+              "root": ""
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "LC_*",
+              "TERM"
+            ]
+          },
+          {
+            "principals": [
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
+            ],
+            "ssh_users": {
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
+            ],
+            "ssh_users": {
+              "thor": "thor"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.22",
+              "fd7a:115c:a1e0::22"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ],
+    "policy_tests": [
+      {
+        "src": "thor@example.org",
+        "proto": "tcp",
+        "accept": [
+          "tag:server:22",
+          "tag:server:443"
+        ],
+        "deny": [
+          "tag:server:23"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "proto": "udp",
+        "accept": [
+          "server-host:53"
+        ],
+        "deny": [
+          "server-host:80"
+        ]
+      }
+    ],
+    "ssh_tests": [
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root",
+          "thor"
+        ],
+        "deny": [
+          "ubuntu"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "server-host"
+        ],
+        "accept": [
+          "root",
+          "thor"
+        ]
+      },
+      {
+        "src": "tag:prod",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "alice"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-current-compat-fixture-batch",
     "filter": [
       {
@@ -2953,6 +3591,14 @@
         ]
       }
     ]
+  },
+  {
+    "engine": "headscale",
+    "name": "policy-v2-nodeattrs-ippool-unsupported",
+    "filter": [
+
+    ],
+    "policy_error": "nodeAttrs ipPool requires the IP allocator"
   },
   {
     "engine": "headscale",

@@ -45,10 +45,11 @@
       "upstream_evidence": [
         "hscontrol/policy/v2/tailscale_acl_data_compat_test.go",
         "hscontrol/policy/v2/tailscale_grants_compat_test.go",
+        "hscontrol/policy/v2/tailscale_nodeattrs_compat_test.go",
         "hscontrol/policy/v2/tailscale_routes_data_compat_test.go",
         "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go"
       ],
-      "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/routes/SSH compatibility fixtures in the differential harness."
+      "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/nodeAttrs/routes/SSH compatibility fixtures in the differential harness."
     },
     {
       "id": "p1-production-backfill-restart-edges",
@@ -65,7 +66,7 @@
         "integration/node_addressing tests",
         "hscontrol/state/node_store_test.go"
       ],
-      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence, prefix-family hydration, and the PostgreSQL IPv4-to-dual-stack route-preservation restart row; remaining closure candidates are DNS/SSH/policy multi-address behavior after backfill/restart."
+      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence, prefix-family hydration, the PostgreSQL IPv4-to-dual-stack route-preservation restart row, and the PostgreSQL IPv4-to-dual-stack MagicDNS A/AAAA restart row; remaining closure candidates are SSH/policy multi-address behavior after backfill/restart."
     },
     {
       "id": "p2-cli-output-error-residuals",
@@ -96,7 +97,7 @@
       "upstream_evidence": [
         "integration/dns_test.go"
       ],
-      "exit_criteria": "Continue broadening live resolver client behavior beyond current netmap/DNSConfig, stock-client MagicDNS, live split-resolver A/AAAA, and extra-record reload coverage. The paired search-domain live-resolver row is wired but still needs a passing live run; remaining deterministic DNS resolver behavior includes search-domain live resolver execution and multi-resolver/failure fallback."
+      "exit_criteria": "Continue broadening live resolver client behavior beyond current netmap/DNSConfig, stock-client MagicDNS, live split-resolver A/AAAA, and extra-record reload coverage. The paired search-domain and multi-resolver/failure-fallback live rows are wired but still need passing live runs before this row can close."
     }
   ]
 }

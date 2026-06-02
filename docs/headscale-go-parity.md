@@ -177,11 +177,14 @@ Current-head audit overlay, refreshed 2026-05-30:
   `PeersRemoved`, policy-derived DNS, updated user profiles, and no stale
   full-map churn. Paired Postgres web-registration policy churn restart smokes
   now carry the no-auth registration plus database-policy map convergence path
-  across a same-URL production server restart. Remote gRPC duplicate-user server errors now have
-  text, JSON, json-line, and YAML CLI output snapshots. gRPC/REST preauth-key
-  list responses now mask fixed-width URL-safe prefixes even when the prefix
-  itself contains `-`, while create responses still return the one-time full
-  key.
+  across a same-URL production server restart. Paired
+  `postgres-web-register-custom-domain` smokes now pin no-auth registration
+  against the custom MagicDNS base-domain config surface over production
+  Postgres for Rust and current headscale-go. Remote gRPC duplicate-user server
+  errors now have text, JSON, json-line, and YAML CLI output snapshots.
+  gRPC/REST preauth-key list responses now mask fixed-width URL-safe prefixes
+  even when the prefix itself contains `-`, while create responses still return
+  the one-time full key.
 - Active P0 default-scenario regressions against the current-head executable
   baseline: none known from the 2026-05-23 audit. Full replacement parity still
   has P0 upgrade/drop-in backlog, led by broader production Postgres

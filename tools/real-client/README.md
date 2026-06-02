@@ -125,6 +125,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-prefix-family-ipv4-only` | `postgres-prefix-family-ipv4-only-smoke.sh` | `postgres-prefix-family-ipv4-only-headscale-go-smoke.sh` | Production Postgres IPv4-only prefix-family allocation |
 | Database | `postgres-prefix-family-ipv6-only` | `postgres-prefix-family-ipv6-only-smoke.sh` | `postgres-prefix-family-ipv6-only-headscale-go-smoke.sh` | Production Postgres IPv6-only prefix-family allocation |
 | Database | `postgres-web-register` | `postgres-web-register-smoke.sh` | `postgres-web-register-headscale-go-smoke.sh` | Production Postgres web registration, stock-client netmap, and online/LastSeen |
+| Database | `postgres-web-register-custom-domain` | `postgres-web-register-custom-domain-smoke.sh` | `postgres-web-register-custom-domain-headscale-go-smoke.sh` | Production Postgres web registration with custom MagicDNS base domain |
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
 | Database | `postgres-web-register-unowned-tag` | `postgres-web-register-unowned-tag-smoke.sh` | `postgres-web-register-unowned-tag-headscale-go-smoke.sh` | Production Postgres web registration rejects unowned requested tag |
 | Database | `postgres-route-advertise` | `postgres-route-advertise-smoke.sh` | `postgres-route-advertise-headscale-go-smoke.sh` | Production Postgres route advertisement without approval |
@@ -784,6 +785,9 @@ lookups for the harness-owned extra records, the
 `postgres-dns-hot-reload` variant asserts production `extra_records_path`
 file reloads in both the stock-client netmap and resolver, and the
 `postgres-magicdns-ipv6-only` variant asserts IPv6-only MagicDNS allocation.
+The `postgres-web-register-custom-domain` row composes no-auth web/CLI
+registration with the custom MagicDNS base-domain config surface over the same
+temporary Postgres process path.
 The `postgres-prefix-family-dual-stack`, `postgres-prefix-family-ipv4-only`,
 and `postgres-prefix-family-ipv6-only` variants assert explicit prefix-family
 allocation through the same path:
@@ -803,6 +807,8 @@ tools/real-client/postgres-magicdns-smoke.sh
 tools/real-client/postgres-magicdns-headscale-go-smoke.sh
 tools/real-client/postgres-magicdns-custom-domain-smoke.sh
 tools/real-client/postgres-magicdns-custom-domain-headscale-go-smoke.sh
+tools/real-client/postgres-web-register-custom-domain-smoke.sh
+tools/real-client/postgres-web-register-custom-domain-headscale-go-smoke.sh
 tools/real-client/postgres-extra-records-smoke.sh
 tools/real-client/postgres-extra-records-headscale-go-smoke.sh
 tools/real-client/postgres-dns-disabled-smoke.sh

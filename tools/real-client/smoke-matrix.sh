@@ -280,6 +280,7 @@ smoke_ids=(
   ssh-profile-variants
   ssh-profile-subdomain-deny
   ssh-accept-env
+  postgres-web-register-custom-domain
 )
 
 smoke_areas=(
@@ -481,6 +482,7 @@ smoke_areas=(
   ssh
   ssh
   ssh
+  database
 )
 
 smoke_rust_scripts=(
@@ -682,6 +684,7 @@ smoke_rust_scripts=(
   tools/real-client/ssh-profile-variants-smoke.sh
   tools/real-client/ssh-profile-subdomain-deny-smoke.sh
   tools/real-client/ssh-accept-env-smoke.sh
+  tools/real-client/postgres-web-register-custom-domain-smoke.sh
 )
 
 smoke_go_scripts=(
@@ -883,6 +886,7 @@ smoke_go_scripts=(
   tools/real-client/ssh-profile-variants-headscale-go-smoke.sh
   tools/real-client/ssh-profile-subdomain-deny-headscale-go-smoke.sh
   tools/real-client/ssh-accept-env-headscale-go-smoke.sh
+  tools/real-client/postgres-web-register-custom-domain-headscale-go-smoke.sh
 )
 
 smoke_assertions=(
@@ -1084,6 +1088,7 @@ smoke_assertions=(
   "current-head Tailscale SSH profile email variants and exact denial status/stderr"
   "current-head Tailscale SSH localpart profile email subdomain denial status/stderr"
   "current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
+  "production Postgres web registration with custom MagicDNS base domain"
 )
 
 assert_matrix_lengths() {

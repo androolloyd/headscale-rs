@@ -2398,3 +2398,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   profile email such as `dave+sshuser@example.com` into the concrete client
   login user `dave+sshuser`, and that a domain/profile mismatch emits only
   root-deny `sshUsers` rather than leaking the localpart pattern.
+
+## 2026-06-02 Postgres web-registration custom-domain row
+
+- Added paired `postgres-web-register-custom-domain` real-client rows. They run
+  the production Postgres no-auth web/CLI registration flow while enabling
+  MagicDNS with a non-default base domain, then assert the stock-client netmap
+  carries that configured suffix for both headscale-rs and current headscale-go.

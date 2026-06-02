@@ -3488,6 +3488,18 @@ mod upstream_tests {
 
         let err = client
             .auth_reject(Request::new(AuthRejectRequest {
+                auth_id: "hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(
+            err.message(),
+            "no pending auth session for auth_id hskey-authreq-bbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+
+        let err = client
+            .auth_reject(Request::new(AuthRejectRequest {
                 auth_id: "hskey-authreq-short".into(),
             }))
             .await

@@ -9606,6 +9606,19 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
     assert_config_stderr_snapshot(
         &config,
         &[
+            "-o",
+            "json",
+            "auth",
+            "approve",
+            "--auth-id",
+            missing_auth_id,
+        ],
+        5,
+        include_str!("snapshots/grpc_remote_auth_missing_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
             "-ojson-line",
             "auth",
             "approve",
@@ -9614,6 +9627,22 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
         ],
         5,
         include_str!("snapshots/grpc_remote_auth_missing_json_line.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &[
+            "-o",
+            "yaml",
+            "auth",
+            "approve",
+            "--auth-id",
+            missing_auth_id,
+        ],
+        5,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/grpc_remote_auth_missing_yaml.stderr")
+        ),
     );
     assert_config_stderr_snapshot(
         &config,

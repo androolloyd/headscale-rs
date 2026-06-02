@@ -34,6 +34,7 @@ REQUIRED_PR_SMOKES = {
     "derp-private",
     "postgres-web-register-policy-churn",
     "postgres-web-register-policy-churn-restart",
+    "postgres-web-register-custom-domain",
     "postgres-oidc-policy-churn-restart",
     "postgres-policy-rename-restart",
     "route-via-multiprefix-reload-restart",

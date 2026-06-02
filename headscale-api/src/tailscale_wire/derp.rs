@@ -2219,6 +2219,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_derp_duplicate_source_remains_routable_and_reports_disconnect_after_clear() {
+        let source_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let source_public = source_key.public_key();
+        let destination_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let destination_public = destination_key.public_key();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+
+        let mut source = start_raw_derp_client(runtime.clone(), &source_key).await;
+        let mut destination = start_raw_derp_client(runtime.clone(), &destination_key).await;
+
+        let duplicate = start_websocket_derp_client(runtime.clone(), &source_key).await;
+        let duplicate_health = Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string());
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                read_next_frame(&mut source.reader, &mut source.decoder),
+            )
+            .await
+            .expect("timed out waiting for duplicate health on source")
+            .unwrap(),
+            duplicate_health
+        );
+        wait_for_sent_messages(&duplicate.sent, 3).await;
+        assert_eq!(
+            decode_websocket_sent_frame(&duplicate.sent, 2, "duplicate health frame decodes"),
+            duplicate_health
+        );
+
+        duplicate.tx.send(Ok(Message::Close(None))).await.unwrap();
+        assert!(duplicate.server.await.unwrap().is_ok());
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                read_next_frame(&mut source.reader, &mut source.decoder),
+            )
+            .await
+            .expect("timed out waiting for duplicate health clear on source")
+            .unwrap(),
+            Frame::Health(String::new())
+        );
+
+        let packet = b"remaining duplicate source stays routable".to_vec();
+        let send_packet = encode_frame(&Frame::SendPacket {
+            destination: destination_public,
+            packet: packet.clone(),
+        })
+        .unwrap();
+        source.writer.write_all(&send_packet).await.unwrap();
+        source.writer.flush().await.unwrap();
+
+        let received = tokio::time::timeout(
+            Duration::from_millis(500),
+            read_next_frame(&mut destination.reader, &mut destination.decoder),
+        )
+        .await
+        .expect("timed out waiting for relayed DERP packet after duplicate clear")
+        .unwrap();
+        assert_eq!(
+            received,
+            Frame::RecvPacket {
+                source: source_public,
+                packet
+            }
+        );
+
+        drop(source.writer);
+        drop(source.reader);
+        assert!(source.server.await.unwrap().is_ok());
+
+        let gone = tokio::time::timeout(
+            Duration::from_millis(500),
+            read_next_frame(&mut destination.reader, &mut destination.decoder),
+        )
+        .await
+        .expect("timed out waiting for source disconnect PeerGone after duplicate clear")
+        .unwrap();
+        assert_eq!(
+            gone,
+            Frame::PeerGone {
+                peer: source_public,
+                reason: PeerGoneReason::Disconnected,
+            }
+        );
+
+        drop(destination.writer);
+        drop(destination.reader);
+        assert!(destination.server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_rejects_unverified_clients() {
         let runtime = Arc::new(
             NativeDerpRuntime::new(

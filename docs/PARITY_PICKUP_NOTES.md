@@ -241,6 +241,11 @@ Recent accepted slices:
   It covers production Postgres OIDC registration, file-policy mutation via
   SIGHUP, stock-client peer/profile convergence, and server restart hydration
   against Rust and headscale-go.
+- This slice also promotes the existing paired
+  `postgres-web-register-custom-domain` row into the bounded push/PR smoke set.
+  It covers no-auth web registration over production Postgres while projecting
+  a custom MagicDNS base domain through stock-client DNS suffix assertions
+  against Rust and headscale-go.
 
 Current multi-agent split:
 

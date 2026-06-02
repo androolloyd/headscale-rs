@@ -537,6 +537,7 @@ impl CliConfig {
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
+        config.apply_logging_env_overrides_from(std::env::vars());
         config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
@@ -603,6 +604,7 @@ impl CliConfig {
         config.apply_dns_env_overrides_from(std::env::vars())?;
         config.apply_derp_env_overrides_from(std::env::vars())?;
         config.apply_tuning_env_overrides_from(std::env::vars())?;
+        config.apply_logging_env_overrides_from(std::env::vars());
         config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
@@ -1137,6 +1139,35 @@ impl CliConfig {
         }
 
         Ok(())
+    }
+
+    fn apply_logging_env_overrides_from<I, K, V>(&mut self, vars: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+
+            match key {
+                "HEADSCALE_LOG_LEVEL" => {
+                    self.logging
+                        .get_or_insert_with(LoggingConfig::default)
+                        .level = value.to_string();
+                }
+                "HEADSCALE_LOG_FORMAT" => {
+                    self.logging
+                        .get_or_insert_with(LoggingConfig::default)
+                        .format = value.to_string();
+                }
+                _ => {}
+            }
+        }
     }
 
     fn apply_tls_acme_env_overrides_from<I, K, V>(&mut self, vars: I)
@@ -3329,6 +3360,20 @@ server_url: "https://headscale.example"
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("invalid HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT"));
+    }
+
+    #[test]
+    fn applies_headscale_logging_env_overrides_to_cli_config() {
+        let mut config = CliConfig::default();
+
+        config.apply_logging_env_overrides_from([
+            ("HEADSCALE_LOG_LEVEL", "debug"),
+            ("HEADSCALE_LOG_FORMAT", "json"),
+        ]);
+
+        let logging = config.logging.unwrap();
+        assert_eq!(logging.level, "debug");
+        assert_eq!(logging.format, "json");
     }
 
     #[test]

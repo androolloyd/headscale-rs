@@ -899,6 +899,12 @@ row is wired through `tools/real-client/smoke-matrix.sh --check
 postgres-oidc-policy-churn-restart --both` and selected by the bounded PR/push
 real-client CI smoke set.
 
+Recent coverage note (2026-06-02): the existing paired
+`postgres-web-register-custom-domain` stock-client row is now selected by the
+bounded PR/push real-client CI smoke set. It covers production Postgres no-auth
+web registration with a custom MagicDNS base domain and validates the projected
+DNS suffix against Rust and headscale-go.
+
 Recent coverage note (2026-06-02): CI harness metadata now records formal
 verification status through `scripts/check_formal_status.sh`. When
 `proofs/lean` is absent the gate writes
@@ -999,7 +1005,8 @@ real-client set now includes `postgres-web-register-policy-churn-restart`.
 1. Broaden production Postgres process-level serve/mutation smokes beyond the
    CI-backed paired stock-client matrix and the grpc-gateway/remote-gRPC admin
    topology smoke, especially additional registration/config mutation rows
-   beyond the now-PR-gated web-registration policy-churn restart case, before
+   beyond the now-PR-gated web-registration policy-churn restart and
+   custom-domain web-registration cases, before
    claiming full database parity.
 2. Continue CLI transport parity on top of the users/nodes/API-key/preauth/policy
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for

@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 09:44 ADT
+Updated: 2026-06-02 10:08 ADT
 
 ## Current State
 
@@ -33,6 +33,14 @@ Recent accepted slices:
   preserving the existing no-restart wrappers, and the push/PR smoke selector
   includes both new rows. The Postgres stock-client matrix now has ninety-six
   rows.
+- This native DERP slice adds the Rust-only `postgres-derp-native-restart`
+  stock-client row. It runs production Postgres with native Rust embedded DERP,
+  proves STUN/map/forced-DERP relay before restart, restarts the same Rust
+  server URL, waits for both stock clients to reconnect, and proves STUN,
+  DERP-map, and forced-DERP relay again. The headscale-go matrix entry is an
+  explicit no-equivalent skip because upstream embedded DERP does not exercise
+  the Rust native relay shutdown health/restarting frames. The Postgres
+  stock-client matrix now has ninety-seven rows.
 - Current map-churn slice suppresses stale NodeStore worker upsert churn when a
   same-batch delete removes the node before the batch completes. Upsert-style
   map-change wakes now revalidate final node presence, and focused registry plus
@@ -417,7 +425,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all ninety-six Pg rows, including
+  all ninety-seven Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -426,6 +434,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-authkey-relogin-route-preserve`,
   `postgres-taildrop-capmap`, `postgres-randomize-client-port`,
   `postgres-derp-private`, `postgres-derp-native`,
+  `postgres-derp-native-restart`,
   `postgres-online-lastseen`, `postgres-ping-lifecycle`,
   `postgres-policy-churn`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
@@ -461,7 +470,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   gate
 - Production restart and mutation smokes for web/CLI/OIDC policy and map churn,
   especially remaining NodeStore reason/state edge deltas
-- Native Rust DERP relay decision; sidecar DERP parity is documented and covered, but native relay is not implemented or claimed
+- Native Rust DERP relay runtime hardening beyond the focused stock-client
+  restart row; sidecar DERP parity remains documented and covered, and
+  headscale-go has no equivalent for Rust native DERP shutdown frames
 
 ## 2026-05-31 GivenName parity slice
 
@@ -2217,8 +2228,26 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Focused tests prove raw DERP and DERP-over-WebSocket sessions receive the
   shutdown lifecycle frames, and a server-waiter test proves the frames are
   emitted from the production shutdown path rather than only direct test API
-  calls. The remaining native DERP row is broader stock-client restart/runtime
-  assertion around reconnect behavior after a production restart.
+  calls. The follow-on stock-client row below covers reconnect behavior after a
+  production restart.
+
+## 2026-06-02 native DERP stock-client restart slice
+
+- Added `REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS` to
+  `tools/real-client/online-lastseen-common.sh`. When enabled, the harness
+  restarts the same production server URL after the initial DERP assertions,
+  waits for each stock client to return to a valid logged-in netmap, and reruns
+  the requested STUN, DERP-map, and forced-DERP ping checks.
+- Added the Rust `postgres-derp-native-restart` row. It uses native embedded
+  DERP relay mode with production Postgres, so the restart crosses the same
+  Rust HTTPS listener used as the advertised DERP port and exercises the
+  shutdown health/restarting lifecycle that was wired in the preceding slice.
+- The headscale-go side is intentionally a no-equivalent skip. Upstream
+  headscale-go embedded DERP can be smoke-tested for its own restart behavior,
+  but it does not exercise headscale-rs native DERP relay shutdown frames, so
+  this row is not claimed as paired parity.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to ninety-seven rows.
 
 ## 2026-06-02 NodeStore update-many/delete churn slice
 

@@ -115,6 +115,7 @@ expected_derp_insecure_for_tests="${REAL_CLIENT_EXPECT_DERP_INSECURE_FOR_TESTS:-
 expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIONS:-}"
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
+derp_restart_after_assertions="${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
 install_openssh="${REAL_CLIENT_INSTALL_OPENSSH:-false}"
@@ -509,6 +510,18 @@ case "${assert_derp_stun}" in
     ;;
   *)
     echo "REAL_CLIENT_ASSERT_DERP_STUN must be true or false, got ${assert_derp_stun}" >&2
+    exit 2
+    ;;
+esac
+case "${derp_restart_after_assertions}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    derp_restart_after_assertions_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    derp_restart_after_assertions_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS must be true or false, got ${derp_restart_after_assertions}" >&2
     exit 2
     ;;
 esac
@@ -1480,6 +1493,33 @@ assert_derp_ping_if_requested() {
     return 1
   fi
   cat "${work_dir}/derp-ping-${source_name}-to-${target_name}.txt"
+  echo "::endgroup::"
+}
+
+assert_derp_restart_if_requested() {
+  ((derp_restart_after_assertions_flag)) || return 0
+  echo "::group::restart ${target} server and assert DERP recovery"
+  stop_server
+  if ! start_server; then
+    echo "::endgroup::"
+    return 1
+  fi
+
+  local reconnect_name safe_reconnect_name status_path
+  for reconnect_name in "${successful_client_names[@]}"; do
+    safe_reconnect_name="${reconnect_name//[^a-zA-Z0-9_.-]/-}"
+    status_path="${work_dir}/${safe_reconnect_name}.post-derp-restart-status.json"
+    if ! wait_for "${reconnect_name} reconnected after DERP restart" \
+      "client_logged_in '${reconnect_name}' '${status_path}'"; then
+      dump_client_debug "${reconnect_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+  done
+
+  assert_derp_stun_if_requested
+  assert_derp_map_if_requested
+  assert_derp_ping_if_requested
   echo "::endgroup::"
 }
 
@@ -3597,6 +3637,7 @@ assert_post_reload_peer_visibility_if_requested
 rename_node_if_requested
 assert_derp_map_if_requested
 assert_derp_ping_if_requested
+assert_derp_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
 assert_self_capmap_keys_if_requested

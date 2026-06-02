@@ -103,6 +103,7 @@ smoke_ids=(
   postgres-randomize-client-port
   postgres-derp-private
   postgres-derp-native
+  postgres-derp-native-reload
   postgres-derp-native-restart
   postgres-online-lastseen
   postgres-ping-lifecycle
@@ -384,6 +385,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -493,6 +495,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-randomize-client-port-smoke.sh
   tools/real-client/postgres-derp-private-smoke.sh
   tools/real-client/postgres-derp-native-smoke.sh
+  tools/real-client/postgres-derp-native-reload-smoke.sh
   tools/real-client/postgres-derp-native-restart-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
@@ -688,6 +691,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-randomize-client-port-headscale-go-smoke.sh
   tools/real-client/postgres-derp-private-headscale-go-smoke.sh
   tools/real-client/postgres-derp-private-headscale-go-smoke.sh
+  tools/real-client/postgres-derp-native-reload-headscale-go-smoke.sh
   tools/real-client/postgres-derp-native-restart-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
@@ -883,6 +887,7 @@ smoke_assertions=(
   "production Postgres randomizeClientPort stamps randomize-client-port in stock-client self CapMap"
   "production Postgres private DERP sidecar, STUN, relay path, status health, and DERP map metadata"
   "production Postgres native DERP relay, STUN, relay path, status health, and DERP map metadata"
+  "production Postgres native DERP map stability, relay path, and status health after live policy reload"
   "production Postgres native DERP stock clients reconnect, clear DERP status health, and relay after Rust server restart"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"

@@ -116,6 +116,7 @@ expected_derp_omit_default_regions="${REAL_CLIENT_EXPECT_DERP_OMIT_DEFAULT_REGIO
 expected_derp_ping="${REAL_CLIENT_EXPECT_DERP_PING:-false}"
 assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
 assert_derp_status_health_clear="${REAL_CLIENT_ASSERT_DERP_STATUS_HEALTH_CLEAR:-false}"
+assert_derp_reload_stability="${REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY:-false}"
 derp_restart_after_assertions="${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
@@ -526,6 +527,18 @@ case "${assert_derp_status_health_clear}" in
     exit 2
     ;;
 esac
+case "${assert_derp_reload_stability}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    assert_derp_reload_stability_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    assert_derp_reload_stability_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY must be true or false, got ${assert_derp_reload_stability}" >&2
+    exit 2
+    ;;
+esac
 case "${derp_restart_after_assertions}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     derp_restart_after_assertions_flag=1
@@ -769,6 +782,16 @@ if [[ -z "${policy_reload_json}" &&
   -n "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]]; then
   echo "post-reload peer expectations require REAL_CLIENT_RELOAD_POLICY_JSON" >&2
   exit 2
+fi
+if ((assert_derp_reload_stability_flag)); then
+  if [[ -z "${policy_reload_json}" ]]; then
+    echo "REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY requires REAL_CLIENT_RELOAD_POLICY_JSON" >&2
+    exit 2
+  fi
+  if [[ -z "${expected_derp_region_id}" && "${use_rust_embedded_derp}${use_headscale_go_embedded_derp}" == "00" ]]; then
+    echo "REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY requires DERP map expectations" >&2
+    exit 2
+  fi
 fi
 authkey_failure_flags=()
 for ((idx = 0; idx < client_count; idx++)); do
@@ -1503,6 +1526,77 @@ assert_derp_map_stable_after_restart_if_available() {
         omitDefaultRegions: post["omitDefaultRegions"],
       })
     ' "${pre_path}" "${post_path}" "${derp_client_name}" >"${output_path}" 2>"${output_path}.err"; then
+      cat "${output_path}.err" >&2 || true
+      dump_client_debug "${derp_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
+}
+
+snapshot_derp_map_before_policy_reload_if_requested() {
+  ((assert_derp_reload_stability_flag)) || return 0
+  echo "::group::snapshot DERP map before policy reload"
+  local derp_client_name safe_derp_client_name output_path
+  for derp_client_name in "${successful_client_names[@]}"; do
+    safe_derp_client_name="${derp_client_name//[^a-zA-Z0-9_.-]/-}"
+    output_path="${work_dir}/${safe_derp_client_name}.pre-policy-reload-derp-map.json"
+    if ! wait_for "DERP map before policy reload ${derp_client_name}" \
+      "assert_derp_map '${derp_client_name}' '${output_path}'"; then
+      cat "${output_path}.err" >&2 || true
+      dump_client_debug "${derp_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
+}
+
+assert_derp_map_stable_after_policy_reload() {
+  local derp_client_name="$1"
+  local pre_path="$2"
+  local post_path="$3"
+  local output_path="$4"
+  : >"${output_path}.err"
+  if [[ ! -f "${pre_path}" ]]; then
+    echo "missing pre-policy-reload DERP map snapshot for ${derp_client_name}: ${pre_path}" >&2
+    return 1
+  fi
+  assert_derp_map "${derp_client_name}" "${post_path}" &&
+    ruby -rjson -e '
+      pre = JSON.parse(File.read(ARGV.fetch(0)))
+      post = JSON.parse(File.read(ARGV.fetch(1)))
+      client = ARGV.fetch(2)
+      unless pre == post
+        abort("DERP map changed after policy reload for #{client}: before=#{JSON.generate(pre)} after=#{JSON.generate(post)}")
+      end
+      node = post.fetch("node", {})
+      puts JSON.pretty_generate({
+        client: client,
+        stable_derp_map_after_policy_reload: true,
+        host: node["HostName"],
+        derp_port: node["DERPPort"],
+        stun_port: node["STUNPort"],
+        omitDefaultRegions: post["omitDefaultRegions"],
+      })
+    ' "${pre_path}" "${post_path}" "${derp_client_name}" >"${output_path}" 2>>"${output_path}.err"
+}
+
+assert_derp_map_stable_after_policy_reload_if_requested() {
+  ((assert_derp_reload_stability_flag)) || return 0
+  echo "::group::assert DERP map stable after policy reload"
+  local derp_client_name safe_derp_client_name pre_path post_path output_path
+  for derp_client_name in "${successful_client_names[@]}"; do
+    safe_derp_client_name="${derp_client_name//[^a-zA-Z0-9_.-]/-}"
+    pre_path="${work_dir}/${safe_derp_client_name}.pre-policy-reload-derp-map.json"
+    post_path="${work_dir}/${safe_derp_client_name}.post-policy-reload-derp-map.json"
+    output_path="${work_dir}/${safe_derp_client_name}.policy-reload-derp-map-stability.json"
+    if ! wait_for "DERP map stable after policy reload ${derp_client_name}" \
+      "assert_derp_map_stable_after_policy_reload '${derp_client_name}' '${pre_path}' '${post_path}' '${output_path}'"; then
+      cat "${post_path}.err" >&2 || true
       cat "${output_path}.err" >&2 || true
       dump_client_debug "${derp_client_name}"
       echo "::endgroup::"
@@ -3765,10 +3859,12 @@ set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_peer_visibility_if_requested
+snapshot_derp_map_before_policy_reload_if_requested
 reload_policy_if_requested
 assert_post_reload_peer_visibility_if_requested
 rename_node_if_requested
 assert_derp_map_if_requested
+assert_derp_map_stable_after_policy_reload_if_requested
 assert_derp_ping_if_requested
 assert_derp_status_health_clear_if_requested
 assert_derp_restart_if_requested

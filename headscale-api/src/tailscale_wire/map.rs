@@ -7720,6 +7720,102 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_subnet_router_lifecycle_emits_full_map_response_like_headscale_go() {
+        let (state, _dir) = fixture();
+        let observer = "a5".repeat(32);
+        let router_key = "b5".repeat(32);
+        let route = "10.55.0.0/24";
+        state.machines.upsert(
+            observer.clone(),
+            policy_record(&observer, "observer", 10, "observer", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            routed_record(&router_key, "router", 11, vec![route.into()]),
+        );
+        state.machines.enable_map_batcher();
+
+        let app = router(state.clone());
+        let mut observer_body = open_zstd_stream(app.clone(), &observer).await;
+        let first = next_zstd_map_response(&mut observer_body).await;
+        let router_peer = peer_named(&first, "router").expect("router peer visible");
+        assert_eq!(router_peer.online, Some(false));
+        let _ = state.machines.drain_pending_map_changes();
+
+        let mut router_body = open_zstd_stream(app, &router_key).await;
+        let router_first = next_zstd_map_response(&mut router_body).await;
+        let router_self = router_first.node.as_ref().expect("router self node");
+        assert_eq!(router_self.online, Some(true));
+        assert!(
+            router_self.allowed_ips.iter().any(|ip| ip == route),
+            "router self node should serve its approved subnet route"
+        );
+
+        let pending_online = state.machines.pending_map_changes();
+        let observer_id = stable_id_from_key(&observer);
+        let observer_changes = pending_online
+            .get(&observer_id)
+            .expect("subnet-router online change fans out to observer");
+        assert!(observer_changes.iter().any(MapChange::is_full));
+        let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "subnet-router lifecycle full update should wait for the map-batch publish"
+        );
+        state
+            .machines
+            .publish_pending_map_changes()
+            .expect("subnet-router online batch published");
+
+        let online = next_zstd_map_response(&mut observer_body).await;
+        assert!(online.node.is_some(), "full map includes self Node");
+        assert!(online.peers_changed.is_empty());
+        assert!(online.peers_changed_patch.is_empty());
+        assert!(online.peers_removed.is_empty());
+        let online_router = peer_named(&online, "router").expect("full map includes router peer");
+        assert_eq!(online_router.online, Some(true));
+        assert!(
+            online_router.allowed_ips.iter().any(|ip| ip == route),
+            "full map should carry the route-derived AllowedIPs"
+        );
+
+        drop(router_body);
+        assert_no_stream_frame(&mut observer_body, Duration::from_secs(9)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        let pending_offline = state.machines.pending_map_changes();
+        let observer_changes = pending_offline
+            .get(&observer_id)
+            .expect("subnet-router offline change fans out to observer");
+        assert!(observer_changes.iter().any(MapChange::is_full));
+        let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "subnet-router offline full update should wait for the map-batch publish"
+        );
+        state
+            .machines
+            .publish_pending_map_changes()
+            .expect("subnet-router offline batch published");
+
+        let offline = next_zstd_map_response(&mut observer_body).await;
+        assert!(
+            offline.node.is_some(),
+            "offline full map includes self Node"
+        );
+        assert!(offline.peers_changed.is_empty());
+        assert!(offline.peers_changed_patch.is_empty());
+        assert!(offline.peers_removed.is_empty());
+        let offline_router = peer_named(&offline, "router").expect("full map includes router peer");
+        assert_eq!(offline_router.online, Some(false));
+        assert!(
+            !offline_router.allowed_ips.iter().any(|ip| ip == route),
+            "offline router should no longer serve route-derived AllowedIPs"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_peer_disconnect_emits_offline_patch_after_grace() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);

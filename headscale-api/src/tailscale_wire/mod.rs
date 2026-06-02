@@ -125,6 +125,8 @@ pub enum MapChangeReason {
     PeersRemoved,
     NodeOnline,
     NodeOffline,
+    SubnetRouterOnline,
+    SubnetRouterOffline,
     EndpointDerpUpdate,
     KeyExpiry,
     PolicyChange,
@@ -147,6 +149,8 @@ impl MapChangeReason {
             Self::PeersRemoved => "peers removed",
             Self::NodeOnline => "node online",
             Self::NodeOffline => "node offline",
+            Self::SubnetRouterOnline => "subnet router online",
+            Self::SubnetRouterOffline => "subnet router offline",
             Self::EndpointDerpUpdate => "endpoint/DERP update",
             Self::KeyExpiry => "key expiry",
             Self::PolicyChange => "policy change",
@@ -191,7 +195,10 @@ impl MapChangeContent {
     fn for_reason(reason: MapChangeReason, node_id: Option<u64>) -> Self {
         let mut content = Self::default();
         match reason {
-            MapChangeReason::FullUpdate | MapChangeReason::FullSelfUpdate => {
+            MapChangeReason::FullUpdate
+            | MapChangeReason::FullSelfUpdate
+            | MapChangeReason::SubnetRouterOnline
+            | MapChangeReason::SubnetRouterOffline => {
                 content = Self::full();
             }
             MapChangeReason::NodeAdded
@@ -402,6 +409,10 @@ fn same_string_set(left: &[String], right: &[String]) -> bool {
     left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
 }
 
+fn record_is_subnet_router(rec: &MachineRecord) -> bool {
+    !active_primary_routes(&rec.available_routes, &rec.approved_routes).is_empty()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingMapChange {
     reason: MapChangeReason,
@@ -454,6 +465,16 @@ impl PendingMapChange {
 
     fn broadcast_peer(reason: MapChangeReason, node_id: u64) -> Self {
         Self::with_content_node(reason, None, None, Some(node_id))
+    }
+
+    fn subnet_router_lifecycle(reason: MapChangeReason, node_id: u64) -> Self {
+        debug_assert!(matches!(
+            reason,
+            MapChangeReason::SubnetRouterOnline | MapChangeReason::SubnetRouterOffline
+        ));
+        let mut change = Self::global(reason);
+        change.origin_node_id = Some(node_id);
+        change
     }
 
     fn lifecycle_peer(reason: MapChangeReason, node_id: u64) -> Self {
@@ -3312,6 +3333,12 @@ impl MachineRegistry {
         result
     }
 
+    fn node_is_subnet_router(&self, node_id: u64) -> bool {
+        self.inner.read().iter().any(|(node_key, rec)| {
+            rec.stable_node_id_for_key(node_key) == node_id && record_is_subnet_router(rec)
+        })
+    }
+
     /// Return the current primary advertiser for a subnet prefix.
     pub fn primary_route_for(&self, route: &str) -> Option<u64> {
         let start = Instant::now();
@@ -3515,10 +3542,15 @@ impl MachineRegistry {
             !was_online
         };
         if online_changed {
-            machines.wake_waiters_with(PendingMapChange::lifecycle_peer(
-                MapChangeReason::NodeOnline,
-                node_id,
-            ));
+            let change = if machines.node_is_subnet_router(node_id) {
+                PendingMapChange::subnet_router_lifecycle(
+                    MapChangeReason::SubnetRouterOnline,
+                    node_id,
+                )
+            } else {
+                PendingMapChange::lifecycle_peer(MapChangeReason::NodeOnline, node_id)
+            };
+            machines.wake_waiters_with(change);
         }
         machines.primary_routes.write().clear_unhealthy(node_id);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -3709,21 +3741,27 @@ impl MachineRegistry {
             "update",
             Box::new(move |map| {
                 let mut found = false;
+                let mut subnet_router = false;
                 if let Some((_node_key, rec)) = map
                     .iter_mut()
                     .find(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
                 {
                     rec.last_seen = now;
+                    subnet_router = record_is_subnet_router(rec);
                     found = true;
                 }
 
                 NodeStoreBoolUpdateOutcome {
                     applied: true,
                     publish_snapshot: found,
-                    change: Some(PendingMapChange::lifecycle_peer(
-                        MapChangeReason::NodeOffline,
-                        node_id,
-                    )),
+                    change: Some(if subnet_router {
+                        PendingMapChange::subnet_router_lifecycle(
+                            MapChangeReason::SubnetRouterOffline,
+                            node_id,
+                        )
+                    } else {
+                        PendingMapChange::lifecycle_peer(MapChangeReason::NodeOffline, node_id)
+                    }),
                     clear_unhealthy_route_state: None,
                     final_presence_node_id: Some(node_id),
                 }
@@ -7243,6 +7281,67 @@ mod registry_tests {
             assert_eq!(changes[0].reason_labels(), vec!["full update"]);
             assert_eq!(changes[0].change_type(), "full");
         }
+    }
+
+    #[tokio::test]
+    async fn subnet_router_stream_lifecycle_queues_full_updates() {
+        let reg = Arc::new(MachineRegistry::new());
+        let observer_key = "subnet-observer";
+        let router_key = "subnet-router";
+        let route = "10.200.0.0/24";
+        reg.upsert(observer_key.to_string(), mk_record(10));
+        reg.upsert(router_key.to_string(), route_record(router_key, 11, route));
+        let observer_id = stable_id_from_key(observer_key);
+        let router_id = stable_id_from_key(router_key);
+
+        let _observer_guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            observer_id,
+            Duration::ZERO,
+        );
+        let _ = reg.drain_pending_map_changes();
+
+        let router_guard = MachineRegistry::track_stream_connection_with_grace(
+            reg.clone(),
+            router_id,
+            Duration::ZERO,
+        );
+        let online = reg
+            .map_change_history()
+            .pop()
+            .expect("router online records a map change");
+        assert_eq!(online.reason_labels(), vec!["subnet router online"]);
+        assert_eq!(online.change_type(), "full");
+        assert_eq!(online.origin_node_id, Some(router_id));
+        assert!(online.is_full());
+        let pending = reg.pending_map_changes();
+        assert!(
+            pending
+                .get(&observer_id)
+                .expect("observer receives subnet-router online change")
+                .iter()
+                .any(MapChange::is_full)
+        );
+        let _ = reg.drain_pending_map_changes();
+
+        drop(router_guard);
+        tokio::task::yield_now().await;
+        let offline = reg
+            .map_change_history()
+            .pop()
+            .expect("router offline records a map change");
+        assert_eq!(offline.reason_labels(), vec!["subnet router offline"]);
+        assert_eq!(offline.change_type(), "full");
+        assert_eq!(offline.origin_node_id, Some(router_id));
+        assert!(offline.is_full());
+        let pending = reg.pending_map_changes();
+        assert!(
+            pending
+                .get(&observer_id)
+                .expect("observer receives subnet-router offline change")
+                .iter()
+                .any(MapChange::is_full)
+        );
     }
 
     #[test]

@@ -1661,3 +1661,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   headscale-api-acl --check`, `cargo clippy -p headscale-api-acl
   --all-targets -- -D warnings`, `cargo clippy -p headscale-api
   --all-targets -- -D warnings`, and `git diff --check`.
+
+## 2026-06-02 subnet-router lifecycle map-stream parity slice
+
+- Stream online/offline lifecycle changes now match current headscale-go's
+  `NodeOnlineFor`/`NodeOfflineFor` branch for subnet routers: active approved
+  non-exit subnet routers enqueue full map updates with upstream-style
+  `subnet router online` and `subnet router offline` reason labels.
+- Non-router online/offline lifecycle changes still use peer patches plus the
+  policy companion update, preserving the previously covered lightweight
+  lifecycle path.
+- Added registry-level coverage for queued full updates and a streaming
+  `Stream:true` regression proving observers receive full `Node`/`Peers` map
+  responses instead of `PeersChanged` or `PeersChangedPatch` chunks when a
+  subnet router connects and disconnects.

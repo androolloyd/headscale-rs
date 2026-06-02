@@ -4832,6 +4832,11 @@ mod tests {
         assert_eq!(parsed["IPAllocation"], "sequential");
         assert_eq!(parsed["DNSConfig"]["MagicDNS"], false);
         assert_eq!(parsed["DNSConfig"]["OverrideLocalDNS"], true);
+        assert_eq!(parsed["Log"]["Format"], "text");
+        assert_eq!(parsed["Log"]["Level"], "info");
+        assert_eq!(parsed["CLI"]["Address"], "");
+        assert_eq!(parsed["CLI"]["Timeout"], 5_000_000_000i64);
+        assert_eq!(parsed["CLI"]["Insecure"], false);
         assert_eq!(parsed["Policy"]["Mode"], "file");
         assert_eq!(parsed["Tuning"]["NodeStoreBatchSize"], 100);
         assert_eq!(parsed["Tuning"]["RegisterCacheMaxEntries"], 0);
@@ -5045,6 +5050,13 @@ mod tests {
         snapshot.tls.lets_encrypt.listen = ":http".to_string();
         snapshot.tls.lets_encrypt.cache_dir = "/var/lib/headscale/cache".to_string();
         snapshot.tls.lets_encrypt.challenge_type = "TLS-ALPN-01".to_string();
+        snapshot.log.level = "debug".to_string();
+        snapshot.log.format = "json".to_string();
+        snapshot.cli.address = "headscale.example:50443".to_string();
+        snapshot.cli.timeout = 12_000_000_000;
+        snapshot.cli.insecure = true;
+        snapshot.policy.mode = "database".to_string();
+        snapshot.policy.path = "ignored-policy.hujson".to_string();
         state.runtime_config = Arc::new(snapshot);
 
         let resp = router(state)
@@ -5090,6 +5102,13 @@ mod tests {
         assert_eq!(parsed["ACMEEmail"], "ops@example.com");
         assert_eq!(parsed["UnixSocket"], "/run/headscale/headscale.sock");
         assert_eq!(parsed["UnixSocketPermission"], 0o760);
+        assert_eq!(parsed["Log"]["Level"], "debug");
+        assert_eq!(parsed["Log"]["Format"], "json");
+        assert_eq!(parsed["CLI"]["Address"], "headscale.example:50443");
+        assert_eq!(parsed["CLI"]["Timeout"], 12_000_000_000i64);
+        assert_eq!(parsed["CLI"]["Insecure"], true);
+        assert_eq!(parsed["Policy"]["Mode"], "database");
+        assert_eq!(parsed["Policy"]["Path"], "ignored-policy.hujson");
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ import (
 
 	_ "github.com/juanfont/headscale/hscontrol/mapper"
 	"github.com/juanfont/headscale/hscontrol/policy"
+	policyv2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
@@ -70,6 +71,8 @@ type scenarioOutput struct {
 	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
 	NodeAttrs      []nodeAttrOut      `json:"node_attrs,omitempty"`
 	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
+	PolicyTests    []policyTestOut    `json:"policy_tests,omitempty"`
+	SSHTests       []sshPolicyTestOut `json:"ssh_tests,omitempty"`
 	Wire           *wireOutput        `json:"wire,omitempty"`
 }
 
@@ -148,6 +151,21 @@ type sshCheck struct {
 type sshPolicyOut struct {
 	Name  string       `json:"name"`
 	Rules []sshRuleOut `json:"rules"`
+}
+
+type policyTestOut struct {
+	Src    string   `json:"src"`
+	Proto  string   `json:"proto,omitempty"`
+	Accept []string `json:"accept,omitempty"`
+	Deny   []string `json:"deny,omitempty"`
+}
+
+type sshPolicyTestOut struct {
+	Src    string   `json:"src"`
+	Dst    []string `json:"dst"`
+	Accept []string `json:"accept,omitempty"`
+	Deny   []string `json:"deny,omitempty"`
+	Check  []string `json:"check,omitempty"`
 }
 
 type sshRuleOut struct {
@@ -508,6 +526,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if sc.ExpectPolicyErr != "" {
 		return scenarioOutput{}, fmt.Errorf("headscale-go policy for %s parsed successfully, want error containing %q", sc.Name, sc.ExpectPolicyErr)
 	}
+	var parsedPolicy policyv2.Policy
+	if err := json.Unmarshal(sc.Policy, &parsedPolicy); err != nil {
+		return scenarioOutput{}, fmt.Errorf("parse policy for tests in %s: %w", sc.Name, err)
+	}
 	rules, _ := pm.Filter()
 	filterForNodes, err := runFilterNodeChecks(sc.FilterNodeChecks, pm, nodes)
 	if err != nil {
@@ -552,6 +574,8 @@ func runScenario(path string) (scenarioOutput, error) {
 		TagChecks:      tagChecks,
 		NodeAttrs:      nodeAttrs,
 		SSHPolicies:    sshPolicies,
+		PolicyTests:    normalizePolicyTests(parsedPolicy.Tests),
+		SSHTests:       normalizeSSHPolicyTests(parsedPolicy.SSHTests),
 		Wire:           wire,
 	}, nil
 }
@@ -849,6 +873,53 @@ func runSSHChecks(checks []sshCheck, pm policy.PolicyManager, nodes types.Nodes)
 		})
 	}
 	return out, nil
+}
+
+func normalizePolicyTests(tests []policyv2.PolicyTest) []policyTestOut {
+	out := make([]policyTestOut, 0, len(tests))
+	for _, test := range tests {
+		out = append(out, policyTestOut{
+			Src:    test.Src,
+			Proto:  string(test.Proto),
+			Accept: append([]string(nil), test.Accept...),
+			Deny:   append([]string(nil), test.Deny...),
+		})
+	}
+	return out
+}
+
+func normalizeSSHPolicyTests(tests []policyv2.SSHPolicyTest) []sshPolicyTestOut {
+	out := make([]sshPolicyTestOut, 0, len(tests))
+	for _, test := range tests {
+		dst := make([]string, 0, len(test.Dst))
+		for _, alias := range test.Dst {
+			dst = append(dst, alias.String())
+		}
+
+		accept := make([]string, 0, len(test.Accept))
+		for _, user := range test.Accept {
+			accept = append(accept, string(user))
+		}
+
+		deny := make([]string, 0, len(test.Deny))
+		for _, user := range test.Deny {
+			deny = append(deny, string(user))
+		}
+
+		check := make([]string, 0, len(test.Check))
+		for _, user := range test.Check {
+			check = append(check, string(user))
+		}
+
+		out = append(out, sshPolicyTestOut{
+			Src:    test.Src.String(),
+			Dst:    dst,
+			Accept: accept,
+			Deny:   deny,
+			Check:  check,
+		})
+	}
+	return out
 }
 
 func normalizeSSHPolicy(policy *tailcfg.SSHPolicy) []sshRuleOut {

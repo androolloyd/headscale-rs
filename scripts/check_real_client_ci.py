@@ -43,6 +43,11 @@ REQUIRED_PR_SMOKES = {
     "route-edge-current-upstream-audit",
     "tag-update-invalid",
 }
+POSTGRES_PR_EXEMPTIONS = {
+    # Covered by the selected restart row, which exercises the same OIDC policy
+    # churn plus persistent restart hydration.
+    "postgres-oidc-policy-churn",
+}
 
 
 class CheckError(Exception):
@@ -98,6 +103,27 @@ def run_smoke_matrix_check(smokes: list[str]) -> None:
     )
 
 
+def all_matrix_rows() -> list[str]:
+    env = os.environ.copy()
+    env["REAL_CLIENT_SMOKES"] = "all"
+    env["REAL_CLIENT_TARGETS"] = "rust headscale-go"
+    output = subprocess.check_output(
+        ["tools/real-client/smoke-matrix.sh", "--list-selected"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+    )
+    rows: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("smoke "):
+            continue
+        rows.append(line.split()[0])
+    if not rows:
+        raise CheckError("real-client smoke matrix listed no rows")
+    return rows
+
+
 def main() -> int:
     try:
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -136,6 +162,26 @@ def main() -> int:
         missing = sorted(REQUIRED_PR_SMOKES - set(smokes))
         if missing:
             raise CheckError(f"PR_SMOKES is missing required rows: {', '.join(missing)}")
+
+        all_rows = set(all_matrix_rows())
+        stale_exemptions = sorted(POSTGRES_PR_EXEMPTIONS - all_rows)
+        if stale_exemptions:
+            raise CheckError(
+                "POSTGRES_PR_EXEMPTIONS contains unknown rows: "
+                f"{', '.join(stale_exemptions)}"
+            )
+        missing_postgres = sorted(
+            row
+            for row in all_rows
+            if row.startswith("postgres-")
+            and row not in POSTGRES_PR_EXEMPTIONS
+            and row not in smokes
+        )
+        if missing_postgres:
+            raise CheckError(
+                "PR_SMOKES is missing paired Postgres rows: "
+                f"{', '.join(missing_postgres)}"
+            )
 
         run_smoke_matrix_check(smokes)
     except (CheckError, subprocess.CalledProcessError) as err:

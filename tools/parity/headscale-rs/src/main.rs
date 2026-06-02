@@ -165,6 +165,10 @@ struct ScenarioOutput {
     node_attrs: Vec<NodeAttrOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ssh_policies: Vec<SshPolicyOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    policy_tests: Vec<PolicyTestOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ssh_tests: Vec<SshPolicyTestOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wire: Option<WireOutput>,
 }
@@ -212,6 +216,29 @@ struct NodeAttrOut {
 struct SshPolicyOut {
     name: String,
     rules: Vec<SshRuleOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyTestOut {
+    src: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    proto: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accept: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    deny: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SshPolicyTestOut {
+    src: String,
+    dst: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    accept: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    deny: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    check: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -756,6 +783,8 @@ fn main() -> Result<()> {
                         tag_checks: Vec::new(),
                         node_attrs: Vec::new(),
                         ssh_policies: Vec::new(),
+                        policy_tests: Vec::new(),
+                        ssh_tests: Vec::new(),
                         wire: None,
                     });
                     continue;
@@ -787,6 +816,8 @@ fn main() -> Result<()> {
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             node_attrs: run_node_attr_checks(&scenario, &doc, &filter_nodes)?,
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
+            policy_tests: normalize_policy_tests(&doc),
+            ssh_tests: normalize_ssh_policy_tests(&doc),
             wire: normalize_wire(scenario.wire, &scenario.nodes, &filter_nodes, &doc)?,
         });
     }
@@ -1048,6 +1079,31 @@ fn run_ssh_checks(
         });
     }
     Ok(out)
+}
+
+fn normalize_policy_tests(doc: &PolicyDoc) -> Vec<PolicyTestOut> {
+    doc.tests
+        .iter()
+        .map(|test| PolicyTestOut {
+            src: test.src.clone(),
+            proto: test.proto.clone(),
+            accept: test.accept.clone(),
+            deny: test.deny.clone(),
+        })
+        .collect()
+}
+
+fn normalize_ssh_policy_tests(doc: &PolicyDoc) -> Vec<SshPolicyTestOut> {
+    doc.ssh_tests
+        .iter()
+        .map(|test| SshPolicyTestOut {
+            src: test.src.clone(),
+            dst: test.dst.clone(),
+            accept: test.accept.clone(),
+            deny: test.deny.clone(),
+            check: test.check.clone(),
+        })
+        .collect()
 }
 
 fn normalize_ssh_policy(policy: Option<&WireSshPolicy>) -> Vec<SshRuleOut> {

@@ -1,0 +1,175 @@
+{
+  "name": "policy-v2-grants-ssh-tests",
+  "policy": {
+    "groups": {
+      "group:devs": [
+        "alice@example.com"
+      ]
+    },
+    "tagOwners": {
+      "tag:server": [
+        "admin@example.com"
+      ]
+    },
+    "grants": [
+      {
+        "src": [
+          "group:devs"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "ip": [
+          "tcp:22",
+          "tcp:443"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "src": "alice@example.com",
+        "proto": "tcp",
+        "accept": [
+          "tag:server:443"
+        ],
+        "deny": [
+          "tag:server:80"
+        ]
+      },
+      {
+        "src": "bob@example.com",
+        "proto": "tcp",
+        "deny": [
+          "tag:server:443"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": [
+          "group:devs"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "root",
+          "localpart:*@example.com"
+        ],
+        "acceptEnv": [
+          "TERM"
+        ]
+      },
+      {
+        "action": "check",
+        "src": [
+          "alice@example.com"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "admin"
+        ],
+        "checkPeriod": "1h"
+      }
+    ],
+    "sshTests": [
+      {
+        "src": "alice@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root",
+          "alice"
+        ],
+        "deny": [
+          "ubuntu"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "bob@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "alice",
+      "email": "alice@example.com"
+    },
+    {
+      "id": 2,
+      "name": "admin",
+      "email": "admin@example.com"
+    },
+    {
+      "id": 3,
+      "name": "bob",
+      "email": "bob@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "alice-client",
+      "ipv4": "100.64.30.10",
+      "ipv6": "fd7a:115c:a1e0::30:10"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "server",
+      "ipv4": "100.64.30.20",
+      "ipv6": "fd7a:115c:a1e0::30:20",
+      "tags": [
+        "tag:server"
+      ]
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "bob-client",
+      "ipv4": "100.64.30.30",
+      "ipv6": "fd7a:115c:a1e0::30:30"
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "server-grant-filter",
+      "node_id": 2
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "alice-grant-and-ssh-test-peers",
+      "node_id": 1
+    },
+    {
+      "name": "bob-deny-test-has-no-peers",
+      "node_id": 3
+    },
+    {
+      "name": "server-test-target-peers",
+      "node_id": 2
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "server-ssh-tests-policy",
+      "node_id": 2
+    }
+  ]
+}

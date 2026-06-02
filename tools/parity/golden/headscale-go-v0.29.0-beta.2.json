@@ -1445,6 +1445,229 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-grants-ssh-tests",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.30.10",
+          "fd7a:115c:a1e0::30:10"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.30.20",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "100.64.30.20",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::30:20",
+            "Ports": {
+              "First": 22,
+              "Last": 22
+            }
+          },
+          {
+            "IP": "fd7a:115c:a1e0::30:20",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-grant-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.30.10",
+              "fd7a:115c:a1e0::30:10"
+            ],
+            "DstPorts": [
+              {
+                "IP": "100.64.30.20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "100.64.30.20",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::30:20",
+                "Ports": {
+                  "First": 22,
+                  "Last": 22
+                }
+              },
+              {
+                "IP": "fd7a:115c:a1e0::30:20",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-grant-and-ssh-test-peers",
+        "peers": [
+          2
+        ]
+      },
+      {
+        "name": "bob-deny-test-has-no-peers",
+        "peers": [
+
+        ]
+      },
+      {
+        "name": "server-test-target-peers",
+        "peers": [
+          1
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-ssh-tests-policy",
+        "rules": [
+          {
+            "principals": [
+              "100.64.30.10",
+              "fd7a:115c:a1e0::30:10"
+            ],
+            "ssh_users": {
+              "admin": "admin",
+              "root": ""
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          },
+          {
+            "principals": [
+              "100.64.30.10",
+              "fd7a:115c:a1e0::30:10"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "TERM"
+            ]
+          },
+          {
+            "principals": [
+              "100.64.30.10",
+              "fd7a:115c:a1e0::30:10"
+            ],
+            "ssh_users": {
+              "alice": "alice"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "TERM"
+            ]
+          }
+        ]
+      }
+    ],
+    "policy_tests": [
+      {
+        "src": "alice@example.com",
+        "proto": "tcp",
+        "accept": [
+          "tag:server:443"
+        ],
+        "deny": [
+          "tag:server:80"
+        ]
+      },
+      {
+        "src": "bob@example.com",
+        "proto": "tcp",
+        "deny": [
+          "tag:server:443"
+        ]
+      }
+    ],
+    "ssh_tests": [
+      {
+        "src": "alice@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root",
+          "alice"
+        ],
+        "deny": [
+          "ubuntu"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "bob@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-nodeattrs-grants-ssh-route-profile",
     "filter": [
       {

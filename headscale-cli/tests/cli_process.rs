@@ -2442,11 +2442,13 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
     for (args, expected) in [
         (
             &["completion", "bash", "bad"][..],
-            "Error: unknown command \"bad\" for \"headscale completion bash\"\n",
+            include_str!("snapshots/utility_completion_bash_unknown_command.stderr"),
         ),
         (
             &["completion", "bash", "--no-descriptions", "bad"][..],
-            "Error: unknown command \"bad\" for \"headscale completion bash\"\n",
+            include_str!(
+                "snapshots/utility_completion_bash_no_descriptions_unknown_command.stderr"
+            ),
         ),
         (
             &["completion", "zsh", "bad"][..],

@@ -1942,3 +1942,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   suppresses the default Postgres database-policy mode in both Rust TOML and
   headscale-go YAML configs, closing the remaining default-vs-Postgres smoke
   matrix asymmetry.
+
+## 2026-06-02 grpc-gateway Octra boundary guard
+
+- Added grpc-gateway e2e coverage proving replacement-mode `/api/v1` only
+  exposes upstream headscale routes: Octra-only legacy node/register/status,
+  balance, and transfer aliases return the standard HTTP 404/code 5 `Not Found`
+  status JSON instead of being accepted by the headscale replacement gateway.

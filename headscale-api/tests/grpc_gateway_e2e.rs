@@ -919,6 +919,63 @@ async fn grpc_gateway_mounts_all_advertised_swagger_routes() {
 }
 
 #[tokio::test]
+async fn grpc_gateway_rejects_non_upstream_octra_api_routes() {
+    let (app, token) = fixture().await;
+
+    for (name, method, uri, body) in [
+        (
+            "legacy plural nodes list",
+            Method::GET,
+            "/api/v1/nodes",
+            Body::empty(),
+        ),
+        (
+            "legacy plural nodes register",
+            Method::POST,
+            "/api/v1/nodes",
+            Body::from(r#"{"name":"octra-node"}"#),
+        ),
+        (
+            "legacy register alias",
+            Method::POST,
+            "/api/v1/register",
+            Body::from(r#"{"name":"octra-node"}"#),
+        ),
+        (
+            "legacy node heartbeat",
+            Method::POST,
+            "/api/v1/nodes/1/heartbeat",
+            Body::empty(),
+        ),
+        (
+            "legacy status",
+            Method::GET,
+            "/api/v1/status",
+            Body::empty(),
+        ),
+        (
+            "legacy balance",
+            Method::GET,
+            "/api/v1/balance/did:example:alice",
+            Body::empty(),
+        ),
+        (
+            "legacy transfer",
+            Method::POST,
+            "/api/v1/transfer",
+            Body::from(r#"{"amount":1}"#),
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(method, uri, Some(&token), body))
+            .await
+            .unwrap();
+        assert_status_json_exact(resp, 404, 5, "Not Found", name).await;
+    }
+}
+
+#[tokio::test]
 async fn grpc_gateway_health_surfaces_database_ping_failure() {
     let (app, token) = fixture_with_failing_health().await;
 

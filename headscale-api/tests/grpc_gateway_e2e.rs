@@ -935,7 +935,7 @@ async fn grpc_gateway_health_surfaces_database_ping_failure() {
         resp,
         500,
         2,
-        "database ping failed: forced offline",
+        "pinging database: forced offline",
         "health database failure",
     )
     .await;

@@ -71,7 +71,10 @@ pub async fn create_grpc(
 }
 
 pub async fn list(client: &AdminClient, fmt: OutputFormat) -> Result<(), AdminError> {
-    let keys: Vec<PreauthAdminKey> = client.get_json("/preauthkeys").await?;
+    let mut keys: Vec<PreauthAdminKey> = client.get_json("/preauthkeys").await?;
+    for key in &mut keys {
+        key.key = short_prefix(&key.key);
+    }
     if fmt.is_structured() {
         print_structured(fmt, &keys)?;
     } else {
@@ -282,7 +285,6 @@ fn owner_display(user: &str, tags: &[String]) -> String {
 }
 
 /// Show the upstream display prefix for modern pre-auth keys.
-#[cfg(test)]
 fn short_prefix(key: &str) -> String {
     const TOKEN_PREFIX: &str = "hskey-auth-";
     const TOKEN_PREFIX_LEN: usize = 12;

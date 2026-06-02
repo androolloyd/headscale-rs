@@ -1436,7 +1436,7 @@ pub mod upstream {
                 database_health
                     .ping()
                     .await
-                    .map_err(|e| Status::unknown(format!("database ping failed: {e}")))?;
+                    .map_err(|e| Status::unknown(format!("pinging database: {e}")))?;
             }
             Ok(Response::new(HealthResponse {
                 database_connectivity: true,
@@ -6232,7 +6232,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(err.message(), "database ping failed: forced offline");
+        assert_eq!(err.message(), "pinging database: forced offline");
     }
 }
 

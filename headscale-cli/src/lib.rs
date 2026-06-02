@@ -66,6 +66,9 @@ pub enum AdminCmd {
     /// Manage pre-auth keys.
     #[command(alias = "preauthkey", alias = "authkey", alias = "pre")]
     Preauthkeys {
+        /// User identifier (ID). Upstream accepts this before `create`.
+        #[arg(short = 'u', long, hide = true)]
+        user: Option<u64>,
         #[command(subcommand)]
         action: PreauthKeysCmd,
     },
@@ -114,7 +117,9 @@ pub async fn dispatch(connect: ConnectArgs, cmd: AdminCmd) -> i32 {
     let result: Result<(), AdminError> = match cmd {
         AdminCmd::Users { action } => admin::run_users(&connect, &action).await,
         AdminCmd::Nodes { action } => admin::run_nodes(&connect, &action).await,
-        AdminCmd::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action).await,
+        AdminCmd::Preauthkeys { user, action } => {
+            admin::run_preauthkeys(&connect, user, &action).await
+        }
         AdminCmd::Auth { action } => admin::run_auth(&connect, &action).await,
         AdminCmd::Apikeys { action } => admin::run_apikeys(&connect, &action).await,
         AdminCmd::Policy { action } => admin::run_policy(&connect, &action).await,
@@ -193,7 +198,19 @@ mod tests {
         assert!(matches!(
             parsed.cmd,
             AdminCmd::Preauthkeys {
-                action: PreauthKeysCmd::Create { .. }
+                user: None,
+                action: PreauthKeysCmd::Create { user: Some(42), .. }
+            }
+        ));
+
+        let parsed =
+            AdminHarness::try_parse_from(["headscale", "preauthkeys", "--user", "42", "create"])
+                .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            AdminCmd::Preauthkeys {
+                user: Some(42),
+                action: PreauthKeysCmd::Create { user: None, .. }
             }
         ));
 

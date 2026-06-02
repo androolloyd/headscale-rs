@@ -3842,6 +3842,11 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
         1,
         "Error: invalid argument \"-o\" for \"-u, --user\" flag: strconv.ParseUint: parsing \"-o\": invalid syntax\n",
     );
+    assert_stderr_snapshot(
+        &["preauthkeys", "--user", "abc", "create"],
+        1,
+        "Error: invalid argument \"abc\" for \"-u, --user\" flag: strconv.ParseUint: parsing \"abc\": invalid syntax\n",
+    );
 }
 
 #[test]
@@ -4967,9 +4972,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         &config,
         &[
             "preauthkeys",
-            "create",
             "--user",
             "1",
+            "create",
             "--reusable",
             "--ephemeral",
             "--expiration",

@@ -1798,3 +1798,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Gateway key JSON now omits genuinely absent optional timestamps like
   `lastSeen`, but preserves present zero-time expiration fields for upstream
   protojson parity.
+
+## 2026-06-02 preauth CLI parent-user parity slice
+
+- `headscale preauthkeys --user <id> create` is now accepted in addition to
+  `headscale preauthkeys create --user <id>`, matching upstream's persistent
+  flag placement.
+- Legacy HTTP `preauthkeys list` output now masks listed keys with
+  `hskey-auth-<prefix>-***` so list output does not reveal the one-time full
+  token returned by create.
+
+## 2026-06-02 health failure wording parity slice
+
+- gRPC and gateway health checks now wrap database ping failures as
+  `pinging database: <err>`, matching headscale-go's `Health` RPC error text.

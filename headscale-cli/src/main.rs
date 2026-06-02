@@ -131,6 +131,9 @@ enum Commands {
     /// Handle the preauthkeys in Headscale.
     #[command(alias = "preauthkey", alias = "authkey", alias = "pre")]
     Preauthkeys {
+        /// User identifier (ID). Upstream accepts this before `create`.
+        #[arg(short = 'u', long, hide = true)]
+        user: Option<u64>,
         #[command(subcommand)]
         action: PreauthKeysCmd,
     },
@@ -543,7 +546,7 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
         Commands::Nodes { action } => admin::run_nodes(&connect, &action)
             .await
             .map_err(Into::into),
-        Commands::Preauthkeys { action } => admin::run_preauthkeys(&connect, &action)
+        Commands::Preauthkeys { user, action } => admin::run_preauthkeys(&connect, user, &action)
             .await
             .map_err(Into::into),
         Commands::Auth { action } => admin::run_auth(&connect, &action).await.map_err(Into::into),
@@ -1555,40 +1558,51 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
 fn preauthkeys_create_user_value_error(parts: &[&str]) -> Option<String> {
     let command_start = upstream_exact_command_start_index(parts);
     let command_parts = &parts[command_start..];
-    let [
-        "preauthkeys" | "preauthkey" | "authkey" | "pre",
-        "create" | "c" | "new",
-        tail @ ..,
-    ] = command_parts
-    else {
+    let ["preauthkeys" | "preauthkey" | "authkey" | "pre", tail @ ..] = command_parts else {
         return None;
     };
 
     let mut output_format = output_format_from_raw_args(&parts[..command_start]);
+    let create_index = tail
+        .iter()
+        .position(|part| matches!(*part, "create" | "c" | "new"))?;
+
+    if let Some(error) =
+        preauthkeys_create_user_value_error_in_tail(&tail[..create_index], &mut output_format)
+    {
+        return Some(error);
+    }
+    preauthkeys_create_user_value_error_in_tail(&tail[create_index + 1..], &mut output_format)
+}
+
+fn preauthkeys_create_user_value_error_in_tail(
+    tail: &[&str],
+    output_format: &mut OutputFormat,
+) -> Option<String> {
     let mut i = 0;
     while i < tail.len() {
         match tail[i] {
             "--" => return None,
             "-u" | "--user" if i + 1 < tail.len() => {
                 if let Some(error) = cobra_parse_uint_error(tail[i + 1]) {
-                    return Some(admin::output::format_error(output_format, &error));
+                    return Some(admin::output::format_error(*output_format, &error));
                 }
                 i += 2;
             }
             "-u" | "--user" => {
                 let error = cobra_missing_flag_value_error(tail[i]);
-                return Some(admin::output::format_error(output_format, &error));
+                return Some(admin::output::format_error(*output_format, &error));
             }
             value if value.starts_with("--user=") => {
                 let value = value.strip_prefix("--user=").unwrap_or_default();
                 if let Some(error) = cobra_parse_uint_error(value) {
-                    return Some(admin::output::format_error(output_format, &error));
+                    return Some(admin::output::format_error(*output_format, &error));
                 }
                 i += 1;
             }
             value if value.starts_with("-u") && value.len() > 2 => {
                 if let Some(error) = cobra_parse_uint_error(&value[2..]) {
-                    return Some(admin::output::format_error(output_format, &error));
+                    return Some(admin::output::format_error(*output_format, &error));
                 }
                 i += 1;
             }
@@ -1597,15 +1611,15 @@ fn preauthkeys_create_user_value_error(parts: &[&str]) -> Option<String> {
             "--reusable" | "--ephemeral" | "--force" | "--insecure" => i += 1,
             value if is_global_bool_assignment(value) => i += 1,
             "-o" | "--output" if i + 1 < tail.len() => {
-                output_format = raw_output_format(tail[i + 1]);
+                *output_format = raw_output_format(tail[i + 1]);
                 i += 2;
             }
             value if value.starts_with("--output=") => {
-                output_format = raw_output_format(value.strip_prefix("--output=").unwrap_or(""));
+                *output_format = raw_output_format(value.strip_prefix("--output=").unwrap_or(""));
                 i += 1;
             }
             value if value.starts_with("-o") && value.len() > 2 => {
-                output_format = raw_output_format(&value[2..]);
+                *output_format = raw_output_format(&value[2..]);
                 i += 1;
             }
             "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
@@ -3471,7 +3485,18 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Preauthkeys {
-                action: PreauthKeysCmd::Create { .. }
+                user: None,
+                action: PreauthKeysCmd::Create { user: Some(42), .. }
+            }
+        ));
+
+        let parsed =
+            Cli::try_parse_from(["headscale", "preauthkeys", "--user", "42", "create"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Preauthkeys {
+                user: Some(42),
+                action: PreauthKeysCmd::Create { user: None, .. }
             }
         ));
     }
@@ -3500,6 +3525,7 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Commands::Preauthkeys {
+                user: None,
                 action: PreauthKeysCmd::Delete { id: Some(42) }
             }
         ));

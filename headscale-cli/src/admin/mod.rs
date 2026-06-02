@@ -854,7 +854,11 @@ fn upstream_required_identifier_error() -> AdminError {
     AdminError::Usage(r#"required flag(s) "identifier" not set"#.into())
 }
 
-pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result<(), AdminError> {
+pub async fn run_preauthkeys(
+    conn: &ConnectArgs,
+    parent_user: Option<u64>,
+    cmd: &PreauthKeysCmd,
+) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
     if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
@@ -867,7 +871,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
                 expires_in,
             } => {
                 let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
-                let user = user.unwrap_or_default().to_string();
+                let user = user.or(parent_user).unwrap_or_default().to_string();
                 preauthkeys::create(
                     &client,
                     &user,
@@ -916,7 +920,7 @@ pub async fn run_preauthkeys(conn: &ConnectArgs, cmd: &PreauthKeysCmd) -> Result
             expires_in,
         } => {
             let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
-            let user = user.unwrap_or_default();
+            let user = user.or(parent_user).unwrap_or_default();
             preauthkeys::create_grpc(
                 &mut client,
                 user,

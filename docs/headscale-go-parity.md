@@ -277,6 +277,16 @@ promoted:
 ./scripts/headscale_rs_current_head_golden.sh
 ```
 
+The full-replacement backlog gate is:
+
+```sh
+python3 scripts/check_parity_backlog.py
+```
+
+It validates `docs/headscale-go-parity-backlog.json`, the machine-readable list
+of known open replacement-parity blockers. The checker intentionally fails if
+the backlog file claims completion while any open blocker remains.
+
 The stock-client parity matrix is:
 
 ```sh

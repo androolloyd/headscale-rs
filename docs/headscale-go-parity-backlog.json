@@ -1,0 +1,316 @@
+{
+  "metadata": {
+    "generated_on": "2026-06-02",
+    "status": "incomplete",
+    "upstream_baseline": "github.com/juanfont/headscale v0.29.0-beta.2",
+    "upstream_commit": "171fd7a3c54156965753a63639cdcafcd50c8d67",
+    "source": "docs/headscale-go-parity.md",
+    "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
+  },
+  "summary": {
+    "open_p0": 6,
+    "open_p1": 8,
+    "open_p2": 4,
+    "total_open": 18
+  },
+  "open_items": [
+    {
+      "id": "p0-production-postgres-process-mutations",
+      "priority": "P0",
+      "lane": "Production Postgres and upgrade/drop-in behavior",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-cli/tests/cli_process.rs",
+        "tools/real-client/postgres-*.sh",
+        "headscale-db/migrations/postgres/**"
+      ],
+      "upstream_evidence": [
+        "hscontrol/db/**",
+        "integration/cli_test.go",
+        "integration/api_auth_test.go"
+      ],
+      "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage for users, preauth keys, API keys, nodes, policy, routes, and auth sessions beyond the current selected stock-client matrix."
+    },
+    {
+      "id": "p0-database-upgrade-dropin",
+      "priority": "P0",
+      "lane": "Production Postgres and upgrade/drop-in behavior",
+      "status": "open",
+      "type": "implementation/evidence",
+      "owner_scope": [
+        "headscale-db/tests/headscale_go_migrations.rs",
+        "headscale-db/migrations/**"
+      ],
+      "upstream_evidence": [
+        "hscontrol/db/migrations/**",
+        "headscale release upgrade notes"
+      ],
+      "exit_criteria": "Add upgrade/drop-in compatibility tests for recent headscale-go schemas, unsupported pre-0.25 boundaries, and current v0.29 tag/preauth/node row changes."
+    },
+    {
+      "id": "p0-map-session-replacement-churn",
+      "priority": "P0",
+      "lane": "Register, map, NodeStore, and batcher churn",
+      "status": "open",
+      "type": "implementation/evidence",
+      "owner_scope": [
+        "headscale-api/src/tailscale_wire/map.rs",
+        "headscale-api/src/tailscale_wire/register.rs",
+        "headscale-api/src/tailscale_wire/mod.rs"
+      ],
+      "upstream_evidence": [
+        "hscontrol/poll.go",
+        "hscontrol/mapper/batcher_test.go",
+        "hscontrol/servertest/race_test.go",
+        "hscontrol/servertest/stress_test.go"
+      ],
+      "exit_criteria": "Mirror map-session replacement, disconnect grace, multi-connection, rapid reconnect, pending-delete, and stress/race behavior with executable tests."
+    },
+    {
+      "id": "p0-change-merge-filter-semantics",
+      "priority": "P0",
+      "lane": "Register, map, NodeStore, and batcher churn",
+      "status": "open",
+      "type": "implementation/evidence",
+      "owner_scope": [
+        "headscale-api/src/tailscale_wire/map.rs",
+        "tools/parity/scenarios/wire-map-response-deltas-control.json"
+      ],
+      "upstream_evidence": [
+        "hscontrol/types/change/change.go"
+      ],
+      "exit_criteria": "Pin targeted updates, self-only updates, PingRequest preservation, policy/runtime peer computation, DNS/DERP/domain inclusion, and peer patch reason filtering."
+    },
+    {
+      "id": "p0-native-derp-stock-client-runtime",
+      "priority": "P0",
+      "lane": "Native DERP/STUN replacement",
+      "status": "in_progress",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "tools/real-client/*derp-native*",
+        "headscale-api/src/tailscale_wire/derp.rs",
+        "headscale-core/src/derp.rs"
+      ],
+      "upstream_evidence": [
+        "hscontrol/derp/server/derp_server.go",
+        "integration/embedded_derp_test.go",
+        "tailscale.com/derp/derpserver"
+      ],
+      "exit_criteria": "Broaden stock-client native DERP runtime assertions beyond focused restart/policy-reload rows, including verify-client coverage over raw DERP and DERP-over-WebSocket where applicable."
+    },
+    {
+      "id": "p0-broader-ssh-client-status",
+      "priority": "P0",
+      "lane": "SSH and SSH check flow",
+      "status": "in_progress",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "tools/real-client/ssh-*.sh",
+        "headscale-api/src/tailscale_wire/ssh.rs"
+      ],
+      "upstream_evidence": [
+        "integration/ssh_test.go",
+        "hscontrol/noise.go"
+      ],
+      "exit_criteria": "Broaden exact stock-client SSH status, stdout, and stderr snapshots outside the already covered allow/deny/check/profile rows."
+    },
+    {
+      "id": "p1-nodestore-hostname-concurrency",
+      "priority": "P1",
+      "lane": "Register, map, NodeStore, and batcher churn",
+      "status": "in_progress",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-db/src/headscale_nodes.rs",
+        "headscale-api/src/tailscale_wire/register.rs"
+      ],
+      "upstream_evidence": [
+        "hscontrol/state/node_store_hostname_test.go",
+        "hscontrol/state/node_store_test.go"
+      ],
+      "exit_criteria": "Broaden hostname/GivenName collision and concurrent NodeStore update parity tests."
+    },
+    {
+      "id": "p1-ephemeral-node-races",
+      "priority": "P1",
+      "lane": "Register, map, NodeStore, and batcher churn",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-api/src/tailscale_wire/mod.rs",
+        "headscale-db/src/headscale_nodes.rs"
+      ],
+      "upstream_evidence": [
+        "hscontrol/state/ephemeral_test.go"
+      ],
+      "exit_criteria": "Expand ephemeral node deletion/logout race coverage across in-memory and persistent paths."
+    },
+    {
+      "id": "p1-route-primary-property-invariants",
+      "priority": "P1",
+      "lane": "Routes, HA, and grants via",
+      "status": "in_progress",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-api/src/tailscale_wire/routes.rs",
+        "headscale-api/tests/**"
+      ],
+      "upstream_evidence": [
+        "hscontrol/state/primaries_property_test.go"
+      ],
+      "exit_criteria": "Mirror route primary randomized/property invariants for owner selection, failover, withdrawal, and degraded-primary retention."
+    },
+    {
+      "id": "p1-route-via-health-edge-coverage",
+      "priority": "P1",
+      "lane": "Routes, HA, and grants via",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-api/src/tailscale_wire/routes.rs",
+        "tools/real-client/route-*.sh"
+      ],
+      "upstream_evidence": [
+        "integration/route_test.go",
+        "hscontrol/servertest/routes_test.go",
+        "hscontrol/servertest/grants_test.go"
+      ],
+      "exit_criteria": "Continue route-via and route-health reload/restart/client-observed edge coverage beyond the mirrored default and Postgres rows."
+    },
+    {
+      "id": "p1-ssh-policy-compiler-edges",
+      "priority": "P1",
+      "lane": "SSH and SSH check flow",
+      "status": "in_progress",
+      "type": "implementation/evidence",
+      "owner_scope": [
+        "headscale-api/src/policy/**",
+        "headscale-api/tests/ssh_integration_parity.rs",
+        "tools/parity/scenarios/ssh-*.json"
+      ],
+      "upstream_evidence": [
+        "hscontrol/policy/v2/types_test.go",
+        "hscontrol/policy/v2/sshtest_test.go"
+      ],
+      "exit_criteria": "Expand compiler parity for trimming, invalid SSH users, SaaS validation, check-period rendering, and policy test failure text."
+    },
+    {
+      "id": "p1-policy-v2-compat-fixtures",
+      "priority": "P1",
+      "lane": "Policy, ACL, tags, and CapMap",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "tools/parity/scenarios/**",
+        "headscale-api/src/policy/**"
+      ],
+      "upstream_evidence": [
+        "hscontrol/policy/v2/tailscale_acl_data_compat_test.go",
+        "hscontrol/policy/v2/tailscale_grants_compat_test.go",
+        "hscontrol/policy/v2/tailscale_routes_data_compat_test.go",
+        "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go"
+      ],
+      "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/routes/SSH compatibility fixtures in the differential harness."
+    },
+    {
+      "id": "p1-config-tls-acme-public-ca-drift",
+      "priority": "P1",
+      "lane": "Runtime DNS, DERP, TLS, and ACME config",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-cli/src/server.rs",
+        "headscale-cli/src/config.rs",
+        "headscale-api/src/tailscale_wire/acme*"
+      ],
+      "upstream_evidence": [
+        "hscontrol/types/config.go",
+        "autocert/ACME behavior"
+      ],
+      "exit_criteria": "Broaden public-CA ACME drift checks beyond controlled local-CA HTTP-01/TLS-ALPN process harnesses."
+    },
+    {
+      "id": "p1-production-backfill-restart-edges",
+      "priority": "P1",
+      "lane": "Address allocation and persistent runtime",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "tools/real-client/*prefix-family*",
+        "headscale-api/src/tailscale_wire/register.rs",
+        "headscale-db/src/headscale_nodes.rs"
+      ],
+      "upstream_evidence": [
+        "integration/node_addressing tests",
+        "hscontrol/state/node_store_test.go"
+      ],
+      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence and prefix-family rows."
+    },
+    {
+      "id": "p2-cli-output-error-residuals",
+      "priority": "P2",
+      "lane": "CLI over upstream gRPC",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-cli/src/**",
+        "headscale-cli/tests/**"
+      ],
+      "upstream_evidence": [
+        "cmd/headscale/cli/*.go"
+      ],
+      "exit_criteria": "Add remaining lower-priority CLI output/error snapshots and process-level config/output tests while keeping Octra-only commands outside parity claims."
+    },
+    {
+      "id": "p2-grpc-remote-server-error-text",
+      "priority": "P2",
+      "lane": "API auth and gRPC/gateway error text",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-api/src/grpc.rs",
+        "headscale-api/src/grpc_gateway.rs",
+        "headscale-cli/tests/**"
+      ],
+      "upstream_evidence": [
+        "proto/headscale/v1/headscale.proto",
+        "integration/api_auth_test.go"
+      ],
+      "exit_criteria": "Add table-driven gRPC and CLI tests for remaining auth, remote/server, and direct gRPC error text."
+    },
+    {
+      "id": "p2-dns-live-resolver-behavior",
+      "priority": "P2",
+      "lane": "DNS/MagicDNS edge behavior",
+      "status": "open",
+      "type": "coverage/evidence",
+      "owner_scope": [
+        "headscale-api/src/dns.rs",
+        "tools/real-client/dns-*.sh",
+        "tools/real-client/magicdns-*.sh"
+      ],
+      "upstream_evidence": [
+        "integration/dns_test.go"
+      ],
+      "exit_criteria": "Broaden live resolver client behavior beyond current netmap/DNSConfig and stock-client MagicDNS coverage."
+    },
+    {
+      "id": "p2-octra-consumer-boundary",
+      "priority": "P2",
+      "lane": "Octra consumer boundary",
+      "status": "open",
+      "type": "downstream/evidence",
+      "owner_scope": [
+        "/Users/androolloyd/Development/octra/crates/**",
+        "headscale-api consumer trait tests"
+      ],
+      "upstream_evidence": [
+        "headscale-go replacement boundary",
+        "Octra embedding requirements"
+      ],
+      "exit_criteria": "Keep Octra-specific admin mounting, preauth store unification, embedded CLI docs, and settlement/billing policy behavior on the Octra side unless a generic headscale contract is missing."
+    }
+  ]
+}

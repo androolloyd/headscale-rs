@@ -35,6 +35,8 @@ jobs:
         run: ./scripts/check_fuzz_corpus.sh
       - name: Check parity golden coverage
         run: python3 scripts/check_parity_golden.py
+      - name: Check full-parity backlog gate
+        run: python3 scripts/check_parity_backlog.py
       - name: Check current-head parity backlog stubs
         run: python3 scripts/generate_go_parity_backlog_stubs.py --check
       - name: Check real-client smoke matrix metadata

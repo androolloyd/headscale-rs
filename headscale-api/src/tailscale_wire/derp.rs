@@ -99,6 +99,13 @@ impl NativeDerpAdmissionSnapshot {
     }
 }
 
+/// Debug snapshot for the native DERP runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeDerpRuntimeSnapshot {
+    pub client_verification_enabled: bool,
+    pub admissions: NativeDerpAdmissionSnapshot,
+}
+
 #[derive(Debug, Default)]
 struct NativeDerpAdmissionCounters {
     raw_allowed: AtomicU64,
@@ -278,6 +285,14 @@ impl NativeDerpRuntime {
     /// Current native DERP verify-client decision counts by transport.
     pub fn admission_snapshot(&self) -> NativeDerpAdmissionSnapshot {
         self.admissions.snapshot()
+    }
+
+    /// Current native DERP runtime state for debug surfaces.
+    pub fn debug_snapshot(&self) -> NativeDerpRuntimeSnapshot {
+        NativeDerpRuntimeSnapshot {
+            client_verification_enabled: self.client_verification_enabled(),
+            admissions: self.admission_snapshot(),
+        }
     }
 
     fn verify_client_for_transport(

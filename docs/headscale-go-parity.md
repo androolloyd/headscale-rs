@@ -221,6 +221,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   `tailscale status --json` peer relay projection: the base and policy-reload
   Rust-only native DERP rows require `Peer[].Relay` to include the advertised
   native DERP region code after forced relay traffic succeeds.
+- Native DERP stock-client runtime assertions now read `/debug/derp` on the
+  metrics/debug listener and require native verify-client mode plus raw
+  admission counters for the stock clients. DERP-over-WebSocket stock-client
+  forcing is still not proven by these rows, so the native DERP P0 remains open.
 - NodeStore hostname/GivenName collision handling now retries auto-derived
   names after concurrent unique-index races on create and auth-path update,
   with SQLite concurrency tests and feature-gated Postgres helper coverage.
@@ -817,8 +821,11 @@ Recent coverage note (2026-06-02): paired `postgres-derp-native` stock-client
 smokes now run Rust production Postgres with native `server.embedded_derp`
 relay mode through the shared real-client DERP assertions. The row proves
 stock-client DERP-map metadata, STUN, forced-DERP relay pings, and clear
-stock-client DERP status health without a Rust `derper` sidecar, bringing the
-Postgres stock-client matrix to ninety-two rows.
+stock-client DERP status health without a Rust `derper` sidecar. The live row
+also asserts `/debug/derp` native runtime counters: verify-client mode must be
+enabled, raw admissions must include both stock clients, and raw/WebSocket
+denials must remain zero. This brings the Postgres stock-client matrix to
+ninety-two rows.
 
 Recent coverage note (2026-06-02): Rust-only
 `postgres-derp-native-restart` stock-client coverage now proves native Rust
@@ -1084,9 +1091,10 @@ policy v2 backlog row.
    registration policy-churn, and Postgres OIDC policy-churn restart rows.
 6. Finish native Rust DERP relay parity beyond the supported upstream
    `derper` sidecar boundary: broader stock-client restart/runtime assertions
-   after keepalive, raw and mixed-transport packet relay, duplicate reconnect,
-   and source-disconnect `PeerGone` cases beyond the focused status-health,
-   duplicate-health reconnect, and restart map-stability pins are wired.
+   after keepalive, WebSocket-forced stock-client traffic, mixed-transport
+   packet relay, duplicate reconnect, and source-disconnect `PeerGone` cases
+   beyond the focused status-health, raw admission counter, duplicate-health
+   reconnect, and restart map-stability pins are wired.
 7. Extend CI/fuzz/golden enforcement: broaden selected real-client rows on PRs,
    scheduled full matrix, current-head pin checks, and parity golden diffs. The
    formal-verification status gate is now explicit and records the current

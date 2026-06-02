@@ -118,6 +118,11 @@ assert_derp_stun="${REAL_CLIENT_ASSERT_DERP_STUN:-false}"
 assert_derp_status_health_clear="${REAL_CLIENT_ASSERT_DERP_STATUS_HEALTH_CLEAR:-false}"
 assert_derp_status_peer_relay="${REAL_CLIENT_ASSERT_DERP_STATUS_PEER_RELAY:-false}"
 assert_derp_reload_stability="${REAL_CLIENT_ASSERT_DERP_RELOAD_STABILITY:-false}"
+expected_derp_native_verify_clients="${REAL_CLIENT_EXPECT_DERP_NATIVE_VERIFY_CLIENTS:-}"
+expected_derp_native_raw_allowed_min="${REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_ALLOWED_MIN:-}"
+expected_derp_native_raw_denied_max="${REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_DENIED_MAX:-}"
+expected_derp_native_websocket_allowed_min="${REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_ALLOWED_MIN:-}"
+expected_derp_native_websocket_denied_max="${REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_DENIED_MAX:-}"
 restart_after_assertions="${REAL_CLIENT_RESTART_AFTER_ASSERTIONS:-${REAL_CLIENT_DERP_RESTART_AFTER_ASSERTIONS:-false}}"
 derp_stun_probe_host="${REAL_CLIENT_DERP_STUN_PROBE_HOST:-127.0.0.1}"
 enable_tailscale_ssh="${REAL_CLIENT_ENABLE_TAILSCALE_SSH:-false}"
@@ -564,6 +569,21 @@ case "${assert_derp_reload_stability}" in
     exit 2
     ;;
 esac
+case "${expected_derp_native_verify_clients}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expected_derp_native_verify_clients_flag=1
+    ;;
+  0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expected_derp_native_verify_clients_flag=0
+    ;;
+  "")
+    expected_derp_native_verify_clients_flag=""
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DERP_NATIVE_VERIFY_CLIENTS must be true or false, got ${expected_derp_native_verify_clients}" >&2
+    exit 2
+    ;;
+esac
 case "${restart_after_assertions}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     restart_after_assertions_flag=1
@@ -579,6 +599,32 @@ esac
 if ((expect_derp_ping_flag)) && ((client_count < 2)); then
   echo "REAL_CLIENT_EXPECT_DERP_PING requires at least two clients" >&2
   exit 2
+fi
+if [[ -n "${expected_derp_native_raw_allowed_min}" ]] &&
+  ! [[ "${expected_derp_native_raw_allowed_min}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_ALLOWED_MIN must be a non-negative integer, got ${expected_derp_native_raw_allowed_min}" >&2
+  exit 2
+fi
+if [[ -n "${expected_derp_native_raw_denied_max}" ]] &&
+  ! [[ "${expected_derp_native_raw_denied_max}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_DERP_NATIVE_RAW_DENIED_MAX must be a non-negative integer, got ${expected_derp_native_raw_denied_max}" >&2
+  exit 2
+fi
+if [[ -n "${expected_derp_native_websocket_allowed_min}" ]] &&
+  ! [[ "${expected_derp_native_websocket_allowed_min}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_ALLOWED_MIN must be a non-negative integer, got ${expected_derp_native_websocket_allowed_min}" >&2
+  exit 2
+fi
+if [[ -n "${expected_derp_native_websocket_denied_max}" ]] &&
+  ! [[ "${expected_derp_native_websocket_denied_max}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_DERP_NATIVE_WEBSOCKET_DENIED_MAX must be a non-negative integer, got ${expected_derp_native_websocket_denied_max}" >&2
+  exit 2
+fi
+if [[ -n "${expected_derp_native_verify_clients}${expected_derp_native_raw_allowed_min}${expected_derp_native_raw_denied_max}${expected_derp_native_websocket_allowed_min}${expected_derp_native_websocket_denied_max}" ]]; then
+  if [[ "${target}" != "rust" ]] || ((use_rust_embedded_derp == 0)) || [[ "${rust_derp_relay_mode}" != "native" ]]; then
+    echo "native DERP admission assertions require REAL_CLIENT_ONLINE_LASTSEEN_TARGET=rust, REAL_CLIENT_RUST_EMBEDDED_DERP=true, and REAL_CLIENT_RUST_DERP_RELAY_MODE=native" >&2
+    exit 2
+  fi
 fi
 if ((use_rust_embedded_derp)) && [[ -z "${rust_derp_stun_addr}" ]]; then
   echo "REAL_CLIENT_RUST_EMBEDDED_DERP requires REAL_CLIENT_RUST_DERP_STUN_ADDR or HSRS_HARNESS_EMBEDDED_DERP_STUN_ADDR" >&2
@@ -1766,6 +1812,67 @@ assert_derp_status_properties_if_requested() {
   echo "::endgroup::"
 }
 
+assert_native_derp_admissions_if_requested() {
+  [[ -n "${expected_derp_native_verify_clients}${expected_derp_native_raw_allowed_min}${expected_derp_native_raw_denied_max}${expected_derp_native_websocket_allowed_min}${expected_derp_native_websocket_denied_max}" ]] || return 0
+  echo "::group::assert native DERP verify-client admissions"
+  local output_path="${work_dir}/native-derp-admissions.json"
+  if ! curl -fsS -H 'accept: application/json' "http://127.0.0.1:${metrics_port}/debug/derp" >"${output_path}.debug.json" 2>"${output_path}.err"; then
+    cat "${output_path}.err" >&2 || true
+    echo "::endgroup::"
+    return 1
+  fi
+  if ! ruby -rjson -e '
+    debug = JSON.parse(File.read(ARGV.fetch(0)))
+    expected_verify = ARGV.fetch(1)
+    raw_allowed_min = ARGV.fetch(2)
+    raw_denied_max = ARGV.fetch(3)
+    websocket_allowed_min = ARGV.fetch(4)
+    websocket_denied_max = ARGV.fetch(5)
+    native = debug.fetch("native") { abort("missing native DERP debug section: #{debug.inspect}") }
+    admissions = native.fetch("admissions")
+
+    unless expected_verify.empty?
+      want = expected_verify == "1"
+      got = !!native.fetch("client_verification_enabled")
+      abort("expected native DERP client_verification_enabled=#{want}, got #{got}") unless got == want
+    end
+
+    checks = {
+      "raw_allowed" => [:min, raw_allowed_min],
+      "raw_denied" => [:max, raw_denied_max],
+      "websocket_allowed" => [:min, websocket_allowed_min],
+      "websocket_denied" => [:max, websocket_denied_max],
+    }
+    checks.each do |key, (mode, expected)|
+      next if expected.empty?
+      actual = Integer(admissions.fetch(key))
+      limit = Integer(expected)
+      case mode
+      when :min
+        abort("expected native DERP #{key} >= #{limit}, got #{actual}: #{admissions.inspect}") unless actual >= limit
+      when :max
+        abort("expected native DERP #{key} <= #{limit}, got #{actual}: #{admissions.inspect}") unless actual <= limit
+      end
+    end
+
+    puts JSON.pretty_generate({
+      native_derp_client_verification_enabled: native.fetch("client_verification_enabled"),
+      native_derp_admissions: admissions,
+    })
+  ' "${output_path}.debug.json" \
+    "${expected_derp_native_verify_clients_flag}" \
+    "${expected_derp_native_raw_allowed_min}" \
+    "${expected_derp_native_raw_denied_max}" \
+    "${expected_derp_native_websocket_allowed_min}" \
+    "${expected_derp_native_websocket_denied_max}" >"${output_path}" 2>"${output_path}.err"; then
+    cat "${output_path}.err" >&2 || true
+    echo "::endgroup::"
+    return 1
+  fi
+  cat "${output_path}"
+  echo "::endgroup::"
+}
+
 assert_post_restart_peer_visibility_if_requested() {
   [[ -n "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]] || return 0
   assert_peer_visibility_counts \
@@ -1825,6 +1932,7 @@ assert_restart_if_requested() {
   assert_derp_map_stable_after_restart_if_available
   assert_derp_ping_if_requested
   assert_derp_status_properties_if_requested
+  assert_native_derp_admissions_if_requested
   echo "::endgroup::"
 }
 
@@ -4041,6 +4149,7 @@ assert_derp_map_if_requested
 assert_derp_map_stable_after_policy_reload_if_requested
 assert_derp_ping_if_requested
 assert_derp_status_properties_if_requested
+assert_native_derp_admissions_if_requested
 assert_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested

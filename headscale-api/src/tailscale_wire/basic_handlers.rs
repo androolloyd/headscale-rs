@@ -570,6 +570,25 @@ pub struct DebugDerpInfo {
     pub total_regions: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub regions: BTreeMap<u16, DebugDerpRegion>,
+    #[cfg(feature = "full")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<DebugNativeDerpInfo>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNativeDerpInfo {
+    pub client_verification_enabled: bool,
+    pub admissions: DebugNativeDerpAdmissions,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugNativeDerpAdmissions {
+    pub raw_allowed: u64,
+    pub raw_denied: u64,
+    pub websocket_allowed: u64,
+    pub websocket_denied: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1297,7 +1316,11 @@ fn debug_routes_info(
 pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let derp_map = state.derp_map.snapshot();
     if wants_json(&headers) {
-        let info = debug_derp_info(&derp_map);
+        let mut info = debug_derp_info(&derp_map);
+        #[cfg(feature = "full")]
+        {
+            info.native = state.native_derp.as_deref().map(debug_native_derp_info);
+        }
         match serde_json::to_string_pretty(&info) {
             Ok(body) => (
                 StatusCode::OK,
@@ -2669,6 +2692,8 @@ fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
             0
         },
         regions: BTreeMap::new(),
+        #[cfg(feature = "full")]
+        native: None,
     };
 
     if !configured {
@@ -2697,6 +2722,21 @@ fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
     }
 
     info
+}
+
+#[cfg(feature = "full")]
+fn debug_native_derp_info(runtime: &super::derp::NativeDerpRuntime) -> DebugNativeDerpInfo {
+    let snapshot = runtime.debug_snapshot();
+    let admissions = snapshot.admissions;
+    DebugNativeDerpInfo {
+        client_verification_enabled: snapshot.client_verification_enabled,
+        admissions: DebugNativeDerpAdmissions {
+            raw_allowed: admissions.raw_allowed,
+            raw_denied: admissions.raw_denied,
+            websocket_allowed: admissions.websocket_allowed,
+            websocket_denied: admissions.websocket_denied,
+        },
+    }
 }
 
 #[allow(clippy::format_push_string)]
@@ -5347,6 +5387,40 @@ mod tests {
         );
         assert_eq!(parsed["regions"]["1"]["nodes"][0]["derp_port"], 443);
         assert_eq!(parsed["regions"]["1"]["nodes"][0]["stun_port"], 3478);
+    }
+
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn debug_derp_json_reports_native_admissions_when_configured() {
+        let (mut state, _dir) = fixture_state();
+        state.derp_map = crate::tailscale_wire::DerpMapStore::shared(derp_fixture());
+        state.native_derp = Some(Arc::new(
+            crate::tailscale_wire::derp::NativeDerpRuntime::new(
+                headscale_core::derp::protocol::DerpNodeKeyPair::from_private_key([9u8; 32])
+                    .unwrap(),
+                headscale_core::derp::native::NativeDerpRelay::new(),
+            )
+            .with_client_verifier(|_| true),
+        ));
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/debug/derp")
+                    .header(header::ACCEPT, "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["native"]["client_verification_enabled"], true);
+        assert_eq!(parsed["native"]["admissions"]["raw_allowed"], 0);
+        assert_eq!(parsed["native"]["admissions"]["raw_denied"], 0);
+        assert_eq!(parsed["native"]["admissions"]["websocket_allowed"], 0);
+        assert_eq!(parsed["native"]["admissions"]["websocket_denied"], 0);
     }
 
     #[tokio::test]

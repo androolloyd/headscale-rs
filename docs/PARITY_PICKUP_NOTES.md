@@ -2529,6 +2529,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   DERP-over-WebSocket, plus restart-row `Peer[].Relay` status assertions for
   `postgres-derp-native-restart`. The native DERP stock-client row remains
   open for broader runtime and transport-forcing coverage.
+- Added live stock-client native DERP admission assertions to the Rust-only
+  Postgres native DERP rows. They read `/debug/derp` and require native
+  verify-client mode, at least two raw allowed admissions, and zero raw or
+  WebSocket denials. The row remains open because stock-client
+  DERP-over-WebSocket forcing is not yet proven.
 - Adopted exact successful Tailscale SSH stderr assertions for the paired
   `ssh-accept-env` and `postgres-ssh-accept-env` rows. Broader SSH
   status/stdout/stderr coverage remains open.

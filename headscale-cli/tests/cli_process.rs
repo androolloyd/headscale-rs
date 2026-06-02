@@ -2520,6 +2520,17 @@ fn residual_current_upstream_parser_edges_match_stderr_snapshots() {
 }
 
 #[test]
+fn completion_fish_no_descriptions_dashdash_unknown_command_matches_current_upstream() {
+    assert_stderr_snapshot(
+        &["completion", "fish", "--no-descriptions", "--", "bad"],
+        1,
+        include_str!(
+            "snapshots/utility_completion_fish_no_descriptions_dashdash_unknown_command.stderr"
+        ),
+    );
+}
+
+#[test]
 fn completion_no_descriptions_strips_zsh_help_text() {
     let output = headscale_clean(&["completion", "zsh"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

@@ -8199,6 +8199,126 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_batches_peer_online_and_route_approval_into_one_policy_delta() {
+        let (state, _dir) = fixture();
+        let observer = "45".repeat(32);
+        let peer_key = "46".repeat(32);
+        let router_key = "47".repeat(32);
+        let route = "10.47.1.0/24".to_string();
+        state.machines.upsert(
+            observer.clone(),
+            policy_record(&observer, "observer", 10, "observer", Vec::new()),
+        );
+        state.machines.upsert(
+            peer_key.clone(),
+            policy_record(&peer_key, "peer", 11, "peer", Vec::new()),
+        );
+        let mut router_record = policy_record(&router_key, "router", 12, "router", Vec::new());
+        router_record.available_routes = vec![route.clone()];
+        state.machines.upsert(router_key.clone(), router_record);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let router_first = next_zstd_map_response(&mut router_body).await;
+        assert_eq!(
+            router_first.node.as_ref().and_then(|node| node.online),
+            Some(true)
+        );
+
+        let mut observer_body = open_zstd_stream(app.clone(), &observer).await;
+        let first_mr = next_zstd_map_response(&mut observer_body).await;
+        let peer = peer_named(&first_mr, "peer").expect("peer visible before connect");
+        assert_eq!(peer.online, Some(false));
+        let router_peer = peer_named(&first_mr, "router").expect("router visible before approval");
+        assert_eq!(router_peer.online, Some(true));
+        assert!(
+            !router_peer
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == &route),
+            "unapproved advertised route must not be sent as an AllowedIP"
+        );
+        let _ = state.machines.drain_pending_map_changes();
+        let history_len = state.machines.map_change_history().len();
+
+        let mut peer_body = open_zstd_stream(app, &peer_key).await;
+        let peer_first = next_zstd_map_response(&mut peer_body).await;
+        assert_eq!(
+            peer_first.node.as_ref().and_then(|node| node.online),
+            Some(true)
+        );
+
+        let (changed, missing) = state
+            .machines
+            .set_approved_routes_many(vec![(router_key.clone(), vec![route.clone()])]);
+        assert_eq!(changed, 1);
+        assert!(missing.is_empty());
+
+        let changes = state.machines.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(
+            new_changes
+                .iter()
+                .map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["node online", "policy change"], vec!["policy change"]]
+        );
+        let pending = state.machines.pending_map_changes();
+        let observer_changes = pending
+            .get(&stable_id_from_key(&observer))
+            .expect("observer receives the batched lifecycle and route changes");
+        assert_eq!(
+            observer_changes
+                .iter()
+                .map(MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["node online", "policy change"], vec!["policy change"]]
+        );
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "mixed lifecycle/route changes should wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut observer_body).await;
+        assert!(
+            delta.node.is_none(),
+            "ordinary peer lifecycle plus route approval should stay incremental"
+        );
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "policy-reasoned batched changes should carry policy-derived DNS updates"
+        );
+        assert_eq!(delta.peers_changed_patch.len(), 1);
+        let patch = &delta.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&peer_key));
+        assert_eq!(patch.online, Some(true));
+
+        let router_delta = changed_peer(&delta, "router").expect("router route peer delta");
+        assert!(
+            router_delta
+                .allowed_ips
+                .iter()
+                .any(|allowed| allowed == &route),
+            "approved route should be sent as a route-derived AllowedIP"
+        );
+        assert_eq!(router_delta.primary_routes, vec![route]);
+
+        tokio::task::yield_now().await;
+        let extra = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            extra.is_none(),
+            "one mixed lifecycle/route batch should emit only one observer delta"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_worker_update_many_delete_same_batch_emits_only_peers_removed() {
         let (state, _dir) = fixture();
         let observer = "43".repeat(32);

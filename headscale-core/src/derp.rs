@@ -2130,6 +2130,28 @@ pub mod native {
         }
 
         #[tokio::test]
+        async fn native_relay_duplicate_reconnect_reissues_health_after_clear() {
+            let relay = NativeDerpRelay::new();
+            let client_key = [1u8; KEY_LEN];
+            let mut first = relay.connect(client_key).await;
+            let second = relay.connect(client_key).await;
+            let second_id = second.session_id();
+            let mut second = second;
+
+            let problem = Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string());
+            assert_eq!(recv_frame(&mut first).await, problem);
+            assert_eq!(recv_frame(&mut second).await, problem);
+
+            relay.disconnect_session(&client_key, second_id).await;
+            assert_eq!(recv_frame(&mut first).await, Frame::Health(String::new()));
+
+            let mut reconnected = relay.connect(client_key).await;
+            assert_eq!(recv_frame(&mut first).await, problem);
+            assert_eq!(recv_frame(&mut reconnected).await, problem);
+            assert_eq!(relay.session_count().await, 2);
+        }
+
+        #[tokio::test]
         async fn native_relay_tracks_session_count() {
             let relay = NativeDerpRelay::new();
             let alice_key = [1u8; KEY_LEN];

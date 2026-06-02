@@ -69,6 +69,7 @@
       "user_id": 1,
       "hostname": "taildrive-client",
       "ipv4": "100.64.0.11",
+      "ipv6": "fd7a:115c:a1e0::11",
       "tags": [
         "tag:client"
       ]
@@ -78,6 +79,7 @@
       "user_id": 2,
       "hostname": "taildrive-server",
       "ipv4": "100.64.0.12",
+      "ipv6": "fd7a:115c:a1e0::12",
       "tags": [
         "tag:server"
       ]

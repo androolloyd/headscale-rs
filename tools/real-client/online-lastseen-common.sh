@@ -2682,6 +2682,7 @@ login_client() {
 
   up_status=0
   if [[ "${login_mode}" == "web" ]]; then
+    local register_user="${client_users[$current_client_index]}"
     docker exec "${client_name}" "${up_args[@]}" \
       >"${work_dir}/${client_name}.tailscale-up.stdout" \
       2>"${work_dir}/${client_name}.tailscale-up.stderr" &
@@ -2700,13 +2701,13 @@ login_client() {
           hskey-authreq-*) ;;
           *) auth_id="hskey-authreq-${auth_id}" ;;
         esac
-        headscale_cmd -o json auth register "--auth-id=${auth_id}" --user alice \
+        headscale_cmd -o json auth register "--auth-id=${auth_id}" --user "${register_user}" \
           >"${work_dir}/${client_name}.registered.json" \
           2>"${work_dir}/${client_name}.registered.stderr" ||
           register_status="$?"
         ;;
       headscale-go)
-        headscale_cmd -o json nodes register --user alice "--key=${registration_id}" \
+        headscale_cmd -o json nodes register --user "${register_user}" "--key=${registration_id}" \
           >"${work_dir}/${client_name}.registered.json" \
           2>"${work_dir}/${client_name}.registered.stderr" ||
           register_status="$?"

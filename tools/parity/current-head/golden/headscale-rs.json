@@ -221,7 +221,8 @@
     "filter": [
       {
         "SrcIPs": [
-          "100.64.0.11"
+          "100.64.0.11",
+          "fd7a:115c:a1e0::11"
         ],
         "DstPorts": [
 
@@ -229,7 +230,8 @@
         "CapGrant": [
           {
             "Dsts": [
-              "100.64.0.12/32"
+              "100.64.0.12/32",
+              "fd7a:115c:a1e0::12/128"
             ],
             "CapMap": {
               "tailscale.com/cap/drive": [
@@ -243,7 +245,8 @@
       },
       {
         "SrcIPs": [
-          "100.64.0.12"
+          "100.64.0.12",
+          "fd7a:115c:a1e0::12"
         ],
         "DstPorts": [
 
@@ -251,7 +254,8 @@
         "CapGrant": [
           {
             "Dsts": [
-              "100.64.0.11/32"
+              "100.64.0.11/32",
+              "fd7a:115c:a1e0::11/128"
             ],
             "CapMap": {
               "tailscale.com/cap/drive-sharer": null
@@ -266,7 +270,8 @@
         "rules": [
           {
             "SrcIPs": [
-              "100.64.0.12"
+              "100.64.0.12",
+              "fd7a:115c:a1e0::12"
             ],
             "DstPorts": [
 
@@ -274,7 +279,8 @@
             "CapGrant": [
               {
                 "Dsts": [
-                  "100.64.0.11/32"
+                  "100.64.0.11/32",
+                  "fd7a:115c:a1e0::11/128"
                 ],
                 "CapMap": {
                   "tailscale.com/cap/drive-sharer": null
@@ -289,7 +295,8 @@
         "rules": [
           {
             "SrcIPs": [
-              "100.64.0.11"
+              "100.64.0.11",
+              "fd7a:115c:a1e0::11"
             ],
             "DstPorts": [
 
@@ -297,7 +304,8 @@
             "CapGrant": [
               {
                 "Dsts": [
-                  "100.64.0.12/32"
+                  "100.64.0.12/32",
+                  "fd7a:115c:a1e0::12/128"
                 ],
                 "CapMap": {
                   "tailscale.com/cap/drive": [

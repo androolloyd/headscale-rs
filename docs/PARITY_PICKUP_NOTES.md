@@ -2299,3 +2299,33 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The snapshot normalizes the dynamic loopback port and platform errno while
   asserting no ACME certificate cache entry is written after the listener bind
   failure.
+
+## 2026-06-02 Multi-agent parity breadth slice
+
+- Added `scripts/check_headscale_go_refs.py` and wired it into CI plus the
+  real-client parity workflow so checked-in `headscale-go-current.sh` must match
+  upstream `juanfont/headscale` `main`, while
+  `headscale-go-baseline.sh` stays aligned with the pinned Go module version.
+- Added paired `postgres-web-register-policy-churn` Rust/headscale-go
+  stock-client rows. The shared online/LastSeen harness now honors
+  per-client users during web registration, so the row registers Alice and Bob
+  via web auth under isolating DB policy, mutates DB policy to allow both
+  users, and asserts live maps converge from `0,0` to `1,1` peers. The row is
+  selected in push/PR real-client CI, bringing the matrix to 100 Postgres rows
+  and 153 deterministic PR rows.
+- Added focused current-head dual-stack Taildrive/Taildrop cap-grant coverage:
+  `policy-v2-taildrive-taildrop-caps` now asserts both IPv4 and IPv6 `SrcIPs`
+  and `CapGrant.Dsts` for direct `drive` and reverse `drive-sharer` grants.
+- Added current-upstream CLI parser coverage for
+  `completion fish --no-descriptions -- bad`, pinning the exact Cobra stderr
+  against `171fd7a3`.
+- Added a TLS-ALPN public-CA-shaped `serve` runtime test with DERP map/source
+  settings that forces a metrics listener bind collision before ACME issuance
+  and asserts no Let's Encrypt cache entry is written.
+- Added native DERP duplicate-reconnect coverage: after duplicate health is
+  cleared when one same-key session disconnects, a later same-key reconnect
+  reissues duplicate health to both live sessions.
+- Added map-stream lifecycle/route batching coverage where a peer online event
+  and route approval before the batch tick emit one incremental policy-style
+  delta with peer online patch, route-bearing peer change, DNS config, and no
+  extra observer frame.

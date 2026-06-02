@@ -57,8 +57,8 @@ use headscale_core::derp::{EmbeddedDerpRuntime, native::NativeDerpRelay};
 
 use crate::acme_issuer::{
     AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate,
-    ensure_tls_alpn_certificate, reload_acme_tls_alpn_material, spawn_http01_renewal_task,
-    spawn_tls_alpn_renewal_task,
+    ensure_tls_alpn_certificate, reload_acme_tls_alpn_material, reload_acme_tls_material,
+    spawn_http01_renewal_task, spawn_tls_alpn_renewal_task,
 };
 use crate::config::{
     AdminCliConfig, LoggingConfig, PolicyConfig, TuningConfig, UpstreamDatabaseConfig,
@@ -410,26 +410,6 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     .await?;
     let acme_tls_alpn_issuer_config =
         acme_tls_alpn_issuer_config(acme_runtime.as_ref(), cfg.tls.acme_email.clone());
-    if let Some(runtime) = acme_http01_runtime.as_ref() {
-        let outcome = ensure_http01_certificate(&runtime.issuer_config, &runtime.store).await?;
-        if outcome.issued {
-            tracing::info!(
-                path = %outcome.cache_path.display(),
-                hostname = %runtime.issuer_config.hostname,
-                "ACME HTTP-01 certificate issued and cached"
-            );
-        } else {
-            tracing::info!(
-                path = %outcome.cache_path.display(),
-                hostname = %runtime.issuer_config.hostname,
-                "ACME HTTP-01 cached certificate reused"
-            );
-        }
-        tracing::info!(
-            hostname = %runtime.issuer_config.hostname,
-            "ACME HTTP-01 live renewal and TLS reload will be enabled after listeners start"
-        );
-    }
     let tls_source = tls_material_source(&cfg, &sans)?;
     let (acme_http01, acme_http01_host, acme_http01_addr) =
         if let Some(runtime) = acme_http01_runtime.as_ref() {
@@ -482,17 +462,30 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
         .await
         .context("start Tailscale wire listeners")?;
-    let acme_http01_renewal = acme_http01_runtime.as_ref().and_then(|runtime| {
-        let public_tls = handle.tls_reloader.clone()?;
-        Some(spawn_http01_renewal_task(
-            runtime.issuer_config.clone(),
-            runtime.store.clone(),
-            AcmeTlsReloaders {
-                public_tls,
-                remote_grpc_tls: remote_grpc_tls_reloader.clone(),
-            },
-        ))
-    });
+    let acme_http01_renewal = match start_acme_http01_after_public_listener(
+        acme_http01_runtime.as_ref(),
+        &handle,
+        remote_grpc_tls_reloader.clone(),
+    )
+    .await
+    {
+        Ok(renewal) => renewal,
+        Err(err) => {
+            abort_serve_handle(&handle);
+            node_expiry_waker.abort();
+            if let Some(handle) = &route_health_probe {
+                handle.abort();
+            }
+            map_change_batcher.abort();
+            offline_connection_cleanup.abort();
+            if let Some(handle) = &derp_auto_update {
+                handle.abort();
+            }
+            drop(nodestore_write_batcher);
+            drop(embedded_derp_runtime);
+            return Err(err);
+        }
+    };
     let acme_tls_alpn_renewal = match start_acme_tls_alpn_after_public_listener(
         acme_tls_alpn_issuer_config,
         &handle,
@@ -1441,10 +1434,12 @@ fn tls_material_source(cfg: &RunServerConfig, sans: &SanConfig) -> Result<TlsMat
             .acme_runtime_plan(public_listeners)?
             .expect("letsencrypt_enabled produced an ACME runtime plan");
         return match plan.challenge_listener {
-            AcmeChallengeListener::Http01 { .. } => Ok(TlsMaterialSource::AcmeAutocertCache {
-                cache_dir: plan.cache_dir,
-                hostname: plan.hostname,
-            }),
+            AcmeChallengeListener::Http01 { .. } => {
+                Ok(TlsMaterialSource::AcmeAutocertCacheWithHttp01Bootstrap {
+                    cache_dir: plan.cache_dir,
+                    hostname: plan.hostname,
+                })
+            }
             AcmeChallengeListener::TlsAlpn01 { .. } => {
                 Ok(TlsMaterialSource::AcmeAutocertCacheWithTlsAlpn {
                     cache_dir: plan.cache_dir,
@@ -1573,6 +1568,48 @@ fn acme_tls_alpn_issuer_config(
         }),
         _ => None,
     }
+}
+
+async fn start_acme_http01_after_public_listener(
+    runtime: Option<&AcmeHttp01Runtime>,
+    handle: &serve::ServeHandle,
+    remote_grpc_tls_reloader: Option<ReloadableServerConfig>,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let Some(runtime) = runtime else {
+        return Ok(None);
+    };
+    let public_tls = handle
+        .tls_reloader
+        .clone()
+        .context("ACME HTTP-01 requires a public TLS reloader")?;
+    let reloaders = AcmeTlsReloaders {
+        public_tls,
+        remote_grpc_tls: remote_grpc_tls_reloader,
+    };
+    let outcome = ensure_http01_certificate(&runtime.issuer_config, &runtime.store).await?;
+    if outcome.issued {
+        reload_acme_tls_material(&runtime.issuer_config, &reloaders)?;
+        tracing::info!(
+            path = %outcome.cache_path.display(),
+            hostname = %runtime.issuer_config.hostname,
+            "ACME HTTP-01 certificate issued, cached, and loaded"
+        );
+    } else {
+        tracing::info!(
+            path = %outcome.cache_path.display(),
+            hostname = %runtime.issuer_config.hostname,
+            "ACME HTTP-01 cached certificate reused"
+        );
+    }
+    tracing::info!(
+        hostname = %runtime.issuer_config.hostname,
+        "ACME HTTP-01 live renewal and TLS reload enabled"
+    );
+    Ok(Some(spawn_http01_renewal_task(
+        runtime.issuer_config.clone(),
+        runtime.store.clone(),
+        reloaders,
+    )))
 }
 
 async fn start_acme_tls_alpn_after_public_listener(
@@ -4686,6 +4723,7 @@ database:
             }
             TlsMaterialSource::SelfSigned { .. }
             | TlsMaterialSource::AcmeAutocertCache { .. }
+            | TlsMaterialSource::AcmeAutocertCacheWithHttp01Bootstrap { .. }
             | TlsMaterialSource::AcmeAutocertCacheWithTlsAlpn { .. } => {
                 panic!("expected manual TLS source")
             }
@@ -4929,14 +4967,14 @@ database:
         let source = tls_material_source(&cfg, &sans).unwrap();
 
         match source {
-            TlsMaterialSource::AcmeAutocertCache {
+            TlsMaterialSource::AcmeAutocertCacheWithHttp01Bootstrap {
                 cache_dir,
                 hostname,
             } => {
                 assert_eq!(cache_dir, dir.path().join("acme-cache"));
                 assert_eq!(hostname, "headscale.example");
             }
-            other => panic!("expected ACME autocert cache source, got {other:?}"),
+            other => panic!("expected ACME HTTP-01 bootstrap cache source, got {other:?}"),
         }
     }
 

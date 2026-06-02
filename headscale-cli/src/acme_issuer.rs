@@ -341,7 +341,7 @@ pub(crate) async fn renew_tls_alpn_certificate_once(
     })
 }
 
-fn reload_acme_tls_material(
+pub(crate) fn reload_acme_tls_material(
     config: &AcmeHttp01IssuerConfig,
     reloaders: &AcmeTlsReloaders,
 ) -> Result<tls::TlsMaterial> {

@@ -2327,9 +2327,10 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   key, and asserts `/metrics` plus `/debug/config` are available on
   `metrics_listen_addr` while the public `listen_addr` fallback does not expose
   those diagnostic payloads.
-- Remaining adjacent gaps are broader public-CA ACME failure-mode snapshots and
-  config/map-stream churn; this slice only closes the default SQLite
-  process-level listener-separation proof.
+- At the time, adjacent gaps included public-CA-shaped ACME failure-mode
+  snapshots and config/map-stream churn; this slice only closed the default
+  SQLite process-level listener-separation proof. Later no-network ACME
+  coverage is recorded below.
 
 ## 2026-06-02 ACME HTTP-01 bind failure snapshot
 
@@ -2597,3 +2598,22 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   default/Postgres mirrors. The `p1-route-via-health-edge-coverage` row remains
   open because broader route-via/route-health edge matrices remain before full
   route parity closure.
+
+## 2026-06-02 ACME public-CA no-network drift closure
+
+- HTTP-01 ACME startup now bootstraps public/remote TLS from in-memory
+  self-signed material when the Go/autocert cache is missing, binds configured
+  listeners before online issuance, then reloads public HTTPS and remote gRPC
+  TLS after issuance writes the cache.
+- The raw public HTTPS listener bind now happens synchronously in `serve`, so
+  HTTP-01 and TLS-ALPN fail on deterministic HTTPS bind collisions before
+  either issuer can contact the configured public CA.
+- `headscale-cli/tests/acme_https_runtime_breadth.rs` now covers
+  public-CA-shaped no-network startup failures for HTTP-01 metrics,
+  remote-gRPC, and public-HTTPS collisions plus TLS-ALPN public-HTTPS collision,
+  while preserving the existing TLS-ALPN metrics/HTTP/remote-gRPC/ignored
+  HTTP-01-listen cases. These tests assert no ACME cache or account entries are
+  written.
+- Removed `p1-config-tls-acme-public-ca-drift` from the open backlog. Actual
+  live public-CA smoke coverage remains an externally-networked release concern,
+  not an open deterministic parity gate.

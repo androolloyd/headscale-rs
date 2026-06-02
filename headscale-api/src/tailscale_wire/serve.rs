@@ -277,7 +277,17 @@ pub async fn serve(
         None
     };
 
-    let tls_material = if cfg.https_addr.is_some() {
+    let https_listener = if let Some(https_addr) = cfg.https_addr {
+        let listener = tokio::net::TcpListener::bind(https_addr)
+            .await
+            .map_err(|e| WireError::Internal(format!("bind {https_addr}: {e}")))?;
+        let bound_addr = listener.local_addr().map_err(WireError::Io)?;
+        Some((listener, bound_addr))
+    } else {
+        None
+    };
+
+    let tls_material = if https_listener.is_some() {
         Some(cfg.tls_source.load()?)
     } else {
         None
@@ -343,7 +353,7 @@ pub async fn serve(
     // hands the unbuffered `TlsStream` straight to
     // `noise::drive_ts2021` for the upgrade path; everything else
     // still flows through the same axum router via hyper http1.
-    let (https, tls, tls_reloader) = if let Some(https_addr) = cfg.https_addr {
+    let (https, tls, tls_reloader) = if let Some((https_listener, https_addr)) = https_listener {
         let material = tls_material.expect("validated TLS material");
         tracing::info!(
             target = "tailscale_wire::serve",
@@ -356,7 +366,14 @@ pub async fn serve(
         let wire_state = state.clone();
         let reloader = server_config.clone();
         let handle = tokio::spawn(async move {
-            raw_tls::serve_raw_tls(https_addr, server_config, https_app, wire_state).await
+            raw_tls::serve_bound_raw_tls(
+                https_listener,
+                https_addr,
+                server_config,
+                https_app,
+                wire_state,
+            )
+            .await
         });
         (Some(handle), Some(material), Some(reloader))
     } else {

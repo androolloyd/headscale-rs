@@ -115,6 +115,18 @@ pub async fn serve_raw_tls(
     wire_state: WireState,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    serve_bound_raw_tls(listener, bound_addr, tls, router, wire_state).await
+}
+
+/// Serve raw rustls connections from an already-bound TCP listener.
+pub async fn serve_bound_raw_tls(
+    listener: TcpListener,
+    addr: SocketAddr,
+    tls: ReloadableServerConfig,
+    router: Router,
+    wire_state: WireState,
+) -> io::Result<()> {
     tracing::info!(
         target = "tailscale_wire::raw_tls",
         %addr,

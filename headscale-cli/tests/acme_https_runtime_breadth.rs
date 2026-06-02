@@ -104,6 +104,20 @@ fn yaml_double_quoted(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn assert_acme_cache_unwritten(cache_dir: &Path, hostname: &str) {
+    assert!(
+        !cache_dir.join(hostname).exists(),
+        "ACME certificate cache should not be written before startup bind failure"
+    );
+    let entry_count = fs::read_dir(cache_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(
+        entry_count, 0,
+        "ACME cache directory should stay empty before startup bind failure"
+    );
+}
+
 #[test]
 fn serve_tls_alpn_public_acme_derp_runtime_stops_before_public_ca_on_metrics_bind_collision() {
     let cwd = tempfile::tempdir().unwrap();
@@ -218,10 +232,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         )),
         "stderr: {normalized_stderr}"
     );
-    assert!(
-        !cache_dir.join("headscale.example").exists(),
-        "ACME certificate cache should not be written before metrics bind failure"
-    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
 }
 
 #[test]
@@ -298,10 +309,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         )),
         "stderr: {normalized_stderr}"
     );
-    assert!(
-        !cache_dir.join("headscale.example").exists(),
-        "ACME certificate cache should not be written before HTTP bind failure"
-    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
 }
 
 #[test]
@@ -377,10 +385,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         )),
         "stderr: {normalized_stderr}"
     );
-    assert!(
-        !cache_dir.join("headscale.example").exists(),
-        "ACME certificate cache should not be written before remote gRPC bind failure"
-    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
 }
 
 #[test]
@@ -462,8 +467,312 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
             && !normalized_stderr.contains("not-a-socket"),
         "TLS-ALPN should ignore the HTTP-01 listener setting; stderr: {normalized_stderr}"
     );
-    assert!(
-        !cache_dir.join("headscale.example").exists(),
-        "ACME certificate cache should not be written before remote gRPC bind failure"
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
+}
+
+#[test]
+fn serve_tls_alpn_public_https_collision_stops_before_public_ca_cache_write() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let https_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let https_addr = https_listener.local_addr().unwrap();
+
+    let db_path = cwd.path().join("db.sqlite");
+    let noise_path = cwd.path().join("noise_private.key");
+    let state_dir = cwd.path().join("state");
+    let unix_socket = cwd.path().join("headscale.sock");
+    let cache_dir = cwd.path().join("acme-cache");
+
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "{https_addr}"
+metrics_listen_addr: ""
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  state_dir: {}
+  unix_socket: {}
+  grpc_listen_addr: "127.0.0.1:0"
+acme_url: "https://acme-v02.api.letsencrypt.org/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&state_dir.to_string_lossy()),
+            yaml_double_quoted(&unix_socket.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
     );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve TLS-ALPN HTTPS collision; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let normalized_stderr = normalize_os_error_number(&stderr(&output));
+    assert!(
+        normalized_stderr.contains(&format!(
+            "Error: start Tailscale wire listeners: internal: bind {https_addr}: Address already in use (os error <errno>)"
+        )),
+        "stderr: {normalized_stderr}"
+    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
+}
+
+#[test]
+fn serve_http01_public_acme_stops_before_public_ca_on_metrics_bind_collision() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let metrics_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let metrics_addr = metrics_listener.local_addr().unwrap();
+
+    let db_path = cwd.path().join("db.sqlite");
+    let noise_path = cwd.path().join("noise_private.key");
+    let state_dir = cwd.path().join("state");
+    let unix_socket = cwd.path().join("headscale.sock");
+    let cache_dir = cwd.path().join("acme-cache");
+
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:0"
+metrics_listen_addr: "{metrics_addr}"
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  state_dir: {}
+  unix_socket: {}
+  grpc_listen_addr: "127.0.0.1:0"
+acme_url: "https://acme-v02.api.letsencrypt.org/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_listen: "127.0.0.1:0"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&state_dir.to_string_lossy()),
+            yaml_double_quoted(&unix_socket.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve HTTP-01 metrics collision; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let normalized_stderr = normalize_os_error_number(&stderr(&output));
+    assert!(
+        normalized_stderr.contains(&format!(
+            "Error: start Tailscale wire listeners: internal: bind {metrics_addr}: Address already in use (os error <errno>)"
+        )),
+        "stderr: {normalized_stderr}"
+    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
+}
+
+#[test]
+fn serve_http01_remote_grpc_collision_bootstraps_without_public_ca_cache_write() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let grpc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let grpc_addr = grpc_listener.local_addr().unwrap();
+
+    let db_path = cwd.path().join("db.sqlite");
+    let noise_path = cwd.path().join("noise_private.key");
+    let state_dir = cwd.path().join("state");
+    let unix_socket = cwd.path().join("headscale.sock");
+    let cache_dir = cwd.path().join("acme-cache");
+
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:0"
+metrics_listen_addr: ""
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  state_dir: {}
+  unix_socket: {}
+  grpc_listen_addr: "{grpc_addr}"
+acme_url: "https://acme-v02.api.letsencrypt.org/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_listen: "127.0.0.1:0"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&state_dir.to_string_lossy()),
+            yaml_double_quoted(&unix_socket.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve HTTP-01 remote gRPC collision; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let normalized_stderr = normalize_os_error_number(&stderr(&output));
+    assert!(
+        normalized_stderr.contains(&format!(
+            "Error: bind remote gRPC TCP listener {grpc_addr}: Address already in use (os error <errno>)"
+        )),
+        "stderr: {normalized_stderr}"
+    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
+}
+
+#[test]
+fn serve_http01_public_https_collision_stops_before_public_ca_cache_write() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let https_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let https_addr = https_listener.local_addr().unwrap();
+
+    let db_path = cwd.path().join("db.sqlite");
+    let noise_path = cwd.path().join("noise_private.key");
+    let state_dir = cwd.path().join("state");
+    let unix_socket = cwd.path().join("headscale.sock");
+    let cache_dir = cwd.path().join("acme-cache");
+
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            r#"
+server_url: "https://headscale.example"
+listen_addr: "{https_addr}"
+metrics_listen_addr: ""
+noise:
+  private_key_path: {}
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: {}
+policy:
+  mode: database
+server:
+  state_dir: {}
+  unix_socket: {}
+  grpc_listen_addr: "127.0.0.1:0"
+acme_url: "https://acme-v02.api.letsencrypt.org/directory"
+acme_email: "ops@example.com"
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_cache_dir: {}
+tls_letsencrypt_listen: "127.0.0.1:0"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+            yaml_double_quoted(&noise_path.to_string_lossy()),
+            yaml_double_quoted(&db_path.to_string_lossy()),
+            yaml_double_quoted(&state_dir.to_string_lossy()),
+            yaml_double_quoted(&unix_socket.to_string_lossy()),
+            yaml_double_quoted(&cache_dir.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in_with_env(
+        &["serve"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_LOG", "error")],
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unexpected status for serve HTTP-01 HTTPS collision; stdout: {}; stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+
+    let normalized_stderr = normalize_os_error_number(&stderr(&output));
+    assert!(
+        normalized_stderr.contains(&format!(
+            "Error: start Tailscale wire listeners: internal: bind {https_addr}: Address already in use (os error <errno>)"
+        )),
+        "stderr: {normalized_stderr}"
+    );
+    assert_acme_cache_unwritten(&cache_dir, "headscale.example");
 }

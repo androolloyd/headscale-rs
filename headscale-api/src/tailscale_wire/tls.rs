@@ -209,6 +209,13 @@ pub enum TlsMaterialSource {
         cache_dir: PathBuf,
         hostname: String,
     },
+    /// ACME/autocert cache mode for HTTP-01. When the cache is missing, use an
+    /// in-memory self-signed certificate so all listeners can bind before the
+    /// issuer makes any public-CA network request.
+    AcmeAutocertCacheWithHttp01Bootstrap {
+        cache_dir: PathBuf,
+        hostname: String,
+    },
     /// ACME/autocert cache mode with a dynamic TLS-ALPN-01 challenge
     /// certificate resolver on the public TLS config.
     AcmeAutocertCacheWithTlsAlpn {
@@ -229,6 +236,10 @@ impl TlsMaterialSource {
                 cache_dir,
                 hostname,
             } => load_from_autocert_cache(cache_dir, hostname),
+            Self::AcmeAutocertCacheWithHttp01Bootstrap {
+                cache_dir,
+                hostname,
+            } => load_from_autocert_cache_or_bootstrap(cache_dir, hostname),
             Self::AcmeAutocertCacheWithTlsAlpn {
                 cache_dir,
                 hostname,
@@ -347,6 +358,27 @@ pub fn load_from_autocert_cache(
     load_from_autocert_cache_inner(cache_dir, hostname, false)
 }
 
+/// Load an ACME cache entry, or bootstrap with in-memory self-signed material
+/// while HTTP-01 startup issuance produces the real cache entry.
+pub fn load_from_autocert_cache_or_bootstrap(
+    cache_dir: impl AsRef<Path>,
+    hostname: &str,
+) -> Result<TlsMaterial, WireError> {
+    let cache_dir = cache_dir.as_ref().to_path_buf();
+    match load_from_autocert_cache(&cache_dir, hostname) {
+        Ok(material) => Ok(material),
+        Err(err) => {
+            tracing::info!(
+                hostname = %hostname,
+                cache_dir = %cache_dir.display(),
+                error = %err,
+                "ACME HTTP-01 cache entry missing or invalid; bootstrapping listener with temporary self-signed material"
+            );
+            bootstrap_acme_material(&cache_dir, hostname, false)
+        }
+    }
+}
+
 /// Load a Go `autocert.DirCache` entry and enable TLS-ALPN-01 challenge
 /// certificate resolution on the returned rustls config.
 pub fn load_from_autocert_cache_with_tls_alpn(
@@ -373,7 +405,7 @@ pub fn load_from_autocert_cache_with_tls_alpn_or_bootstrap(
                 error = %err,
                 "ACME TLS-ALPN cache entry missing or invalid; bootstrapping listener with temporary self-signed material"
             );
-            bootstrap_tls_alpn_material(&cache_dir, hostname)
+            bootstrap_acme_material(&cache_dir, hostname, true)
         }
     }
 }
@@ -416,20 +448,29 @@ fn load_from_autocert_cache_inner(
     })
 }
 
-fn bootstrap_tls_alpn_material(cache_dir: &Path, hostname: &str) -> Result<TlsMaterial, WireError> {
+fn bootstrap_acme_material(
+    cache_dir: &Path,
+    hostname: &str,
+    enable_tls_alpn: bool,
+) -> Result<TlsMaterial, WireError> {
     let cache_path = autocert_cache_path(cache_dir, hostname);
     let sans = SanConfig::with_hostname(hostname);
     let (cert_pem, key_pem) = mint_self_signed(&sans)?;
     let expires_at = leaf_certificate_not_after(&cert_pem)?;
-    let (server_config, resolver) =
-        build_server_config_with_acme_tls_alpn_resolver(&cert_pem, &key_pem)?;
+    let (server_config, resolver) = if enable_tls_alpn {
+        let (server_config, resolver) =
+            build_server_config_with_acme_tls_alpn_resolver(&cert_pem, &key_pem)?;
+        (server_config, Some(resolver))
+    } else {
+        (build_server_config(&cert_pem, &key_pem)?, None)
+    };
     Ok(TlsMaterial {
         cert_pem,
         key_pem,
         cert_path: cache_path.clone(),
         key_path: cache_path,
         server_config: Arc::new(server_config),
-        acme_tls_alpn_resolver: Some(resolver),
+        acme_tls_alpn_resolver: resolver,
         expires_at,
     })
 }

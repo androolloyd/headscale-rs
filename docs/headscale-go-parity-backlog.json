@@ -9,9 +9,9 @@
   },
   "summary": {
     "open_p0": 2,
-    "open_p1": 4,
+    "open_p1": 3,
     "open_p2": 2,
-    "total_open": 8
+    "total_open": 7
   },
   "open_items": [
     {
@@ -86,23 +86,6 @@
         "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go"
       ],
       "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/routes/SSH compatibility fixtures in the differential harness."
-    },
-    {
-      "id": "p1-config-tls-acme-public-ca-drift",
-      "priority": "P1",
-      "lane": "Runtime DNS, DERP, TLS, and ACME config",
-      "status": "open",
-      "type": "coverage/evidence",
-      "owner_scope": [
-        "headscale-cli/src/server.rs",
-        "headscale-cli/src/config.rs",
-        "headscale-api/src/tailscale_wire/acme*"
-      ],
-      "upstream_evidence": [
-        "hscontrol/types/config.go",
-        "autocert/ACME behavior"
-      ],
-      "exit_criteria": "Broaden public-CA ACME drift checks beyond controlled local-CA HTTP-01/TLS-ALPN process harnesses."
     },
     {
       "id": "p1-production-backfill-restart-edges",

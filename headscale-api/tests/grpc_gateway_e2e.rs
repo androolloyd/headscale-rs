@@ -17,7 +17,9 @@ use headscale_api::admin::{
 use headscale_api::grpc::upstream::{DatabaseHealthCheck, HeadscaleAdminService};
 use headscale_api::grpc_gateway;
 use headscale_api::policy::PolicyStore;
-use headscale_api::tailscale_wire::MachineRegistry;
+use headscale_api::tailscale_wire::{
+    AuthWaitOutcome, MachineRegistry, RegistrationCache, SshCheckBinding,
+};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -63,6 +65,46 @@ async fn fixture_with_wire_registry()
     .with_database_pool(db.pool().clone())
     .with_policy_pool(db.pool().clone());
     (grpc_gateway::router(service), created.api_key, registry, db)
+}
+
+async fn fixture_with_registration_cache() -> (
+    Router,
+    String,
+    Arc<RegistrationCache>,
+    headscale_db::Database,
+) {
+    let db = headscale_db::Database::in_memory()
+        .await
+        .expect("open in-memory db");
+    db.migrate().await.expect("migrate");
+
+    let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+    let api_keys = Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone()));
+    let created = api_keys
+        .mint(ApiKeyMintRequest { expiration: None })
+        .await
+        .expect("mint api key");
+    let preauth = Arc::new(
+        PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users.clone()),
+    );
+    let registration_cache = Arc::new(RegistrationCache::new());
+    let machines = Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new())));
+    let service = HeadscaleAdminService::with_user_admin(
+        users,
+        api_keys,
+        preauth,
+        PolicyStore::new(),
+        machines,
+    )
+    .with_database_pool(db.pool().clone())
+    .with_policy_pool(db.pool().clone())
+    .with_registration_cache(registration_cache.clone());
+    (
+        grpc_gateway::router(service),
+        created.api_key,
+        registration_cache,
+        db,
+    )
 }
 
 async fn fixture_with_db() -> (Router, String, headscale_db::Database) {
@@ -2682,6 +2724,79 @@ async fn grpc_gateway_auth_paths_use_upstream_body_shapes() {
         .await
         .unwrap();
     assert_status_json(resp, 400, 3, "invalid auth_id", "auth approve bare id").await;
+}
+
+#[tokio::test]
+async fn grpc_gateway_auth_terminal_reuse_preserves_first_outcome() {
+    let (app, token, registration_cache, _db) = fixture_with_registration_cache().await;
+    let approve_key = "j".repeat(24);
+    let reject_key = "k".repeat(24);
+    let binding = SshCheckBinding {
+        src_node_id: 1001,
+        dst_node_id: 1002,
+        local_user: "root".into(),
+    };
+
+    registration_cache.insert_ssh_check(approve_key.clone(), binding.clone());
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/approve",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{approve_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/reject",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{approve_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+    assert_eq!(
+        registration_cache.wait_for_auth(&approve_key).await,
+        AuthWaitOutcome::Accepted
+    );
+
+    registration_cache.insert_ssh_check(reject_key.clone(), binding);
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/reject",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{reject_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+
+    let resp = app
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/auth/approve",
+            Some(&token),
+            Body::from(format!(r#"{{"authId":"hskey-authreq-{reject_key}"}}"#)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(body_json(resp).await, serde_json::json!({}));
+    assert_eq!(
+        registration_cache.wait_for_auth(&reject_key).await,
+        AuthWaitOutcome::Rejected("auth request rejected".into())
+    );
 }
 
 #[tokio::test]

@@ -999,6 +999,7 @@ pub mod upstream {
             for tag in &body.tags {
                 validate_tag(tag)?;
             }
+            let node = self.machine_by_id(body.node_id).await?;
             let invalid_tags = body
                 .tags
                 .iter()
@@ -1011,7 +1012,6 @@ pub mod upstream {
                     invalid_tags.join(" ")
                 )));
             }
-            let node = self.machine_by_id(body.node_id).await?;
             self.machines
                 .set_tags(&node.id, body.tags)
                 .await
@@ -4642,6 +4642,16 @@ mod upstream_tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(err.message(), "tag must start with the string 'tag:'");
+
+        let err = service
+            .set_tags(Request::new(SetTagsRequest {
+                node_id: 99_999,
+                tags: vec!["tag:server".into()],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "node not found");
 
         let err = service
             .set_tags(Request::new(SetTagsRequest {

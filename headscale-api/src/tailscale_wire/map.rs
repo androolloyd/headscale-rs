@@ -7088,6 +7088,156 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_policy_reload_removes_only_newly_hidden_peer() {
+        let (state, _dir) = fixture();
+        let initial_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["bob@:*", "carol@:*"]}
+            ]
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(initial_policy).unwrap(),
+            initial_policy.into(),
+        );
+
+        let alice = "a5".repeat(32);
+        let bob = "b5".repeat(32);
+        let carol = "c5".repeat(32);
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            bob.clone(),
+            policy_record(&bob, "bob", 11, "bob", Vec::new()),
+        );
+        state.machines.upsert(
+            carol.clone(),
+            policy_record(&carol, "carol", 12, "carol", Vec::new()),
+        );
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut alice_body = open_zstd_stream(app, &alice).await;
+        let first_mr = next_zstd_map_response(&mut alice_body).await;
+        let initial_peer_ids = first_mr
+            .peers
+            .iter()
+            .map(|peer| peer.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            initial_peer_ids,
+            BTreeSet::from([stable_id_from_key(&bob), stable_id_from_key(&carol)])
+        );
+        assert!(
+            first_mr
+                .user_profiles
+                .iter()
+                .any(|profile| profile.login_name == "carol"),
+            "initial full map should include the profile for the visible peer that will be hidden"
+        );
+        let _ = state.machines.drain_pending_map_changes();
+        let alice_id = stable_id_from_key(&alice);
+        assert_eq!(
+            state.machines.active_connections().get(&alice_id),
+            Some(&1),
+            "Alice stream should be active before policy reload"
+        );
+        let generated_before = state.machines.mapresponse_generated_metrics();
+        let full_before = generated_before.get("full").copied().unwrap_or_default();
+        let policy_before = generated_before.get("policy").copied().unwrap_or_default();
+
+        let restrictive_policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["bob@:*"]}
+            ]
+        }"#;
+        state.policy.set_quiet(
+            crate::policy::parse_hujson_policy(restrictive_policy).unwrap(),
+            restrictive_policy.into(),
+        );
+        let snapshot = state.machines.snapshot();
+        let served_routes = served_routes_for_snapshot(&snapshot);
+        let allowed_after_reload =
+            allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &alice, &served_routes)
+                .expect("restrictive policy should build a peer map");
+        assert_eq!(
+            allowed_after_reload,
+            BTreeSet::from([stable_id_from_key(&bob)]),
+            "policy reload should narrow Alice's visible peers before stream batching"
+        );
+
+        let mut pending_frame = Box::pin(http_body_util::BodyExt::frame(&mut alice_body));
+        assert!(
+            pending_frame.as_mut().now_or_never().is_none(),
+            "observer stream should be parked before policy reload"
+        );
+
+        state.policy.notify_change();
+        tokio::task::yield_now().await;
+        let immediate = pending_frame.as_mut().now_or_never();
+        assert!(
+            immediate.is_none(),
+            "batched policy reload should wait for the map-batch tick"
+        );
+
+        for _ in 0..10 {
+            if state.machines.pending_map_changes().contains_key(&alice_id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let pending = state.machines.pending_map_changes();
+        let alice_changes = pending
+            .get(&alice_id)
+            .expect("parked observer stream should enqueue a policy-change batch");
+        assert_eq!(alice_changes.len(), 1);
+        assert_eq!(alice_changes[0].reason_labels(), vec!["policy change"]);
+        publish_test_map_batch().await;
+
+        let frame = pending_frame.await.unwrap().unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let delta: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(
+            delta.node.is_none(),
+            "policy visibility narrowing should be a peer delta, not a full self map"
+        );
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert_eq!(delta.peers_removed, vec![stable_id_from_key(&carol)]);
+        assert!(
+            delta.dns_config.is_some(),
+            "policy reload deltas should carry policy-derived DNS updates"
+        );
+        let profile_names = delta
+            .user_profiles
+            .iter()
+            .map(|profile| profile.login_name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(profile_names, BTreeSet::from(["alice", "bob"]));
+
+        let generated_after = state.machines.mapresponse_generated_metrics();
+        assert_eq!(
+            generated_after.get("full").copied().unwrap_or_default(),
+            full_before,
+            "batched policy reload must not generate a stale full map"
+        );
+        assert_eq!(
+            generated_after.get("policy").copied().unwrap_or_default(),
+            policy_before + 1,
+            "batched policy reload should generate one policy delta"
+        );
+        tokio::task::yield_now().await;
+        let extra = http_body_util::BodyExt::frame(&mut alice_body).now_or_never();
+        assert!(
+            extra.is_none(),
+            "policy visibility narrowing should emit only one observer delta"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_policy_reload_auto_approval_waits_for_batch_tick() {
         let (state, _dir) = fixture();
         let initial_policy = r#"{

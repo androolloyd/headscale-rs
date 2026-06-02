@@ -5490,6 +5490,47 @@ mod tests {
         assert!(metrics.contains("headscale_mapresponse_ended_total{reason=\"done\"} 1\n"));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_same_key_auth_completion_emits_peer_delta() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "observer", 11);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(first_mr.peers[0].name, "peer-a");
+
+        let history_len = state.machines.map_change_history().len();
+        let mut updated = state.machines.get(&a).expect("peer-a exists");
+        updated.hostname = "peer-a-reauth".into();
+        updated.host_info.hostname = updated.hostname.clone();
+        updated.last_seen = chrono::Utc::now();
+        state
+            .machines
+            .upsert_auth_completion(updated.node_key_hex.clone(), updated);
+
+        let changes = state.machines.map_change_history();
+        assert_eq!(changes.len(), history_len + 1);
+        assert_eq!(
+            changes[history_len].reasons,
+            vec![MapChangeReason::NodeAdded]
+        );
+
+        let mr = next_zstd_map_response(&mut body).await;
+        assert!(mr.peers.is_empty());
+        assert_eq!(mr.peers_changed.len(), 1);
+        assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&a));
+        assert_eq!(mr.peers_changed[0].name, "peer-a-reauth");
+        assert!(mr.peers_removed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.dns_config.is_none());
+    }
+
     #[tokio::test]
     async fn stream_true_records_cancelled_end_reason_when_self_node_deleted() {
         let (state, _dir) = fixture();

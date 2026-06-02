@@ -1474,10 +1474,7 @@ fn generate_group_help_tail(subcommand: &str, tail: &[&str]) -> bool {
 
 fn private_key_help_tail(tail: &[&str]) -> bool {
     !tail.is_empty()
-        && tail
-            .iter()
-            .take_while(|arg| **arg != "--")
-            .any(|arg| matches!(*arg, "-h" | "--help"))
+        && tail_has_unconsumed_help(tail, UtilityFlagScope::GenerateGroup)
         && first_unknown_flag(tail, UtilityFlagScope::GenerateGroup).is_none()
 }
 
@@ -1491,6 +1488,7 @@ fn tail_has_unconsumed_help(tail: &[&str], scope: UtilityFlagScope) -> bool {
     let mut i = 0;
     while i < tail.len() {
         match (scope, tail[i]) {
+            (_, "--") => return false,
             (_, "-h" | "--help") => return true,
             (
                 UtilityFlagScope::Version
@@ -3329,6 +3327,10 @@ mod tests {
         assert_eq!(
             upstream_exact_help(&["generate", "private-key", "--force", "--help"]),
             Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["generate", "private-key", "--output", "--help"]),
+            None
         );
         assert_eq!(
             upstream_exact_help(&["generate", "bad", "--help"]),

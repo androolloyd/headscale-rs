@@ -1281,7 +1281,9 @@ fn generate_private_key_ignores_extra_positionals_like_upstream_cobra() {
         &["generate", "private-key", "extra"][..],
         &["generate", "private-key", "--", "--bad"][..],
         &["generate", "private-key", "--", "--help"][..],
+        &["generate", "private-key", "--output", "--help"][..],
         &["gen", "private-key", "extra", "--force"][..],
+        &["gen", "private-key", "-o", "--help"][..],
         &["gen", "private-key", "--", "--bad"][..],
     ] {
         let output = headscale_in(args, cwd.path(), home.path());

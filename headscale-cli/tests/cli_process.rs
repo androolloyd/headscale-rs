@@ -7595,12 +7595,36 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
         headscale_with_config(&no_key_config, &["users", "list", "--output", "json"]);
     assert_process_stderr_snapshot(
         &no_key_config_output,
-        6,
+        1,
         include_str!("snapshots/cliwithconfigauthenticationbypass_missing_api_key.stderr"),
-        "CLI config missing API key",
+        "CLI config missing API key JSON",
     );
     assert!(!stderr(&no_key_config_output).contains("grpcuser1"));
     assert!(!stderr(&no_key_config_output).contains("grpcuser2"));
+
+    let no_key_config_json_line =
+        headscale_with_config(&no_key_config, &["users", "list", "--output", "json-line"]);
+    assert_process_stderr_snapshot(
+        &no_key_config_json_line,
+        1,
+        include_str!(
+            "snapshots/cliwithconfigauthenticationbypass_missing_api_key_json_line.stderr"
+        ),
+        "CLI config missing API key JSON-line",
+    );
+    assert!(!stderr(&no_key_config_json_line).contains("grpcuser1"));
+    assert!(!stderr(&no_key_config_json_line).contains("grpcuser2"));
+
+    let no_key_config_yaml =
+        headscale_with_config(&no_key_config, &["users", "list", "--output", "yaml"]);
+    assert_process_stderr_snapshot(
+        &no_key_config_yaml,
+        1,
+        include_str!("snapshots/cliwithconfigauthenticationbypass_missing_api_key_yaml.stderr"),
+        "CLI config missing API key YAML",
+    );
+    assert!(!stderr(&no_key_config_yaml).contains("grpcuser1"));
+    assert!(!stderr(&no_key_config_yaml).contains("grpcuser2"));
 
     let invalid_config_dir = tempfile::tempdir().unwrap();
     let invalid_config =

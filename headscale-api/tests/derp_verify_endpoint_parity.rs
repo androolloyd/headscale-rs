@@ -92,3 +92,28 @@ async fn derpverifyendpoint() {
     let body = to_bytes(resp.into_body(), 4096).await.unwrap();
     assert_eq!(&body[..], b"{\"Allow\":true}\n");
 }
+
+#[tokio::test]
+async fn derpverifyendpointdeniesunknownnode() {
+    let (state, _dir) = wire_state();
+    let app = headscale_api::tailscale_wire::router(state);
+    let node_key = "32".repeat(32);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    "{{\"NodePublic\":\"nodekey:{node_key}\",\"Source\":\"203.0.113.11\"}}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+    assert_eq!(&body[..], b"{\"Allow\":false}\n");
+}

@@ -626,7 +626,10 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
     let cli_config = config.cli.as_ref();
 
     if option_is_empty(merged.address.as_ref()) {
-        merged.address = cli_config.and_then(|cli| non_empty_clone(cli.address.as_ref()));
+        if let Some(address) = cli_config.and_then(|cli| non_empty_clone(cli.address.as_ref())) {
+            merged.address = Some(address);
+            merged.wrap_grpc_connect_error = true;
+        }
     }
     if option_is_empty(merged.api_key.as_ref()) {
         merged.api_key = cli_config.and_then(|cli| non_empty_clone(cli.api_key.as_ref()));
@@ -4283,6 +4286,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {
@@ -4304,6 +4308,7 @@ database:
         );
         assert!(merged.insecure);
         assert_eq!(merged.timeout_secs, Some(3));
+        assert!(merged.wrap_grpc_connect_error);
         assert_eq!(
             merged.unix_socket.as_deref(),
             Some(PathBuf::from("/run/headscale/admin.sock").as_path())
@@ -4329,6 +4334,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: Some(11),
+            wrap_grpc_connect_error: false,
         };
         let config = CliConfig {
             cli: Some(config::AdminCliConfig {
@@ -4351,6 +4357,7 @@ database:
         );
         assert!(merged.insecure);
         assert_eq!(merged.timeout_secs, Some(11));
+        assert!(!merged.wrap_grpc_connect_error);
     }
 
     #[test]
@@ -4368,6 +4375,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         let config = CliConfig {
             server: Some(ServerConfig {

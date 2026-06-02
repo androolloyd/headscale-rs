@@ -185,6 +185,10 @@ pub struct ConnectArgs {
     /// `HEADSCALE_CLI_TIMEOUT`; this is not a Rust-only CLI flag.
     #[arg(skip)]
     pub timeout_secs: Option<u64>,
+    /// True when the gRPC endpoint was supplied by upstream `cli.address`
+    /// config, whose Cobra command wrappers prefix connection setup failures.
+    #[arg(skip)]
+    pub wrap_grpc_connect_error: bool,
 }
 
 impl ConnectArgs {
@@ -201,14 +205,19 @@ impl ConnectArgs {
     }
 
     pub async fn build_grpc_client(&self) -> Result<GrpcAdminClient, AdminError> {
-        GrpcAdminClient::connect(
+        let result = GrpcAdminClient::connect(
             self.address.as_deref(),
             self.api_key.as_deref(),
             self.unix_socket.as_deref(),
             self.insecure,
             self.timeout_secs.map(Duration::from_secs),
         )
-        .await
+        .await;
+        if self.wrap_grpc_connect_error {
+            result.map_err(|err| AdminError::Usage(format!("connecting to headscale: {err}")))
+        } else {
+            result
+        }
     }
 
     pub fn should_use_legacy_http_for_migrated_commands(&self) -> bool {
@@ -1214,6 +1223,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         let e = conn.build_client().unwrap_err();
         assert!(matches!(e, AdminError::Local(_)));
@@ -1232,6 +1242,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         assert!(conn.build_client().is_ok());
     }
@@ -1249,6 +1260,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
     }
@@ -1266,6 +1278,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            wrap_grpc_connect_error: false,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());
     }

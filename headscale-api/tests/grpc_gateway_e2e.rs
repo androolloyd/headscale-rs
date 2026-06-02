@@ -2984,6 +2984,11 @@ async fn grpc_gateway_auth_register_invalid_auth_ids_match_upstream_unknown() {
             r#"{"user":"alice","authId":"hskey-authreq-short"}"#,
             "auth ID has invalid length: expected 38, got 19",
         ),
+        (
+            "auth register prefixed long authId",
+            r#"{"user":"alice","authId":"hskey-authreq-abcdefghijklmnopqrstuvwxy"}"#,
+            "auth ID has invalid length: expected 38, got 39",
+        ),
     ] {
         let resp = app
             .clone()
@@ -3034,6 +3039,18 @@ async fn grpc_gateway_auth_approve_reject_malformed_auth_ids_are_exact() {
             uri: "/api/v1/auth/reject",
             body: r#"{"auth_id":"hskey-authreq-short"}"#,
             expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 19",
+        },
+        Case {
+            name: "auth approve prefixed long auth id",
+            uri: "/api/v1/auth/approve",
+            body: r#"{"authId":"hskey-authreq-abcdefghijklmnopqrstuvwxy"}"#,
+            expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 39",
+        },
+        Case {
+            name: "auth reject prefixed long auth id",
+            uri: "/api/v1/auth/reject",
+            body: r#"{"auth_id":"hskey-authreq-abcdefghijklmnopqrstuvwxy"}"#,
+            expected_message: "invalid auth_id: auth ID has invalid length: expected 38, got 39",
         },
     ] {
         let resp = app

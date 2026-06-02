@@ -2405,3 +2405,30 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   the production Postgres no-auth web/CLI registration flow while enabling
   MagicDNS with a non-default base domain, then assert the stock-client netmap
   carries that configured suffix for both headscale-rs and current headscale-go.
+
+## 2026-06-02 headscale-go auth-key relogin TLS harness
+
+- Fixed the shared headscale-go auth-key smoke harness so every auth-key
+  relogin variant defaults to HTTPS when `REAL_CLIENT_HEADSCALE_GO_TLS` is not
+  explicitly set. This covers the current-head different-user relogin row that
+  was previously still advertising an HTTP `server_url`; Tailscale v1.94.1 can
+  force the follow-up register request toward HTTPS/443 after Noise dialing and
+  fail before reaching the configured random port.
+
+## 2026-06-02 subagent parity edge adoption
+
+- Added gateway auth-ID parser coverage for overlong `hskey-authreq-` values
+  on `/api/v1/auth/register`, `/api/v1/auth/approve`, and
+  `/api/v1/auth/reject`, preserving the upstream split where register remains
+  an `Unknown`/HTTP 500 envelope while approve/reject are
+  `InvalidArgument`/HTTP 400 envelopes.
+- Added `/verify` DERP admission denial coverage for an unknown node key,
+  complementing the existing registered-node allow case with the upstream
+  `{"Allow":false}` response body.
+- Added map-stream batching coverage where an `endpoint/DERP update` patch is
+  queued before the same peer is deleted; the batch tick now proves only
+  `PeersRemoved` is emitted and stale `PeersChangedPatch` entries are
+  suppressed.
+- Matched config-backed remote gRPC CLI connection setup errors by prefixing
+  `cli.address`-derived missing API-key failures with
+  `connecting to headscale:` while preserving direct flag/env behavior.

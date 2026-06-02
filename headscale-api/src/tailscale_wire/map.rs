@@ -9430,6 +9430,90 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_batched_derp_patch_then_delete_emits_only_peers_removed() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let mut peer_a = MachineRecord::new_at(
+            chrono::Utc::now(),
+            a.clone(),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "u".into(),
+            "peer-a".into(),
+            Ipv4Addr::new(100, 64, 0, 10),
+            false,
+        );
+        peer_a.home_derp = 1;
+        state.machines.upsert(a.clone(), peer_a);
+        insert_peer(&state, &b, "peer-b", 11);
+        let _batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app.clone(), &b).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&a));
+        assert_eq!(first_mr.peers[0].home_derp, 1);
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let peer_id = stable_id_from_key(&a);
+        let update_req = serde_json::json!({
+            "Version": 113,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "NetInfo": {
+                    "PreferredDERP": 7
+                }
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let raw = to_bytes(update_resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(raw.is_empty());
+
+        assert!(state.machines.delete(&a));
+
+        let changes = state.machines.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 2, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_labels(), vec!["endpoint/DERP update"]);
+        assert_eq!(new_changes[0].change_type(), "patch");
+        assert_eq!(new_changes[0].content.peer_patches, vec![peer_id]);
+        assert_eq!(new_changes[1].reason_labels(), vec!["peers removed"]);
+        assert_eq!(new_changes[1].content.peers_removed, vec![peer_id]);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "queued patch/delete changes must wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(
+            delta.peers_changed_patch.is_empty(),
+            "stale patches for removed peers must be suppressed"
+        );
+        assert_eq!(delta.peers_removed, vec![peer_id]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_batched_derp_clear_uses_full_peer_delta_reason() {
         let (state, _dir) = fixture();
         let a = "ca".repeat(32);

@@ -1139,6 +1139,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_replays_shutdown_health_to_late_session() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ));
+        assert_eq!(
+            runtime.announce_server_shutdown().await,
+            NativeDerpLifecycleDelivery {
+                health: 0,
+                restarting: 0
+            }
+        );
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap()
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let server_info_frame = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        assert_eq!(
+            open_server_info(&client_key, &server_public, &server_info_frame).unwrap(),
+            ServerInfo::current()
+        );
+        assert_eq!(
+            read_next_frame(&mut client_reader, &mut decoder)
+                .await
+                .unwrap(),
+            Frame::Health(NATIVE_DERP_SHUTDOWN_HEALTH_PROBLEM.to_string())
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(server.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_reports_duplicate_connection_health_and_clear() {
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
         let runtime = Arc::new(NativeDerpRuntime::new(

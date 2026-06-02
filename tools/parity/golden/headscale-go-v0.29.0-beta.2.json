@@ -2735,6 +2735,40 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v2-compat-fixture-batch-4",
+    "filter": [
+
+    ],
+    "node_attrs": [
+      {
+        "name": "cidr-target-gets-randomize",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      },
+      {
+        "name": "server-gets-host-tag-deduped-attrs",
+        "attrs": [
+          "custom:host-alias-target",
+          "disable-captive-portal-detection"
+        ]
+      },
+      {
+        "name": "group-target-gets-nextdns-profile",
+        "attrs": [
+          "nextdns:ops-profile"
+        ]
+      },
+      {
+        "name": "unmatched-client-no-nodeattrs",
+        "attrs": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-current-compat-fixture-batch",
     "filter": [
       {

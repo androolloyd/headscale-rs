@@ -2814,3 +2814,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - This narrows the P0 production Postgres/drop-in evidence, but the backlog row
   remains open for the broader production process route, auth/API-session,
   config/registration, and map-stream churn cases.
+
+## 2026-06-02 policy compat fixture batch 4
+
+- Added `policy-v2-compat-fixture-batch-4` to the pinned Go/Rust differential
+  suite for upstream-backed nodeAttrs target shapes: raw CIDR-prefix targets,
+  host-alias targets, group targets, and duplicate capability deduplication.
+- Refreshed the v0.29.0-beta.2 golden to 98 scenarios. The P1
+  `p1-policy-v2-compat-fixtures` row remains open because this is another
+  representative fixture batch, not full coverage of the upstream
+  ACL/grants/nodeAttrs/routes/policyTest/sshTest corpus.

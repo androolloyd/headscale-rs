@@ -1164,6 +1164,13 @@ tagged nodes. Rust now accepts and canonicalizes numeric TCP `tests[].proto`
 like headscale-go. The pinned golden now covers 97 scenarios; the P1 row
 remains open because the full 864-capture upstream corpus is not exhausted.
 
+Recent coverage note (2026-06-02): `policy-v2-compat-fixture-batch-4`
+adds another upstream-backed nodeAttrs compatibility slice for CIDR-prefix
+targets, host-alias targets, group targets, and duplicate capability
+deduplication. The pinned golden now covers 98 scenarios; the P1 row remains
+open for broader ACL/grants/nodeAttrs/routes/policyTest/sshTest capture
+coverage.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

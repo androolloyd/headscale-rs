@@ -7580,6 +7580,170 @@ async fn serve_postgres_runtime_grpc_gateway_preauth_key_lifecycle_smoke() -> Bo
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_gateway_preauth_key_restart_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_preauth_restart").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret").to_string();
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let created_user = http
+            .post(format!("{server_url}/api/v1/user"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({ "name": "preauth-restart-user" }))
+            .send()
+            .await?;
+        assert_eq!(created_user.status(), reqwest::StatusCode::OK);
+        let created_user = created_user.json::<serde_json::Value>().await?;
+        let user_id = created_user["user"]["id"]
+            .as_str()
+            .expect("created user id")
+            .to_string();
+        assert_eq!(user_id, "1");
+
+        let created = http
+            .post(format!("{server_url}/api/v1/preauthkey"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({
+                "user": user_id,
+                "reusable": true,
+                "ephemeral": true,
+                "aclTags": ["tag:restart"]
+            }))
+            .send()
+            .await?;
+        assert_eq!(created.status(), reqwest::StatusCode::OK);
+        let created = created.json::<serde_json::Value>().await?;
+        let preauth = &created["preAuthKey"];
+        assert_eq!(preauth["id"].as_str(), Some("1"));
+        assert_eq!(
+            preauth["user"]["name"].as_str(),
+            Some("preauth-restart-user")
+        );
+        let preauth_secret = preauth["key"]
+            .as_str()
+            .expect("created preauth key")
+            .to_string();
+        assert!(
+            preauth_secret.starts_with("hskey-auth-"),
+            "created preauth key: {created}"
+        );
+        assert_eq!(preauth["reusable"].as_bool(), Some(true));
+        assert_eq!(preauth["ephemeral"].as_bool(), Some(true));
+        assert_eq!(preauth["used"].as_bool(), Some(false));
+        assert_eq!(preauth["aclTags"], serde_json::json!(["tag:restart"]));
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let listed_after_restart = http
+            .get(format!("{server_url}/api/v1/preauthkey"))
+            .bearer_auth(&api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed_after_restart.status(), reqwest::StatusCode::OK);
+        let listed_after_restart = listed_after_restart.json::<serde_json::Value>().await?;
+        let preauth_keys = listed_after_restart["preAuthKeys"]
+            .as_array()
+            .expect("preAuthKeys");
+        assert_eq!(
+            preauth_keys.len(),
+            1,
+            "listed preauth keys after restart: {listed_after_restart}"
+        );
+        let hydrated = &preauth_keys[0];
+        assert_eq!(hydrated["id"].as_str(), Some("1"));
+        assert_eq!(hydrated["user"]["id"].as_str(), Some(user_id.as_str()));
+        assert_eq!(
+            hydrated["user"]["name"].as_str(),
+            Some("preauth-restart-user")
+        );
+        assert!(
+            hydrated["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("hskey-auth-")),
+            "hydrated preauth key: {listed_after_restart}"
+        );
+        assert_ne!(
+            hydrated["key"].as_str(),
+            Some(preauth_secret.as_str()),
+            "listed preauth keys should remain display-masked after restart"
+        );
+        assert_eq!(hydrated["reusable"].as_bool(), Some(true));
+        assert_eq!(hydrated["ephemeral"].as_bool(), Some(true));
+        assert_eq!(hydrated["used"].as_bool(), Some(false));
+        assert_eq!(hydrated["aclTags"], serde_json::json!(["tag:restart"]));
+
+        let expired_after_restart = http
+            .post(format!("{server_url}/api/v1/preauthkey/expire"))
+            .bearer_auth(&api_key_secret)
+            .json(&serde_json::json!({ "id": "1" }))
+            .send()
+            .await?;
+        assert_eq!(expired_after_restart.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            expired_after_restart.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let deleted_after_restart = http
+            .delete(format!("{server_url}/api/v1/preauthkey?id=1"))
+            .bearer_auth(&api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(deleted_after_restart.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            deleted_after_restart.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        let listed_after_delete = http
+            .get(format!("{server_url}/api/v1/preauthkey"))
+            .bearer_auth(&api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(listed_after_delete.status(), reqwest::StatusCode::OK);
+        let listed_after_delete = listed_after_delete.json::<serde_json::Value>().await?;
+        assert_eq!(listed_after_delete["preAuthKeys"], serde_json::json!([]));
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_policy_write_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_policy").await? else {
         return Ok(());

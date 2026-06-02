@@ -30,7 +30,7 @@
         "integration/cli_test.go",
         "integration/api_auth_test.go"
       ],
-      "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage for users, preauth keys, API keys, nodes, policy, routes, and auth sessions beyond the current selected stock-client matrix."
+      "exit_criteria": "Broaden production server-process Postgres mutation/restart coverage beyond the current selected stock-client matrix and focused API-key/preauth-key restart smokes, especially remaining users, nodes, policy, routes, auth sessions, and config/map-churn cases."
     },
     {
       "id": "p0-native-derp-stock-client-runtime",

@@ -2638,3 +2638,16 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p2-cli-output-error-residuals` row remains open because broader
   current-upstream CLI output/error parity still has residual utility and
   process-level surfaces to pin.
+
+## 2026-06-02 Postgres preauth restart process smoke
+
+- Added `serve_postgres_runtime_gateway_preauth_key_restart_smoke`, a
+  feature-gated live-Postgres production `headscale serve` process test. It
+  creates a user and tagged reusable/ephemeral preauth key through the
+  authenticated public grpc-gateway, restarts the same server config against
+  the same temporary Postgres database, asserts the hydrated preauth-key
+  owner/tag/reusable/ephemeral/unused metadata, then expires and deletes the
+  key after restart.
+- The `p0-production-postgres-process-mutations` row remains open. This slice
+  complements the API-key revocation restart smoke but does not close the
+  remaining user/node/policy/route/auth-session/config and map-churn breadth.

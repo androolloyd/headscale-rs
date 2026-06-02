@@ -3665,7 +3665,7 @@ fn implemented_admin_local_errors_match_snapshots() {
 }
 
 #[test]
-fn grpc_node_identifier_usage_errors_happen_before_connection() {
+fn grpc_identifier_usage_errors_happen_before_connection() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("missing.sock");
     let config = write_unix_socket_config(dir.path(), &socket);
@@ -3695,6 +3695,12 @@ fn grpc_node_identifier_usage_errors_happen_before_connection() {
         &["nodes", "list-routes", "--identifier", "-1"],
         1,
         "Error: invalid argument \"-1\" for \"-i, --identifier\" flag: strconv.ParseUint: parsing \"-1\": invalid syntax\n",
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["users", "list", "--identifier", "abc"],
+        1,
+        "Error: invalid argument \"abc\" for \"-i, --identifier\" flag: strconv.ParseInt: parsing \"abc\": invalid syntax\n",
     );
 }
 

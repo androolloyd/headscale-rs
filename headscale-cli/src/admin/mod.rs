@@ -254,7 +254,7 @@ pub enum UsersCmd {
     List {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
-        identifier: Option<i64>,
+        identifier: Option<String>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -267,7 +267,7 @@ pub enum UsersCmd {
     Destroy {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
-        identifier: Option<i64>,
+        identifier: Option<String>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -277,7 +277,7 @@ pub enum UsersCmd {
     Rename {
         /// User identifier (ID).
         #[arg(short = 'i', long = "identifier", allow_hyphen_values = true)]
-        identifier: Option<i64>,
+        identifier: Option<String>,
         /// Username.
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -586,6 +586,14 @@ pub enum DebugCmd {
 
 pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
+    let parsed_identifier = match cmd {
+        UsersCmd::List { identifier, .. }
+        | UsersCmd::Destroy { identifier, .. }
+        | UsersCmd::Rename { identifier, .. } => {
+            users::parse_user_identifier(identifier.as_deref())?
+        }
+        UsersCmd::Create { .. } => None,
+    };
     if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
         return match cmd {
@@ -627,31 +635,30 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
             )
             .await
         }
-        UsersCmd::List {
-            identifier,
-            name,
-            email,
-        } => {
+        UsersCmd::List { name, email, .. } => {
             users::list_grpc(
                 &mut client,
-                *identifier,
+                parsed_identifier,
                 name.as_deref(),
                 email.as_deref(),
                 fmt,
             )
             .await
         }
-        UsersCmd::Destroy { identifier, name } => {
-            users::destroy_grpc(&mut client, *identifier, name.as_deref(), conn.force, fmt).await
+        UsersCmd::Destroy { name, .. } => {
+            users::destroy_grpc(
+                &mut client,
+                parsed_identifier,
+                name.as_deref(),
+                conn.force,
+                fmt,
+            )
+            .await
         }
-        UsersCmd::Rename {
-            identifier,
-            name,
-            new_name,
-        } => {
+        UsersCmd::Rename { name, new_name, .. } => {
             users::rename_grpc(
                 &mut client,
-                *identifier,
+                parsed_identifier,
                 name.as_deref(),
                 new_name.as_deref().unwrap_or_default(),
                 fmt,
@@ -1503,18 +1510,27 @@ mod tests {
                 .unwrap()
                 .action,
             UsersCmd::List {
-                identifier: Some(42),
+                identifier: Some(identifier),
                 ..
-            }
+            } if identifier == "42"
         ));
         assert!(matches!(
             UsersHarness::try_parse_from(["headscale", "list", "--identifier", "-1"])
                 .unwrap()
                 .action,
             UsersCmd::List {
-                identifier: Some(-1),
+                identifier: Some(identifier),
                 ..
-            }
+            } if identifier == "-1"
+        ));
+        assert!(matches!(
+            UsersHarness::try_parse_from(["headscale", "list", "--identifier", "abc"])
+                .unwrap()
+                .action,
+            UsersCmd::List {
+                identifier: Some(identifier),
+                ..
+            } if identifier == "abc"
         ));
         assert!(matches!(
             UsersHarness::try_parse_from(["headscale", "destroy", "--name", "alice"])

@@ -2680,6 +2680,7 @@ mod tests {
 
         assert_eq!(LoggingConfig::default().format, "text");
         assert!(config.taildrop.enabled);
+        assert!(!config.oidc.enabled);
         assert!(config.oidc.only_start_if_oidc_is_available);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
         assert!(config.oidc.email_verified_required);
@@ -4899,6 +4900,7 @@ oidc:
         assert_eq!(config.oidc.client_id, "yaml-client");
         assert_eq!(config.oidc.allowed_domains, ["example.com"]);
         assert_eq!(config.oidc.scope, ["openid", "profile", "email"]);
+        assert!(!config.oidc.enabled);
         assert!(config.oidc.only_start_if_oidc_is_available);
     }
 
@@ -5139,14 +5141,80 @@ client_secret_path = "/run/secret"
     }
 
     #[test]
-    fn rejects_invalid_oidc_pkce_method() {
+    fn configtest_accepts_invalid_oidc_pkce_method_when_oidc_enabled_is_absent() {
         let source = r#"
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "noise_private.key"
+
+[dns]
+magic_dns = false
+override_local_dns = false
+
+[database]
+type = "sqlite"
+
 [oidc.pkce]
 method = "S384"
 "#;
 
         let mut config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.resolve_oidc_client_secret().unwrap_err();
+        config.resolve_oidc_client_secret().unwrap();
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_accepts_invalid_oidc_pkce_method_when_oidc_disabled() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "noise_private.key"
+
+[dns]
+magic_dns = false
+override_local_dns = false
+
+[database]
+type = "sqlite"
+
+[oidc]
+enabled = false
+
+[oidc.pkce]
+method = "S384"
+"#;
+
+        let mut config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        config.resolve_oidc_client_secret().unwrap();
+        config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_rejects_invalid_oidc_pkce_method_when_oidc_enabled() {
+        let source = r#"
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "noise_private.key"
+
+[dns]
+magic_dns = false
+override_local_dns = false
+
+[database]
+type = "sqlite"
+
+[oidc]
+enabled = true
+
+[oidc.pkce]
+method = "S384"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_for_configtest().unwrap_err();
         let err = format!("{err:#}");
 
         assert!(err.contains("pkce.method"));

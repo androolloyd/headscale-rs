@@ -88,6 +88,30 @@ pub async fn list_grpc(
     Ok(())
 }
 
+pub(crate) fn parse_user_identifier(id: Option<&str>) -> Result<Option<i64>, AdminError> {
+    id.map(|id| {
+        id.parse::<i64>()
+            .map_err(|_| AdminError::Usage(upstream_parse_int_error(id)))
+    })
+    .transpose()
+}
+
+fn upstream_parse_int_error(id: &str) -> String {
+    let unsigned_digits = !id.is_empty() && id.chars().all(|c| c.is_ascii_digit());
+    let signed_digits = id
+        .strip_prefix('-')
+        .or_else(|| id.strip_prefix('+'))
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
+    let detail = if unsigned_digits || signed_digits {
+        "value out of range"
+    } else {
+        "invalid syntax"
+    };
+    format!(
+        "invalid argument \"{id}\" for \"-i, --identifier\" flag: strconv.ParseInt: parsing \"{id}\": {detail}"
+    )
+}
+
 pub async fn delete(client: &AdminClient, name: &str) -> Result<(), AdminError> {
     // The admin router URL-routes on the raw name segment; `name` is
     // validated server-side, so we don't pre-encode here (the regex
@@ -400,6 +424,13 @@ mod tests {
         assert!(!upstream_user_id_was_supplied(None));
         assert!(!upstream_user_id_was_supplied(Some(-1)));
         assert!(upstream_user_id_was_supplied(Some(0)));
+        assert_eq!(parse_user_identifier(None).unwrap(), None);
+        assert_eq!(parse_user_identifier(Some("42")).unwrap(), Some(42));
+        assert_eq!(parse_user_identifier(Some("-1")).unwrap(), Some(-1));
+        assert_eq!(
+            parse_user_identifier(Some("abc")).unwrap_err().to_string(),
+            "invalid argument \"abc\" for \"-i, --identifier\" flag: strconv.ParseInt: parsing \"abc\": invalid syntax"
+        );
         assert_eq!(upstream_rename_request_id(None), 0);
         assert_eq!(upstream_rename_request_id(Some(-1)), 0);
         assert_eq!(upstream_rename_request_id(Some(42)), 42);

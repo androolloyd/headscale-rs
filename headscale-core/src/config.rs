@@ -164,6 +164,10 @@ impl EmbeddedDerpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OidcConfig {
+    /// Config-only validation guard used by headscale-go for OIDC-specific
+    /// validation. Runtime OIDC enablement is still derived from `issuer`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
     /// Block startup until the OIDC provider is reachable.
     #[serde(default = "default_true")]
     pub only_start_if_oidc_is_available: bool,
@@ -207,6 +211,7 @@ pub struct OidcConfig {
 impl Default for OidcConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             only_start_if_oidc_is_available: true,
             issuer: String::new(),
             client_id: String::new(),
@@ -250,6 +255,9 @@ impl OidcConfig {
             let value = value.as_ref();
 
             match key {
+                "HEADSCALE_OIDC_ENABLED" => {
+                    self.enabled = parse_bool_env(key, value)?;
+                }
                 "HEADSCALE_OIDC_ONLY_START_IF_OIDC_IS_AVAILABLE" => {
                     self.only_start_if_oidc_is_available = parse_bool_env(key, value)?;
                 }
@@ -316,7 +324,11 @@ impl OidcConfig {
     /// Validate the OIDC config values that headscale-go validates at config
     /// load time.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        validate_pkce_method(&self.pkce.method)
+        if self.enabled {
+            validate_pkce_method(&self.pkce.method)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -406,6 +418,10 @@ fn default_oidc_expiry() -> Duration {
 
 fn default_pkce_method() -> String {
     PKCE_METHOD_S256.to_string()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn validate_pkce_method(method: &str) -> Result<(), ConfigError> {
@@ -672,6 +688,7 @@ mod tests {
     fn oidc_defaults_match_headscale_go_v028() {
         let oidc = OidcConfig::default();
 
+        assert!(!oidc.enabled);
         assert!(oidc.only_start_if_oidc_is_available);
         assert_eq!(oidc.scope, ["openid", "profile", "email"]);
         assert!(oidc.email_verified_required);
@@ -698,6 +715,7 @@ mod tests {
         let mut oidc = OidcConfig::default();
 
         oidc.apply_headscale_env_overrides_from([
+            ("HEADSCALE_OIDC_ENABLED", "true"),
             ("HEADSCALE_OIDC_ISSUER", "https://issuer.example"),
             ("HEADSCALE_OIDC_CLIENT_ID", "client-id"),
             ("HEADSCALE_OIDC_SCOPE", "openid,profile,email,groups"),
@@ -716,6 +734,7 @@ mod tests {
         ])
         .unwrap();
 
+        assert!(oidc.enabled);
         assert_eq!(oidc.issuer, "https://issuer.example");
         assert_eq!(oidc.client_id, "client-id");
         assert_eq!(oidc.scope, ["openid", "profile", "email", "groups"]);
@@ -762,9 +781,28 @@ mod tests {
     }
 
     #[test]
-    fn oidc_rejects_invalid_pkce_method() {
-        let mut oidc = OidcConfig::default();
-        oidc.pkce.method = "S384".to_string();
+    fn oidc_accepts_invalid_pkce_method_when_disabled() {
+        let oidc = OidcConfig {
+            pkce: PkceConfig {
+                method: "S384".to_string(),
+                ..PkceConfig::default()
+            },
+            ..OidcConfig::default()
+        };
+
+        oidc.validate().unwrap();
+    }
+
+    #[test]
+    fn oidc_rejects_invalid_pkce_method_when_enabled() {
+        let oidc = OidcConfig {
+            enabled: true,
+            pkce: PkceConfig {
+                method: "S384".to_string(),
+                ..PkceConfig::default()
+            },
+            ..OidcConfig::default()
+        };
 
         assert!(matches!(
             oidc.validate(),

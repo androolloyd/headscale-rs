@@ -1989,3 +1989,21 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - This still sits below the HTTP `/derp` upgrade and encrypted client-info
   handshake; production relay parity remains sidecar-backed until those layers
   and stock-client native DERP smokes are wired.
+
+## 2026-06-02 native DERP auth/fuzz foundation
+
+- Added NaCl-box-compatible DERP node-key helpers in `headscale-core` using
+  the RustCrypto `crypto_box` crate: clamped X25519 node keys, server-key
+  frame emission, encrypted `ClientInfo` and `ServerInfo` frame builders, and
+  open/decode helpers for the DERP login sequence.
+- `ClientInfo` and `ServerInfo` now pin the current Tailscale JSON field
+  shapes, including lower/upper-case version aliases, optional 64-hex DERP mesh
+  keys, `CanAckPings`, `IsProber`, and token-bucket server limits.
+- Expanded `fuzz_derp` from legacy parser-only coverage to structured
+  coverage for arbitrary raw bytes, raw frame encode/decode, typed frame
+  round trips, split-stream decoding, and coalesced frames.
+- This closes the native DERP crypto/auth payload foundation. The remaining
+  native DERP gap is the public `/derp` HTTP upgrade/runtime loop, including
+  `Upgrade: DERP`/websocket boundaries, `Derp-Fast-Start`, server-key header
+  behavior, verify-client admission, keepalive/ping runtime, and stock-client
+  native DERP smokes.

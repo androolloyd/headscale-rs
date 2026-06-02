@@ -35,6 +35,11 @@ const FRAME_PEER_PRESENT: u8 = 0x09;
 /// sidecar runtime remains the default relay implementation until a native
 /// session registry and `/derp` upgrade handler are layered on top.
 pub mod protocol {
+    use crypto_box::aead::Aead;
+    use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
+    use rand_core::{OsRng, RngCore};
+    use serde::{Deserialize, Serialize};
+
     /// Maximum packet payload visible to DERP, excluding frame headers.
     pub const MAX_PACKET_SIZE: usize = 64 << 10;
     /// DERP frame header size: one type byte plus a big-endian u32 length.
@@ -185,6 +190,185 @@ pub mod protocol {
         pub port: u16,
     }
 
+    /// Tailscale DERP node keypair used for client/server info boxes.
+    ///
+    /// DERP addresses peers with the same X25519 node keys Tailscale uses for
+    /// WireGuard. The login envelopes are NaCl boxes: a 24-byte nonce followed
+    /// by XSalsa20-Poly1305 ciphertext authenticated from this private key to
+    /// the peer's public key.
+    #[derive(Clone)]
+    pub struct DerpNodeKeyPair {
+        secret: SecretKey,
+    }
+
+    impl std::fmt::Debug for DerpNodeKeyPair {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("DerpNodeKeyPair")
+                .field("public_key", &hex::encode(self.public_key()))
+                .finish()
+        }
+    }
+
+    impl DerpNodeKeyPair {
+        /// Generate a fresh clamped node keypair.
+        pub fn generate() -> Self {
+            let mut secret = [0u8; KEY_LEN];
+            OsRng.fill_bytes(&mut secret);
+            clamp_x25519_private(&mut secret);
+            Self::from_private_key(secret).expect("random DERP key is non-zero")
+        }
+
+        /// Build a keypair from 32 raw private-key bytes.
+        pub fn from_private_key(secret: [u8; KEY_LEN]) -> Result<Self, ProtocolError> {
+            reject_zero_key(&secret)?;
+            Ok(Self {
+                secret: SecretKey::from(secret),
+            })
+        }
+
+        /// Raw private-key bytes. Treat this as secret material.
+        pub fn private_key(&self) -> [u8; KEY_LEN] {
+            self.secret.to_bytes()
+        }
+
+        /// Public DERP node key bytes.
+        pub fn public_key(&self) -> [u8; KEY_LEN] {
+            self.secret.public_key().to_bytes()
+        }
+
+        /// Seal plaintext to a peer using a fresh random nonce.
+        pub fn seal_to(
+            &self,
+            peer_public: &[u8; KEY_LEN],
+            plaintext: &[u8],
+        ) -> Result<Vec<u8>, ProtocolError> {
+            let mut nonce = [0u8; NONCE_LEN];
+            OsRng.fill_bytes(&mut nonce);
+            self.seal_to_with_nonce(peer_public, nonce, plaintext)
+        }
+
+        /// Seal plaintext to a peer using a caller-provided nonce.
+        ///
+        /// This is exposed for deterministic parity tests. Runtime callers
+        /// should use [`Self::seal_to`].
+        pub fn seal_to_with_nonce(
+            &self,
+            peer_public: &[u8; KEY_LEN],
+            nonce: [u8; NONCE_LEN],
+            plaintext: &[u8],
+        ) -> Result<Vec<u8>, ProtocolError> {
+            reject_zero_key(peer_public)?;
+            let peer = PublicKey::from(*peer_public);
+            let box_ = SalsaBox::new(&peer, &self.secret);
+            let ciphertext = box_
+                .encrypt(Nonce::from_slice(&nonce), plaintext)
+                .map_err(|_| ProtocolError::CryptoBox)?;
+            let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+            out.extend_from_slice(&nonce);
+            out.extend_from_slice(&ciphertext);
+            Ok(out)
+        }
+
+        /// Open a NaCl-box DERP envelope authenticated from a peer.
+        pub fn open_from(
+            &self,
+            peer_public: &[u8; KEY_LEN],
+            encrypted: &[u8],
+        ) -> Result<Vec<u8>, ProtocolError> {
+            reject_zero_key(peer_public)?;
+            if encrypted.len() < NONCE_LEN {
+                return Err(ProtocolError::InfoEnvelopeTooShort {
+                    len: encrypted.len(),
+                });
+            }
+            let (nonce, ciphertext) = encrypted.split_at(NONCE_LEN);
+            let peer = PublicKey::from(*peer_public);
+            let box_ = SalsaBox::new(&peer, &self.secret);
+            box_.decrypt(Nonce::from_slice(nonce), ciphertext)
+                .map_err(|_| ProtocolError::CryptoBox)
+        }
+    }
+
+    /// Information a DERP client sends after receiving the server key.
+    #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ClientInfo {
+        /// Optional regional mesh key for trusted DERP peers.
+        #[serde(
+            rename = "meshKey",
+            alias = "MeshKey",
+            default,
+            skip_serializing_if = "mesh_key_is_none_or_zero",
+            with = "optional_hex_key"
+        )]
+        pub mesh_key: Option<[u8; KEY_LEN]>,
+        /// DERP protocol version supported by the client.
+        #[serde(
+            rename = "version",
+            alias = "Version",
+            default,
+            skip_serializing_if = "is_zero_u32"
+        )]
+        pub version: u32,
+        /// Whether the client declares support for ping acknowledgements.
+        #[serde(rename = "CanAckPings", alias = "canAckPings", default)]
+        pub can_ack_pings: bool,
+        /// Whether this connection is a DERP prober.
+        #[serde(
+            rename = "IsProber",
+            alias = "isProber",
+            default,
+            skip_serializing_if = "is_false"
+        )]
+        pub is_prober: bool,
+    }
+
+    impl ClientInfo {
+        /// Current stock-client info payload for a regular DERP client.
+        pub fn regular() -> Self {
+            Self {
+                version: u32::from(PROTOCOL_VERSION),
+                ..Self::default()
+            }
+        }
+    }
+
+    /// Information a DERP server sends after accepting client info.
+    #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ServerInfo {
+        /// DERP protocol version supported by the server.
+        #[serde(
+            rename = "version",
+            alias = "Version",
+            default,
+            skip_serializing_if = "is_zero_u32"
+        )]
+        pub version: u32,
+        /// Optional server-side accepted bytes per second, including framing.
+        #[serde(
+            rename = "TokenBucketBytesPerSecond",
+            default,
+            skip_serializing_if = "is_zero_u32"
+        )]
+        pub token_bucket_bytes_per_second: u32,
+        /// Optional burst bytes for the token bucket.
+        #[serde(
+            rename = "TokenBucketBytesBurst",
+            default,
+            skip_serializing_if = "is_zero_u32"
+        )]
+        pub token_bucket_bytes_burst: u32,
+    }
+
+    impl ServerInfo {
+        /// Current stock server info payload.
+        pub fn current() -> Self {
+            Self {
+                version: u32::from(PROTOCOL_VERSION),
+                ..Self::default()
+            }
+        }
+    }
+
     /// Parsed DERP frame.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Frame {
@@ -325,6 +509,21 @@ pub mod protocol {
             /// Protocol maximum packet bytes.
             max: usize,
         },
+        /// DERP node keys must not be all zero.
+        #[error("DERP node key must not be all zero")]
+        ZeroKey,
+        /// Encrypted client/server info envelope did not contain a nonce.
+        #[error("DERP info envelope too short: {len} bytes")]
+        InfoEnvelopeTooShort {
+            /// Actual envelope bytes.
+            len: usize,
+        },
+        /// NaCl box encryption or authentication failed.
+        #[error("DERP info envelope box operation failed")]
+        CryptoBox,
+        /// Client/server info JSON failed to encode or decode.
+        #[error("DERP info JSON error: {0}")]
+        InfoJson(String),
     }
 
     /// Build a DERP frame header.
@@ -389,6 +588,84 @@ pub mod protocol {
             }
         };
         Ok((frame, expected))
+    }
+
+    /// Build a complete DERP server-key greeting frame.
+    pub fn encode_server_key_frame(server_key: &DerpNodeKeyPair) -> Result<Vec<u8>, ProtocolError> {
+        encode_frame(&Frame::ServerKey {
+            key: server_key.public_key(),
+            extra: Vec::new(),
+        })
+    }
+
+    /// Build the encrypted client-info frame sent after the server greeting.
+    pub fn encode_client_info_frame(
+        client_key: &DerpNodeKeyPair,
+        server_public: &[u8; KEY_LEN],
+        info: &ClientInfo,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let plaintext =
+            serde_json::to_vec(info).map_err(|e| ProtocolError::InfoJson(e.to_string()))?;
+        let encrypted_info = client_key.seal_to(server_public, &plaintext)?;
+        encode_frame(&Frame::ClientInfo {
+            public_key: client_key.public_key(),
+            encrypted_info,
+        })
+    }
+
+    /// Decrypt and decode a client-info frame payload.
+    pub fn open_client_info(
+        server_key: &DerpNodeKeyPair,
+        frame: &Frame,
+    ) -> Result<([u8; KEY_LEN], ClientInfo), ProtocolError> {
+        let Frame::ClientInfo {
+            public_key,
+            encrypted_info,
+        } = frame
+        else {
+            return invalid(FrameType::ClientInfo, "expected client info frame");
+        };
+        if encrypted_info.len() > NONCE_LEN + MAX_CLIENT_INFO_LEN {
+            return invalid(FrameType::ClientInfo, "encrypted client info is too large");
+        }
+        let plaintext = server_key.open_from(public_key, encrypted_info)?;
+        if plaintext.len() > MAX_CLIENT_INFO_LEN {
+            return invalid(FrameType::ClientInfo, "client info JSON is too large");
+        }
+        let info = serde_json::from_slice(&plaintext)
+            .map_err(|e| ProtocolError::InfoJson(e.to_string()))?;
+        Ok((*public_key, info))
+    }
+
+    /// Build the encrypted server-info frame sent after accepting client info.
+    pub fn encode_server_info_frame(
+        server_key: &DerpNodeKeyPair,
+        client_public: &[u8; KEY_LEN],
+        info: &ServerInfo,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let plaintext =
+            serde_json::to_vec(info).map_err(|e| ProtocolError::InfoJson(e.to_string()))?;
+        let encrypted_info = server_key.seal_to(client_public, &plaintext)?;
+        encode_frame(&Frame::ServerInfo { encrypted_info })
+    }
+
+    /// Decrypt and decode a server-info frame payload.
+    pub fn open_server_info(
+        client_key: &DerpNodeKeyPair,
+        server_public: &[u8; KEY_LEN],
+        frame: &Frame,
+    ) -> Result<ServerInfo, ProtocolError> {
+        let Frame::ServerInfo { encrypted_info } = frame else {
+            return invalid(FrameType::ServerInfo, "expected server info frame");
+        };
+        if encrypted_info.len() > NONCE_LEN + MAX_INFO_LEN {
+            return invalid(FrameType::ServerInfo, "encrypted server info is too large");
+        }
+        let plaintext = client_key.open_from(server_public, encrypted_info)?;
+        if plaintext.len() > MAX_INFO_LEN {
+            return invalid(FrameType::ServerInfo, "server info JSON is too large");
+        }
+        serde_json::from_slice(&plaintext).map_err(|e| ProtocolError::InfoJson(e.to_string()))
     }
 
     /// Incremental DERP frame decoder for TCP/HTTP-upgrade streams.
@@ -764,9 +1041,224 @@ pub mod protocol {
         Err(ProtocolError::InvalidPayload { frame_type, reason })
     }
 
+    fn clamp_x25519_private(secret: &mut [u8; KEY_LEN]) {
+        secret[0] &= 0xf8;
+        secret[31] &= 0x7f;
+        secret[31] |= 0x40;
+    }
+
+    fn reject_zero_key(key: &[u8; KEY_LEN]) -> Result<(), ProtocolError> {
+        if key.iter().all(|byte| *byte == 0) {
+            Err(ProtocolError::ZeroKey)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_zero_u32(v: &u32) -> bool {
+        *v == 0
+    }
+
+    fn is_false(v: &bool) -> bool {
+        !*v
+    }
+
+    fn mesh_key_is_none_or_zero(v: &Option<[u8; KEY_LEN]>) -> bool {
+        v.is_none_or(|key| key.iter().all(|byte| *byte == 0))
+    }
+
+    mod optional_hex_key {
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        use super::KEY_LEN;
+
+        pub fn serialize<S>(value: &Option<[u8; KEY_LEN]>, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            match value {
+                Some(key) => serializer.serialize_some(&hex::encode(key)),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; KEY_LEN]>, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let Some(s) = Option::<String>::deserialize(deserializer)? else {
+                return Ok(None);
+            };
+            let decoded = hex::decode(&s)
+                .map_err(|e| serde::de::Error::custom(format!("invalid mesh key: {e}")))?;
+            if decoded.len() != KEY_LEN {
+                return Err(serde::de::Error::custom("invalid mesh key length"));
+            }
+            let mut out = [0u8; KEY_LEN];
+            out.copy_from_slice(&decoded);
+            Ok(Some(out))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn generated_derp_node_key_is_clamped_and_non_zero() {
+            let key = DerpNodeKeyPair::generate();
+            let secret = key.private_key();
+
+            assert_ne!(secret, [0u8; KEY_LEN]);
+            assert_eq!(secret[0] & 0x07, 0);
+            assert_eq!(secret[31] & 0x80, 0);
+            assert_ne!(secret[31] & 0x40, 0);
+            assert_ne!(key.public_key(), [0u8; KEY_LEN]);
+        }
+
+        #[test]
+        fn zero_derp_node_key_is_rejected() {
+            assert_eq!(
+                DerpNodeKeyPair::from_private_key([0u8; KEY_LEN]).unwrap_err(),
+                ProtocolError::ZeroKey
+            );
+        }
+
+        #[test]
+        fn client_info_json_matches_tailscale_field_shape() {
+            let regular = serde_json::to_value(ClientInfo::regular()).unwrap();
+            assert_eq!(regular["version"], u32::from(PROTOCOL_VERSION));
+            assert_eq!(regular["CanAckPings"], false);
+            assert!(regular.get("meshKey").is_none());
+            assert!(regular.get("IsProber").is_none());
+
+            let mesh_key = [0xab; KEY_LEN];
+            let info = ClientInfo {
+                mesh_key: Some(mesh_key),
+                version: 5,
+                can_ack_pings: true,
+                is_prober: true,
+            };
+            let value = serde_json::to_value(&info).unwrap();
+            assert_eq!(value["meshKey"], hex::encode(mesh_key));
+            assert_eq!(value["version"], 5);
+            assert_eq!(value["CanAckPings"], true);
+            assert_eq!(value["IsProber"], true);
+
+            let parsed: ClientInfo = serde_json::from_str(&format!(
+                r#"{{"Version":5,"MeshKey":"{}","CanAckPings":true,"IsProber":true}}"#,
+                hex::encode(mesh_key)
+            ))
+            .unwrap();
+            assert_eq!(parsed, info);
+
+            let parsed_lower: ClientInfo = serde_json::from_str(&format!(
+                r#"{{"version":5,"meshKey":"{}"}}"#,
+                hex::encode(mesh_key)
+            ))
+            .unwrap();
+            assert_eq!(parsed_lower.mesh_key, Some(mesh_key));
+            assert_eq!(parsed_lower.version, 5);
+            assert!(!parsed_lower.can_ack_pings);
+        }
+
+        #[test]
+        fn invalid_mesh_key_json_is_rejected() {
+            let err = serde_json::from_str::<ClientInfo>(r#"{"version":5,"meshKey":"abcdefg"}"#)
+                .unwrap_err();
+            assert!(err.to_string().contains("invalid mesh key"));
+        }
+
+        #[test]
+        fn server_info_json_matches_tailscale_field_shape() {
+            let current = serde_json::to_value(ServerInfo::current()).unwrap();
+            assert_eq!(current["version"], u32::from(PROTOCOL_VERSION));
+            assert!(current.get("TokenBucketBytesPerSecond").is_none());
+            assert!(current.get("TokenBucketBytesBurst").is_none());
+
+            let limited = ServerInfo {
+                version: 2,
+                token_bucket_bytes_per_second: 1024,
+                token_bucket_bytes_burst: 4096,
+            };
+            let value = serde_json::to_value(&limited).unwrap();
+            assert_eq!(value["version"], 2);
+            assert_eq!(value["TokenBucketBytesPerSecond"], 1024);
+            assert_eq!(value["TokenBucketBytesBurst"], 4096);
+
+            let parsed: ServerInfo = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed, limited);
+        }
+
+        #[test]
+        fn client_info_box_round_trips_with_fixed_nonce() {
+            let server = DerpNodeKeyPair::from_private_key([1u8; KEY_LEN]).unwrap();
+            let client = DerpNodeKeyPair::from_private_key([2u8; KEY_LEN]).unwrap();
+            let info = ClientInfo {
+                version: u32::from(PROTOCOL_VERSION),
+                can_ack_pings: true,
+                ..ClientInfo::default()
+            };
+            let plaintext = serde_json::to_vec(&info).unwrap();
+            let encrypted_info = client
+                .seal_to_with_nonce(&server.public_key(), [7u8; NONCE_LEN], &plaintext)
+                .unwrap();
+            assert_eq!(&encrypted_info[..NONCE_LEN], &[7u8; NONCE_LEN]);
+
+            let frame = Frame::ClientInfo {
+                public_key: client.public_key(),
+                encrypted_info,
+            };
+            let (opened_key, opened_info) = open_client_info(&server, &frame).unwrap();
+            assert_eq!(opened_key, client.public_key());
+            assert_eq!(opened_info, info);
+
+            let wrong_server = DerpNodeKeyPair::from_private_key([3u8; KEY_LEN]).unwrap();
+            assert_eq!(
+                open_client_info(&wrong_server, &frame).unwrap_err(),
+                ProtocolError::CryptoBox
+            );
+        }
+
+        #[test]
+        fn client_and_server_info_frames_round_trip() {
+            let server = DerpNodeKeyPair::from_private_key([4u8; KEY_LEN]).unwrap();
+            let client = DerpNodeKeyPair::from_private_key([5u8; KEY_LEN]).unwrap();
+
+            let server_key_frame = encode_server_key_frame(&server).unwrap();
+            let (decoded_server_key, consumed) =
+                decode_frame(&server_key_frame, MAX_INFO_LEN).unwrap();
+            assert_eq!(consumed, server_key_frame.len());
+            assert_eq!(
+                decoded_server_key,
+                Frame::ServerKey {
+                    key: server.public_key(),
+                    extra: Vec::new(),
+                }
+            );
+
+            let client_frame_bytes =
+                encode_client_info_frame(&client, &server.public_key(), &ClientInfo::regular())
+                    .unwrap();
+            let (client_frame, consumed) = decode_frame(&client_frame_bytes, MAX_INFO_LEN).unwrap();
+            assert_eq!(consumed, client_frame_bytes.len());
+            let (client_public, client_info) = open_client_info(&server, &client_frame).unwrap();
+            assert_eq!(client_public, client.public_key());
+            assert_eq!(client_info, ClientInfo::regular());
+
+            let server_info = ServerInfo {
+                version: u32::from(PROTOCOL_VERSION),
+                token_bucket_bytes_per_second: 2048,
+                token_bucket_bytes_burst: 8192,
+            };
+            let server_frame_bytes =
+                encode_server_info_frame(&server, &client_public, &server_info).unwrap();
+            let (server_frame, consumed) = decode_frame(&server_frame_bytes, MAX_INFO_LEN).unwrap();
+            assert_eq!(consumed, server_frame_bytes.len());
+            let opened_server_info =
+                open_server_info(&client, &server.public_key(), &server_frame).unwrap();
+            assert_eq!(opened_server_info, server_info);
+        }
 
         #[test]
         fn header_uses_big_endian_payload_length() {

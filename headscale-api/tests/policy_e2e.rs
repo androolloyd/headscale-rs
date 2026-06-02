@@ -949,7 +949,7 @@ fn test_grant_cap_relay() {
     let relay = ParityNode::tagged(1, "relay", "100.64.0.10", &["tag:relay"]);
     let client_a = ParityNode::tagged(2, "clienta", "100.64.0.11", &["tag:client-a"]);
     let client_b = ParityNode::tagged(3, "clientb", "100.64.0.12", &["tag:client-b"]);
-    let nodes = [relay.clone(), client_a.clone(), client_b.clone()]
+    let nodes = [relay.clone(), client_a.clone(), client_b]
         .iter()
         .map(ParityNode::packet_filter_node)
         .collect::<Vec<_>>();
@@ -1015,7 +1015,7 @@ fn test_grant_cap_drive() {
     let rw = ParityNode::tagged(2, "rwclient", "100.64.0.11", &["tag:rw-client"]);
     let ro = ParityNode::tagged(3, "roclient", "100.64.0.12", &["tag:ro-client"]);
     let no_access = ParityNode::tagged(4, "noaccess", "100.64.0.13", &["tag:no-access"]);
-    let nodes = [sharer.clone(), rw.clone(), ro.clone(), no_access.clone()]
+    let nodes = [sharer.clone(), rw.clone(), ro, no_access.clone()]
         .iter()
         .map(ParityNode::packet_filter_node)
         .collect::<Vec<_>>();

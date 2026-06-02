@@ -73,6 +73,7 @@ fn wire_fixture() -> (WireState, ReplayRedeemer, tempfile::TempDir) {
         machines: Arc::new(MachineRegistry::new()),
         registration_store: None,
         derp_map: tailscale_wire::DerpMapStore::shared(DerpMap::default()),
+        #[cfg(feature = "full")]
         native_derp: None,
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock: tailscale_wire::KnockConfig::disabled(),
@@ -118,7 +119,7 @@ fn no_auth_register_body(node_key_hex: &str, hostname: &str) -> Value {
 
 fn noise_post(
     uri: impl Into<String>,
-    body: Value,
+    body: &Value,
     machine_key_hex: &str,
 ) -> axum::http::Request<Body> {
     let mut req = axum::http::Request::builder()
@@ -279,7 +280,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
         .clone()
         .oneshot(noise_post(
             format!("/machine/nodekey:{node_key_hex}/register"),
-            auth_register_body(&node_key_hex, authkey, "original-host"),
+            &auth_register_body(&node_key_hex, authkey, "original-host"),
             &original_machine_key,
         ))
         .await
@@ -293,7 +294,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
         .clone()
         .oneshot(noise_post(
             format!("/machine/nodekey:{node_key_hex}/register"),
-            auth_register_body(&node_key_hex, authkey, "attacker-host"),
+            &auth_register_body(&node_key_hex, authkey, "attacker-host"),
             &attacker_machine_key,
         ))
         .await
@@ -310,7 +311,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
     let same_identity_replay = app
         .oneshot(noise_post(
             format!("/machine/nodekey:{node_key_hex}/register"),
-            auth_register_body(&node_key_hex, authkey, "legitimate-restart"),
+            &auth_register_body(&node_key_hex, authkey, "legitimate-restart"),
             &original_machine_key,
         ))
         .await
@@ -340,7 +341,7 @@ async fn noise_flat_register_no_auth_restart_rejects_mismatched_machine_key() {
         .clone()
         .oneshot(noise_post(
             "/machine/register",
-            auth_register_body(&node_key_hex, authkey, "flat-original"),
+            &auth_register_body(&node_key_hex, authkey, "flat-original"),
             &original_machine_key,
         ))
         .await
@@ -353,7 +354,7 @@ async fn noise_flat_register_no_auth_restart_rejects_mismatched_machine_key() {
     let stolen_restart = app
         .oneshot(noise_post(
             "/machine/register",
-            no_auth_register_body(&node_key_hex, "flat-attacker"),
+            &no_auth_register_body(&node_key_hex, "flat-attacker"),
             &attacker_machine_key,
         ))
         .await

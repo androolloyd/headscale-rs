@@ -1137,7 +1137,12 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     }
 
     if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
-        return Some(admin::output::format_error(output_format, &error));
+        let fmt = if matches!(parts.as_slice(), ["mockoidc", ..]) {
+            OutputFormat::Table
+        } else {
+            output_format
+        };
+        return Some(admin::output::format_error(fmt, &error));
     }
 
     if let Some(error) = completion_shell_unknown_command_error(parts.as_slice()) {
@@ -3985,6 +3990,10 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["mockoidc", "--config", "missing.yaml", "--help"]),
             Some("Error: unknown flag: --config\n".into())
+        );
+        assert_eq!(
+            upstream_exact_error(&["mockoidc", "--output", "json"]),
+            Some("Error: unknown flag: --output\n".into())
         );
         assert_eq!(
             upstream_exact_help(&["help", "mockoidc"]),

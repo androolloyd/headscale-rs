@@ -211,8 +211,7 @@ fn normalize_localhost_port(text: &str) -> String {
         let port_start = start + relative + PREFIX.len();
         let port_end = normalized[port_start..]
             .find(|c: char| !c.is_ascii_digit())
-            .map(|offset| port_start + offset)
-            .unwrap_or(normalized.len());
+            .map_or(normalized.len(), |offset| port_start + offset);
         if port_start == port_end {
             start = port_end;
             continue;
@@ -1720,7 +1719,7 @@ fn generate_private_key_structured_outputs_match_current_upstream_snapshots() {
             expected.trim_end_matches('\n'),
             "stdout snapshot for {args:?}"
         );
-        if args.iter().any(|arg| *arg == "-oyaml") {
+        if args.contains(&"-oyaml") {
             assert!(
                 stdout(&output).ends_with("\n\n"),
                 "yaml stdout should keep upstream trailing blank line for {args:?}: {}",
@@ -1831,7 +1830,7 @@ fn version_outputs_match_current_upstream_snapshots() {
             expected.trim_end_matches('\n'),
             "stdout snapshot for {args:?}"
         );
-        if args.iter().any(|arg| *arg == "-oyaml") {
+        if args.contains(&"-oyaml") {
             assert!(
                 stdout(&output).ends_with("\n\n"),
                 "yaml stdout should keep upstream trailing blank line for {args:?}: {}",

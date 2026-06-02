@@ -1078,7 +1078,7 @@ fn list_nodes_query_from_values(
     values: &BTreeMap<String, Vec<String>>,
 ) -> Result<ListNodesQuery, Status> {
     Ok(ListNodesQuery {
-        user: query_string(&values, &["user"], "user")?.unwrap_or_default(),
+        user: query_string(values, &["user"], "user")?.unwrap_or_default(),
     })
 }
 

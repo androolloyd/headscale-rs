@@ -3,8 +3,8 @@
   "metadata": {
     "audit_date": "2026-06-02",
     "headscale_rs": {
-      "compared_ref": "c219fa655a502140206bd310085073d2e66de24b",
-      "origin_main_commit": "c219fa655a502140206bd310085073d2e66de24b",
+      "compared_ref": "ca0dd0f1a083cee3a842835ae3b851ff8817cbb6",
+      "origin_main_commit": "ca0dd0f1a083cee3a842835ae3b851ff8817cbb6",
       "root": "/Users/androolloyd/Development/headscale-rs-main-coordinator-20260602"
     },
     "notes": [

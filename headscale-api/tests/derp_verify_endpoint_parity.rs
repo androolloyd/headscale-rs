@@ -40,6 +40,7 @@ fn wire_state() -> (WireState, tempfile::TempDir) {
         machines: Arc::new(MachineRegistry::new()),
         registration_store: None,
         derp_map: headscale_api::tailscale_wire::DerpMapStore::shared(DerpMap::default()),
+        #[cfg(feature = "full")]
         native_derp: None,
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock: KnockConfig::disabled(),

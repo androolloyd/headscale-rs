@@ -161,7 +161,7 @@ async fn admin_post_tags(
     let resp = admin_router(admin.clone()).oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-    let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::Value::Null);
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
 }
 
@@ -274,7 +274,7 @@ async fn register_with_auth_key(
     let resp = register_router(state.clone()).oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-    let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::Value::Null);
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, value)
 }
 

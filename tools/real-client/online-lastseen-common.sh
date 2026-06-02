@@ -2860,8 +2860,7 @@ relogin_with_authkey_if_requested() {
   ((authkey_relogin_requested_flag)) || return 0
   local rejection_mode=""
   if ((authkey_relogin_different_user_flag)); then
-    rejection_mode="different-user"
-    echo "::group::auth-key logout and different-user relogin rejection"
+    echo "::group::auth-key logout and different-user relogin"
   elif ((authkey_relogin_deleted_flag)); then
     rejection_mode="deleted-key"
     echo "::group::auth-key logout and deleted-key relogin rejection"
@@ -2931,11 +2930,9 @@ relogin_with_authkey_if_requested() {
     relogin_status=0
     run_with_timeout "tailscale auth-key relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       relogin_status="$?"
-    if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag || authkey_relogin_deleted_flag)); then
+    if ((authkey_relogin_expired_flag || authkey_relogin_deleted_flag)); then
       if client_logged_in "${client_name}" "${work_dir}/${client_name}.unexpected-relogin-status.json"; then
-        if ((authkey_relogin_different_user_flag)); then
-          echo "expected different-user auth-key relogin to fail for ${client_name}, but it logged in" >&2
-        elif ((authkey_relogin_deleted_flag)); then
+        if ((authkey_relogin_deleted_flag)); then
           echo "expected deleted-key auth-key relogin to fail for ${client_name}, but it logged in" >&2
         else
           echo "expected expired auth-key relogin to fail for ${client_name}, but it logged in" >&2
@@ -2945,9 +2942,7 @@ relogin_with_authkey_if_requested() {
       fi
       docker exec "${client_name}" tailscale status --json \
         >"${work_dir}/${client_name}.expected-relogin-failure-status.json" 2>/dev/null || true
-      if ((authkey_relogin_different_user_flag)); then
-        echo "different-user auth-key relogin failed as expected for ${client_name}"
-      elif ((authkey_relogin_deleted_flag)); then
+      if ((authkey_relogin_deleted_flag)); then
         echo "deleted-key auth-key relogin failed as expected for ${client_name}"
       else
         echo "expired auth-key relogin failed as expected for ${client_name}"
@@ -2955,13 +2950,17 @@ relogin_with_authkey_if_requested() {
       continue
     fi
     if ((relogin_status != 0)); then
-      echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
+      echo "tailscale auth-key relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
     fi
-    if ! wait_for "tailscale logged-in netmap after same-user relogin ${client_name}" \
+    if ! wait_for "tailscale logged-in netmap after auth-key relogin ${client_name}" \
       "client_logged_in '${client_name}' '${work_dir}/${client_name}.relogin-status.json'"; then
       dump_client_debug "${client_name}"
       echo "::endgroup::"
       return 1
+    fi
+    if ((authkey_relogin_different_user_flag)); then
+      cp "${work_dir}/${client_name}.relogin-status.json" "${work_dir}/${client_name}.status.json"
+      continue
     fi
     relogin_after_ips="$(tailscale_status_ips "${work_dir}/${client_name}.relogin-status.json")"
     if [[ "${relogin_after_ips}" != "${relogin_before_ips[$idx]}" ]]; then
@@ -2973,7 +2972,7 @@ relogin_with_authkey_if_requested() {
   done
 
   headscale_cmd -o json nodes list >"${after_nodes_path}"
-  if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag || authkey_relogin_deleted_flag)); then
+  if ((authkey_relogin_expired_flag || authkey_relogin_deleted_flag)); then
     ruby -rjson -e '
       def nodes(path)
         payload = JSON.parse(File.read(path))
@@ -2988,7 +2987,7 @@ relogin_with_authkey_if_requested() {
       abort("expected #{expected_count} nodes before #{mode} relogin, got #{before.length}") unless before.length == expected_count
       abort("expected #{expected_count} nodes after #{mode} relogin rejection, got #{after.length}") unless after.length == expected_count
 
-      if ["different-user", "deleted-key"].include?(mode)
+      if mode == "deleted-key"
         def node_name(node)
           node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
         end
@@ -3033,13 +3032,67 @@ relogin_with_authkey_if_requested() {
       puts JSON.pretty_generate({"#{mode.tr("-", "_")}_relogin_rejected_nodes": after.length})
     ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}" "${rejection_mode}" "$(IFS=,; echo "${successful_client_names[*]}")"
     echo "::endgroup::"
-    if ((authkey_relogin_different_user_flag)); then
-      echo "${target} different-user auth-key relogin real-client smoke passed"
-    elif ((authkey_relogin_deleted_flag)); then
+    if ((authkey_relogin_deleted_flag)); then
       echo "${target} deleted-key auth-key relogin real-client smoke passed"
     else
       echo "${target} expired auth-key relogin real-client smoke passed"
     fi
+    exit 0
+  fi
+  if ((authkey_relogin_different_user_flag)); then
+    ruby -rjson -e '
+      def nodes(path)
+        payload = JSON.parse(File.read(path))
+        payload.nil? ? [] : (payload.is_a?(Array) ? payload : payload.fetch("nodes"))
+      end
+
+      def node_name(node)
+        node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+      end
+
+      def user_name(node)
+        user = node["user"] || node["User"]
+        user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
+      end
+
+      def node_id(node)
+        node["id"] || node["ID"] || node["nodeId"] || node["node_id"]
+      end
+
+      def machine_key(node)
+        node["machineKey"] || node["machine_key"] || node["MachineKey"] || node["machine"]
+      end
+
+      before = nodes(ARGV.fetch(0))
+      after = nodes(ARGV.fetch(1))
+      expected_count = Integer(ARGV.fetch(2))
+      expected_names = ARGV.fetch(3).split(",").reject(&:empty?)
+      expected_after = expected_count + expected_names.length
+      abort("expected #{expected_count} nodes before different-user relogin, got #{before.length}") unless before.length == expected_count
+      abort("expected #{expected_after} nodes after different-user relogin, got #{after.length}") unless after.length == expected_after
+
+      expected_names.each do |name|
+        old = before.find { |node| node_name(node).to_s == name }
+        abort("missing before-relogin node #{name.inspect}") unless old
+        preserved = after.find { |node| node_id(node) == node_id(old) && user_name(node) == user_name(old) }
+        abort("missing preserved old-user node #{name.inspect}") unless preserved
+        old_machine_key = machine_key(old)
+        created = after.find do |node|
+          next false unless user_name(node) != user_name(old)
+          next false unless node_id(node) != node_id(old)
+
+          if old_machine_key.to_s.empty?
+            node_name(node).to_s.start_with?(name)
+          else
+            machine_key(node) == old_machine_key
+          end
+        end
+        abort("missing new different-user node #{name.inspect}") unless created
+      end
+      puts JSON.pretty_generate({different_user_relogin_new_nodes: expected_names.length})
+    ' "${before_nodes_path}" "${after_nodes_path}" "${expected_count}" "$(IFS=,; echo "${successful_client_names[*]}")"
+    echo "::endgroup::"
+    echo "${target} different-user auth-key relogin real-client smoke passed"
     exit 0
   fi
   ruby -rjson -e '

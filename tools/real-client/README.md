@@ -87,7 +87,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Registration | `authkey-expired` | `authkey-expired-smoke.sh` | `authkey-expired-headscale-go-smoke.sh` | Expired auth-key rejects stock-client registration |
 | Lifecycle | `authkey-relogin-same-user` | `authkey-relogin-same-user-smoke.sh` | `authkey-relogin-same-user-headscale-go-smoke.sh` | Auth-key logout then same-user relogin preserves node identity and IPs |
 | Lifecycle | `authkey-relogin-expired` | `authkey-relogin-expired-smoke.sh` | `authkey-relogin-expired-headscale-go-smoke.sh` | Auth-key logout then expired same-user relogin key is rejected |
-| Lifecycle | `authkey-relogin-different-user` | `authkey-relogin-different-user-smoke.sh` | `authkey-relogin-different-user-headscale-go-smoke.sh` | Auth-key logout then different-user relogin key is rejected without duplicating or transferring node state |
+| Lifecycle | `authkey-relogin-different-user` | `authkey-relogin-different-user-smoke.sh` | `authkey-relogin-different-user-headscale-go-smoke.sh` | Auth-key logout then different-user relogin creates a new node and preserves the old node |
 | Lifecycle | `authkey-relogin-deleted` | `authkey-relogin-deleted-smoke.sh` | `authkey-relogin-deleted-headscale-go-smoke.sh` | Auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Lifecycle | `authkey-relogin-route-preserve` | `authkey-relogin-route-preserve-smoke.sh` | `authkey-relogin-route-preserve-headscale-go-smoke.sh` | Same-user auth-key relogin preserves approved route state |
 | Tailcfg | `taildrop-capmap` | `taildrop-capmap-smoke.sh` | `taildrop-capmap-headscale-go-smoke.sh` | Disabled Taildrop removes file-sharing from stock-client self CapMap |
@@ -97,7 +97,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-authkey-expired` | `postgres-authkey-expired-smoke.sh` | `postgres-authkey-expired-headscale-go-smoke.sh` | Production Postgres expired auth-key rejects stock-client registration |
 | Database | `postgres-authkey-relogin-same-user` | `postgres-authkey-relogin-same-user-smoke.sh` | `postgres-authkey-relogin-same-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then same-user relogin preserves node identity and IPs |
 | Database | `postgres-authkey-relogin-expired` | `postgres-authkey-relogin-expired-smoke.sh` | `postgres-authkey-relogin-expired-headscale-go-smoke.sh` | Production Postgres auth-key logout then expired same-user relogin key is rejected |
-| Database | `postgres-authkey-relogin-different-user` | `postgres-authkey-relogin-different-user-smoke.sh` | `postgres-authkey-relogin-different-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then different-user relogin key is rejected without duplicating or transferring node state |
+| Database | `postgres-authkey-relogin-different-user` | `postgres-authkey-relogin-different-user-smoke.sh` | `postgres-authkey-relogin-different-user-headscale-go-smoke.sh` | Production Postgres auth-key logout then different-user relogin creates a new node and preserves the old node |
 | Database | `postgres-authkey-relogin-deleted` | `postgres-authkey-relogin-deleted-smoke.sh` | `postgres-authkey-relogin-deleted-headscale-go-smoke.sh` | Production Postgres auth-key logout then deleted same-user relogin key is rejected after server restart without duplicating or changing node state |
 | Database | `postgres-authkey-relogin-route-preserve` | `postgres-authkey-relogin-route-preserve-smoke.sh` | `postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh` | Production Postgres auth-key same-user relogin preserves approved route state |
 | Database | `postgres-taildrop-capmap` | `postgres-taildrop-capmap-smoke.sh` | `postgres-taildrop-capmap-headscale-go-smoke.sh` | Production Postgres taildrop disabled removes file-sharing from stock-client self CapMap |
@@ -382,8 +382,8 @@ The expired-relogin variant expires the fresh same-user key before relogin,
 then asserts the stock client remains logged out and the persisted node count
 does not change.
 The different-user relogin variant mints the fresh key for a separate user and
-asserts the stock client remains logged out while the persisted node is neither
-duplicated nor transferred to that user.
+asserts the stock client logs in as that user while the previous user's node is
+preserved and a new node is created.
 The deleted-key relogin variant deletes the fresh same-user key through the
 CLI, restarts the server, and asserts the stock client remains logged out
 while the persisted node is neither duplicated nor changed.

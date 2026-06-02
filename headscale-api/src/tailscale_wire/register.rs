@@ -91,9 +91,6 @@ const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH: &str =
     "node exists with a different machine key";
 const REGISTER_LOGOUT_MACHINE_KEY_MISMATCH: &str = "node exist with different machine key";
-const DIFFERENT_REGISTERED_USER_ERROR: &str =
-    "machine was previously registered with a different user";
-
 pub(crate) const CAPABILITY_ADMIN: &str = "https://tailscale.com/cap/is-admin";
 pub(crate) const CAPABILITY_DEFAULT_AUTO_UPDATE: &str = "default-auto-update";
 pub(crate) const CAPABILITY_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
@@ -302,13 +299,6 @@ async fn register_inner(
         return register_interactive(state, node_key_hex, machine_key_hex, body).await;
     }
 
-    if let Some(ok) = state.preauth.lookup(authkey).await
-        && let Some(resp) =
-            reject_different_user_machine_relogin(&state, &machine_key_hex, &ok.user, &ok.tags)
-    {
-        return resp;
-    }
-
     let redeemed = match state.preauth.redeem(authkey).await {
         Ok(ok) => ok,
         Err(err) => {
@@ -331,11 +321,6 @@ async fn register_inner(
         }
     };
     let user = redeemed.user.clone();
-    if let Some(resp) =
-        reject_different_user_machine_relogin(&state, &machine_key_hex, &user, &redeemed.tags)
-    {
-        return resp;
-    }
 
     if !requested_tags.is_empty() {
         return invalid_requested_tags_response(&requested_tags);
@@ -794,26 +779,6 @@ fn failed_authkey_belongs_to_existing_node(
         }
         _ => true,
     }
-}
-
-fn reject_different_user_machine_relogin(
-    state: &WireState,
-    machine_key_hex: &str,
-    user: &str,
-    tags: &[String],
-) -> Option<axum::response::Response> {
-    if !tags.is_empty() {
-        return None;
-    }
-
-    let (_, existing) = state
-        .machines
-        .get_by_machine_key_any_user(machine_key_hex)?;
-    if existing.is_tagged() || existing.user == user {
-        return None;
-    }
-
-    Some(register_error_response(DIFFERENT_REGISTERED_USER_ERROR))
 }
 
 fn logout_existing_node(
@@ -2333,7 +2298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authkey_register_same_machine_different_user_is_rejected() {
+    async fn authkey_register_same_machine_different_user_creates_new_node() {
         let (state, redeemer, _dir) = fixture();
         let first_authkey = "hskey-auth-different-user-first";
         let second_authkey = "hskey-auth-different-user-second";
@@ -2370,12 +2335,96 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, DIFFERENT_REGISTERED_USER_ERROR);
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+        assert_eq!(rr.login.login_name, "bob");
 
-        assert_eq!(state.machines.len(), 1);
-        assert!(state.machines.get(&first_node_key).is_some());
-        assert!(state.machines.get(&second_node_key).is_none());
-        assert!(redeemer.contains(second_authkey));
+        assert_eq!(state.machines.len(), 2);
+        let first = state.machines.get(&first_node_key).unwrap();
+        assert_eq!(first.user, "alice");
+        let second = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(second.user, "bob");
+        assert_eq!(second.machine_key_hex, first.machine_key_hex);
+        assert_ne!(second.ipv4, first.ipv4);
+        assert!(!redeemer.contains(second_authkey));
+    }
+
+    #[tokio::test]
+    async fn authkey_logout_relogin_different_user_creates_new_node() {
+        let (state, redeemer, _dir) = fixture();
+        let first_authkey = "hskey-auth-logout-different-user-first";
+        let second_authkey = "hskey-auth-logout-different-user-second";
+        redeemer.insert(first_authkey, "alice");
+        redeemer.insert(second_authkey, "bob");
+        let app = router(state.clone());
+        let first_node_key = "6c".repeat(32);
+        let second_node_key = "6d".repeat(32);
+        let machine_key_hex = "b8".repeat(32);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{first_node_key}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&req_body(&first_node_key, first_authkey)).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let logout_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{first_node_key}"),
+            "Expiry": chrono::Utc::now() - chrono::Duration::minutes(1),
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{first_node_key}/register"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&logout_body).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex.clone()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.node_key_expired);
+        assert!(
+            state
+                .machines
+                .get(&first_node_key)
+                .unwrap()
+                .is_expired_at(chrono::Utc::now())
+        );
+
+        let mut body = req_body(&second_node_key, second_authkey);
+        body["Hostinfo"]["Hostname"] = serde_json::json!("peer-bob");
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{second_node_key}/register"))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(machine_key_hex));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert!(rr.machine_authorized);
+        assert!(!rr.node_key_expired);
+        assert_eq!(rr.login.login_name, "bob");
+
+        assert_eq!(state.machines.len(), 2);
+        let original = state.machines.get(&first_node_key).unwrap();
+        assert_eq!(original.user, "alice");
+        assert!(original.is_expired_at(chrono::Utc::now()));
+        let relogin = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(relogin.user, "bob");
+        assert_eq!(relogin.hostname, "peer-bob");
+        assert!(!relogin.is_expired_at(chrono::Utc::now()));
     }
 
     #[tokio::test]

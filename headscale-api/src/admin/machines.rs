@@ -72,8 +72,6 @@ const REGISTER_METHOD_AUTH_KEY: i32 = 1;
 const REGISTER_METHOD_OIDC: i32 = 3;
 const EMPTY_TAGS_ERROR: &str =
     "cannot remove all tags from a node - tagged nodes must have at least one tag";
-const DIFFERENT_REGISTERED_USER_ERROR: &str =
-    "machine was previously registered with a different user";
 
 #[derive(Clone, Debug, Default)]
 struct UserIdentity {
@@ -678,16 +676,6 @@ impl PersistentMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(e) => return Err(db_error_to_machine(e, &record.id)),
             };
-        if existing_for_user.is_none()
-            && let Some(row) = existing_for_machine.as_ref()
-            && record.tags.is_empty()
-            && row.tag_list().is_empty()
-            && row.user_id != user_id
-        {
-            return Err(MachineAdminError::BadRequest(
-                DIFFERENT_REGISTERED_USER_ERROR.into(),
-            ));
-        }
         let existing = existing_for_user.or_else(|| {
             existing_for_machine
                 .as_ref()
@@ -1180,16 +1168,6 @@ impl PersistentPostgresMachineAdmin {
             Err(headscale_db::DbError::NotFound(_)) => None,
             Err(e) => return Err(db_error_to_machine(e, &record.id)),
         };
-        if existing_for_user.is_none()
-            && let Some(row) = existing_for_machine.as_ref()
-            && record.tags.is_empty()
-            && row.tag_list().is_empty()
-            && row.user_id != user_id
-        {
-            return Err(MachineAdminError::BadRequest(
-                DIFFERENT_REGISTERED_USER_ERROR.into(),
-            ));
-        }
         let existing = existing_for_user.or_else(|| {
             existing_for_machine
                 .as_ref()
@@ -4524,7 +4502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_auth_key_path_rejects_same_machine_different_user() {
+    async fn persistent_auth_key_path_different_user_creates_new_row() {
         let (admin, db, users) = persistent_fixture().await;
         let bob = users.create("bob").await.unwrap();
         let first_key = headscale_db::preauth_keys::create_for_test(
@@ -4566,21 +4544,24 @@ mod tests {
         relogin.user = "bob".into();
         relogin.hostname = "bob-relogin".into();
         relogin.host_info.hostname = "bob-relogin".into();
-        let err = admin
+        relogin.ipv4 = Some(Ipv4Addr::new(100, 64, 0, 77));
+        let result = admin
             .create_or_update_auth_key_path(relogin, &PolicyStore::new(), Some(second_key.row.id))
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(err, MachineAdminError::BadRequest(_)));
-        assert_eq!(
-            err.to_string(),
-            format!("bad request: {DIFFERENT_REGISTERED_USER_ERROR}")
-        );
+        assert!(result.new_node);
+        assert_eq!(result.replaced_node_key_hex, None);
+        assert_ne!(result.record.node_id, created.record.node_id);
+        assert_eq!(result.record.id, "cd".repeat(32));
+        assert_eq!(result.record.user, "bob");
+        assert_eq!(result.record.user_id, Some(bob.id));
+        assert_eq!(result.record.auth_key_id, Some(second_key.row.id));
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
         let raw =
             headscale_db::headscale_nodes::get_by_id(db.pool(), created.record.node_id as i64)
                 .await
@@ -4588,6 +4569,14 @@ mod tests {
         assert_eq!(raw.node_key, format!("nodekey:{}", original.node_key_hex));
         assert_eq!(raw.user_id, Some(1));
         assert_eq!(raw.auth_key_id, Some(first_key.row.id));
+        let relogin_raw =
+            headscale_db::headscale_nodes::get_by_id(db.pool(), result.record.node_id as i64)
+                .await
+                .unwrap();
+        assert_eq!(relogin_raw.node_key, format!("nodekey:{}", "cd".repeat(32)));
+        assert_eq!(relogin_raw.machine_key, raw.machine_key);
+        assert_eq!(relogin_raw.user_id, Some(bob.id as i64));
+        assert_eq!(relogin_raw.auth_key_id, Some(second_key.row.id));
     }
 
     #[tokio::test]

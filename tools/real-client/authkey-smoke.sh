@@ -1810,7 +1810,7 @@ fi
 
 if ((authkey_relogin_requested_flag)); then
   if ((authkey_relogin_different_user_flag)); then
-    echo "::group::auth-key logout and different-user relogin rejection"
+    echo "::group::auth-key logout and different-user relogin"
   elif ((authkey_relogin_expired_flag)); then
     echo "::group::auth-key logout and expired-key relogin rejection"
   else
@@ -1880,32 +1880,28 @@ if ((authkey_relogin_requested_flag)); then
     relogin_status=0
     run_with_timeout "tailscale auth-key relogin ${client_name}" docker exec "${client_name}" "${up_args[@]}" ||
       relogin_status="$?"
-    if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag)); then
+    if ((authkey_relogin_expired_flag)); then
       if tailscale_logged_in "${client_name}"; then
-        if ((authkey_relogin_different_user_flag)); then
-          echo "expected different-user auth-key relogin to fail for ${client_name}, but it reached a logged-in netmap" >&2
-        else
-          echo "expected expired auth-key relogin to fail for ${client_name}, but it reached a logged-in netmap" >&2
-        fi
+        echo "expected expired auth-key relogin to fail for ${client_name}, but it reached a logged-in netmap" >&2
         docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.unexpected-relogin-status.json" 2>/dev/null || true
         exit 1
       fi
       docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.expected-relogin-failure-status.json" 2>/dev/null || true
-      if ((authkey_relogin_different_user_flag)); then
-        echo "different-user auth-key relogin failed as expected for ${client_name}"
-      else
-        echo "expired auth-key relogin failed as expected for ${client_name}"
-      fi
+      echo "expired auth-key relogin failed as expected for ${client_name}"
       continue
     fi
     if ((relogin_status != 0)); then
-      echo "tailscale same-user relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
+      echo "tailscale auth-key relogin ${client_name} returned ${relogin_status}; verifying logged-in netmap"
     fi
-    if ! wait_for "tailscale logged-in netmap after same-user relogin ${client_name}" "tailscale_logged_in '${client_name}'"; then
+    if ! wait_for "tailscale logged-in netmap after auth-key relogin ${client_name}" "tailscale_logged_in '${client_name}'"; then
       dump_client_debug "${client_name}"
       exit 1
     fi
     docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.relogin-tailscale-status.json"
+    if ((authkey_relogin_different_user_flag)); then
+      cp "${work_dir}/${client_name}.relogin-tailscale-status.json" "${work_dir}/${client_name}.tailscale-status.json"
+      continue
+    fi
     relogin_after_ips="$(tailscale_status_ips "${work_dir}/${client_name}.relogin-tailscale-status.json")"
     if [[ "${relogin_after_ips}" != "${relogin_before_ips[$idx]}" ]]; then
       echo "expected stable Tailscale IPs for ${client_name}: ${relogin_before_ips[$idx]}, got ${relogin_after_ips}" >&2
@@ -1914,40 +1910,58 @@ if ((authkey_relogin_requested_flag)); then
     cp "${work_dir}/${client_name}.relogin-tailscale-status.json" "${work_dir}/${client_name}.tailscale-status.json"
   done
   curl -fsS "http://127.0.0.1:${http_port}/harness/machines" >"${work_dir}/machines-after-relogin.json"
-  if ((authkey_relogin_expired_flag || authkey_relogin_different_user_flag)); then
+  if ((authkey_relogin_expired_flag)); then
     ruby -rjson -e '
       before = JSON.parse(File.read(ARGV.fetch(0)))
       after = JSON.parse(File.read(ARGV.fetch(1)))
       expected_count = Integer(ARGV.fetch(2))
       mode = ARGV.fetch(3)
-      expected_names = ARGV.fetch(4).split(",").reject(&:empty?)
       abort("expected #{expected_count} machines before #{mode} relogin, got #{before.length}") unless before.length == expected_count
       abort("expected #{expected_count} machines after #{mode} relogin rejection, got #{after.length}") unless after.length == expected_count
 
-      if mode == "different-user"
-        comparable = %w[machine_key user hostname addresses available_routes approved_routes]
-        expected_names.each do |name|
-          old = before.find { |machine| machine.fetch("hostname") == name }
-          new = after.find { |machine| machine.fetch("hostname") == name }
-          abort("missing before-relogin machine #{name.inspect}") unless old
-          abort("missing after-relogin machine #{name.inspect}") unless new
-          comparable.each do |field|
-            old_value = old.fetch(field)
-            new_value = new.fetch(field)
-            old_value = old_value.sort if old_value.is_a?(Array)
-            new_value = new_value.sort if new_value.is_a?(Array)
-            abort("different-user relogin changed #{name} #{field}: #{old_value.inspect} -> #{new_value.inspect}") unless old_value == new_value
-          end
-        end
-      end
       puts JSON.pretty_generate({"#{mode.tr("-", "_")}_relogin_rejected_machines": after.length})
-    ' "${work_dir}/machines-before-relogin.json" "${work_dir}/machines-after-relogin.json" "${expected_machine_count}" "$([[ "${authkey_relogin_different_user_flag}" -eq 1 ]] && printf different-user || printf expired)" "${expected_client_names_csv}"
+    ' "${work_dir}/machines-before-relogin.json" "${work_dir}/machines-after-relogin.json" "${expected_machine_count}" "expired"
     echo "::endgroup::"
-    if ((authkey_relogin_different_user_flag)); then
-      echo "authkey different-user-relogin real-client smoke passed"
-    else
-      echo "authkey expired-relogin real-client smoke passed"
-    fi
+    echo "authkey expired-relogin real-client smoke passed"
+    exit 0
+  fi
+  if ((authkey_relogin_different_user_flag)); then
+    ruby -rjson -e '
+      before = JSON.parse(File.read(ARGV.fetch(0)))
+      after = JSON.parse(File.read(ARGV.fetch(1)))
+      expected_count = Integer(ARGV.fetch(2))
+      expected_names = ARGV.fetch(3).split(",").reject(&:empty?)
+      expected_after = expected_count + expected_names.length
+      abort("expected #{expected_count} machines before different-user relogin, got #{before.length}") unless before.length == expected_count
+      abort("expected #{expected_after} machines after different-user relogin, got #{after.length}") unless after.length == expected_after
+
+      comparable = %w[machine_key user hostname addresses available_routes approved_routes]
+      expected_names.each do |name|
+        old = before.find { |machine| machine.fetch("hostname") == name }
+        abort("missing before-relogin machine #{name.inspect}") unless old
+        preserved = after.find do |machine|
+          machine.fetch("hostname") == name &&
+            machine.fetch("machine_key") == old.fetch("machine_key") &&
+            machine.fetch("user") == old.fetch("user")
+        end
+        abort("missing preserved old-user machine #{name.inspect}") unless preserved
+        comparable.each do |field|
+          old_value = old.fetch(field)
+          preserved_value = preserved.fetch(field)
+          old_value = old_value.sort if old_value.is_a?(Array)
+          preserved_value = preserved_value.sort if preserved_value.is_a?(Array)
+          abort("different-user relogin changed preserved #{name} #{field}: #{old_value.inspect} -> #{preserved_value.inspect}") unless old_value == preserved_value
+        end
+        created = after.find do |machine|
+          machine.fetch("machine_key") == old.fetch("machine_key") &&
+            machine.fetch("user") != old.fetch("user")
+        end
+        abort("missing new different-user machine #{name.inspect}") unless created
+      end
+      puts JSON.pretty_generate({different_user_relogin_new_machines: expected_names.length})
+    ' "${work_dir}/machines-before-relogin.json" "${work_dir}/machines-after-relogin.json" "${expected_machine_count}" "${expected_client_names_csv}"
+    echo "::endgroup::"
+    echo "authkey different-user-relogin real-client smoke passed"
     exit 0
   fi
   ruby -rjson -e '

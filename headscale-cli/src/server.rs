@@ -5660,7 +5660,10 @@ policy:
             "auth-router",
         )
         .await;
-        assert!(auth_register.machine_authorized);
+        assert!(
+            auth_register.machine_authorized,
+            "auth-key register response: {auth_register:?}"
+        );
         assert!(auth_register.error.is_empty());
 
         let interactive_node_key = "c1".repeat(32);

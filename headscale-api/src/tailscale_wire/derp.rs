@@ -96,6 +96,11 @@ impl fmt::Debug for NativeDerpRuntime {
             )
             .field("keepalive_interval", &self.keepalive_interval)
             .field("keepalive_jitter", &self.keepalive_jitter)
+            .field(
+                "connection_sequence",
+                &self.connection_sequence.load(Ordering::Relaxed),
+            )
+            .field("health_problem", &self.health_problem)
             .finish()
     }
 }
@@ -214,7 +219,7 @@ impl NativeDerpRuntime {
             let mut guard = self
                 .health_problem
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let had_problem = guard.is_some();
             if problem.is_empty() {
                 *guard = None;
@@ -267,7 +272,7 @@ impl NativeDerpRuntime {
     fn current_health_frame(&self) -> Option<Frame> {
         self.health_problem
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .map(Frame::Health)
     }
@@ -596,7 +601,7 @@ where
         let event = tokio::select! {
             read = reader.read(&mut buf) => RelayLoopEvent::Read(read),
             outbound = session.recv() => RelayLoopEvent::Outbound(outbound),
-            _ = &mut keepalive_sleep => RelayLoopEvent::KeepAlive,
+            () = &mut keepalive_sleep => RelayLoopEvent::KeepAlive,
         };
 
         match event {
@@ -660,7 +665,7 @@ where
                 WebsocketRelayLoopEvent::Incoming(incoming)
             }
             outbound = session.recv() => WebsocketRelayLoopEvent::Outbound(outbound),
-            _ = &mut keepalive_sleep => WebsocketRelayLoopEvent::KeepAlive,
+            () = &mut keepalive_sleep => WebsocketRelayLoopEvent::KeepAlive,
         };
 
         match event {

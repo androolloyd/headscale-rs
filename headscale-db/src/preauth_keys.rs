@@ -49,6 +49,8 @@ pub const BCRYPT_COST_DEFAULT: u32 = 10;
 /// rejects costs below 4 with `BcryptError::CostNotAllowed`.
 pub const BCRYPT_COST_TEST: u32 = 4;
 
+const GO_ZERO_TIME_UNIX_SECONDS: i64 = -62_135_596_800;
+
 const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const AUTH_KEY_PARSE_ERROR: &str = "failed to parse auth-key";
 const PREAUTH_KEY_COLUMNS: &str = r"
@@ -160,7 +162,7 @@ impl PreauthKeyRow {
     /// inject a fixed clock).
     pub fn is_expired(&self, now_unix: i64) -> bool {
         match self.expiration {
-            Some(exp) => now_unix >= exp,
+            Some(exp) => exp != GO_ZERO_TIME_UNIX_SECONDS && now_unix >= exp,
             None => false,
         }
     }
@@ -1274,6 +1276,19 @@ mod tests {
         let c = create_for_test(db.pool(), p).await.unwrap();
         let e = try_use(db.pool(), &c.plaintext).await.unwrap_err();
         assert_eq!(e, UseError::Expired);
+    }
+
+    /// gRPC create without an expiration mirrors headscale-go's zero
+    /// timestamp in storage, but that zero timestamp still means no expiry.
+    #[tokio::test]
+    async fn try_use_accepts_go_zero_expiration() {
+        let db = fresh_db().await;
+        let mut p = alice();
+        p.expiration = Some(GO_ZERO_TIME_UNIX_SECONDS);
+        let c = create_for_test(db.pool(), p).await.unwrap();
+
+        let redeemed = try_use(db.pool(), &c.plaintext).await.unwrap();
+        assert_eq!(redeemed.expiration, Some(GO_ZERO_TIME_UNIX_SECONDS));
     }
 
     /// Future expiration ⇒ try_use accepts.

@@ -1610,7 +1610,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   feature flags that project into `/debug/config` and map-response capability
   shaping.
 
-## 2026-06-01 auth-key different-user relogin rejection smoke slice
+## 2026-06-01 auth-key different-user relogin rejection smoke slice (superseded)
 
 - Added paired `authkey-relogin-different-user` Rust/headscale-go rows and
   paired `postgres-authkey-relogin-different-user` Rust/headscale-go rows.
@@ -1621,7 +1621,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The rejection assertion compares pre/post persisted node state so the
   rejected relogin cannot duplicate the node or silently transfer it to the
   different user.
-- This closes the different-user relogin rejection gap.
+- This was superseded by the 2026-06-02 current-head observation that
+  different-user auth-key relogin creates a new node while preserving the old
+  node.
 
 ## 2026-06-01 auth-key deleted relogin restart rejection smoke slice
 
@@ -1691,18 +1693,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 ## 2026-06-02 auth-key different-user relogin runtime fix
 
-- Rust now rejects a stock-client auth-key relogin when the presented machine
-  key is already attached to an untagged node owned by a different user.
-- The guard runs before preauth redemption when lookup metadata is available,
-  so the rejected relogin key is not consumed, with an after-redemption fallback
-  for simpler redeemers.
-- SQLite and Postgres persistent auth-key paths now apply the same untagged
-  same-machine/different-user guard so restart/hydration cannot silently create
-  or transfer persistent state.
-- Current-head headscale-go has direct unit coverage that creates a new node
-  for some different-user same-machine paths, but the stock-client real-client
-  row at `171fd7a3` remains logged out and preserves the original node. This
-  slice matches the stock-client observable behavior that failed CI.
+- Rust now mirrors current-head headscale-go for stock-client auth-key relogin:
+  if the presented machine key is already attached to an untagged node owned by
+  a different user, the fresh different-user key creates a new node instead of
+  rejecting or transferring the old node.
+- SQLite and Postgres persistent auth-key paths use the same behavior, so
+  restart/hydration preserves the old-user node and stores the relogin as a
+  separate node for the fresh key's user.
+- The Rust and headscale-go real-client rows now assert the successful login,
+  the additional node count, and preservation of the old-user node.
 
 ## 2026-06-02 policy danger-all source parity slice
 

@@ -18,6 +18,7 @@ pub const API_KEY_PREFIX_LEN: usize = 12;
 pub const API_KEY_SECRET_LEN: usize = 64;
 pub const LEGACY_API_KEY_PREFIX_LEN: usize = 7;
 pub const LEGACY_API_KEY_SECRET_LEN: usize = 32;
+const GO_ZERO_TIME_UNIX_SECONDS: i64 = -62_135_596_800;
 
 /// Same production cost family as headscale-go (`bcrypt.DefaultCost`).
 pub const BCRYPT_COST_DEFAULT: u32 = 10;
@@ -84,7 +85,8 @@ impl ApiKeyRow {
     }
 
     pub fn is_expired(&self, now_unix: i64) -> bool {
-        self.expiration.is_some_and(|exp| exp <= now_unix)
+        self.expiration
+            .is_some_and(|exp| exp != GO_ZERO_TIME_UNIX_SECONDS && exp <= now_unix)
     }
 }
 
@@ -626,6 +628,23 @@ mod tests {
         let c = create_for_test(db.pool(), CreateParams { expiration: None })
             .await
             .unwrap();
+        assert!(validate(db.pool(), &c.plaintext).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_go_zero_expiration_as_never_expires() {
+        let db = fresh_db().await;
+        let c = create_for_test(
+            db.pool(),
+            CreateParams {
+                expiration: Some(GO_ZERO_TIME_UNIX_SECONDS),
+            },
+        )
+        .await
+        .unwrap();
+        let row = get_by_id(db.pool(), c.row.id).await.unwrap();
+        assert_eq!(row.expiration, Some(GO_ZERO_TIME_UNIX_SECONDS));
+        assert!(!row.is_expired(now_unix()));
         assert!(validate(db.pool(), &c.plaintext).await.unwrap());
     }
 

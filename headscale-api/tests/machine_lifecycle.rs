@@ -104,6 +104,7 @@ fn fixture(registry: Arc<MachineRegistry>) -> (WireState, AdminState) {
         derp_map: headscale_api::tailscale_wire::DerpMapStore::shared(
             headscale_api::tailscale_wire::DerpMap::default(),
         ),
+        #[cfg(feature = "full")]
         native_derp: None,
         policy: Arc::new(policy.clone()),
         knock: headscale_api::tailscale_wire::KnockConfig::disabled(),

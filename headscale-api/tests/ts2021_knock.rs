@@ -66,6 +66,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         machines: Arc::new(MachineRegistry::new()),
         registration_store: None,
         derp_map: tailscale_wire::DerpMapStore::shared(tailscale_wire::wire::DerpMap::default()),
+        #[cfg(feature = "full")]
         native_derp: None,
         policy: Arc::new(headscale_api::policy::PolicyStore::new()),
         knock,

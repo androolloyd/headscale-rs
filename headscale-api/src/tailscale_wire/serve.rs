@@ -398,9 +398,7 @@ fn resolve_trusted_proxy_headers(
         return peer;
     }
 
-    trusted_proxy_client_ip(headers, trusted)
-        .map(|ip| SocketAddr::new(ip, peer.port()))
-        .unwrap_or(peer)
+    trusted_proxy_client_ip(headers, trusted).map_or(peer, |ip| SocketAddr::new(ip, peer.port()))
 }
 
 fn strip_forwarded_headers(headers: &mut HeaderMap) {

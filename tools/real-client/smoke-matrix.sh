@@ -998,7 +998,7 @@ smoke_assertions=(
   "MagicDNS suffix, peer DNS names, and peer resolver lookup"
   "custom DNS base domain and peer resolver lookup"
   "extra DNS A record in client netmap and resolver"
-  "split DNS routes plus AAAA/CNAME extra records and resolver lookups"
+  "split DNS route/fallback resolver object shape plus AAAA/CNAME extra records and resolver lookups"
   "production extra-records file hot reload in client netmap and resolver"
   "MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup"
   "MagicDNS disabled fallback names"

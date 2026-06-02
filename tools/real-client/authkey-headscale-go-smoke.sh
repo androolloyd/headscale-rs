@@ -74,6 +74,7 @@ expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
+expected_dns_resolver_objects="${REAL_CLIENT_EXPECT_DNS_RESOLVER_OBJECTS:-false}"
 expected_dns_debug_resolves="${REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES:-}"
 expected_peer_magic_dns_resolve="${REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE:-false}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
@@ -552,6 +553,18 @@ case "${expected_peer_magic_dns_resolve}" in
     ;;
   *)
     echo "REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE must be true or false, got ${expected_peer_magic_dns_resolve}" >&2
+    exit 2
+    ;;
+esac
+case "${expected_dns_resolver_objects}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    expect_dns_resolver_objects=true
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    expect_dns_resolver_objects=false
+    ;;
+  *)
+    echo "REAL_CLIENT_EXPECT_DNS_RESOLVER_OBJECTS must be true or false, got ${expected_dns_resolver_objects}" >&2
     exit 2
     ;;
 esac
@@ -1220,23 +1233,36 @@ assert_dns_resolver_list() {
   local field="$2"
   local expected_csv="$3"
   local output_path="$4"
+  local expect_objects="${5:-false}"
   local netmap_path="${output_path}.netmap"
   docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
     ruby -rjson -e '
+      def normalize_resolver(resolver, expect_object)
+        unless resolver.is_a?(Hash)
+          abort("expected DNS resolver object, got #{resolver.inspect}") if expect_object
+          return {
+            "Addr" => resolver.to_s,
+            "BootstrapResolution" => [],
+            "UseWithExitNode" => false,
+          }
+        end
+        {
+          "Addr" => (resolver["Addr"] || resolver["addr"]).to_s,
+          "BootstrapResolution" => Array(resolver["BootstrapResolution"] || resolver["bootstrap_resolution"]).map(&:to_s),
+          "UseWithExitNode" => !!(resolver["UseWithExitNode"] || resolver["use_with_exit_node"]),
+        }
+      end
+
       netmap = JSON.parse(File.read(ARGV.fetch(0)))
       field = ARGV.fetch(1)
       expected = ARGV.fetch(2).split(",").reject(&:empty?)
+      expect_objects = ARGV.fetch(3) == "true"
       resolvers = Array(netmap.dig("DNS", field))
-      got = resolvers.map do |resolver|
-        if resolver.is_a?(Hash)
-          (resolver["Addr"] || resolver["addr"]).to_s
-        else
-          resolver.to_s
-        end
-      end
+      normalized = resolvers.map { |resolver| normalize_resolver(resolver, expect_objects) }
+      got = normalized.map { |resolver| resolver.fetch("Addr") }
       abort("expected DNS #{field} #{expected.inspect}, got #{got.inspect}") unless got == expected
-      puts JSON.pretty_generate({field => got})
-    ' "${netmap_path}" "${field}" "${expected_csv}" >"${output_path}"
+      puts JSON.pretty_generate({field => normalized})
+    ' "${netmap_path}" "${field}" "${expected_csv}" "${expect_objects}" >"${output_path}"
 }
 
 assert_dns_route() {
@@ -1244,25 +1270,38 @@ assert_dns_route() {
   local suffix="$2"
   local expected_csv="$3"
   local output_path="$4"
+  local expect_objects="${5:-false}"
   local netmap_path="${output_path}.netmap"
   docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
     ruby -rjson -e '
+      def normalize_resolver(resolver, expect_object)
+        unless resolver.is_a?(Hash)
+          abort("expected DNS route resolver object, got #{resolver.inspect}") if expect_object
+          return {
+            "Addr" => resolver.to_s,
+            "BootstrapResolution" => [],
+            "UseWithExitNode" => false,
+          }
+        end
+        {
+          "Addr" => (resolver["Addr"] || resolver["addr"]).to_s,
+          "BootstrapResolution" => Array(resolver["BootstrapResolution"] || resolver["bootstrap_resolution"]).map(&:to_s),
+          "UseWithExitNode" => !!(resolver["UseWithExitNode"] || resolver["use_with_exit_node"]),
+        }
+      end
+
       netmap = JSON.parse(File.read(ARGV.fetch(0)))
       suffix = ARGV.fetch(1).sub(/\.\z/, "")
       expected = ARGV.fetch(2).split(",").reject(&:empty?)
+      expect_objects = ARGV.fetch(3) == "true"
       routes = netmap.dig("DNS", "Routes") || {}
       route = routes[suffix] || routes["#{suffix}."]
       abort("expected DNS route #{suffix}, got #{routes.inspect}") if route.nil?
-      got = Array(route).map do |resolver|
-        if resolver.is_a?(Hash)
-          (resolver["Addr"] || resolver["addr"]).to_s
-        else
-          resolver.to_s
-        end
-      end
+      normalized = Array(route).map { |resolver| normalize_resolver(resolver, expect_objects) }
+      got = normalized.map { |resolver| resolver.fetch("Addr") }
       abort("expected DNS route #{suffix}=#{expected.inspect}, got #{got.inspect}") unless got == expected
-      puts JSON.pretty_generate({suffix => got})
-    ' "${netmap_path}" "${suffix}" "${expected_csv}" >"${output_path}"
+      puts JSON.pretty_generate({suffix => normalized})
+    ' "${netmap_path}" "${suffix}" "${expected_csv}" "${expect_objects}" >"${output_path}"
 }
 
 assert_dns_debug_resolve() {
@@ -2661,7 +2700,7 @@ if [[ -n "${expected_dns_resolvers}" ]]; then
   echo "::group::assert DNS resolvers"
   resolver_client="${client_names[0]}"
   wait_for "DNS resolvers ${expected_dns_resolvers}" \
-    "assert_dns_resolver_list '${resolver_client}' 'Resolvers' '${expected_dns_resolvers}' '${work_dir}/dns-resolvers.json'" || {
+    "assert_dns_resolver_list '${resolver_client}' 'Resolvers' '${expected_dns_resolvers}' '${work_dir}/dns-resolvers.json' '${expect_dns_resolver_objects}'" || {
       dump_client_debug "${resolver_client}"
       exit 1
     }
@@ -2673,7 +2712,7 @@ if [[ -n "${expected_dns_fallback_resolvers}" ]]; then
   echo "::group::assert DNS fallback resolvers"
   resolver_client="${client_names[0]}"
   wait_for "DNS fallback resolvers ${expected_dns_fallback_resolvers}" \
-    "assert_dns_resolver_list '${resolver_client}' 'FallbackResolvers' '${expected_dns_fallback_resolvers}' '${work_dir}/dns-fallback-resolvers.json'" || {
+    "assert_dns_resolver_list '${resolver_client}' 'FallbackResolvers' '${expected_dns_fallback_resolvers}' '${work_dir}/dns-fallback-resolvers.json' '${expect_dns_resolver_objects}'" || {
       dump_client_debug "${resolver_client}"
       exit 1
     }
@@ -2695,7 +2734,7 @@ if [[ -n "${expected_dns_routes}" ]]; then
     expected_csv="${expected//|/,}"
     safe_suffix="${suffix//[^a-zA-Z0-9_.-]/-}"
     wait_for "DNS route ${suffix}" \
-      "assert_dns_route '${resolver_client}' '${suffix}' '${expected_csv}' '${work_dir}/dns-route-${safe_suffix}.json'" || {
+      "assert_dns_route '${resolver_client}' '${suffix}' '${expected_csv}' '${work_dir}/dns-route-${safe_suffix}.json' '${expect_dns_resolver_objects}'" || {
         dump_client_debug "${resolver_client}"
         exit 1
       }

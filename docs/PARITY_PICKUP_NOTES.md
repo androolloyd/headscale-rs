@@ -1841,6 +1841,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - CLI process snapshots now cover YAML stderr envelopes for remote gRPC
   connection failure, remote API-key authentication failure, and live local
   gRPC health failure.
+- Remote gRPC missing-API-key stderr now has process snapshots for human,
+  JSON, json-line, and YAML output modes, keeping the local pre-connection
+  error envelope aligned with the rest of the CLI transport failures.
 - `configtest` and `server` now print headscale-go's non-fatal TLS-ALPN ACME
   warning when `tls_letsencrypt_hostname` uses `TLS-ALPN-01` while
   `listen_addr` does not end in `:443`.

@@ -3739,6 +3739,39 @@ fn implemented_admin_local_errors_match_snapshots() {
     );
     assert_stderr_snapshot(
         &[
+            "--output=json",
+            "--address",
+            "http://127.0.0.1:9",
+            "users",
+            "list",
+        ],
+        6,
+        include_str!("snapshots/grpc_remote_missing_api_key_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--output=json-line",
+            "--address",
+            "http://127.0.0.1:9",
+            "users",
+            "list",
+        ],
+        6,
+        include_str!("snapshots/grpc_remote_missing_api_key_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--output=yaml",
+            "--address",
+            "http://127.0.0.1:9",
+            "users",
+            "list",
+        ],
+        6,
+        include_str!("snapshots/grpc_remote_missing_api_key_yaml.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
             "--address",
             "http://127.0.0.1:9",
             "--api-key",

@@ -2261,3 +2261,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Remaining adjacent gaps are broader public-CA ACME failure-mode snapshots and
   config/map-stream churn; this slice only closes the default SQLite
   process-level listener-separation proof.
+
+## 2026-06-02 ACME HTTP-01 bind failure snapshot
+
+- Added a focused `headscale serve` process snapshot for an HTTP-01 ACME
+  challenge-listener bind collision. This exercises the same upstream
+  `autocert` startup boundary without making public-CA network requests.
+- The snapshot normalizes the dynamic loopback port and platform errno while
+  asserting no ACME certificate cache entry is written after the listener bind
+  failure.

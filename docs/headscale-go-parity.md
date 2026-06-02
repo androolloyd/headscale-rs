@@ -197,17 +197,20 @@ Current-head audit overlay, refreshed 2026-05-30:
   snapshots for residual serve/output drift, narrower gRPC/remote/server error
   text matrices, and Octra-side adaptation to consume the generic no-health
   control router instead of hand-picking stock public control routes.
-- Current branch closes the hidden `dumpConfig` no-config default-warning
+- Recent coverage closes the hidden `dumpConfig` no-config default-warning
   slice: process snapshots now pin headscale-go's timestamped
   `WRN no config file found, using defaults` line before the human,
   JSON, json-line, and YAML missing-target error envelopes.
-- Current branch closes one residual current-upstream help-topic warning slice:
+- Recent coverage closes one residual current-upstream help-topic warning slice:
   headscale-go `171fd7a3` emits the timestamped `WRN no config file found,
   using defaults` stderr line when `headscale help <topic>` falls through to
   default config discovery with no config file, including extra-topic and
   unknown-topic help lookups; process snapshots now normalize that timestamp
   via `no_config_default_warning.stderr` while direct `subcommand --help`
   remains clean.
+- Recent coverage adds process snapshots for API-key delete selector errors in
+  JSON, json-line, and YAML, pinning the current-upstream missing
+  `--id`/`--prefix` envelope before any gRPC connection attempt.
 
 This ledger tracks observable behavior that must match before
 `headscale-rs` can claim full parity with headscale-go. Rows marked

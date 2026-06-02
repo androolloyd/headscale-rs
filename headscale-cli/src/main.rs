@@ -1151,7 +1151,7 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     }
 
     if let Some(error) = nodes_list_missing_user_error(command_parts) {
-        return Some(format!("Error: {error}\n"));
+        return Some(admin::output::format_error(output_format, &error));
     }
 
     if matches!(parts.first(), Some(&"server")) {
@@ -3892,6 +3892,18 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["nodes", "list", "--user"]),
             Some("Error: flag needs an argument: --user\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["-o", "json", "nodes", "list", "--user"]),
+            Some("{\n\t\"error\": \"flag needs an argument: --user\"\n}\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["-ojson-line", "nodes", "list", "--user"]),
+            Some("{\"error\":\"flag needs an argument: --user\"}\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["--output=yaml", "nodes", "list", "--user"]),
+            Some("error: 'flag needs an argument: --user'\n\n".to_string())
         );
         assert_eq!(
             upstream_exact_error(&["preauthkeys", "create", "--user"]),

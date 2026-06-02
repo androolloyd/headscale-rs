@@ -4208,6 +4208,24 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
         "Error: flag needs an argument: --user\n",
     );
     assert_stderr_snapshot(
+        &["-o", "json", "nodes", "list", "--user"],
+        1,
+        include_str!("snapshots/nodes_list_missing_user_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["-ojson-line", "nodes", "list", "--user"],
+        1,
+        include_str!("snapshots/nodes_list_missing_user_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["--output=yaml", "nodes", "list", "--user"],
+        1,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/nodes_list_missing_user_yaml.stderr")
+        ),
+    );
+    assert_stderr_snapshot(
         &["preauthkeys", "create", "--user"],
         1,
         "Error: flag needs an argument: --user\n",

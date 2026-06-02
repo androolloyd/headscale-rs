@@ -2363,6 +2363,18 @@ fn residual_current_upstream_parser_edges_match_stderr_snapshots() {
         include_str!("snapshots/utility_completion_bash_dashdash_unknown_command.stderr"),
     );
     assert_stderr_snapshot(
+        &["completion", "bash", "--no-descriptions", "--", "bad"],
+        1,
+        include_str!(
+            "snapshots/utility_completion_bash_no_descriptions_dashdash_unknown_command.stderr"
+        ),
+    );
+    assert_stderr_snapshot(
+        &["completion", "--no-descriptions"],
+        1,
+        include_str!("snapshots/utility_completion_missing_shell_no_descriptions.stderr"),
+    );
+    assert_stderr_snapshot(
         &["completion", "bad", "--no-descriptions"],
         1,
         include_str!("snapshots/utility_completion_unknown_shell_no_descriptions.stderr"),
@@ -2376,6 +2388,11 @@ fn residual_current_upstream_parser_edges_match_stderr_snapshots() {
         &["generate", "private-key", "--force", "--bad"],
         1,
         include_str!("snapshots/utility_generate_private_key_unknown_flag.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["generate", "private-key", "--force", "-x"],
+        1,
+        include_str!("snapshots/utility_generate_private_key_force_unknown_shorthand.stderr"),
     );
 }
 

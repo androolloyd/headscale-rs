@@ -99,24 +99,68 @@ pub fn raw_policy_omits_packet_filter_rules(raw: &str) -> bool {
 /// behaviour for deny-all policies.
 pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
     let mut out: Vec<FilterRule> = Vec::new();
-    append_app_grant_rules(&mut out, doc, &doc.grants, &[], None);
+    let projected_grant_indices = projected_network_grant_indices(&doc.grants);
+    append_leading_app_only_grant_rules(
+        &mut out,
+        doc,
+        &doc.grants,
+        &projected_grant_indices,
+        &[],
+        None,
+    );
 
-    for rule in &doc.rules {
+    for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                &[],
+                None,
+            );
             continue;
         }
         let src_ips = resolve_principals(doc, &rule.src, &[], None, PrincipalPosition::Source);
         if src_ips.is_empty() {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                &[],
+                None,
+            );
             continue;
         }
 
         let dst_ips = resolve_principals(doc, &rule.dst, &[], None, PrincipalPosition::Destination);
         if dst_ips.is_empty() {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                &[],
+                None,
+            );
             continue;
         }
 
         let port_groups = compile_port_groups(&rule.ports);
         if port_groups.is_empty() {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                &[],
+                None,
+            );
             continue;
         }
 
@@ -142,6 +186,15 @@ pub fn acl_to_filter_rules(doc: &PolicyDoc) -> Vec<FilterRule> {
                 },
             );
         }
+        append_projected_grant_app_rules_after_rule(
+            &mut out,
+            doc,
+            &doc.grants,
+            &projected_grant_indices,
+            rule_index,
+            &[],
+            None,
+        );
     }
     out
 }
@@ -161,8 +214,16 @@ pub fn acl_to_filter_rules_for_node(
         return Vec::new();
     };
     let mut out = Vec::new();
-    append_app_grant_rules(&mut out, doc, &doc.grants, nodes, Some(self_node));
-    let via_insert_index = projected_network_grant_rule_count(&doc.grants);
+    let projected_grant_indices = projected_network_grant_indices(&doc.grants);
+    let via_insert_index = projected_grant_indices.len();
+    append_leading_app_only_grant_rules(
+        &mut out,
+        doc,
+        &doc.grants,
+        &projected_grant_indices,
+        nodes,
+        Some(self_node),
+    );
     let mut via_appended = false;
     if via_insert_index == 0 {
         append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
@@ -171,6 +232,15 @@ pub fn acl_to_filter_rules_for_node(
 
     for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                nodes,
+                Some(self_node),
+            );
             if !via_appended && rule_index + 1 == via_insert_index {
                 append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
                 via_appended = true;
@@ -180,6 +250,15 @@ pub fn acl_to_filter_rules_for_node(
 
         let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
         if src_ips.is_empty() {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &doc.grants,
+                &projected_grant_indices,
+                rule_index,
+                nodes,
+                Some(self_node),
+            );
             if !via_appended && rule_index + 1 == via_insert_index {
                 append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
                 via_appended = true;
@@ -218,6 +297,15 @@ pub fn acl_to_filter_rules_for_node(
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
 
+        append_projected_grant_app_rules_after_rule(
+            &mut out,
+            doc,
+            &doc.grants,
+            &projected_grant_indices,
+            rule_index,
+            nodes,
+            Some(self_node),
+        );
         if !via_appended && rule_index + 1 == via_insert_index {
             append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
             via_appended = true;
@@ -231,58 +319,114 @@ pub fn acl_to_filter_rules_for_node(
     coalesce_filter_rules(reduce_filter_rules_for_node(out, self_node))
 }
 
-fn projected_network_grant_rule_count(grants: &[GrantRule]) -> usize {
+fn projected_network_grant_indices(grants: &[GrantRule]) -> Vec<usize> {
     grants
         .iter()
-        .filter(|grant| grant.via.is_empty() && !grant.ip.is_empty())
-        .count()
+        .enumerate()
+        .filter_map(|(index, grant)| {
+            (grant.via.is_empty() && !grant.ip.is_empty()).then_some(index)
+        })
+        .collect()
 }
 
-fn append_app_grant_rules(
+fn append_leading_app_only_grant_rules(
     out: &mut Vec<FilterRule>,
     doc: &PolicyDoc,
     grants: &[GrantRule],
+    projected_grant_indices: &[usize],
     nodes: &[PacketFilterNode],
     self_node: Option<&PacketFilterNode>,
 ) {
-    for grant in grants {
-        if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+    let end = projected_grant_indices
+        .first()
+        .copied()
+        .unwrap_or(grants.len());
+    append_app_only_grant_rules_in_range(out, doc, grants, 0, end, nodes, self_node);
+}
+
+fn append_projected_grant_app_rules_after_rule(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    grants: &[GrantRule],
+    projected_grant_indices: &[usize],
+    rule_index: usize,
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) {
+    let Some(&grant_index) = projected_grant_indices.get(rule_index) else {
+        return;
+    };
+    let Some(grant) = grants.get(grant_index) else {
+        return;
+    };
+    append_app_grant_rule(out, doc, grant, nodes, self_node);
+    let end = projected_grant_indices
+        .get(rule_index + 1)
+        .copied()
+        .unwrap_or(grants.len());
+    append_app_only_grant_rules_in_range(out, doc, grants, grant_index + 1, end, nodes, self_node);
+}
+
+fn append_app_only_grant_rules_in_range(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    grants: &[GrantRule],
+    start: usize,
+    end: usize,
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) {
+    for grant in grants.iter().skip(start).take(end.saturating_sub(start)) {
+        if !grant.ip.is_empty() {
             continue;
         }
-
-        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
-        let mut other_dsts = Vec::new();
-        let mut self_dsts = Vec::new();
-        for dst in &grant.dst {
-            if dst == "autogroup:self" {
-                self_dsts.push(dst.clone());
-            } else {
-                other_dsts.push(dst.clone());
-            }
-        }
-
-        if !other_dsts.is_empty() {
-            append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
-        }
-
-        let Some(node) = self_node else {
-            continue;
-        };
-        if self_dsts.is_empty() || !node.tags.is_empty() {
-            continue;
-        }
-
-        let same_user = same_user_untagged_nodes(nodes, node);
-        let self_src = nodes_matching_prefixes(&same_user, &src_ips);
-        if self_src.is_empty() {
-            continue;
-        }
-        let self_dst = same_user
-            .iter()
-            .flat_map(|node| node_addr_prefixes(node))
-            .collect::<Vec<_>>();
-        append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
+        append_app_grant_rule(out, doc, grant, nodes, self_node);
     }
+}
+
+fn append_app_grant_rule(
+    out: &mut Vec<FilterRule>,
+    doc: &PolicyDoc,
+    grant: &GrantRule,
+    nodes: &[PacketFilterNode],
+    self_node: Option<&PacketFilterNode>,
+) {
+    if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+        return;
+    }
+
+    let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+    let mut other_dsts = Vec::new();
+    let mut self_dsts = Vec::new();
+    for dst in &grant.dst {
+        if dst == "autogroup:self" {
+            self_dsts.push(dst.clone());
+        } else {
+            other_dsts.push(dst.clone());
+        }
+    }
+
+    if !other_dsts.is_empty() {
+        append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
+    }
+
+    let Some(node) = self_node else {
+        return;
+    };
+    if self_dsts.is_empty() || !node.tags.is_empty() {
+        return;
+    }
+
+    let same_user = same_user_untagged_nodes(nodes, node);
+    let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+    if self_src.is_empty() {
+        return;
+    }
+    let self_dst = same_user
+        .iter()
+        .flat_map(|node| node_addr_prefixes(node))
+        .collect::<Vec<_>>();
+    append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
 }
 
 fn append_cap_grant_rules(
@@ -1585,6 +1729,59 @@ mod tests {
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].src_ips, vec!["100.64.0.1"]);
         assert_eq!(rs[1].src_ips, vec!["100.64.0.3"]);
+    }
+
+    #[test]
+    fn app_grants_follow_grant_order_around_projected_network_grants() {
+        let d = crate::policy::parse_hujson_policy(
+            r#"{
+                "grants": [
+                    {
+                        "src": ["100.64.0.10/32"],
+                        "dst": ["100.64.0.2/32"],
+                        "app": {"example.com/cap/first": [{}]}
+                    },
+                    {
+                        "src": ["100.64.0.11/32"],
+                        "dst": ["100.64.0.3/32"],
+                        "ip": ["tcp:80"],
+                        "app": {"example.com/cap/second": [{}]}
+                    },
+                    {
+                        "src": ["100.64.0.12/32"],
+                        "dst": ["100.64.0.4/32"],
+                        "ip": ["tcp:443"]
+                    },
+                    {
+                        "src": ["100.64.0.13/32"],
+                        "dst": ["100.64.0.5/32"],
+                        "app": {"example.com/cap/third": [{}]}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let rs = acl_to_filter_rules(&d);
+
+        assert_eq!(rs.len(), 5);
+        assert!(
+            rs[0].cap_grant[0]
+                .cap_map
+                .contains_key("example.com/cap/first")
+        );
+        assert_eq!(rs[1].dst_ports[0].ports.first, 80);
+        assert!(
+            rs[2].cap_grant[0]
+                .cap_map
+                .contains_key("example.com/cap/second")
+        );
+        assert_eq!(rs[3].dst_ports[0].ports.first, 443);
+        assert!(
+            rs[4].cap_grant[0]
+                .cap_map
+                .contains_key("example.com/cap/third")
+        );
     }
 
     #[test]

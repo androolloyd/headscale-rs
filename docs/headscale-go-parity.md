@@ -1093,9 +1093,13 @@ real-client set now includes `postgres-web-register-policy-churn-restart`.
 Recent coverage note (2026-06-02): `policy-v2-tailscale-compat-fixtures`
 adds a representative pinned Tailscale compatibility slice for ACLs, wildcard
 app grants, subnet routes, auto-approvers, `grants[].via`, and SSH
-accept/check rules. The pinned golden now covers 93 scenarios; broader
-upstream ACL/grants/routes/SSH fixture auditing remains open before closing the
-policy v2 backlog row.
+accept/check rules. `policy-v2-current-compat-fixture-batch` adds a second
+upstream-current slice for `autogroup:tagged`, TCP/UDP/ICMP policy rules,
+accepted `tests` host/IP-literal/bracketed-IPv6 destinations, `nodeAttrs`
+targeting wildcard/tags/groups, app-only grants, app+IP grants, `grants[].via`,
+and `sshTests` tag/host-alias/self/localpart/nonroot variants. The pinned golden
+now covers 94 scenarios; broader upstream ACL/grants/routes/nodeAttrs/policyTest/
+sshTest fixture auditing remains open before closing the policy v2 backlog row.
 
 ## Next Implementation Order
 

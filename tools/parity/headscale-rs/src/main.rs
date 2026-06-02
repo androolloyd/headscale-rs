@@ -1150,8 +1150,9 @@ fn compile_filter_rules(
 ) -> Vec<FilterRuleOut> {
     let self_node = node_id.and_then(|id| nodes.iter().find(|node| node.id == id));
     let mut out = Vec::new();
-    append_app_grant_rules(&mut out, doc, nodes, self_node);
-    let via_insert_index = projected_network_grant_rule_count(&doc.grants);
+    let projected_grant_indices = projected_network_grant_indices(&doc.grants);
+    let via_insert_index = projected_grant_indices.len();
+    append_leading_app_only_grant_rules(&mut out, doc, &projected_grant_indices, nodes, self_node);
     let mut via_appended = false;
     if via_insert_index == 0 {
         if let Some(node) = self_node {
@@ -1162,6 +1163,14 @@ fn compile_filter_rules(
 
     for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &projected_grant_indices,
+                rule_index,
+                nodes,
+                self_node,
+            );
             if !via_appended && rule_index + 1 == via_insert_index {
                 if let Some(node) = self_node {
                     append_via_grant_rules_for_node(&mut out, doc, nodes, node);
@@ -1173,6 +1182,14 @@ fn compile_filter_rules(
 
         let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
         if src_ips.is_empty() {
+            append_projected_grant_app_rules_after_rule(
+                &mut out,
+                doc,
+                &projected_grant_indices,
+                rule_index,
+                nodes,
+                self_node,
+            );
             if !via_appended && rule_index + 1 == via_insert_index {
                 if let Some(node) = self_node {
                     append_via_grant_rules_for_node(&mut out, doc, nodes, node);
@@ -1219,6 +1236,14 @@ fn compile_filter_rules(
             append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
         }
 
+        append_projected_grant_app_rules_after_rule(
+            &mut out,
+            doc,
+            &projected_grant_indices,
+            rule_index,
+            nodes,
+            self_node,
+        );
         if !via_appended && rule_index + 1 == via_insert_index {
             if let Some(node) = self_node {
                 append_via_grant_rules_for_node(&mut out, doc, nodes, node);
@@ -1240,57 +1265,117 @@ fn compile_filter_rules(
     }
 }
 
-fn projected_network_grant_rule_count(grants: &[GrantRule]) -> usize {
+fn projected_network_grant_indices(grants: &[GrantRule]) -> Vec<usize> {
     grants
         .iter()
-        .filter(|grant| grant.via.is_empty() && !grant.ip.is_empty())
-        .count()
+        .enumerate()
+        .filter_map(|(index, grant)| {
+            (grant.via.is_empty() && !grant.ip.is_empty()).then_some(index)
+        })
+        .collect()
 }
 
-fn append_app_grant_rules(
+fn append_leading_app_only_grant_rules(
     out: &mut Vec<FilterRuleOut>,
     doc: &PolicyDoc,
+    projected_grant_indices: &[usize],
     nodes: &[FilterNode],
     self_node: Option<&FilterNode>,
 ) {
-    for grant in &doc.grants {
-        if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+    let end = projected_grant_indices
+        .first()
+        .copied()
+        .unwrap_or(doc.grants.len());
+    append_app_only_grant_rules_in_range(out, doc, 0, end, nodes, self_node);
+}
+
+fn append_projected_grant_app_rules_after_rule(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    projected_grant_indices: &[usize],
+    rule_index: usize,
+    nodes: &[FilterNode],
+    self_node: Option<&FilterNode>,
+) {
+    let Some(&grant_index) = projected_grant_indices.get(rule_index) else {
+        return;
+    };
+    let Some(grant) = doc.grants.get(grant_index)
+    else {
+        return;
+    };
+    append_app_grant_rule(out, doc, grant, nodes, self_node);
+    let end = projected_grant_indices
+        .get(rule_index + 1)
+        .copied()
+        .unwrap_or(doc.grants.len());
+    append_app_only_grant_rules_in_range(out, doc, grant_index + 1, end, nodes, self_node);
+}
+
+fn append_app_only_grant_rules_in_range(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    start: usize,
+    end: usize,
+    nodes: &[FilterNode],
+    self_node: Option<&FilterNode>,
+) {
+    for grant in doc
+        .grants
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        if !grant.ip.is_empty() {
             continue;
         }
-
-        let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
-        let mut other_dsts = Vec::new();
-        let mut self_dsts = Vec::new();
-        for dst in &grant.dst {
-            if dst == "autogroup:self" {
-                self_dsts.push(dst.clone());
-            } else {
-                other_dsts.push(dst.clone());
-            }
-        }
-
-        if !other_dsts.is_empty() {
-            append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
-        }
-
-        let Some(node) = self_node else {
-            continue;
-        };
-        if self_dsts.is_empty() || !node.tags.is_empty() {
-            continue;
-        }
-
-        let same_user = same_user_untagged_nodes(nodes, node);
-        let self_src = nodes_matching_prefixes(&same_user, &src_ips);
-        if self_src.is_empty() {
-            continue;
-        }
-        let self_dst = same_user
-            .iter()
-            .flat_map(|node| node_addr_prefixes(node))
-            .collect::<Vec<_>>();
-        append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
+        append_app_grant_rule(out, doc, grant, nodes, self_node);
     }
+}
+
+fn append_app_grant_rule(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    grant: &GrantRule,
+    nodes: &[FilterNode],
+    self_node: Option<&FilterNode>,
+) {
+    if grant.app.is_empty() || !grant.via.is_empty() || grant.src.is_empty() {
+        return;
+    }
+
+    let src_ips = resolve_principals(doc, &grant.src, nodes, None, PrincipalPosition::Source);
+    let mut other_dsts = Vec::new();
+    let mut self_dsts = Vec::new();
+    for dst in &grant.dst {
+        if dst == "autogroup:self" {
+            self_dsts.push(dst.clone());
+        } else {
+            other_dsts.push(dst.clone());
+        }
+    }
+
+    if !other_dsts.is_empty() {
+        append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
+    }
+
+    let Some(node) = self_node else {
+        return;
+    };
+    if self_dsts.is_empty() || !node.tags.is_empty() {
+        return;
+    }
+
+    let same_user = same_user_untagged_nodes(nodes, node);
+    let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+    if self_src.is_empty() {
+        return;
+    }
+    let self_dst = same_user
+        .iter()
+        .flat_map(|node| node_addr_prefixes(node))
+        .collect::<Vec<_>>();
+    append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
 }
 
 fn append_cap_grant_rules(

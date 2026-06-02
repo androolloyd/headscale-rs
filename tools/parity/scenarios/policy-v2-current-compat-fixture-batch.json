@@ -1,0 +1,578 @@
+{
+  "name": "policy-v2-current-compat-fixture-batch",
+  "policy": {
+    "groups": {
+      "group:admins": [
+        "odin@example.com"
+      ],
+      "group:developers": [
+        "thor@example.org",
+        "odin@example.com"
+      ],
+      "group:monitors": [
+        "freya@example.com"
+      ]
+    },
+    "hosts": {
+      "internal": "10.0.0.0/8",
+      "prodbox": "100.64.0.18",
+      "srv": "100.64.0.16",
+      "subnet24": "192.168.1.0/24",
+      "webserver": "100.64.0.16"
+    },
+    "tagOwners": {
+      "tag:client": [
+        "odin@example.com"
+      ],
+      "tag:exit": [
+        "odin@example.com"
+      ],
+      "tag:ha-a1": [
+        "odin@example.com"
+      ],
+      "tag:ha-a2": [
+        "odin@example.com"
+      ],
+      "tag:prod": [
+        "odin@example.com"
+      ],
+      "tag:router": [
+        "odin@example.com"
+      ],
+      "tag:server": [
+        "odin@example.com"
+      ]
+    },
+    "nodeAttrs": [
+      {
+        "target": [
+          "*"
+        ],
+        "attr": [
+          "nextdns:abc123"
+        ]
+      },
+      {
+        "target": [
+          "tag:client"
+        ],
+        "attr": [
+          "disable-ipv4"
+        ]
+      },
+      {
+        "target": [
+          "group:developers"
+        ],
+        "attr": [
+          "nextdns:def456"
+        ]
+      }
+    ],
+    "autoApprovers": {
+      "routes": {
+        "0.0.0.0/0": [
+          "tag:exit"
+        ],
+        "10.0.0.0/8": [
+          "tag:router"
+        ],
+        "192.168.0.0/16": [
+          "tag:ha-a1",
+          "tag:ha-a2"
+        ],
+        "::/0": [
+          "tag:exit"
+        ]
+      }
+    },
+    "acls": [
+      {
+        "action": "accept",
+        "src": [
+          "autogroup:tagged"
+        ],
+        "dst": [
+          "*:*"
+        ]
+      },
+      {
+        "action": "accept",
+        "proto": "tcp",
+        "src": [
+          "group:developers"
+        ],
+        "dst": [
+          "tag:server:22,443"
+        ]
+      },
+      {
+        "action": "accept",
+        "proto": "udp",
+        "src": [
+          "group:developers"
+        ],
+        "dst": [
+          "webserver:53"
+        ]
+      },
+      {
+        "action": "accept",
+        "proto": "icmp",
+        "src": [
+          "tag:client"
+        ],
+        "dst": [
+          "webserver:*"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "subnet24"
+        ],
+        "dst": [
+          "internal:*"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "internal"
+        ],
+        "dst": [
+          "subnet24:*"
+        ]
+      }
+    ],
+    "grants": [
+      {
+        "src": [
+          "autogroup:member"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "ip": [
+          "*"
+        ],
+        "app": {
+          "example.com/cap/test": [
+            {
+              "role": "admin"
+            }
+          ]
+        }
+      },
+      {
+        "src": [
+          "tag:client"
+        ],
+        "dst": [
+          "10.33.0.0/16"
+        ],
+        "ip": [
+          "tcp:80"
+        ],
+        "app": {
+          "example.com/cap/subnet-access": [
+            {
+              "level": "admin"
+            }
+          ]
+        },
+        "via": [
+          "tag:router"
+        ]
+      },
+      {
+        "src": [
+          "tag:client"
+        ],
+        "dst": [
+          "100.64.0.16",
+          "fd7a:115c:a1e0::16",
+          "prodbox"
+        ],
+        "ip": [
+          "tcp:22"
+        ]
+      },
+      {
+        "src": [
+          "group:monitors"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "app": {
+          "example.com/cap/array": [
+            {
+              "items": [
+                1,
+                2,
+                3
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "tests": [
+      {
+        "src": "thor@example.org",
+        "proto": "tcp",
+        "accept": [
+          "tag:server:22",
+          "webserver:443"
+        ],
+        "deny": [
+          "tag:server:80"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "proto": "udp",
+        "accept": [
+          "webserver:53"
+        ]
+      },
+      {
+        "src": "tag:client",
+        "accept": [
+          "100.64.0.16:22",
+          "[fd7a:115c:a1e0::16]:22",
+          "prodbox:22"
+        ]
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": [
+          "autogroup:member"
+        ],
+        "dst": [
+          "autogroup:self"
+        ],
+        "users": [
+          "root"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "root",
+          "localpart:*@example.org"
+        ]
+      },
+      {
+        "action": "check",
+        "checkPeriod": "12h",
+        "src": [
+          "thor@example.org"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "admin"
+        ]
+      },
+      {
+        "action": "accept",
+        "src": [
+          "tag:prod"
+        ],
+        "dst": [
+          "tag:server"
+        ],
+        "users": [
+          "autogroup:nonroot"
+        ]
+      }
+    ],
+    "sshTests": [
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "root",
+          "thor"
+        ],
+        "deny": [
+          "ubuntu"
+        ],
+        "check": [
+          "admin"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "srv"
+        ],
+        "accept": [
+          "root"
+        ]
+      },
+      {
+        "src": "thor@example.org",
+        "dst": [
+          "thor@example.org"
+        ],
+        "accept": [
+          "root"
+        ]
+      },
+      {
+        "src": "tag:prod",
+        "dst": [
+          "tag:server"
+        ],
+        "accept": [
+          "alice"
+        ],
+        "deny": [
+          "root"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": 1,
+      "name": "odin",
+      "email": "odin@example.com"
+    },
+    {
+      "id": 2,
+      "name": "thor",
+      "email": "thor@example.org"
+    },
+    {
+      "id": 3,
+      "name": "freya",
+      "email": "freya@example.com"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "hostname": "bulbasaur",
+      "ipv4": "100.64.0.11",
+      "ipv6": "fd7a:115c:a1e0::11"
+    },
+    {
+      "id": 2,
+      "user_id": 2,
+      "hostname": "ivysaur",
+      "ipv4": "100.64.0.12",
+      "ipv6": "fd7a:115c:a1e0::12"
+    },
+    {
+      "id": 3,
+      "user_id": 3,
+      "hostname": "venusaur",
+      "ipv4": "100.64.0.13",
+      "ipv6": "fd7a:115c:a1e0::13"
+    },
+    {
+      "id": 4,
+      "user_id": 1,
+      "hostname": "beedrill",
+      "ipv4": "100.64.0.16",
+      "ipv6": "fd7a:115c:a1e0::16",
+      "tags": [
+        "tag:server"
+      ]
+    },
+    {
+      "id": 5,
+      "user_id": 1,
+      "hostname": "weedle",
+      "ipv4": "100.64.0.17",
+      "ipv6": "fd7a:115c:a1e0::17",
+      "tags": [
+        "tag:client"
+      ]
+    },
+    {
+      "id": 6,
+      "user_id": 1,
+      "hostname": "kakuna",
+      "ipv4": "100.64.0.18",
+      "ipv6": "fd7a:115c:a1e0::18",
+      "tags": [
+        "tag:prod"
+      ]
+    },
+    {
+      "id": 7,
+      "user_id": 1,
+      "hostname": "squirtle",
+      "ipv4": "100.64.0.19",
+      "ipv6": "fd7a:115c:a1e0::19",
+      "tags": [
+        "tag:router"
+      ],
+      "routes": [
+        "10.33.0.0/16"
+      ],
+      "approved_routes": [
+        "10.33.0.0/16"
+      ]
+    },
+    {
+      "id": 8,
+      "user_id": 1,
+      "hostname": "butterfree",
+      "ipv4": "100.64.0.20",
+      "ipv6": "fd7a:115c:a1e0::20",
+      "tags": [
+        "tag:ha-a1"
+      ],
+      "routes": [
+        "192.168.1.0/24"
+      ],
+      "approved_routes": [
+        "192.168.1.0/24"
+      ]
+    },
+    {
+      "id": 9,
+      "user_id": 1,
+      "hostname": "metapod",
+      "ipv4": "100.64.0.21",
+      "ipv6": "fd7a:115c:a1e0::21",
+      "tags": [
+        "tag:ha-a2"
+      ],
+      "routes": [
+        "192.168.2.0/24"
+      ],
+      "approved_routes": [
+        "192.168.2.0/24"
+      ]
+    },
+    {
+      "id": 10,
+      "user_id": 1,
+      "hostname": "charmander",
+      "ipv4": "100.64.0.22",
+      "ipv6": "fd7a:115c:a1e0::22",
+      "tags": [
+        "tag:exit"
+      ],
+      "routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "filter_node_checks": [
+    {
+      "name": "server-filter-autogroup-tagged-protos-and-app-grant",
+      "node_id": 4
+    },
+    {
+      "name": "router-filter-subnet-grant-via",
+      "node_id": 7
+    },
+    {
+      "name": "ha-a1-filter-subnet-to-subnet",
+      "node_id": 8
+    }
+  ],
+  "peer_map_checks": [
+    {
+      "name": "developer-peer-map-protocol-and-ssh-tests",
+      "node_id": 2
+    },
+    {
+      "name": "client-peer-map-autogroup-tagged-icmp-and-via",
+      "node_id": 5
+    },
+    {
+      "name": "server-peer-map-tagged-and-app-grants",
+      "node_id": 4
+    },
+    {
+      "name": "router-peer-map-via-and-subnet-routes",
+      "node_id": 7
+    },
+    {
+      "name": "ha-a1-peer-map-subnet-to-subnet",
+      "node_id": 8
+    }
+  ],
+  "route_checks": [
+    {
+      "name": "router-autoapproves-internal-subnet",
+      "node_id": 7,
+      "announced_routes": [
+        "10.33.0.0/16"
+      ]
+    },
+    {
+      "name": "ha-a1-autoapproves-subnet24",
+      "node_id": 8,
+      "announced_routes": [
+        "192.168.1.0/24"
+      ]
+    },
+    {
+      "name": "exit-autoapproves-defaults",
+      "node_id": 10,
+      "announced_routes": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
+  "via_route_checks": [
+    {
+      "name": "client-uses-router-for-subnet-grant",
+      "viewer_id": 5,
+      "peer_id": 7
+    },
+    {
+      "name": "developer-does-not-use-client-via-grant",
+      "viewer_id": 2,
+      "peer_id": 7
+    }
+  ],
+  "node_attr_checks": [
+    {
+      "name": "developer-inherits-wildcard-and-group-nextdns",
+      "node_id": 2
+    },
+    {
+      "name": "client-inherits-wildcard-and-disable-ipv4",
+      "node_id": 5
+    },
+    {
+      "name": "server-inherits-wildcard-only",
+      "node_id": 4
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "server-ssh-host-localpart-check-and-nonroot",
+      "node_id": 4
+    },
+    {
+      "name": "thor-self-ssh-policy",
+      "node_id": 2
+    }
+  ]
+}

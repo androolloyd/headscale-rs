@@ -287,8 +287,8 @@ if ((route_via_restart_flag && route_health_restart_flag)); then
     echo "combined route-via/route-health mode cannot use route-health reload, mixed-exit, or all-unhealthy modes" >&2
     exit 2
   fi
-  if ((!route_via_no_restart_flag || !route_health_no_restart_flag)); then
-    echo "combined route-via/route-health mode currently requires REAL_CLIENT_ROUTE_VIA_NO_RESTART=true and REAL_CLIENT_ROUTE_HEALTH_NO_RESTART=true" >&2
+  if ((route_via_no_restart_flag != route_health_no_restart_flag)); then
+    echo "combined route-via/route-health mode requires REAL_CLIENT_ROUTE_VIA_NO_RESTART and REAL_CLIENT_ROUTE_HEALTH_NO_RESTART to match" >&2
     exit 2
   fi
 fi
@@ -2771,9 +2771,22 @@ elif ((route_via_health_flag)); then
   login_observer_with_web_registration "${bob_name}" bob
   assert_route_via_persisted_nodes "initial"
   wait_for_route_via_peer_maps "initial"
+  if ((route_via_no_restart_flag)); then
+    assert_route_via_health_peer_failover
+    echo "${target} route-via-health real-client smoke passed"
+    exit 0
+  fi
+
+  stop_server
+  start_server
+  wait_for "router-a reconnected after route-via-health restart" "tailscale_logged_in '${router_name}'"
+  wait_for "router-b reconnected after route-via-health restart" "tailscale_logged_in '${router_b_name}'"
+  wait_for "alice reconnected after route-via-health restart" "tailscale_logged_in '${observer_name}'"
+  wait_for "bob reconnected after route-via-health restart" "tailscale_logged_in '${bob_name}'"
+  assert_route_via_persisted_nodes "after-restart"
+  wait_for_route_via_peer_maps "after restart"
   assert_route_via_health_peer_failover
   echo "${target} route-via-health real-client smoke passed"
-  exit 0
 elif ((route_via_restart_flag)); then
   create_route_via_users_and_keys
   start_client "${router_name}"

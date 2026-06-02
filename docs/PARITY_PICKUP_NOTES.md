@@ -25,6 +25,14 @@ Recent accepted slices:
   before the batch completes. Rekey-style map-change wakes now revalidate final
   node presence, and focused `Stream:true` coverage proves observers receive
   only the delayed `PeersRemoved` delta after the map-batcher tick.
+- This route-edge slice adds paired `route-via-health-restart` and
+  `postgres-route-via-health-restart` Rust/headscale-go rows for current-head
+  same-tag `grants[].via` route ownership following route-health failover after
+  a same-URL production restart. `restart-persistence-common.sh` now allows
+  the combined route-via/route-health mode to cross the restart boundary while
+  preserving the existing no-restart wrappers, and the push/PR smoke selector
+  includes both new rows. The Postgres stock-client matrix now has ninety-six
+  rows.
 - Current map-churn slice suppresses stale NodeStore worker upsert churn when a
   same-batch delete removes the node before the batch completes. Upsert-style
   map-change wakes now revalidate final node presence, and focused registry plus
@@ -409,7 +417,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all ninety-five Pg rows, including
+  all ninety-six Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -431,7 +439,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-route-primary-failover`, `postgres-route-primary-sticky`,
   `postgres-route-primary-withdraw`,
   `postgres-web-register-route-approve-restart`, `postgres-acl-allow`,
-  `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`, `postgres-route-via-reload`, `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`, `postgres-route-via-same-tag-restart`, `postgres-route-health`, `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`, `postgres-route-health-mixed-exit`,
+  `postgres-route-via`, `postgres-route-via-same-tag`, `postgres-route-via-health`,
+  `postgres-route-via-health-restart`, `postgres-route-via-reload`,
+  `postgres-route-via-multiprefix`, `postgres-route-via-multiprefix-reload`,
+  `postgres-route-via-same-tag-restart`, `postgres-route-health`,
+  `postgres-route-health-all-unhealthy`, `postgres-route-health-all-unhealthy-reload`,
+  `postgres-route-health-mixed-exit`,
   `postgres-ssh`, `postgres-ssh-oidc-check`,
   `postgres-ssh-cli-check`, `postgres-ssh-oidc-check-period-cache`,
   `postgres-ssh-accept-env`, `postgres-ssh-localpart`,
@@ -944,7 +957,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   and now asserts the primary route owner before restart matches the owner after
   the real server process is restarted and both stock clients reconnect.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
-  Postgres stock-client matrix to ninety-five rows.
+  Postgres stock-client matrix to ninety-five rows before the later route-via-health restart expansion.
 
 ## 2026-06-01 Postgres SSH smoke slice
 

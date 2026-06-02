@@ -8617,7 +8617,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() {
+async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_output() {
     let (_dir, _db, address, api_key, handle) = spawn_process_remote_grpc_service(false).await;
     let config_dir = tempfile::tempdir().unwrap();
     let config = write_remote_grpc_config(config_dir.path(), &address, &api_key);
@@ -8647,6 +8647,31 @@ async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() 
         stdout(&list_users)
     );
     assert_eq!(stderr(&list_users), "");
+
+    assert_config_stderr_snapshot(
+        &config,
+        &["users", "create", "remote"],
+        6,
+        include_str!("snapshots/grpc_remote_duplicate_user.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "json", "users", "create", "remote"],
+        6,
+        include_str!("snapshots/grpc_remote_duplicate_user_json.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-ojson-line", "users", "create", "remote"],
+        6,
+        include_str!("snapshots/grpc_remote_duplicate_user_json_line.stderr"),
+    );
+    assert_config_stderr_snapshot(
+        &config,
+        &["-o", "yaml", "users", "create", "remote"],
+        6,
+        include_str!("snapshots/grpc_remote_duplicate_user_yaml.stderr"),
+    );
 
     let bad_config_dir = tempfile::tempdir().unwrap();
     let bad_config = write_remote_grpc_config(bad_config_dir.path(), &address, "bad-token");

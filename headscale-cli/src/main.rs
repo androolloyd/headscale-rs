@@ -400,6 +400,7 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
         } => {
             if let Some(config) = config.as_ref() {
                 config.validate_for_configtest().map_err(MainError::Other)?;
+                print_config_warnings(config);
             }
             let server_config = config.as_ref().and_then(|c| c.server.as_ref());
             let defaults = ServerConfig::default();
@@ -3149,7 +3150,14 @@ fn configtest(config: Option<&CliConfig>) -> Result<()> {
     config
         .validate_for_configtest()
         .context("configuration error: loading configuration")?;
+    print_config_warnings(config);
     Ok(())
+}
+
+fn print_config_warnings(config: &CliConfig) {
+    for warning in config.upstream_nonfatal_config_warnings() {
+        eprintln!("{warning}");
+    }
 }
 
 fn generate_completion(shell: &CompletionShell) {

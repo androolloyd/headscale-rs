@@ -17,6 +17,7 @@ const DEFAULT_CLI_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
 const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
 const MISSING_NOISE_PRIVATE_KEY_PATH_ERROR: &str = "Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol";
+pub(crate) const TLS_ALPN_ACME_PORT_WARNING: &str = "Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443";
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1522,6 +1523,26 @@ impl CliConfig {
         self.validate_upstream_database_config()?;
 
         Ok(())
+    }
+
+    pub(crate) fn upstream_nonfatal_config_warnings(&self) -> Vec<&'static str> {
+        let default_server = ServerConfig::default();
+        let server = self.server.as_ref().unwrap_or(&default_server);
+        let mut warnings = Vec::new();
+
+        if self.should_warn_tls_alpn_acme_non_443(server) {
+            warnings.push(TLS_ALPN_ACME_PORT_WARNING);
+        }
+
+        warnings
+    }
+
+    fn should_warn_tls_alpn_acme_non_443(&self, server: &ServerConfig) -> bool {
+        self.tls_letsencrypt_hostname
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && self.tls_letsencrypt_challenge_type.as_deref() == Some("TLS-ALPN-01")
+            && !server.listen.ends_with(":443")
     }
 
     fn validate_trusted_proxies(&self) -> Result<()> {
@@ -4224,6 +4245,56 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
         config.validate_for_configtest().unwrap();
+    }
+
+    #[test]
+    fn configtest_warns_for_tls_alpn_acme_non_443_listen_addr() {
+        let source = r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:8443"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        assert_eq!(
+            config.upstream_nonfatal_config_warnings(),
+            vec![TLS_ALPN_ACME_PORT_WARNING]
+        );
+    }
+
+    #[test]
+    fn configtest_does_not_warn_for_tls_alpn_acme_443_listen_addr() {
+        let source = r#"
+server_url: "https://headscale.example"
+listen_addr: "127.0.0.1:443"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_challenge_type: "TLS-ALPN-01"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
+
+        config.validate_for_configtest().unwrap();
+        assert_eq!(
+            config.upstream_nonfatal_config_warnings(),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]

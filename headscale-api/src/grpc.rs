@@ -4347,6 +4347,101 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_node_grpc_register_route_autoapproval_projects_policy_churn() {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let machines =
+            Arc::new(PersistentMachineAdmin::new(db.pool().clone()).with_user_admin(users.clone()));
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{
+            "autoApprovers": {
+                "routes": {"10.70.0.0/16": ["alice@"]}
+            }
+        }"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                    .with_user_admin(users.clone()),
+            ),
+            policy,
+            machines,
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone())
+        .with_registration_cache(registration_cache.clone())
+        .with_wire_registry(wire_registry.clone());
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let node_key_hex = "a7".repeat(32);
+        let machine_key_hex = "a8".repeat(32);
+        let registration_id = "routeautoapprovalabcdefg";
+        assert_eq!(registration_id.len(), 24);
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            node_key_hex.clone(),
+            machine_key_hex,
+            String::new(),
+            "route-router".into(),
+            Ipv4Addr::new(100, 64, 0, 70),
+            false,
+        );
+        pending.available_routes = vec!["10.70.1.0/24".into()];
+        registration_cache.insert(registration_id.to_string(), pending);
+        let history_len = wire_registry.map_change_history().len();
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: format!("hskey-authreq-{registration_id}"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+
+        assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
+        assert_eq!(registered.available_routes, vec!["10.70.1.0/24"]);
+        assert_eq!(registered.approved_routes, vec!["10.70.1.0/24"]);
+        let live = wire_registry.get(&node_key_hex).expect("live projection");
+        assert_eq!(live.approved_routes, vec!["10.70.1.0/24"]);
+
+        let changes = wire_registry.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(
+            new_changes.len(),
+            2,
+            "RegisterNode route autoapproval should project lifecycle plus policy churn"
+        );
+        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(new_changes[0].origin_node_id, Some(registered.id));
+        assert_eq!(new_changes[0].content.peers_changed, vec![registered.id]);
+        assert_eq!(new_changes[1].reason_labels(), vec!["policy change"]);
+        assert_eq!(new_changes[1].origin_node_id, Some(registered.id));
+        assert!(new_changes[1].content.include_policy);
+        assert!(new_changes[1].content.requires_runtime_peer_computation);
+    }
+
+    #[tokio::test]
     async fn upstream_node_grpc_persistent_register_survives_restarted_service() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("headscale.db");

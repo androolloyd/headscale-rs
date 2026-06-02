@@ -2091,6 +2091,8 @@ dns:
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]
@@ -2149,6 +2151,11 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/configtest_tls_alpn_acme_port_warning.stderr")
+    );
 }
 
 #[test]
@@ -3767,6 +3774,19 @@ fn implemented_admin_local_errors_match_snapshots() {
         ],
         3,
         include_str!("snapshots/grpc_remote_connection_failure_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &[
+            "--output=yaml",
+            "--address",
+            "http://127.0.0.1:9",
+            "--api-key",
+            "test",
+            "users",
+            "list",
+        ],
+        3,
+        include_str!("snapshots/grpc_remote_connection_failure_yaml.stderr"),
     );
 }
 
@@ -6310,6 +6330,13 @@ async fn live_remote_grpc_config_success_and_auth_errors_match_process_output() 
         include_str!("snapshots/grpc_remote_auth_failure_json.stderr")
     );
 
+    let bad_auth_yaml = wait_for_headscale_status(&bad_config, &["-o", "yaml", "health"], 4).await;
+    assert_eq!(stdout(&bad_auth_yaml), "");
+    assert_eq!(
+        stderr(&bad_auth_yaml),
+        include_str!("snapshots/grpc_remote_auth_failure_yaml.stderr")
+    );
+
     handle.abort();
     let _ = handle.await;
 }
@@ -6339,6 +6366,13 @@ async fn live_local_grpc_health_failure_matches_process_stderr() {
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure_json_line.stderr")
+    );
+
+    let output = wait_for_headscale_status(&config, &["-o", "yaml", "health"], 6).await;
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        include_str!("snapshots/grpc_live_health_failure_yaml.stderr")
     );
 
     handle.abort();

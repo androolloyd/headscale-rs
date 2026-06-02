@@ -1356,8 +1356,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 
 - Auth-key, web/CLI `RegisterNode`/`AuthRegister`, and OIDC registration
   completion now use auth-specific live-registry writes: successful same-key
-  updates and rekeys emit upstream-style `node added` unless owner/tag/IP/active
-  approved-route identity changes require a global `policy change`.
+  updates and rekeys emit upstream-style `node added` unless owner/tag/IP
+  identity changes require a global `policy change`.
 - Same-machine web/OIDC reauth that clears tags or changes route identity now
   records `policy change` rather than a targeted self-update, matching
   headscale-go's post-auth policy-manager promotion path.
@@ -1821,3 +1821,26 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   followed by the deferred `policy change` route auto-approval.
 - The observer's pending batch and resulting route-aware map response are pinned
   in `stream_true_initial_routable_ips_wake_peer_with_allowed_ips`.
+
+## 2026-06-02 auth completion route auto-approval churn
+
+- Web/CLI `RegisterNode`/`AuthRegister` and OIDC registration completion now
+  preserve the upstream `Change(nodeChange, routeChange)` shape when completed
+  nodes carry auto-approved advertised routes: the auth lifecycle change remains
+  `node added`, followed by a separate route-derived `policy change`.
+- The live registry can now wake one auth-completion event with an ordered list
+  of bounded map changes while preserving one stream generation, including the
+  NodeStore rekey worker path.
+- Focused registry tests pin new-node and same-key route approval churn, a
+  persistent gRPC `RegisterNode` test pins stored/live approved routes plus map
+  history, and the OIDC callback handoff test still passes through the same
+  completion helper.
+
+## 2026-06-02 CLI YAML and TLS-ALPN warning parity
+
+- CLI process snapshots now cover YAML stderr envelopes for remote gRPC
+  connection failure, remote API-key authentication failure, and live local
+  gRPC health failure.
+- `configtest` and `server` now print headscale-go's non-fatal TLS-ALPN ACME
+  warning when `tls_letsencrypt_hostname` uses `TLS-ALPN-01` while
+  `listen_addr` does not end in `:443`.

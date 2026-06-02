@@ -2327,7 +2327,7 @@ enum NodeStoreWriteWork {
         old_node_key_hex: String,
         new_node_key_hex: String,
         rec: Box<MachineRecord>,
-        change: Option<PendingMapChange>,
+        changes: Vec<PendingMapChange>,
         result_tx: std_mpsc::Sender<()>,
     },
 }
@@ -2351,7 +2351,7 @@ enum NodeStoreWriteCompletion {
     Unit {
         operation: &'static str,
         result_tx: std_mpsc::Sender<()>,
-        change: Option<PendingMapChange>,
+        changes: Vec<PendingMapChange>,
     },
 }
 
@@ -2631,6 +2631,27 @@ impl MachineRegistry {
         self.notify.notify_waiters();
     }
 
+    fn wake_waiters_with_many(&self, changes: Vec<PendingMapChange>) {
+        if changes.is_empty() {
+            return;
+        }
+
+        // One upstream event can contain more than one semantic change, for
+        // example auth completion followed by route auto-approval. Bump the
+        // stream generation once, then preserve the ordered change list.
+        let mut generation = 0;
+        self.gen_tx.send_modify(|g| {
+            *g = g.wrapping_add(1);
+            generation = *g;
+        });
+        for change in changes {
+            let change = change.into_change(generation);
+            self.push_map_change(change.clone());
+            self.enqueue_map_change(change);
+        }
+        self.notify.notify_waiters();
+    }
+
     /// Headscale-go `State.ExpireExpiredNodes` parity: find nodes whose
     /// key-expiry crossed since the previous scheduler pass and wake
     /// active map streams so they rebuild with `KeyExpiry`/`Expired`.
@@ -2713,29 +2734,64 @@ impl MachineRegistry {
     pub(crate) fn upsert_auth_completion(&self, node_key_hex: String, rec: MachineRecord) {
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
         let existing = self.get(&node_key_hex);
-        let reason = Self::auth_completion_map_change_reason(existing.as_ref(), &rec);
+        let changes = Self::auth_completion_pending_changes(existing.as_ref(), &rec, node_id);
         self.upsert_record(node_key_hex, rec);
-        self.wake_waiters_with(Self::auth_completion_pending_change(reason, node_id));
+        self.wake_waiters_with_many(changes);
     }
 
     fn auth_completion_map_change_reason(
         existing: Option<&MachineRecord>,
         rec: &MachineRecord,
     ) -> MapChangeReason {
-        if existing.is_some_and(|existing| Self::policy_identity_changed(existing, rec)) {
+        if existing
+            .is_some_and(|existing| Self::policy_identity_without_routes_changed(existing, rec))
+        {
             MapChangeReason::PolicyChange
         } else {
             MapChangeReason::NodeAdded
         }
     }
 
-    fn policy_identity_changed(before: &MachineRecord, after: &MachineRecord) -> bool {
+    fn policy_identity_without_routes_changed(
+        before: &MachineRecord,
+        after: &MachineRecord,
+    ) -> bool {
         before.tailscale_user_id() != after.tailscale_user_id()
             || before.ipv4 != after.ipv4
             || before.ipv6 != after.ipv6
             || !same_string_set(&before.forced_tags, &after.forced_tags)
-            || active_primary_routes(&before.available_routes, &before.approved_routes)
-                != active_primary_routes(&after.available_routes, &after.approved_routes)
+    }
+
+    fn auth_completion_active_approved_routes_changed(
+        existing: Option<&MachineRecord>,
+        rec: &MachineRecord,
+    ) -> bool {
+        let after = active_approved_routes(&rec.available_routes, &rec.approved_routes);
+        match existing {
+            Some(existing) => {
+                active_approved_routes(&existing.available_routes, &existing.approved_routes)
+                    != after
+            }
+            None => !after.is_empty(),
+        }
+    }
+
+    fn auth_completion_pending_changes(
+        existing: Option<&MachineRecord>,
+        rec: &MachineRecord,
+        node_id: u64,
+    ) -> Vec<PendingMapChange> {
+        let reason = Self::auth_completion_map_change_reason(existing, rec);
+        let mut changes = vec![Self::auth_completion_pending_change(reason, node_id)];
+        if reason != MapChangeReason::PolicyChange
+            && Self::auth_completion_active_approved_routes_changed(existing, rec)
+        {
+            changes.push(PendingMapChange::origin(
+                MapChangeReason::PolicyChange,
+                node_id,
+            ));
+        }
+        changes
     }
 
     fn auth_completion_pending_change(reason: MapChangeReason, node_id: u64) -> PendingMapChange {
@@ -3013,12 +3069,12 @@ impl MachineRegistry {
         old_node_key_hex: String,
         new_node_key_hex: String,
         rec: MachineRecord,
-        change: Option<PendingMapChange>,
+        changes: Vec<PendingMapChange>,
     ) {
         let fallback_old_node_key_hex = old_node_key_hex.clone();
         let fallback_new_node_key_hex = new_node_key_hex.clone();
         let fallback_rec = rec.clone();
-        let fallback_change = change.clone();
+        let fallback_changes = changes.clone();
         let (result_tx, result_rx) = std_mpsc::channel();
         self.metrics
             .nodestore_queue_depth
@@ -3027,7 +3083,7 @@ impl MachineRegistry {
             old_node_key_hex,
             new_node_key_hex,
             rec: Box::new(rec),
-            change,
+            changes,
             result_tx,
         }) {
             Ok(()) => {
@@ -3036,7 +3092,7 @@ impl MachineRegistry {
                         &fallback_old_node_key_hex,
                         fallback_new_node_key_hex,
                         fallback_rec,
-                        fallback_change,
+                        fallback_changes,
                     );
                 }
             }
@@ -3044,14 +3100,14 @@ impl MachineRegistry {
                 old_node_key_hex,
                 new_node_key_hex,
                 rec,
-                change,
+                changes,
                 ..
             })) => {
                 self.apply_nodestore_rekey_direct(
                     &old_node_key_hex,
                     new_node_key_hex,
                     *rec,
-                    change,
+                    changes,
                 );
             }
             Err(std_mpsc::SendError(
@@ -3071,7 +3127,7 @@ impl MachineRegistry {
         old_node_key_hex: &str,
         new_node_key_hex: String,
         rec: MachineRecord,
-        change: Option<PendingMapChange>,
+        changes: Vec<PendingMapChange>,
     ) {
         let start = Instant::now();
         {
@@ -3086,9 +3142,7 @@ impl MachineRegistry {
         let elapsed = start.elapsed();
         self.record_nodestore_operation("replace_key", elapsed);
         self.record_nodestore_batch(1, elapsed);
-        if let Some(change) = change {
-            self.wake_waiters_with(change);
-        }
+        self.wake_waiters_with_many(changes);
     }
 
     fn apply_nodestore_write_batch(&self, batch: Vec<NodeStoreWriteWork>) {
@@ -3160,7 +3214,7 @@ impl MachineRegistry {
                         old_node_key_hex,
                         new_node_key_hex,
                         rec,
-                        change,
+                        changes,
                         result_tx,
                     } => {
                         if old_node_key_hex != new_node_key_hex {
@@ -3171,7 +3225,7 @@ impl MachineRegistry {
                         completions.push(NodeStoreWriteCompletion::Unit {
                             operation: "replace_key",
                             result_tx,
-                            change,
+                            changes,
                         });
                     }
                 }
@@ -3226,11 +3280,9 @@ impl MachineRegistry {
                     let _ = result_tx.send(outcome);
                 }
                 NodeStoreWriteCompletion::Unit {
-                    result_tx, change, ..
+                    result_tx, changes, ..
                 } => {
-                    if let Some(change) = change {
-                        self.wake_waiters_with(change);
-                    }
+                    self.wake_waiters_with_many(changes);
                     let _ = result_tx.send(());
                 }
             }
@@ -4078,20 +4130,9 @@ impl MachineRegistry {
         rec: MachineRecord,
     ) {
         let existing = self.get(old_node_key_hex);
-        let reason = Self::auth_completion_map_change_reason(existing.as_ref(), &rec);
-        self.replace_node_key_with_reason(old_node_key_hex, new_node_key_hex, rec, reason);
-    }
-
-    pub(crate) fn replace_node_key_with_reason(
-        &self,
-        old_node_key_hex: &str,
-        new_node_key_hex: String,
-        rec: MachineRecord,
-        reason: MapChangeReason,
-    ) {
         let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
-        let change = Self::auth_completion_pending_change(reason, new_id);
-        self.replace_node_key_with_change(old_node_key_hex, new_node_key_hex, rec, Some(change));
+        let changes = Self::auth_completion_pending_changes(existing.as_ref(), &rec, new_id);
+        self.replace_node_key_with_changes(old_node_key_hex, new_node_key_hex, rec, changes);
     }
 
     pub(crate) fn replace_node_key_quiet(
@@ -4110,6 +4151,21 @@ impl MachineRegistry {
         rec: MachineRecord,
         change: Option<PendingMapChange>,
     ) {
+        self.replace_node_key_with_changes(
+            old_node_key_hex,
+            new_node_key_hex,
+            rec,
+            change.into_iter().collect(),
+        );
+    }
+
+    fn replace_node_key_with_changes(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        changes: Vec<PendingMapChange>,
+    ) {
         let key_changed = old_node_key_hex != new_node_key_hex;
         let old_id = self.stable_node_id_for_key(old_node_key_hex);
         let queue = self.nodestore_write_queue.read().clone();
@@ -4119,10 +4175,10 @@ impl MachineRegistry {
                 old_node_key_hex.to_string(),
                 new_node_key_hex,
                 rec,
-                change,
+                changes,
             );
         } else {
-            self.apply_nodestore_rekey_direct(old_node_key_hex, new_node_key_hex, rec, change);
+            self.apply_nodestore_rekey_direct(old_node_key_hex, new_node_key_hex, rec, changes);
         }
         if key_changed {
             self.forget_batcher_connection_state(old_id);
@@ -8463,20 +8519,18 @@ mod registry_tests {
     }
 
     #[test]
-    fn auth_completion_same_key_policy_identity_change_records_policy_change() {
+    fn auth_completion_same_key_non_route_policy_identity_change_records_policy_change() {
         let reg = MachineRegistry::new();
         let mut existing = mk_record(31);
         existing.node_key_hex = "same-node-policy".into();
         existing.machine_key_hex = "same-machine-policy".into();
         existing.user = "alice".into();
         existing.user_id = Some(7);
-        existing.available_routes = vec!["10.30.0.0/24".into()];
-        existing.approved_routes = Vec::new();
         reg.upsert(existing.node_key_hex.clone(), existing.clone());
         let history_len = reg.map_change_history().len();
 
         let mut updated = existing;
-        updated.approved_routes = vec!["10.30.0.0/24".into()];
+        updated.user_id = Some(8);
         reg.upsert_auth_completion(updated.node_key_hex.clone(), updated);
 
         let changes = reg.map_change_history();
@@ -8492,6 +8546,65 @@ mod registry_tests {
                 .content
                 .requires_runtime_peer_computation
         );
+    }
+
+    #[test]
+    fn auth_completion_new_approved_route_records_lifecycle_plus_policy_change() {
+        let reg = MachineRegistry::new();
+        let mut rec = mk_record(32);
+        rec.node_key_hex = "new-route-node".into();
+        rec.machine_key_hex = "new-route-machine".into();
+        rec.user = "router".into();
+        rec.available_routes = vec!["10.32.0.0/24".into()];
+        rec.approved_routes = vec!["10.32.0.0/24".into()];
+        let node_id = rec.stable_node_id_for_key(&rec.node_key_hex);
+
+        reg.upsert_auth_completion(rec.node_key_hex.clone(), rec);
+
+        let changes = reg.map_change_history();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(changes[0].change_type(), "peers");
+        assert_eq!(changes[0].origin_node_id, Some(node_id));
+        assert_eq!(changes[0].content.peers_changed, vec![node_id]);
+        assert!(!changes[0].content.include_policy);
+        assert_eq!(changes[1].reason_labels(), vec!["policy change"]);
+        assert_eq!(changes[1].change_type(), "policy");
+        assert_eq!(changes[1].origin_node_id, Some(node_id));
+        assert!(changes[1].content.include_policy);
+        assert!(changes[1].content.requires_runtime_peer_computation);
+        assert_eq!(
+            changes[0].generation, changes[1].generation,
+            "one auth-completion event should preserve ordered changes under one stream generation"
+        );
+    }
+
+    #[test]
+    fn auth_completion_same_key_approved_route_records_lifecycle_plus_policy_change() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(33);
+        existing.node_key_hex = "same-node-route".into();
+        existing.machine_key_hex = "same-machine-route".into();
+        existing.user = "router".into();
+        existing.available_routes = vec!["10.33.0.0/24".into()];
+        existing.approved_routes = Vec::new();
+        reg.upsert(existing.node_key_hex.clone(), existing.clone());
+        let history_len = reg.map_change_history().len();
+
+        let mut updated = existing;
+        updated.approved_routes = vec!["10.33.0.0/24".into()];
+        let node_id = updated.stable_node_id_for_key(&updated.node_key_hex);
+        reg.upsert_auth_completion(updated.node_key_hex.clone(), updated);
+
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 2);
+        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(new_changes[0].origin_node_id, Some(node_id));
+        assert_eq!(new_changes[1].reason_labels(), vec!["policy change"]);
+        assert_eq!(new_changes[1].origin_node_id, Some(node_id));
+        assert!(new_changes[1].content.include_policy);
+        assert!(new_changes[1].content.requires_runtime_peer_computation);
     }
 
     /// `gc_ephemeral` only collects ephemeral rows where last_seen is

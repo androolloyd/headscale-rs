@@ -2778,6 +2778,18 @@ dns:
         "serve missing noise private key json-line",
     );
 
+    assert_serve_default_config_args_snapshot(
+        r#"
+server_url: "https://headscale.example"
+dns:
+  magic_dns: false
+  override_local_dns: false
+"#,
+        &["-oyaml", "serve"],
+        include_str!("snapshots/serve_missing_noise_private_key_yaml.stderr"),
+        "serve missing noise private key yaml",
+    );
+
     assert_serve_default_config_snapshot(
         r#"
 server_url: "headscale.example"
@@ -2963,6 +2975,15 @@ database:
         1,
         include_str!("snapshots/serve_unsupported_postgres_json_line.stderr"),
         "serve unsupported postgres json-line",
+    );
+
+    let output = headscale_in(&["-oyaml", "serve"], cwd.path(), home.path());
+
+    assert_process_stderr_snapshot(
+        &output,
+        1,
+        include_str!("snapshots/serve_unsupported_postgres_yaml.stderr"),
+        "serve unsupported postgres yaml",
     );
     assert!(
         !db_path.exists(),

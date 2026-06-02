@@ -554,6 +554,12 @@ differentially covers `grants[].app` `CapGrant` output for
 nullable companion caps `drive-sharer` and `relay-target` after per-node packet
 filter reduction. The checked golden now covers eighty-eight scenarios.
 
+Recent coverage note (2026-06-02): process-level `serve` startup validation
+snapshots now cover YAML output in addition to human, JSON, and JSON-line for
+missing Noise private-key config and the SQLite-only unsupported-Postgres
+runtime guard. This closes another residual server/output formatter edge in the
+CLI parity stream.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

@@ -84,7 +84,7 @@
         "integration/node_addressing tests",
         "hscontrol/state/node_store_test.go"
       ],
-      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence and prefix-family rows."
+      "exit_criteria": "Broaden production backfill/restart edges beyond covered restart-persistence, prefix-family hydration, and the PostgreSQL IPv4-to-dual-stack route-preservation restart row; remaining closure candidates are DNS/SSH/policy multi-address behavior after backfill/restart."
     },
     {
       "id": "p2-cli-output-error-residuals",

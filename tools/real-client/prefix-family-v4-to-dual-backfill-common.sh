@@ -48,11 +48,20 @@ work_root="${REAL_CLIENT_WORKDIR:-target/real-client/prefix-family-${migration_c
 run_id="hspf-${migration_case}-${target}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
 base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
+edge="${REAL_CLIENT_PREFIX_MIGRATION_EDGE:-addresses}"
+route="${REAL_CLIENT_PREFIX_BACKFILL_ROUTE:-10.94.0.0/24}"
 
 case "${database_backend}" in
   sqlite | postgres) ;;
   *)
     echo "REAL_CLIENT_DATABASE_BACKEND must be sqlite or postgres" >&2
+    exit 2
+    ;;
+esac
+case "${edge}" in
+  addresses | route-approval-restart) ;;
+  *)
+    echo "REAL_CLIENT_PREFIX_MIGRATION_EDGE must be addresses or route-approval-restart" >&2
     exit 2
     ;;
 esac
@@ -500,13 +509,19 @@ wait_for_client_family() {
 login_client_initial_family() {
   echo "::group::tailscale up against ${initial_family} config"
   up_status=0
-  docker exec "${client_name}" tailscale up \
+  up_args=(
+    tailscale up
     "--login-server=${control_url}" \
     "--hostname=${client_name}" \
     --timeout=60s \
     --accept-routes=false \
     --accept-dns=false \
-    "--authkey=${authkey}" \
+    "--authkey=${authkey}"
+  )
+  if [[ "${edge}" == "route-approval-restart" ]]; then
+    up_args+=("--advertise-routes=${route}")
+  fi
+  docker exec "${client_name}" "${up_args[@]}" \
     >"${work_dir}/${client_name}.tailscale-up.stdout" \
     2>"${work_dir}/${client_name}.tailscale-up.stderr" ||
     up_status="$?"
@@ -515,6 +530,92 @@ login_client_initial_family() {
   fi
   wait_for_client_family "${initial_family}" "${initial_family} client netmap"
   echo "::endgroup::"
+}
+
+assert_node_routes_file() {
+  local path="$1"
+  local expected_available="$2"
+  local expected_approved="$3"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    expected_available = ARGV.fetch(2).split(",").reject(&:empty?).sort
+    expected_approved = ARGV.fetch(3).split(",").reject(&:empty?).sort
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).include?(client_name)
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    available = Array(node["availableRoutes"] || node["available_routes"] || node["routes"]).map(&:to_s).sort
+    approved = Array(node["approvedRoutes"] || node["approved_routes"]).map(&:to_s).sort
+    subnet = Array(node["subnetRoutes"] || node["subnet_routes"]).map(&:to_s).sort
+    abort("expected available routes #{expected_available.inspect}, got #{available.inspect} in #{node.inspect}") unless available == expected_available
+    abort("expected approved routes #{expected_approved.inspect}, got #{approved.inspect} in #{node.inspect}") unless approved == expected_approved
+    expected_approved.each do |candidate_route|
+      abort("expected subnet routes to include #{candidate_route.inspect}, got #{subnet.inspect}") unless subnet.include?(candidate_route)
+    end
+    puts JSON.pretty_generate({name: client_name, available_routes: available, approved_routes: approved, subnet_routes: subnet})
+  ' "${path}" "${client_name}" "${expected_available}" "${expected_approved}"
+}
+
+wait_for_node_routes() {
+  local expected_available="$1"
+  local expected_approved="$2"
+  local label="$3"
+  local path="${work_dir}/nodes-${label//[^a-zA-Z0-9_-]/-}.json"
+  wait_for "${label}" "headscale_cmd -o json nodes list >'${path}' && assert_node_routes_file '${path}' '${expected_available}' '${expected_approved}'" || {
+    dump_client_debug
+    return 1
+  }
+}
+
+node_id_for_client() {
+  local path="$1"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    client_name = ARGV.fetch(1)
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    node = nodes.find do |candidate|
+      [
+        candidate["givenName"],
+        candidate["given_name"],
+        candidate["name"],
+        candidate["hostname"],
+      ].compact.map(&:to_s).include?(client_name)
+    end
+    abort("expected one node named #{client_name.inspect}, got #{nodes.inspect}") unless node
+    id = node["id"] || node["ID"]
+    abort("expected node id in #{node.inspect}") if id.nil? || id.to_s.empty?
+    puts id
+  ' "${path}" "${client_name}"
+}
+
+approve_route_edge_if_requested() {
+  [[ "${edge}" == "route-approval-restart" ]] || return 0
+
+  wait_for_node_routes "${route}" "" "advertised route before prefix restart"
+
+  echo "::group::approve advertised route before prefix restart"
+  local nodes_path="${work_dir}/nodes-before-route-approve.json"
+  local node_id
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  node_id="$(node_id_for_client "${nodes_path}")"
+  headscale_cmd -o json nodes approve-routes --identifier "${node_id}" --routes "${route}" \
+    >"${work_dir}/approved-routes-${node_id}.json"
+  echo "::endgroup::"
+
+  wait_for_node_routes "${route}" "${route}" "approved route before prefix restart"
+}
+
+assert_route_edge_if_requested() {
+  local label="$1"
+  [[ "${edge}" == "route-approval-restart" ]] || return 0
+  wait_for_node_routes "${route}" "${route}" "${label}"
 }
 
 run_backfill() {
@@ -631,6 +732,7 @@ start_server "${initial_family}"
 create_user_and_key
 start_client
 login_client_initial_family
+approve_route_edge_if_requested
 
 echo "::group::restart ${target} server from ${initial_family} to ${final_family}"
 stop_server
@@ -640,6 +742,7 @@ echo "::endgroup::"
 run_backfill
 wait_for_client_family "${final_family}" "${final_family} client netmap after backfill"
 assert_node_state_family "${final_family}" "after-backfill"
+assert_route_edge_if_requested "approved route after backfill"
 
 echo "::group::restart ${target} server after ${backfill_label} backfill"
 stop_server
@@ -648,5 +751,6 @@ echo "::endgroup::"
 
 wait_for_client_family "${final_family}" "${final_family} client netmap after post-backfill restart"
 assert_node_state_family "${final_family}" "after-backfill-restart"
+assert_route_edge_if_requested "approved route after post-backfill restart"
 
 echo "${target} prefix-family ${migration_case} backfill real-client smoke passed"

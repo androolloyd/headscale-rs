@@ -122,6 +122,7 @@ smoke_ids=(
   postgres-magicdns-ipv6-only
   postgres-prefix-family-dual-stack
   postgres-prefix-family-v4-to-dual-backfill
+  postgres-prefix-family-v4-to-dual-backfill-route-restart
   postgres-prefix-family-dual-stack-to-ipv4-only-backfill
   postgres-prefix-family-dual-stack-to-ipv6-only-backfill
   postgres-prefix-family-ipv4-only
@@ -402,6 +403,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -534,6 +536,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-magicdns-ipv6-only-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-smoke.sh
   tools/real-client/postgres-prefix-family-v4-to-dual-backfill-smoke.sh
+  tools/real-client/postgres-prefix-family-v4-to-dual-backfill-route-restart-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-to-ipv6-only-backfill-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-smoke.sh
@@ -740,6 +743,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-magicdns-ipv6-only-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-v4-to-dual-backfill-headscale-go-smoke.sh
+  tools/real-client/postgres-prefix-family-v4-to-dual-backfill-route-restart-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-to-ipv4-only-backfill-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-dual-stack-to-ipv6-only-backfill-headscale-go-smoke.sh
   tools/real-client/postgres-prefix-family-ipv4-only-headscale-go-smoke.sh
@@ -946,6 +950,7 @@ smoke_assertions=(
   "production Postgres MagicDNS with IPv6-only prefix-family allocation"
   "production Postgres dual-stack prefix-family allocation"
   "production Postgres IPv4-to-dual-stack backfill plus post-backfill restart hydration after prefix migration"
+  "production Postgres IPv4-to-dual-stack backfill preserves approved route state across post-backfill restart"
   "production Postgres dual-stack-to-IPv4-only backfill plus post-backfill restart hydration after prefix-family removal"
   "production Postgres dual-stack-to-IPv6-only backfill plus post-backfill restart hydration after prefix-family removal"
   "production Postgres IPv4-only prefix-family allocation"

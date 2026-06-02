@@ -235,7 +235,8 @@ Recent accepted slices:
   database-policy churn path, assert peer maps move from `0,0` to `1,1`, restart
   the same production server URL, and assert the post-reload peer visibility
   remains hydrated after reconnect. The checked-in Postgres stock-client matrix
-  now has one hundred one rows.
+  now has one hundred seven rows after the DERP WebSocket and prefix-family
+  route-preservation restart rows.
 - This slice also promotes the existing paired
   `postgres-oidc-policy-churn-restart` row into the bounded push/PR smoke set.
   It covers production Postgres OIDC registration, file-policy mutation via

@@ -803,6 +803,7 @@ fn upstream_exact_help<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
 fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
     match parts {
         ["-h" | "--help" | "help"] => Some(UPSTREAM_TOP_LEVEL_HELP),
+        ["help", "help", ..] => Some(UPSTREAM_HELP_HELP),
         ["serve", "-h" | "--help"] | ["help", "serve"] => Some(UPSTREAM_SERVE_HELP),
         ["serve", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Serve) => {
             Some(UPSTREAM_SERVE_HELP)
@@ -1045,9 +1046,18 @@ fn upstream_exact_success_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<String> 
     }
 
     match parts.as_slice() {
-        ["help", topic] if !topic.starts_with('-') => Some(format!(
-            "Unknown help topic [`{topic}`]\n{UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE}"
-        )),
+        ["help", topic @ ..]
+            if !topic.is_empty() && topic.iter().all(|arg| !arg.starts_with('-')) =>
+        {
+            let topic = topic
+                .iter()
+                .map(|arg| format!("`{arg}`"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(format!(
+                "Unknown help topic [{topic}]\n{UPSTREAM_TOP_LEVEL_HELP_TOPIC_USAGE}"
+            ))
+        }
         _ => None,
     }
 }
@@ -1777,6 +1787,9 @@ fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
             "-h" | "--help" | "--force" | "--insecure" => {
                 i += 1;
             }
+            value if invalid_global_bool_assignment_error(value).is_some() => {
+                return invalid_global_bool_assignment_error(value);
+            }
             value if is_global_bool_assignment(value) => i += 1,
             "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
             | "--api-key" | "--unix-socket" | "--log-level"
@@ -1808,11 +1821,19 @@ fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
 }
 
 fn upstream_top_level_unknown_command_error(parts: &[&str]) -> Option<String> {
-    let ["userz", tail @ ..] = parts else {
+    let [command, tail @ ..] = parts else {
         return None;
     };
+    let suggestion = match *command {
+        "auths" => "auth",
+        "nodez" => "nodes",
+        "policyy" => "policy",
+        "servee" => "serve",
+        "userss" | "userz" => "users",
+        _ => return None,
+    };
     (tail.is_empty() || tail_is_help(tail)).then(|| {
-        "unknown command \"userz\" for \"headscale\"\n\nDid you mean this?\n\tusers\n".into()
+        format!("unknown command \"{command}\" for \"headscale\"\n\nDid you mean this?\n\t{suggestion}\n")
     })
 }
 
@@ -1821,6 +1842,24 @@ fn is_global_bool_assignment(arg: &str) -> bool {
         return false;
     };
     matches!(flag, "--force" | "--insecure") && is_cobra_bool_value(value)
+}
+
+fn invalid_global_bool_assignment_error(arg: &str) -> Option<String> {
+    invalid_bool_assignment_error(arg, &["--force", "--insecure"])
+}
+
+fn invalid_completion_bool_assignment_error(arg: &str) -> Option<String> {
+    invalid_bool_assignment_error(arg, &["--no-descriptions"])
+}
+
+fn invalid_bool_assignment_error(arg: &str, flags: &[&str]) -> Option<String> {
+    let (flag, value) = arg.split_once('=')?;
+    if !flags.contains(&flag) || is_cobra_bool_value(value) {
+        return None;
+    }
+    Some(format!(
+        "invalid argument \"{value}\" for \"{flag}\" flag: strconv.ParseBool: parsing \"{value}\": invalid syntax"
+    ))
 }
 
 fn is_cobra_bool_value(value: &str) -> bool {
@@ -1918,6 +1957,19 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
             | (UtilityFlagScope::CompletionShell, "--" | "--no-descriptions") => {
                 i += 1;
                 continue;
+            }
+            (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                value,
+            ) if invalid_global_bool_assignment_error(value).is_some() => {
+                return invalid_global_bool_assignment_error(value);
+            }
+            (UtilityFlagScope::CompletionShell, value)
+                if invalid_completion_bool_assignment_error(value).is_some() =>
+            {
+                return invalid_completion_bool_assignment_error(value);
             }
             (
                 UtilityFlagScope::Serve
@@ -2287,6 +2339,21 @@ Flags:
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 
 Use "headscale [command] --help" for more information about a command.
+"#;
+
+const UPSTREAM_HELP_HELP: &str = r#"Help provides help for any command in the application.
+Simply type headscale help [path to command] for full details.
+
+Usage:
+  headscale help [command] [flags]
+
+Flags:
+  -h, --help   help for help
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 "#;
 
 const UPSTREAM_VERSION_HELP: &str = r"The version of headscale.
@@ -3838,6 +3905,14 @@ mod tests {
             Some(UPSTREAM_VERSION_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "help"]),
+            Some(UPSTREAM_HELP_HELP)
+        );
+        assert_eq!(
+            upstream_exact_help(&["help", "help", "extra"]),
+            Some(UPSTREAM_HELP_HELP)
+        );
+        assert_eq!(
             upstream_exact_help(&["help", "version", "bad"]),
             Some(UPSTREAM_VERSION_HELP)
         );
@@ -3914,6 +3989,13 @@ mod tests {
         assert_eq!(
             upstream_exact_error(&["server", "--help"]),
             Some(UPSTREAM_SERVER_UNKNOWN_COMMAND.into())
+        );
+        assert_eq!(
+            upstream_exact_error(&["servee", "--help"]),
+            Some(
+                "Error: unknown command \"servee\" for \"headscale\"\n\nDid you mean this?\n\tserve\n\n"
+                    .into()
+            )
         );
         assert_eq!(
             upstream_exact_error(&["userz"]),

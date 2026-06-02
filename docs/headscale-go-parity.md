@@ -76,7 +76,8 @@ Current-head audit overlay, refreshed 2026-05-30:
   current-upstream Cobra help snapshots for stable
   operator/auth/user/node/preauthkey/API-key/policy subcommands,
   deprecated `nodes register`, completion shell helpers, `mockoidc`,
-  and hidden `dumpConfig`, plus
+  hidden `dumpConfig`, and residual top-level/help-command parser
+  snapshots, plus
   upstream policy direct-database bypass over configured SQLite,
   process-level local stderr snapshots for migrated CLI command
   boundary errors, exact gRPC node mutation stdout for expire,

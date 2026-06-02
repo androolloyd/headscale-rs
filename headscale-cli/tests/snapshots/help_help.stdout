@@ -1,0 +1,13 @@
+Help provides help for any command in the application.
+Simply type headscale help [path to command] for full details.
+
+Usage:
+  headscale help [command] [flags]
+
+Flags:
+  -h, --help   help for help
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

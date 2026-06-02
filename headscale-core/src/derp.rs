@@ -391,6 +391,60 @@ pub mod protocol {
         Ok((frame, expected))
     }
 
+    /// Incremental DERP frame decoder for TCP/HTTP-upgrade streams.
+    #[derive(Debug)]
+    pub struct FrameDecoder {
+        buffer: Vec<u8>,
+        max_payload_len: usize,
+    }
+
+    impl FrameDecoder {
+        /// Create a stream decoder with a maximum accepted payload size.
+        pub fn new(max_payload_len: usize) -> Self {
+            Self {
+                buffer: Vec::new(),
+                max_payload_len,
+            }
+        }
+
+        /// Queue more stream bytes.
+        pub fn push(&mut self, bytes: &[u8]) {
+            self.buffer.extend_from_slice(bytes);
+        }
+
+        /// Current queued byte count.
+        pub fn buffered_len(&self) -> usize {
+            self.buffer.len()
+        }
+
+        /// Decode the next complete frame when enough bytes are buffered.
+        pub fn next_frame(&mut self) -> Result<Option<Frame>, ProtocolError> {
+            if self.buffer.len() < FRAME_HEADER_LEN {
+                return Ok(None);
+            }
+            let len = u32::from_be_bytes([
+                self.buffer[1],
+                self.buffer[2],
+                self.buffer[3],
+                self.buffer[4],
+            ]) as usize;
+            if len > self.max_payload_len {
+                return Err(ProtocolError::FrameTooLarge {
+                    len,
+                    max: self.max_payload_len,
+                });
+            }
+            let expected = FRAME_HEADER_LEN + len;
+            if self.buffer.len() < expected {
+                return Ok(None);
+            }
+
+            let (frame, consumed) = decode_frame(&self.buffer[..expected], self.max_payload_len)?;
+            self.buffer.drain(..consumed);
+            Ok(Some(frame))
+        }
+    }
+
     impl Frame {
         fn to_raw_parts(&self) -> (u8, Vec<u8>) {
             match self {
@@ -968,6 +1022,52 @@ pub mod protocol {
                     payload: b"future".to_vec(),
                 }
             );
+        }
+
+        #[test]
+        fn stream_decoder_handles_split_and_coalesced_frames() {
+            let ping = encode_frame(&Frame::Ping([0, 1, 2, 3, 4, 5, 6, 7])).unwrap();
+            let health = encode_frame(&Frame::Health("ERR".to_string())).unwrap();
+            let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+            decoder.push(&ping[..2]);
+            assert_eq!(decoder.next_frame().unwrap(), None);
+            assert_eq!(decoder.buffered_len(), 2);
+
+            decoder.push(&ping[2..7]);
+            assert_eq!(decoder.next_frame().unwrap(), None);
+
+            decoder.push(&ping[7..]);
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some(Frame::Ping([0, 1, 2, 3, 4, 5, 6, 7]))
+            );
+            assert_eq!(decoder.next_frame().unwrap(), None);
+
+            let mut coalesced = Vec::new();
+            coalesced.extend_from_slice(&ping);
+            coalesced.extend_from_slice(&health);
+            decoder.push(&coalesced);
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some(Frame::Ping([0, 1, 2, 3, 4, 5, 6, 7]))
+            );
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some(Frame::Health("ERR".to_string()))
+            );
+            assert_eq!(decoder.buffered_len(), 0);
+        }
+
+        #[test]
+        fn stream_decoder_rejects_oversized_header_before_payload() {
+            let mut decoder = FrameDecoder::new(8);
+            decoder.push(&[FrameType::Health.code(), 0, 0, 0, 9]);
+
+            assert!(matches!(
+                decoder.next_frame(),
+                Err(ProtocolError::FrameTooLarge { len: 9, max: 8 })
+            ));
         }
     }
 }

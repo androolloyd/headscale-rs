@@ -1972,3 +1972,9 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   native session registry plus `/derp` upgrade handler; the supported
   production relay path remains the upstream `derper` sidecar until those
   pieces pass stock-client smokes.
+
+## 2026-06-02 native DERP stream decoder foundation
+
+- Added an incremental DERP frame decoder for native relay work so split TCP
+  headers, split payloads, coalesced frames, unknown frame preservation, and
+  oversized-frame rejection are handled before wiring a `/derp` upgrade route.

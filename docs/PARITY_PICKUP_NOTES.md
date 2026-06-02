@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-01 18:52 ADT
+Updated: 2026-06-01 21:18 ADT
 
 ## Current State
 
@@ -1531,3 +1531,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Unit coverage proves those env values override the parsed/default runtime
   feature flags that project into `/debug/config` and map-response capability
   shaping.
+
+## 2026-06-01 auth-key different-user relogin rejection smoke slice
+
+- Added paired `authkey-relogin-different-user` Rust/headscale-go rows and
+  paired `postgres-authkey-relogin-different-user` Rust/headscale-go rows.
+- The shared auth-key relogin flows can now mint the fresh relogin key for a
+  deterministic alternate user, run `tailscale logout`, attempt `tailscale up`
+  with the existing stock-client state, and require the client to remain logged
+  out.
+- The rejection assertion compares pre/post persisted node state so the
+  rejected relogin cannot duplicate the node or silently transfer it to the
+  different user.
+- This closes the different-user relogin rejection gap; deleted-key restart
+  remains the next auth-key lifecycle row.

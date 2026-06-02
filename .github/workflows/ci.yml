@@ -35,6 +35,8 @@ jobs:
         run: python3 scripts/check_parity_golden.py
       - name: Check real-client smoke matrix metadata
         run: tools/real-client/smoke-matrix.sh --check --all --both
+      - name: Check real-client CI enforcement
+        run: python3 scripts/check_real_client_ci.py
       - name: Record formal verification status
         run: ./scripts/check_formal_status.sh
       - name: Upload formal verification status

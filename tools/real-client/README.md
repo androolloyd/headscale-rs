@@ -96,6 +96,7 @@ upstream commit from `headscale-go-current.sh`.
 | Database | `postgres-authkey-relogin-route-preserve` | `postgres-authkey-relogin-route-preserve-smoke.sh` | `postgres-authkey-relogin-route-preserve-headscale-go-smoke.sh` | Production Postgres auth-key same-user relogin preserves approved route state |
 | Database | `postgres-taildrop-capmap` | `postgres-taildrop-capmap-smoke.sh` | `postgres-taildrop-capmap-headscale-go-smoke.sh` | Production Postgres taildrop disabled removes file-sharing from stock-client self CapMap |
 | Database | `postgres-derp-private` | `postgres-derp-private-smoke.sh` | `postgres-derp-private-headscale-go-smoke.sh` | Production Postgres private DERP sidecar, STUN, relay path, and DERP map metadata |
+| Database | `postgres-derp-native` | `postgres-derp-native-smoke.sh` | `postgres-derp-private-headscale-go-smoke.sh` | Production Postgres native DERP relay, STUN, relay path, and DERP map metadata |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |

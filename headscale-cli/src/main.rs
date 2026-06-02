@@ -1092,7 +1092,7 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     }
 
     if let Some(error) = upstream_unknown_utility_flag(parts.as_slice()) {
-        return Some(format!("Error: {error}\n"));
+        return Some(admin::output::format_error(output_format, &error));
     }
 
     if let Some(error) = completion_shell_unknown_command_error(parts.as_slice()) {

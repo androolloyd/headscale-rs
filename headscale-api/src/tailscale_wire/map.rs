@@ -7635,6 +7635,105 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_update_many_delete_same_batch_emits_only_peers_removed() {
+        let (state, _dir) = fixture();
+        let observer = "43".repeat(32);
+        let router_key = "44".repeat(32);
+        let routes = vec!["10.44.1.0/24".to_string(), "10.44.2.0/24".to_string()];
+        state.machines.upsert(
+            observer.clone(),
+            policy_record(&observer, "observer", 10, "observer", Vec::new()),
+        );
+        let mut router_record = policy_record(&router_key, "router", 11, "router", Vec::new());
+        router_record.available_routes = routes.clone();
+        state.machines.upsert(router_key.clone(), router_record);
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut observer_body = open_zstd_stream(app, &observer).await;
+        let first_mr = next_zstd_map_response(&mut observer_body).await;
+        let router_peer = peer_named(&first_mr, "router").expect("router peer visible");
+        for route in &routes {
+            assert!(
+                !router_peer
+                    .allowed_ips
+                    .iter()
+                    .any(|allowed| allowed == route),
+                "unapproved advertised routes must not be sent as AllowedIPs"
+            );
+        }
+        let _ = state.machines.drain_pending_map_changes();
+
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(2, Duration::from_secs(5));
+        let history_len = state.machines.map_change_history().len();
+        let router_id = stable_id_from_key(&router_key);
+        let machines = state.machines.clone();
+        let router_for_update = router_key.clone();
+        let routes_for_update = routes.clone();
+        let update = std::thread::spawn(move || {
+            machines.set_approved_routes_many(vec![(router_for_update, routes_for_update)])
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while state.machines.nodestore_queue_depth() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued update-many did not reach the NodeStore worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            state
+                .machines
+                .get(&router_key)
+                .expect("router update should still be queued")
+                .approved_routes
+                .is_empty(),
+            "queued update-many should wait for another item or the timeout"
+        );
+
+        assert!(state.machines.delete(&router_key));
+        let (changed, missing) = update
+            .join()
+            .expect("queued update-many should finish after same-batch delete");
+        assert_eq!(
+            changed, 0,
+            "same-batch delete should clear the stale update-many completion"
+        );
+        assert!(missing.is_empty());
+
+        let changes = state.machines.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_labels(), vec!["peers removed"]);
+        assert_eq!(new_changes[0].content.peers_removed, vec![router_id]);
+        assert!(new_changes[0].content.peers_changed.is_empty());
+        assert!(new_changes[0].content.peer_patches.is_empty());
+        let pending = state.machines.pending_map_changes();
+        let observer_changes = pending
+            .get(&stable_id_from_key(&observer))
+            .expect("same-batch delete should queue a peer removal for the observer");
+        assert_eq!(observer_changes.len(), 1);
+        assert_eq!(observer_changes[0].reason_labels(), vec!["peers removed"]);
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "same-batch update-many/delete should wait for the map-batch tick"
+        );
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut observer_body).await;
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_changed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert_eq!(delta.peers_removed, vec![router_id]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stream_true_initial_routable_ips_wake_peer_with_allowed_ips() {
         let (state, _dir) = fixture();
         let policy = r#"{

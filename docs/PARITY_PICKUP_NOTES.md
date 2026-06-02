@@ -2126,3 +2126,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   input state. The test remains
   `postgres-sqlx` feature-gated and skips cleanly when
   `HEADSCALE_DB_POSTGRES_TEST_URL` is absent.
+
+## 2026-06-02 NodeStore update-many/delete churn slice
+
+- The NodeStore write worker now revalidates update-many outcomes that require
+  final node presence, so `set_approved_routes_many` followed by a delete for
+  the same node in one worker batch returns zero applied changes and does not
+  emit a stale `policy change` map wake.
+- Focused worker and streaming map tests pin the observer-visible shape: the
+  active `/map` stream waits for the map-batcher tick and then receives only the
+  `PeersRemoved` delta for the deleted router.

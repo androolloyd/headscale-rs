@@ -2620,6 +2620,21 @@ fn completion_no_descriptions_dashdash_unknown_commands_match_current_upstream()
 }
 
 #[test]
+fn completion_no_descriptions_unknown_flags_match_current_upstream() {
+    for args in [
+        &["completion", "fish", "--no-descriptions", "--bad"][..],
+        &["completion", "powershell", "--no-descriptions", "--bad"][..],
+        &["completion", "zsh", "--no-descriptions", "--bad"][..],
+    ] {
+        assert_stderr_snapshot(
+            args,
+            1,
+            include_str!("snapshots/utility_completion_no_descriptions_unknown_flag.stderr"),
+        );
+    }
+}
+
+#[test]
 fn completion_no_descriptions_strips_zsh_help_text() {
     let output = headscale_clean(&["completion", "zsh"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));

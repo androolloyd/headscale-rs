@@ -2661,3 +2661,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The `p0-production-postgres-process-mutations` row remains open. This slice
   complements the API-key revocation restart smoke but does not close the
   remaining user/node/policy/route/auth-session/config and map-churn breadth.
+
+## 2026-06-02 CLI completion no-descriptions unknown-flag slice
+
+- Probed current-upstream headscale-go `171fd7a3` and pinned exact process
+  stderr for `completion fish|powershell|zsh --no-descriptions --bad`: exit 1,
+  empty stdout, and `Error: unknown flag: --bad`.
+- This complements the existing bash no-space unknown-flag assertion and the
+  recently expanded `--no-descriptions -- bad` separator snapshots. The
+  `p2-cli-output-error-residuals` row remains open for broader residual utility
+  and process-level CLI output/error drift.

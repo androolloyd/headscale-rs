@@ -1877,3 +1877,23 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - The test asserts protojson `apiKey`/`apiKeys` field names, display-prefix
   deletion, `{}` mutation responses, and timestamp field projection on the real
   public gateway path.
+
+## 2026-06-02 OIDC policy-churn stock-client smoke
+
+- Added paired `oidc-policy-churn` Rust/headscale-go real-client wrappers over
+  the production SQLite/file-policy OIDC topology. The smoke starts a
+  CLI/auth-key viewer under a policy that hides the OIDC peer, completes OIDC
+  registration for a second stock client, reloads policy with `SIGHUP`, and
+  waits for the viewer to see the OIDC peer/profile.
+- Added the row to `tools/real-client/smoke-matrix.sh`, the real-client README,
+  and the PR real-client parity smoke list. Local Docker execution reached the
+  Rust production server and viewer preauth-key minting, then stopped because
+  the local OrbStack Docker socket was unavailable; CI should run the paired
+  stock-client row.
+
+## 2026-06-02 NodeStore timeout flush regression
+
+- Added a focused NodeStore write-worker regression for `batch_size=2` and a
+  partial batch that flushes on `recv_timeout`. The test proves the queued write
+  does not publish immediately, then the timeout commits one `put`, clears queue
+  depth, records batch-size bucket `1`, and publishes exactly one new snapshot.

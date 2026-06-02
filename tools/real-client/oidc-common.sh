@@ -25,6 +25,7 @@ oidc_email="${REAL_CLIENT_OIDC_EMAIL:-alice@example.com}"
 oidc_username="${REAL_CLIENT_OIDC_USERNAME:-alice}"
 oidc_groups="${REAL_CLIENT_OIDC_GROUPS:-engineering}"
 oidc_restart="${REAL_CLIENT_OIDC_RESTART:-false}"
+oidc_policy_churn="${REAL_CLIENT_OIDC_POLICY_CHURN:-false}"
 oidc_advertise_routes="${REAL_CLIENT_OIDC_ADVERTISE_ROUTES:-}"
 oidc_approve_routes="${REAL_CLIENT_OIDC_APPROVE_ROUTES:-}"
 database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
@@ -32,6 +33,10 @@ base_domain="${REAL_CLIENT_BASE_DOMAIN-tail.test}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/oidc-${target}-smoke}"
 run_id="hs-oidc-${target}-${database_backend}-$(date +%s)-$$"
 client_name="${REAL_CLIENT_CLIENT_NAME:-${run_id}-client}"
+policy_churn_viewer_user="${REAL_CLIENT_OIDC_POLICY_CHURN_VIEWER_USER:-viewer}"
+policy_churn_viewer_name="${REAL_CLIENT_OIDC_POLICY_CHURN_VIEWER_NAME:-${run_id}-viewer}"
+policy_churn_peer_name="${REAL_CLIENT_OIDC_POLICY_CHURN_PEER_NAME:-${run_id}-oidc-peer}"
+docker_client_names=("${client_name}")
 
 case "${database_backend}" in
   sqlite | postgres) ;;
@@ -53,6 +58,27 @@ case "${oidc_restart}" in
     exit 2
     ;;
 esac
+case "${oidc_policy_churn}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    oidc_policy_churn_flag=1
+    docker_client_names=("${policy_churn_viewer_name}" "${policy_churn_peer_name}")
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    oidc_policy_churn_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_POLICY_CHURN must be true or false, got ${oidc_policy_churn}" >&2
+    exit 2
+    ;;
+esac
+if ((oidc_policy_churn_flag)) && [[ "${database_backend}" != "sqlite" ]]; then
+  echo "REAL_CLIENT_OIDC_POLICY_CHURN currently supports only REAL_CLIENT_DATABASE_BACKEND=sqlite" >&2
+  exit 2
+fi
+if ((oidc_policy_churn_flag)) && [[ -n "${oidc_advertise_routes}${oidc_approve_routes}" ]]; then
+  echo "REAL_CLIENT_OIDC_POLICY_CHURN cannot be combined with OIDC route advertisement/approval flags" >&2
+  exit 2
+fi
 if [[ -n "${oidc_approve_routes}" && -z "${oidc_advertise_routes}" ]]; then
   echo "REAL_CLIENT_OIDC_APPROVE_ROUTES requires REAL_CLIENT_OIDC_ADVERTISE_ROUTES" >&2
   exit 2
@@ -76,6 +102,7 @@ local_health_url=""
 control_port=""
 config_path="${work_dir}/headscale-config"
 db_path="${work_dir}/db.sqlite"
+policy_path="${work_dir}/policy.hujson"
 tls_cert_path=""
 headscale_bin="${HEADSCALE_GO_BIN:-${work_dir}/bin/headscale}"
 headscale_rs_socket_path="${REAL_CLIENT_HEADSCALE_RS_SOCKET:-/tmp/hsrs-${run_id}.sock}"
@@ -91,7 +118,10 @@ postgres_sslmode=""
 postgres_database_created=0
 
 cleanup() {
-  docker rm -f "${client_name}" >/dev/null 2>&1 || true
+  local docker_client_name
+  for docker_client_name in "${docker_client_names[@]}"; do
+    docker rm -f "${docker_client_name}" >/dev/null 2>&1 || true
+  done
   rm -f "${headscale_rs_socket_path}"
   if [[ -n "${headscale_go_socket_path}" ]]; then
     rm -f "${headscale_go_socket_path}"
@@ -293,8 +323,9 @@ stop_server() {
 }
 
 tailscale_logged_in() {
+  local active_client_name="${1:-${client_name}}"
   local status_json
-  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  status_json="$(docker exec "${active_client_name}" tailscale status --json 2>/dev/null || true)"
   ruby -rjson -e '
     status = JSON.parse(STDIN.read)
     self_node = status["Self"] || {}
@@ -309,8 +340,9 @@ tailscale_logged_in() {
 
 write_registration_id() {
   local output_path="$1"
+  local active_client_name="${2:-${client_name}}"
   local status_json
-  status_json="$(docker exec "${client_name}" tailscale status --json 2>/dev/null || true)"
+  status_json="$(docker exec "${active_client_name}" tailscale status --json 2>/dev/null || true)"
   ruby -rjson -e '
     status = JSON.parse(STDIN.read)
     url = status["AuthURL"].to_s
@@ -321,8 +353,9 @@ write_registration_id() {
 }
 
 dump_client_debug() {
-  docker exec "${client_name}" tailscale status 2>&1 || true
-  docker exec "${client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
+  local active_client_name="${1:-${client_name}}"
+  docker exec "${active_client_name}" tailscale status 2>&1 || true
+  docker exec "${active_client_name}" sh -c 'tail -180 /tmp/tailscaled.log 2>/dev/null || true' >&2
 }
 
 headscale_cmd() {
@@ -482,6 +515,20 @@ ssl = $(quoted_string "${postgres_sslmode}")
 [policy]
 mode = "database"
 EOF
+  else
+    cat >>"${config_path}" <<EOF
+
+[database]
+type = "sqlite"
+EOF
+  fi
+  if ((oidc_policy_churn_flag)); then
+    cat >>"${config_path}" <<EOF
+
+[policy]
+mode = "file"
+path = "${policy_path}"
+EOF
   fi
 
   echo "::group::start headscale-rs OIDC server"
@@ -637,6 +684,14 @@ oidc:
   email_verified_required: true
 EOF
   write_headscale_go_database_config >>"${config_path}"
+  if ((oidc_policy_churn_flag)); then
+    cat >>"${config_path}" <<EOF
+
+policy:
+  mode: file
+  path: ${policy_path}
+EOF
+  fi
 
   echo "::group::start headscale-go OIDC server"
   printf '\n--- headscale-go start %s ---\n' "$(date -u +%FT%TZ)" >>"${work_dir}/headscale-go.stdout"
@@ -652,10 +707,11 @@ EOF
 }
 
 start_client() {
-  echo "::group::start stock tailscale client"
+  local active_client_name="${1:-${client_name}}"
+  echo "::group::start stock tailscale client ${active_client_name}"
   docker run -d \
-    --name "${client_name}" \
-    --hostname "${client_name}" \
+    --name "${active_client_name}" \
+    --hostname "${active_client_name}" \
     --add-host host.docker.internal:host-gateway \
     --entrypoint /bin/sh \
     -v "${tls_cert_path}:/usr/local/share/ca-certificates/headscale-oidc.crt:ro" \
@@ -664,16 +720,17 @@ start_client() {
     >/dev/null
 
   wait_for "tailscaled local socket" \
-    "docker exec '${client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
+    "docker exec '${active_client_name}' sh -ceu 'tailscale status >/tmp/ts.status 2>&1 || true; grep -Eq \"Logged out|NeedsLogin|Needs login\" /tmp/ts.status'"
   echo "::endgroup::"
 }
 
 drive_oidc_login() {
-  echo "::group::tailscale OIDC login"
+  local active_client_name="${1:-${client_name}}"
+  echo "::group::tailscale OIDC login ${active_client_name}"
   local oidc_registration_success_pattern="Authenticated|Signed in successfully|Node registered|Node reauthenticated"
   local tailscale_up_args=(
     "--login-server=${control_url}" \
-    "--hostname=${client_name}" \
+    "--hostname=${active_client_name}" \
     "--timeout=60s" \
     --accept-routes=false \
     --accept-dns=false
@@ -681,31 +738,35 @@ drive_oidc_login() {
   if [[ -n "${oidc_advertise_routes}" ]]; then
     tailscale_up_args+=("--advertise-routes=${oidc_advertise_routes}")
   fi
-  docker exec "${client_name}" tailscale up "${tailscale_up_args[@]}" \
-    >"${work_dir}/${client_name}.tailscale-up.stdout" \
-    2>"${work_dir}/${client_name}.tailscale-up.stderr" &
+  docker exec "${active_client_name}" tailscale up "${tailscale_up_args[@]}" \
+    >"${work_dir}/${active_client_name}.tailscale-up.stdout" \
+    2>"${work_dir}/${active_client_name}.tailscale-up.stderr" &
   local up_pid="$!"
 
-  local registration_id_path="${work_dir}/${client_name}.registration-id"
+  local registration_id_path="${work_dir}/${active_client_name}.registration-id"
   if ! wait_for "OIDC registration URL" \
-    "write_registration_id '${registration_id_path}'"; then
-    dump_client_debug
+    "write_registration_id '${registration_id_path}' '${active_client_name}'"; then
+    dump_client_debug "${active_client_name}"
     exit 1
   fi
   local registration_id
   registration_id="$(cat "${registration_id_path}")"
+  local callback_headers="${work_dir}/${active_client_name}.oidc-callback.headers"
+  local callback_html="${work_dir}/${active_client_name}.oidc-callback.html"
+  local confirm_html="${work_dir}/${active_client_name}.oidc-confirm.html"
+  local cookie_jar="${work_dir}/${active_client_name}.oidc.cookies"
   curl -fsSL \
-    -D "${work_dir}/oidc-callback.headers" \
+    -D "${callback_headers}" \
     --cacert "${tls_cert_path}" \
     --resolve "host.docker.internal:${control_port}:127.0.0.1" \
-    -c "${work_dir}/oidc.cookies" \
-    -b "${work_dir}/oidc.cookies" \
+    -c "${cookie_jar}" \
+    -b "${cookie_jar}" \
     "${control_url}/register/${registration_id}" \
-    >"${work_dir}/oidc-callback.html"
-  grep -Eiq "Location: .*host\.docker\.internal:${control_port}/oidc/callback\\?" "${work_dir}/oidc-callback.headers"
-  if grep -Eq "Confirm node registration" "${work_dir}/oidc-callback.html"; then
+    >"${callback_html}"
+  grep -Eiq "Location: .*host\.docker\.internal:${control_port}/oidc/callback\\?" "${callback_headers}"
+  if grep -Eq "Confirm node registration" "${callback_html}"; then
     local confirm_csrf
-    confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${work_dir}/oidc-callback.html" | head -n 1)"
+    confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${callback_html}" | head -n 1)"
     if [[ -z "${confirm_csrf}" ]]; then
       echo "OIDC confirmation page did not contain CSRF token" >&2
       exit 1
@@ -713,15 +774,15 @@ drive_oidc_login() {
     curl -fsSL \
       --cacert "${tls_cert_path}" \
       --resolve "host.docker.internal:${control_port}:127.0.0.1" \
-      -c "${work_dir}/oidc.cookies" \
-      -b "${work_dir}/oidc.cookies" \
+      -c "${cookie_jar}" \
+      -b "${cookie_jar}" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       --data "headscale_register_confirm=${confirm_csrf}" \
       "${control_url}/register/confirm/${registration_id}" \
-      >"${work_dir}/oidc-confirm.html"
-    grep -Eq "${oidc_registration_success_pattern}" "${work_dir}/oidc-confirm.html"
-  elif grep -Eq "${oidc_registration_success_pattern}" "${work_dir}/oidc-callback.html"; then
-    cp "${work_dir}/oidc-callback.html" "${work_dir}/oidc-confirm.html"
+      >"${confirm_html}"
+    grep -Eq "${oidc_registration_success_pattern}" "${confirm_html}"
+  elif grep -Eq "${oidc_registration_success_pattern}" "${callback_html}"; then
+    cp "${callback_html}" "${confirm_html}"
     echo "OIDC callback completed registration without explicit confirm form"
   else
     echo "OIDC callback contained neither confirmation form nor success page" >&2
@@ -731,12 +792,218 @@ drive_oidc_login() {
   if ! wait_pid_with_timeout "tailscale up OIDC" "${up_pid}"; then
     echo "tailscale up returned non-zero; verifying logged-in netmap" >&2
   fi
-  if ! wait_for "tailscale logged-in netmap" "tailscale_logged_in"; then
-    dump_client_debug
+  if ! wait_for "tailscale logged-in netmap" "tailscale_logged_in '${active_client_name}'"; then
+    dump_client_debug "${active_client_name}"
     exit 1
   fi
-  docker exec "${client_name}" tailscale status --json >"${work_dir}/${client_name}.tailscale-status.json"
+  docker exec "${active_client_name}" tailscale status --json >"${work_dir}/${active_client_name}.tailscale-status.json"
   echo "::endgroup::"
+}
+
+write_oidc_policy_churn_initial_policy() {
+  cat >"${policy_path}" <<EOF
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["${policy_churn_viewer_user}@"],
+      "dst": ["${policy_churn_viewer_user}@:*"]
+    }
+  ]
+}
+EOF
+}
+
+write_oidc_policy_churn_allow_policy() {
+  cat >"${policy_path}" <<EOF
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["*"],
+      "dst": ["*:*"]
+    }
+  ]
+}
+EOF
+}
+
+create_policy_churn_viewer_authkey() {
+  echo "::group::create policy-churn viewer preauth key"
+  headscale_cmd -o json users create "${policy_churn_viewer_user}" >"${work_dir}/policy-churn-viewer-user.json"
+  local user_id
+  user_id="$(ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("id")' "${work_dir}/policy-churn-viewer-user.json")"
+  headscale_cmd -o json preauthkeys create \
+    --user "${user_id}" \
+    --reusable \
+    --expiration 1h \
+    >"${work_dir}/policy-churn-viewer-preauth.json"
+  policy_churn_viewer_authkey="$(
+    ruby -rjson -e 'j=JSON.parse(File.read(ARGV.fetch(0))); puts j.fetch("key")' \
+      "${work_dir}/policy-churn-viewer-preauth.json"
+  )"
+  echo "minted ${policy_churn_viewer_authkey%%-*}-..."
+  echo "::endgroup::"
+}
+
+drive_authkey_login() {
+  local active_client_name="$1"
+  local authkey="$2"
+  echo "::group::tailscale auth-key login ${active_client_name}"
+  docker exec "${active_client_name}" tailscale up \
+    "--login-server=${control_url}" \
+    "--hostname=${active_client_name}" \
+    "--timeout=60s" \
+    --accept-routes=false \
+    --accept-dns=false \
+    "--authkey=${authkey}" \
+    >"${work_dir}/${active_client_name}.tailscale-up.stdout" \
+    2>"${work_dir}/${active_client_name}.tailscale-up.stderr" ||
+    echo "tailscale up returned non-zero for ${active_client_name}; verifying logged-in netmap" >&2
+  if ! wait_for "tailscale logged-in netmap ${active_client_name}" "tailscale_logged_in '${active_client_name}'"; then
+    dump_client_debug "${active_client_name}"
+    exit 1
+  fi
+  docker exec "${active_client_name}" tailscale status --json >"${work_dir}/${active_client_name}.tailscale-status.json"
+  echo "::endgroup::"
+}
+
+tailscale_peer_count_matches() {
+  local active_client_name="$1"
+  local expected_count="$2"
+  docker exec "${active_client_name}" tailscale status --json 2>/dev/null | ruby -rjson -e '
+    status = JSON.parse(STDIN.read)
+    peers = status["Peer"] || {}
+    exit(peers.length == Integer(ARGV.fetch(0)) ? 0 : 1)
+  ' "${expected_count}"
+}
+
+assert_tailscale_peer_count() {
+  local active_client_name="$1"
+  local expected_count="$2"
+  local output_path="$3"
+  if ! wait_for "tailscale peer count ${expected_count} for ${active_client_name}" \
+    "tailscale_peer_count_matches '${active_client_name}' '${expected_count}'"; then
+    dump_client_debug "${active_client_name}"
+    exit 1
+  fi
+  docker exec "${active_client_name}" tailscale status --json >"${output_path}"
+  ruby -rjson -e '
+    status = JSON.parse(File.read(ARGV.fetch(0)))
+    peers = status["Peer"] || {}
+    puts JSON.pretty_generate({
+      self: status.fetch("Self").fetch("HostName"),
+      peer_count: peers.length,
+      peers: peers.each_value.map { |peer| peer.fetch("HostName") }.sort,
+    })
+  ' "${output_path}"
+}
+
+tailscale_peer_visible_with_profile() {
+  local source_name="$1"
+  local peer_name="$2"
+  local output_path="$3"
+  docker exec "${source_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      peer_name = ARGV.fetch(1)
+      expected_logins = [ARGV.fetch(2), ARGV.fetch(3)]
+      peer = (status["Peer"] || {}).each_value.find { |candidate| candidate["HostName"] == peer_name }
+      abort("missing peer #{peer_name}") unless peer
+
+      profiles = status["User"] || status["Users"] || status["UserProfiles"] || {}
+      user_id = peer["UserID"] || peer["UserId"] || peer["userID"] || peer["userId"]
+      profile = nil
+      if profiles.is_a?(Hash)
+        profile = profiles[user_id.to_s] if user_id
+        profile ||= profiles.each_value.find do |candidate|
+          candidate.is_a?(Hash) &&
+            [candidate["ID"], candidate["Id"], candidate["id"]].compact.map(&:to_s).include?(user_id.to_s)
+        end
+      elsif profiles.is_a?(Array)
+        profile = profiles.find do |candidate|
+          candidate.is_a?(Hash) &&
+            [candidate["ID"], candidate["Id"], candidate["id"]].compact.map(&:to_s).include?(user_id.to_s)
+        end
+      end
+      login = nil
+      if profile.is_a?(Hash)
+        login = profile["LoginName"] || profile["loginName"] || profile["login_name"] ||
+          profile["DisplayName"] || profile["displayName"] || profile["display_name"] ||
+          profile["Name"] || profile["name"]
+      end
+      abort("missing user profile for #{peer_name}: #{JSON.pretty_generate(status)}") if login.to_s.empty?
+      abort("expected #{peer_name} profile #{expected_logins.inspect}, got #{login.inspect}") unless expected_logins.include?(login.to_s)
+
+      puts JSON.pretty_generate({
+        source: status.fetch("Self").fetch("HostName"),
+        peer: peer.fetch("HostName"),
+        profile: login,
+        peer_ips: peer["TailscaleIPs"] || peer["TailscaleIP"],
+      })
+    ' "${output_path}" "${peer_name}" "${oidc_email}" "${oidc_username}"
+}
+
+assert_policy_churn_cli_state() {
+  echo "::group::assert policy-churn admin node state"
+  local nodes_path="${work_dir}/policy-churn-nodes.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    viewer_name = ARGV.fetch(1)
+    viewer_user = ARGV.fetch(2)
+    peer_name = ARGV.fetch(3)
+    oidc_email = ARGV.fetch(4)
+    oidc_username = ARGV.fetch(5)
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+    abort("expected 2 nodes, got #{nodes.length}") unless nodes.length == 2
+    by_name = nodes.to_h do |node|
+      name = node["givenName"] || node["given_name"] || node["name"] || node["hostname"]
+      [name.to_s, node]
+    end
+    viewer = by_name.fetch(viewer_name)
+    peer = by_name.fetch(peer_name)
+    user_name = lambda do |node|
+      user = node["user"] || node["User"]
+      user.is_a?(Hash) ? (user["name"] || user["loginName"] || user["login_name"]) : user.to_s
+    end
+    viewer_actual_user = user_name.call(viewer)
+    peer_actual_user = user_name.call(peer)
+    abort("expected viewer user #{viewer_user}, got #{viewer_actual_user.inspect}") unless viewer_actual_user == viewer_user
+    abort("expected OIDC user #{oidc_email} or #{oidc_username}, got #{peer_actual_user.inspect}") unless [oidc_email, oidc_username].include?(peer_actual_user)
+    register_method = peer["registerMethod"] || peer["register_method"]
+    abort("expected OIDC register method, got #{register_method.inspect}") unless register_method.to_s.match?(/oidc/i) || register_method.to_s == "3"
+    puts JSON.pretty_generate({viewer: viewer_name, oidc_peer: peer_name, oidc_user: peer_actual_user})
+  ' "${nodes_path}" "${policy_churn_viewer_name}" "${policy_churn_viewer_user}" "${policy_churn_peer_name}" "${oidc_email}" "${oidc_username}"
+  echo "::endgroup::"
+}
+
+reload_oidc_policy_churn_policy() {
+  echo "::group::reload OIDC policy-churn policy"
+  write_oidc_policy_churn_allow_policy
+  kill -HUP "${server_pid}"
+  wait_for "${target} health after OIDC policy reload" "server_health_probe"
+  wait_for "OIDC peer visible to viewer after policy reload" \
+    "tailscale_peer_visible_with_profile '${policy_churn_viewer_name}' '${policy_churn_peer_name}' '${work_dir}/policy-churn-viewer-after-reload-status.json'" || {
+      dump_client_debug "${policy_churn_viewer_name}"
+      exit 1
+    }
+  cat "${work_dir}/policy-churn-viewer-after-reload-status.json"
+  echo "::endgroup::"
+}
+
+run_oidc_policy_churn_smoke() {
+  create_policy_churn_viewer_authkey
+  start_client "${policy_churn_viewer_name}"
+  drive_authkey_login "${policy_churn_viewer_name}" "${policy_churn_viewer_authkey}"
+  echo "::group::assert policy-churn initial viewer map"
+  assert_tailscale_peer_count "${policy_churn_viewer_name}" 0 "${work_dir}/policy-churn-viewer-initial-status.json"
+  echo "::endgroup::"
+
+  start_client "${policy_churn_peer_name}"
+  drive_oidc_login "${policy_churn_peer_name}"
+  assert_policy_churn_cli_state
+  reload_oidc_policy_churn_policy
 }
 
 assert_sqlite_oidc_state() {
@@ -993,10 +1260,18 @@ cat "${work_dir}/headscale-go-version.txt"
 echo "::endgroup::"
 
 start_mock_oidc
+if ((oidc_policy_churn_flag)); then
+  write_oidc_policy_churn_initial_policy
+fi
 if [[ "${target}" == "rust" ]]; then
   start_rust_server
 else
   start_headscale_go_server
+fi
+if ((oidc_policy_churn_flag)); then
+  run_oidc_policy_churn_smoke
+  echo "${target} OIDC policy-churn real-client smoke passed"
+  exit 0
 fi
 start_client
 drive_oidc_login

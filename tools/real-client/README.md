@@ -180,6 +180,7 @@ upstream commit from `headscale-go-current.sh`.
 | Registration | `web-register-unowned-tag` | `web-register-unowned-tag-smoke.sh` | `web-register-unowned-tag-headscale-go-smoke.sh` | Rejection for unowned requested tag |
 | Registration | `web-register-route-approve` | `web-register-route-approve-smoke.sh` | `web-register-route-approve-headscale-go-smoke.sh` | Web registration with route advertisement/approval |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| Registration | `oidc-policy-churn` | `oidc-policy-churn-smoke.sh` | `oidc-policy-churn-headscale-go-smoke.sh` | OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
 | SSH | `ssh-cli-check` | `ssh-cli-check-smoke.sh` | `ssh-cli-check-headscale-go-smoke.sh` | CLI-approved Tailscale SSH `check` approval |
 | SSH | `ssh-oidc-check-period-cache` | `ssh-oidc-check-period-cache-smoke.sh` | `ssh-oidc-check-period-cache-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `checkPeriod` cache |
@@ -455,6 +456,8 @@ tools/real-client/oidc-restart-smoke.sh
 tools/real-client/oidc-restart-headscale-go-smoke.sh
 tools/real-client/oidc-route-approve-restart-smoke.sh
 tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh
+tools/real-client/oidc-policy-churn-smoke.sh
+tools/real-client/oidc-policy-churn-headscale-go-smoke.sh
 ```
 
 All OIDC scripts assert that the client reaches a logged-in netmap and that SQLite
@@ -468,6 +471,10 @@ that the stock client reconnects and the OIDC node/user state still matches.
 The route-approval restart variant also advertises `10.77.0.0/24`, approves it
 through the production CLI/gRPC path, and asserts available/approved route state
 before and after the restart.
+The policy-churn variant starts a CLI/auth-key viewer under a file policy that
+does not expose the OIDC peer, completes OIDC registration for a second stock
+client, reloads the file policy with `SIGHUP`, then waits until the viewer sees
+the OIDC peer and associated profile.
 The Rust OIDC config sets `node.expiry = "180d"` to mirror the pinned
 headscale-go OIDC default through the current `node.expiry` surface.
 
@@ -481,6 +488,12 @@ Useful knobs:
   `oidc-restart` and `oidc-route-approve-restart` wrappers set it.
 - `REAL_CLIENT_OIDC_ADVERTISE_ROUTES` and `REAL_CLIENT_OIDC_APPROVE_ROUTES`
   enable advertised-route persistence assertions for OIDC clients.
+- `REAL_CLIENT_OIDC_POLICY_CHURN=true` enables the two-client file-policy reload
+  assertion used by the `oidc-policy-churn` wrappers.
+- `REAL_CLIENT_OIDC_POLICY_CHURN_VIEWER_USER`,
+  `REAL_CLIENT_OIDC_POLICY_CHURN_VIEWER_NAME`, and
+  `REAL_CLIENT_OIDC_POLICY_CHURN_PEER_NAME` override the generated viewer user,
+  viewer hostname, and OIDC peer hostname for policy-churn runs.
 - `HEADSCALE_GO_VERSION` defaults to the release in
   `tools/real-client/headscale-go-baseline.sh`.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.

@@ -6231,6 +6231,82 @@ mod registry_tests {
     }
 
     #[test]
+    fn nodestore_write_batcher_flushes_partial_batch_after_timeout() {
+        let reg = Arc::new(MachineRegistry::new());
+        let _handle = reg.configure_nodestore_write_batcher(2, Duration::from_millis(200));
+        let before = reg.snapshot();
+
+        let first_reg = reg.clone();
+        let first = std::thread::spawn(move || {
+            let mut rec = mk_record(1);
+            rec.node_key_hex = "node-timeout-flush".into();
+            first_reg.upsert(rec.node_key_hex.clone(), rec);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "first upsert did not enqueue before the deadline"
+            );
+            std::thread::yield_now();
+        }
+
+        let queued = reg.snapshot();
+        assert!(
+            Arc::ptr_eq(&before, &queued),
+            "partial batch should not publish before its timeout"
+        );
+        assert_eq!(
+            reg.len(),
+            0,
+            "partial batch should wait for another item or the timeout"
+        );
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("put")
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
+        assert_eq!(reg.nodestore_batch_size_metrics().count, 0);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while reg.nodestore_queue_depth() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "partial batch did not flush after the timeout"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        first.join().expect("first upsert thread should finish");
+
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.nodestore_queue_depth(), 0);
+        assert_eq!(
+            reg.nodestore_operation_metrics()
+                .get("put")
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let batch_size = reg.nodestore_batch_size_metrics();
+        assert_eq!(batch_size.count, 1);
+        assert_eq!(batch_size.bucket("1"), 1);
+
+        let after = reg.snapshot();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "timeout flush should publish one fresh snapshot"
+        );
+        assert!(
+            Arc::ptr_eq(&after, &reg.snapshot()),
+            "snapshot pointer should stay stable after the timeout flush drains"
+        );
+    }
+
+    #[test]
     fn nodestore_write_batcher_batches_concurrent_deletes() {
         let reg = Arc::new(MachineRegistry::new());
         for idx in 1..=2 {

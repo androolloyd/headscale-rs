@@ -793,6 +793,13 @@ show the renamed node. This adds a focused live admin/map mutation row distinct
 from the existing grpc-gateway/remote-gRPC topology and policy-file SIGHUP
 smokes.
 
+Recent coverage note (2026-06-02):
+`serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke` now covers
+a second live production Postgres registration/mutation path: local gRPC/CLI
+registers a pending node, mutates database-backed policy to allow a tag, applies
+that node tag while `serve` remains running, and polls `/debug/nodestore` until
+the live registry exposes the new `forced_tags` state.
+
 Recent coverage note (2026-06-02): `configtest` now snapshots invalid
 `server.https_listen` parsing, matching the already-covered `serve` startup
 guard so explicit HTTPS listener mistakes are caught before runtime state is

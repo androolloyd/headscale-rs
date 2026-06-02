@@ -5598,6 +5598,161 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
     result
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("live_cli_policy_tag").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let metrics_url = format!("http://{metrics}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let auth_id = "hskey-authreq-acacacacacacacacacacacac";
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                auth_id,
+                "--name",
+                "pg-live-tag-node",
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let auth_register = headscale_with_config(
+            &config,
+            &["auth", "register", "--user", "alice", "--auth-id", auth_id],
+        );
+        assert!(
+            auth_register.status.success(),
+            "stderr: {}",
+            stderr(&auth_register)
+        );
+        assert_eq!(stdout(&auth_register), "Node pg-live-tag-node registered\n");
+        assert_eq!(stderr(&auth_register), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        let nodes = json_output(&nodes);
+        let node_id = nodes[0]["id"].as_u64().expect("node id").to_string();
+        assert_eq!(nodes[0]["name"].as_str(), Some("pg-live-tag-node"));
+        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes[0]["tags"], serde_json::json!([]));
+
+        let http = reqwest::Client::new();
+        let nodestore = http
+            .get(format!("{metrics_url}/debug/nodestore"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+        let nodestore = nodestore.json::<serde_json::Value>().await?;
+        let live_node = nodestore
+            .get(&node_id)
+            .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
+        assert_eq!(live_node["hostname"].as_str(), Some("pg-live-tag-node"));
+        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(live_node["forced_tags"], serde_json::json!([]));
+
+        let policy_path = dir.path().join("live-tag-policy.hujson");
+        fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#)?;
+        let policy_path = policy_path.to_string_lossy().to_string();
+        let set_policy = headscale_with_config(
+            &config,
+            &["-o", "json", "policy", "set", "--file", &policy_path],
+        );
+        assert!(
+            set_policy.status.success(),
+            "stderr: {}",
+            stderr(&set_policy)
+        );
+        assert_eq!(stdout(&set_policy), "Policy updated.\n");
+        assert_eq!(stderr(&set_policy), "");
+
+        let tag_node = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "tag",
+                "--identifier",
+                &node_id,
+                "--tags",
+                "tag:server",
+            ],
+        );
+        assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
+        assert_eq!(stdout(&tag_node), "Node updated\n");
+        assert_eq!(stderr(&tag_node), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        let nodes = json_output(&nodes);
+        assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
+        assert_eq!(nodes[0]["name"].as_str(), Some("pg-live-tag-node"));
+        assert_eq!(nodes[0]["tags"], serde_json::json!(["tag:server"]));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let nodestore = http
+                .get(format!("{metrics_url}/debug/nodestore"))
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await?;
+            assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+            let nodestore = nodestore.json::<serde_json::Value>().await?;
+            let live_node = nodestore
+                .get(&node_id)
+                .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
+            if live_node["forced_tags"] == serde_json::json!(["tag:server"]) {
+                assert_eq!(live_node["hostname"].as_str(), Some("pg-live-tag-node"));
+                assert_eq!(live_node["user"].as_str(), Some("alice"));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for live registry tag update; nodestore: {nodestore}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
 #[cfg(all(feature = "postgres-sqlx", unix))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -> BoxTestResult {

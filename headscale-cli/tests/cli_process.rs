@@ -3466,9 +3466,8 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
         "--config", config, "--force", "-o", "json", "policy", "set", "--file", policy, bypass,
     ]);
     assert!(set.status.success(), "stderr: {}", stderr(&set));
-    let set_json: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
-    assert_eq!(set_json["applied"], true);
-    assert_eq!(set_json["policy"], "{\n  // preserved\n  \"acls\": []\n}\n");
+    assert_eq!(stdout(&set), "Policy updated.\n");
+    assert_eq!(stderr(&set), "");
 
     let set_text = headscale_clean(&[
         "--config", config, "--force", "policy", "set", "--file", policy, bypass,
@@ -3533,12 +3532,8 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
             ],
         );
         assert!(set_json.status.success(), "stderr: {}", stderr(&set_json));
-        let set_json: serde_json::Value = serde_json::from_slice(&set_json.stdout)?;
-        assert_eq!(set_json["applied"], true);
-        assert_eq!(
-            set_json["policy"],
-            "{\n  // preserved pg\n  \"acls\": []\n}\n"
-        );
+        assert_eq!(stdout(&set_json), "Policy updated.\n");
+        assert_eq!(stderr(&set_json), "");
 
         let set_text = headscale_with_config(
             &config,
@@ -4182,7 +4177,10 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         let policy_path = dir.path().join("pg-policy.hujson");
         fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
         let policy_path = policy_path.to_string_lossy().to_string();
-        let set_policy = headscale_with_config(&config, &["policy", "set", "--file", &policy_path]);
+        let set_policy = headscale_with_config(
+            &config,
+            &["-o", "json", "policy", "set", "--file", &policy_path],
+        );
         assert!(
             set_policy.status.success(),
             "stderr: {}",
@@ -5649,8 +5647,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let policy_path = config_dir.path().join("tag-policy.hujson");
     fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
     let policy_path_string = policy_path.to_string_lossy().to_string();
-    let set_policy =
-        headscale_with_config(&config, &["policy", "set", "--file", &policy_path_string]);
+    let set_policy = headscale_with_config(
+        &config,
+        &["-o", "json", "policy", "set", "--file", &policy_path_string],
+    );
     assert!(
         set_policy.status.success(),
         "stderr: {}",

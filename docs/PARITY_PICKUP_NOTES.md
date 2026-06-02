@@ -1779,3 +1779,12 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Added regressions for changed-local-user follow-up acceptance, pair-scoped
   check-period cache reuse, unchanged rejection for different src/dst pairs,
   and the existing policy-generation invalidation path.
+
+## 2026-06-02 CLI policy set output parity slice
+
+- `headscale policy set` over gRPC and direct database bypass now ignores
+  structured output formats and always prints `Policy updated.`, matching
+  headscale-go's CLI success output.
+- Updated direct SQLite/Postgres bypass expectations and live gRPC coverage so
+  `policy set -o json` preserves the text success shape while `policy get`
+  remains raw policy text output.

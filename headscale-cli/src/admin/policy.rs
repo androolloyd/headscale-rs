@@ -12,7 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use headscale_api::admin::{MachineAdmin, PersistentMachineAdmin, PersistentUserAdmin};
 #[cfg(feature = "postgres-sqlx")]
 use headscale_api::admin::{PersistentPostgresMachineAdmin, PersistentPostgresUserAdmin};
-use headscale_api::generated::{GetPolicyResponse, SetPolicyResponse};
+use headscale_api::generated::GetPolicyResponse;
 use headscale_api::policy::{PolicyCheckNode, check_policy_semantics, parse_hujson_policy};
 use headscale_api::tailscale_wire::wire::stable_id_from_key;
 use headscale_db::Database;
@@ -69,41 +69,28 @@ pub async fn set(client: &AdminClient, path: &Path, fmt: OutputFormat) -> Result
 pub async fn set_grpc(
     client: &mut GrpcAdminClient,
     path: &Path,
-    fmt: OutputFormat,
+    _fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let body = read_policy_file(path)?;
-    let response = PolicySetOutput::from(client.set_policy(body).await?);
-    if fmt.is_structured() {
-        print_structured(fmt, &response)?;
-    } else {
-        println!("Policy updated.");
-    }
+    client.set_policy(body).await?;
+    println!("Policy updated.");
     Ok(())
 }
 
 pub async fn set_direct_db(
     database: &DirectPolicyDatabase,
     path: &Path,
-    fmt: OutputFormat,
+    _fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let body = read_policy_file(path)?;
-    let policy = match database {
+    match database {
         DirectPolicyDatabase::Sqlite { path } => set_direct_sqlite(path, &body).await?,
         DirectPolicyDatabase::Postgres { url } => set_direct_postgres(url, &body).await?,
         DirectPolicyDatabase::Unavailable { reason } => {
             return Err(AdminError::Local(reason.clone()));
         }
     };
-    let response = PolicySetOutput {
-        applied: true,
-        policy: policy.data,
-        updated_at: Some(unix_timestamp_rfc3339(policy.updated_at)),
-    };
-    if fmt.is_structured() {
-        print_structured(fmt, &response)?;
-    } else {
-        println!("Policy updated.");
-    }
+    println!("Policy updated.");
     Ok(())
 }
 
@@ -431,24 +418,6 @@ struct PolicyOutput {
 impl From<GetPolicyResponse> for PolicyOutput {
     fn from(response: GetPolicyResponse) -> Self {
         Self {
-            policy: response.policy,
-            updated_at: timestamp_rfc3339(response.updated_at.as_ref()),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct PolicySetOutput {
-    applied: bool,
-    policy: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    updated_at: Option<String>,
-}
-
-impl From<SetPolicyResponse> for PolicySetOutput {
-    fn from(response: SetPolicyResponse) -> Self {
-        Self {
-            applied: true,
             policy: response.policy,
             updated_at: timestamp_rfc3339(response.updated_at.as_ref()),
         }

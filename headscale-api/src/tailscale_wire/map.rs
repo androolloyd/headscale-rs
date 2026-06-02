@@ -259,6 +259,47 @@ fn served_routes_for_snapshot(
         .collect()
 }
 
+fn policy_auto_approval_updates_for_snapshot(
+    policy: &PolicyStore,
+    snapshot: &HashMap<String, MachineRecord>,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let mut updates = Vec::new();
+    for (node_key, rec) in snapshot {
+        let addr = rec.primary_addr_string().unwrap_or_default();
+        let user = (!rec.user.is_empty()).then_some(rec.user.as_str());
+        let approved = auto_approved_routes_for_node(
+            policy,
+            &addr,
+            user,
+            &rec.forced_tags,
+            &rec.approved_routes,
+            &rec.available_routes,
+        )?;
+        if approved != rec.approved_routes {
+            updates.push((node_key.clone(), approved));
+        }
+    }
+    Ok(updates)
+}
+
+fn apply_policy_auto_approvals_for_registry(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    policy: &PolicyStore,
+) -> Result<usize, String> {
+    let updates = policy_auto_approval_updates_for_snapshot(policy, &machines.snapshot())?;
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    let (changed, missing) = machines.set_approved_routes_many(updates);
+    if let Some(node_key) = missing.into_iter().next() {
+        return Err(format!(
+            "node {node_key} disappeared while applying policy auto-approvals"
+        ));
+    }
+    Ok(changed)
+}
+
 fn route_is_exit_default(route: &str) -> bool {
     matches!(route, "0.0.0.0/0" | "::/0")
 }
@@ -1639,6 +1680,19 @@ async fn map_inner(
                         // rather than a full map whose empty Peers list
                         // would serialize away and leave clients with
                         // stale peers/routes.
+                        match apply_policy_auto_approvals_for_registry(&machines, &policy) {
+                            Ok(changed) if changed > 0 => {
+                                last_seen_generation = *gen_rx.borrow();
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::error!(
+                                    target = "tailscale_wire::map",
+                                    error = %error,
+                                    "applying policy route auto-approvals"
+                                );
+                            }
+                        }
                         if machines.map_batcher_enabled() {
                             machines.record_observed_map_change(
                                 MapChangeReason::PolicyChange,
@@ -6662,25 +6716,27 @@ mod tests {
             crate::policy::parse_hujson_policy(reloaded_policy).unwrap(),
             reloaded_policy.into(),
         );
-        let router_record = state
-            .machines
-            .get(&router_key)
-            .expect("router remains registered");
-        let approved_routes = auto_approved_routes_for_node(
-            &state.policy,
-            &router_record.primary_addr_string().unwrap_or_default(),
-            Some(router_record.user.as_str()),
-            &router_record.forced_tags,
-            &router_record.approved_routes,
-            &router_record.available_routes,
-        )
-        .unwrap();
-        let (approved, missing) = state
-            .machines
-            .set_approved_routes_many(vec![(router_key.clone(), approved_routes)]);
-        assert_eq!(approved, 1);
-        assert!(missing.is_empty());
+
+        let changes = state.machines.map_change_history();
+        assert_eq!(
+            changes.len(),
+            history_len,
+            "policy reload should not record route auto-approval until the stream observes it"
+        );
+
+        let mut pending_frame = Box::pin(http_body_util::BodyExt::frame(&mut alice_body));
+        assert!(
+            pending_frame.as_mut().now_or_never().is_none(),
+            "observer stream should be parked before policy reload"
+        );
+
         state.policy.notify_change();
+        tokio::task::yield_now().await;
+        let immediate = pending_frame.as_mut().now_or_never();
+        assert!(
+            immediate.is_none(),
+            "policy reload must not emit a stale pre-auto-approval frame before the map-batch tick"
+        );
         assert_eq!(
             state
                 .machines
@@ -6689,7 +6745,6 @@ mod tests {
                 .approved_routes,
             vec![route.to_string()]
         );
-
         let changes = state.machines.map_change_history();
         let approval_change = changes
             .get(history_len)
@@ -6698,13 +6753,6 @@ mod tests {
         assert_eq!(approval_change.change_type(), "policy");
         assert!(approval_change.content.include_policy);
         assert!(approval_change.content.requires_runtime_peer_computation);
-
-        tokio::task::yield_now().await;
-        let immediate = http_body_util::BodyExt::frame(&mut alice_body).now_or_never();
-        assert!(
-            immediate.is_none(),
-            "policy reload must not emit a stale pre-auto-approval frame before the map-batch tick"
-        );
         let pending = state.machines.pending_map_changes();
         assert!(
             pending.contains_key(&stable_id_from_key(&alice)),
@@ -6713,7 +6761,10 @@ mod tests {
 
         publish_test_map_batch().await;
 
-        let delta = next_zstd_map_response(&mut alice_body).await;
+        let frame = pending_frame.await.unwrap().unwrap();
+        let chunk = frame.into_data().unwrap();
+        let decoded = decode_framed(&chunk);
+        let delta: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(
             delta.node.is_none(),
             "batched policy reload should be a peer delta, not a full map"

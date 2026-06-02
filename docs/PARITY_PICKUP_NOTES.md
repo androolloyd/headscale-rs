@@ -1918,3 +1918,11 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   the existing online/LastSeen harness. The row mirrors the existing Postgres
   coverage by applying `randomizeClientPort: true` and asserting the stock
   client self CapMap contains `randomize-client-port`.
+
+## 2026-06-02 policy-reload route auto-approval batching
+
+- Policy reload stream wakes now recompute route auto-approvals from the current
+  machine snapshot before queuing the policy map batch. This matches
+  headscale-go's reload ordering where auto-approvals are applied before mapper
+  batching, so `Stream:true` observers do not receive a stale no-route map
+  before the first post-reload batch tick.

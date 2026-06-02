@@ -1575,6 +1575,39 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn utility_missing_global_flag_values_match_current_upstream_cobra() {
+    assert_stderr_snapshot(
+        &["version", "--output"],
+        1,
+        include_str!("snapshots/utility_missing_output_value.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["version", "-o"],
+        1,
+        include_str!("snapshots/utility_missing_output_shorthand_value.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["health", "--config"],
+        1,
+        include_str!("snapshots/utility_missing_config_value.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["serve", "-c"],
+        1,
+        include_str!("snapshots/utility_missing_config_shorthand_value.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["configtest", "--output"],
+        1,
+        include_str!("snapshots/utility_missing_output_value.stderr"),
+    );
+
+    let top_level_missing_output = include_str!("snapshots/utility_top_level_json_flag.stderr")
+        .replace("unknown flag: --json", "flag needs an argument: --output");
+    assert_stderr_snapshot(&["--output"], 1, &top_level_missing_output);
+}
+
+#[test]
 fn utility_skip_config_commands_reject_late_global_flags_like_current_upstream_cobra() {
     assert_stderr_snapshot(
         &["version", "--config", "missing.yaml"],

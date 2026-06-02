@@ -1243,6 +1243,9 @@ fn upstream_top_level_unknown_flag(parts: &[&str]) -> Option<String> {
             {
                 i += 2;
             }
+            "-c" | "--config" | "-o" | "--output" => {
+                return Some(cobra_missing_flag_value_error(arg));
+            }
             value
                 if value.starts_with("--config=")
                     || value.starts_with("--output=")
@@ -1271,6 +1274,18 @@ fn cobra_unknown_flag_error(arg: &str) -> Option<String> {
         arg.strip_prefix('-')
             .and_then(|shorthand| shorthand.chars().next())
             .map(|flag| format!("unknown shorthand flag: '{flag}' in {arg}"))
+    }
+}
+
+fn cobra_missing_flag_value_error(arg: &str) -> String {
+    if arg.starts_with("--") {
+        format!("flag needs an argument: {arg}")
+    } else {
+        let flag = arg.strip_prefix('-').and_then(|value| value.chars().next());
+        match flag {
+            Some(flag) => format!("flag needs an argument: '{flag}' in {arg}"),
+            None => format!("flag needs an argument: {arg}"),
+        }
     }
 }
 
@@ -1355,6 +1370,15 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
                 | UtilityFlagScope::Serve
                 | UtilityFlagScope::GenerateGroup
                 | UtilityFlagScope::GlobalConfig,
+                "-o" | "--output",
+            ) => {
+                return Some(cobra_missing_flag_value_error(arg));
+            }
+            (
+                UtilityFlagScope::Version
+                | UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
                 value,
             ) if value.starts_with("--output=") => {
                 i += 1;
@@ -1378,6 +1402,14 @@ fn first_unknown_flag(tail: &[&str], scope: UtilityFlagScope) -> Option<String> 
             ) if i + 1 < tail.len() => {
                 i += 2;
                 continue;
+            }
+            (
+                UtilityFlagScope::Serve
+                | UtilityFlagScope::GenerateGroup
+                | UtilityFlagScope::GlobalConfig,
+                "-c" | "--config",
+            ) => {
+                return Some(cobra_missing_flag_value_error(arg));
             }
             (
                 UtilityFlagScope::Serve

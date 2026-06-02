@@ -2022,7 +2022,6 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Tests cover missing-upgrade `426` body parity, websocket-without-DERP-protocol
   rejection, and an in-memory native DERP login plus ping/pong stream.
 - Remaining native DERP runtime gaps: `Derp-Fast-Start` no-response hijack,
-  verify-client admission through the headscale registry,
   keepalive/restarting/health runtime scheduling, and stock-client native DERP
   smokes.
 
@@ -2053,3 +2052,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   upgrade path.
 - Focused tests cover WebSocket login, encrypted server info, ping/pong relay,
   and unsupported text-frame rejection.
+
+## 2026-06-02 native DERP verify-client admission
+
+- Added an optional native DERP client verifier hook that runs after encrypted
+  `ClientInfo` login and before the client is registered in the native relay.
+  When configured, failed admissions close the connection before any relay
+  session is created.
+- `headscale server` now wires `derp.server.verify_clients`/embedded
+  `verify_clients` to the live `MachineRegistry`, matching headscale-go's
+  fail-closed registry admission behavior for native DERP mode.
+- Focused tests cover raw DERP and DERP-over-WebSocket allow/deny paths plus
+  CLI runtime wiring against a registered and unknown node key.

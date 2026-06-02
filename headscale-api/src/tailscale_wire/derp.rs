@@ -7,7 +7,7 @@
 
 use std::{
     borrow::Cow,
-    fs,
+    fmt, fs,
     io::{ErrorKind, Write},
     path::Path,
     sync::Arc,
@@ -44,11 +44,27 @@ const READ_BUF_LEN: usize = 16 * 1024;
 const DERP_PRIVATE_KEY_PREFIX: &str = "privkey:";
 const WEBSOCKET_UNSUPPORTED_DATA: u16 = 1003;
 
+type NativeDerpClientVerifier = Arc<dyn Fn(&[u8; KEY_LEN]) -> bool + Send + Sync>;
+
 /// Shared native DERP runtime.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NativeDerpRuntime {
     server_key: Arc<DerpNodeKeyPair>,
     relay: NativeDerpRelay,
+    client_verifier: Option<NativeDerpClientVerifier>,
+}
+
+impl fmt::Debug for NativeDerpRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeDerpRuntime")
+            .field("server_key", &self.server_key)
+            .field("relay", &self.relay)
+            .field(
+                "client_verifier",
+                &self.client_verifier.as_ref().map(|_| "<configured>"),
+            )
+            .finish()
+    }
 }
 
 impl NativeDerpRuntime {
@@ -99,12 +115,39 @@ impl NativeDerpRuntime {
         Self {
             server_key: Arc::new(server_key),
             relay,
+            client_verifier: None,
         }
     }
 
     /// Public DERP server key bytes.
     pub fn public_key(&self) -> [u8; KEY_LEN] {
         self.server_key.public_key()
+    }
+
+    /// Install a fail-closed client verifier for native DERP admissions.
+    ///
+    /// The verifier receives the DERP client's public node key bytes after the
+    /// encrypted `ClientInfo` frame is opened and before the client is registered
+    /// in the relay.
+    pub fn with_client_verifier<F>(mut self, verifier: F) -> Self
+    where
+        F: Fn(&[u8; KEY_LEN]) -> bool + Send + Sync + 'static,
+    {
+        self.client_verifier = Some(Arc::new(verifier));
+        self
+    }
+
+    /// Whether a native DERP client verifier is configured.
+    pub fn client_verification_enabled(&self) -> bool {
+        self.client_verifier.is_some()
+    }
+
+    /// Return whether a client public key is admitted to the native relay.
+    pub fn admit_client(&self, client_public: &[u8; KEY_LEN]) -> bool {
+        match &self.client_verifier {
+            Some(verifier) => verifier(client_public),
+            None => true,
+        }
     }
 }
 
@@ -292,6 +335,11 @@ where
     let first = read_next_frame(&mut reader, &mut decoder).await?;
     let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
         .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+    if !runtime.admit_client(&client_public) {
+        return Err(WireError::Internal(
+            "DERP client was not admitted by verifier".into(),
+        ));
+    }
 
     let session = runtime.relay.connect(client_public).await;
     let server_info =
@@ -333,6 +381,11 @@ where
     let first = read_next_websocket_frame(&mut reader, &mut decoder).await?;
     let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
         .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+    if !runtime.admit_client(&client_public) {
+        return Err(WireError::Internal(
+            "DERP client was not admitted by verifier".into(),
+        ));
+    }
 
     let session = runtime.relay.connect(client_public).await;
     let server_info =
@@ -617,11 +670,16 @@ mod tests {
 
     #[tokio::test]
     async fn drive_native_derp_completes_login_and_routes_ping() {
-        let runtime = Arc::new(NativeDerpRuntime::new(
-            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
-            NativeDerpRelay::new(),
-        ));
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let allowed_public = client_key.public_key();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_client_verifier(move |client_public| client_public == &allowed_public),
+        );
+        assert!(runtime.client_verification_enabled());
         let (client_io, server_io) = tokio::io::duplex(4096);
         let server_runtime = runtime.clone();
         let server =
@@ -670,12 +728,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_native_derp_websocket_completes_login_and_routes_ping() {
-        let runtime = Arc::new(NativeDerpRuntime::new(
-            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
-            NativeDerpRelay::new(),
-        ));
+    async fn drive_native_derp_rejects_unverified_clients() {
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_client_verifier(|_| false),
+        );
         let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+        let server_key = read_next_frame(&mut client_reader, &mut decoder)
+            .await
+            .unwrap();
+        let Frame::ServerKey {
+            key: server_public, ..
+        } = server_key
+        else {
+            panic!("expected server-key frame");
+        };
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        client_writer.write_all(&client_info).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("DERP client was not admitted by verifier"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_websocket_completes_login_and_routes_ping() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let allowed_public = client_key.public_key();
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_client_verifier(move |client_public| client_public == &allowed_public),
+        );
         let server_public = runtime.public_key();
         let client_info =
             encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
@@ -726,6 +830,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_native_derp_websocket_rejects_unverified_clients() {
+        let runtime = Arc::new(
+            NativeDerpRuntime::new(
+                DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+                NativeDerpRelay::new(),
+            )
+            .with_client_verifier(|_| false),
+        );
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let client_info =
+            encode_client_info_frame(&client_key, &runtime.public_key(), &ClientInfo::regular())
+                .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+
+        tx.send(Ok(Message::Binary(client_info))).await.unwrap();
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("DERP client was not admitted by verifier"),
+            "{err:#}"
+        );
+        let messages = sent.lock().unwrap().clone();
+        assert_eq!(messages.len(), 1);
+        let (frame, _) =
+            headscale_core::derp::protocol::decode_frame(binary_frame(&messages[0]), MAX_INFO_LEN)
+                .expect("server key frame decodes");
+        assert!(matches!(frame, Frame::ServerKey { .. }));
+    }
+
+    #[tokio::test]
     async fn drive_native_derp_websocket_rejects_text_messages() {
         let runtime = Arc::new(NativeDerpRuntime::new(
             DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
@@ -772,6 +920,21 @@ mod tests {
             NativeDerpRelay::new(),
         );
         assert_eq!(runtime.public_key(), runtime.server_key.public_key());
+    }
+
+    #[test]
+    fn native_derp_client_verifier_defaults_open_and_can_deny() {
+        let runtime = NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        );
+        let client_public = [8u8; KEY_LEN];
+        assert!(!runtime.client_verification_enabled());
+        assert!(runtime.admit_client(&client_public));
+
+        let runtime = runtime.with_client_verifier(|_| false);
+        assert!(runtime.client_verification_enabled());
+        assert!(!runtime.admit_client(&client_public));
     }
 
     #[test]

@@ -566,14 +566,21 @@ fn attach_native_derp_runtime(state: &mut WireState, cfg: &EmbeddedDerpConfig) -
         return Ok(());
     }
 
-    let native_derp =
+    let mut native_derp =
         NativeDerpRuntime::load_or_generate(&cfg.derper_config_path, NativeDerpRelay::new())?;
     if native_derp.public_key() == state.server_noise_key.public_bytes() {
         bail!("embedded DERP private key must not be the same as the Noise private key");
     }
+    if cfg.verify_clients {
+        let machines = Arc::clone(&state.machines);
+        native_derp = native_derp.with_client_verifier(move |client_public| {
+            machines.get(&hex::encode(client_public)).is_some()
+        });
+    }
     tracing::info!(
         public_key = %hex::encode(native_derp.public_key()),
         path = %cfg.derper_config_path.display(),
+        verify_clients = native_derp.client_verification_enabled(),
         "embedded native DERP relay ready"
     );
     state.native_derp = Some(Arc::new(native_derp));
@@ -3512,10 +3519,65 @@ regions:
         attach_native_derp_runtime(&mut runtime.state, &cfg).unwrap();
 
         assert!(runtime.state.native_derp.is_some());
+        assert!(
+            !runtime
+                .state
+                .native_derp
+                .as_ref()
+                .unwrap()
+                .client_verification_enabled()
+        );
         let contents = std::fs::read_to_string(&key_path).unwrap();
         let text = contents.trim();
         assert!(text.starts_with("privkey:"));
         assert_eq!(text.len(), "privkey:".len() + 64);
+    }
+
+    #[tokio::test]
+    async fn native_derp_runtime_attaches_registry_client_verifier() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+        let client_key =
+            headscale_core::derp::protocol::DerpNodeKeyPair::from_private_key([8u8; 32]).unwrap();
+        let allowed_public = client_key.public_key();
+        let allowed_hex = hex::encode(allowed_public);
+        let rec = headscale_api::tailscale_wire::MachineRecord::new_at(
+            chrono::Utc::now(),
+            allowed_hex.clone(),
+            format!("mkey-{allowed_hex}"),
+            "alice".to_string(),
+            "derp-client".to_string(),
+            "100.64.0.50".parse().unwrap(),
+            false,
+        );
+        runtime.state.machines.upsert(allowed_hex, rec);
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "headscale.example".into(),
+            stun_addr: Some("127.0.0.1:3478".parse().unwrap()),
+            relay_mode: EmbeddedDerpRelayMode::Native,
+            verify_clients: true,
+            derper_config_path: dir.path().join("derp-verify.key"),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        attach_native_derp_runtime(&mut runtime.state, &cfg).unwrap();
+
+        let native_derp = runtime.state.native_derp.as_ref().unwrap();
+        assert!(native_derp.client_verification_enabled());
+        assert!(native_derp.admit_client(&allowed_public));
+        assert!(!native_derp.admit_client(&[0x42; 32]));
     }
 
     #[tokio::test]

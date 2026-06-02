@@ -1871,18 +1871,19 @@ impl AclDoc {
     pub fn can_access_node(
         &self,
         src: &NodeView<'_>,
+        src_routes: &[String],
         dst: &NodeView<'_>,
         dst_routes: &[String],
         port: PortRef<'_>,
     ) -> bool {
         for rule in &self.rules {
-            if self.matches_node_or_route(rule, src, dst, dst_routes, port) {
+            if self.matches_node_or_route(rule, src, src_routes, dst, dst_routes, port) {
                 return rule.action == AclAction::Accept;
             }
         }
-        self.grants
-            .iter()
-            .any(|grant| self.grant_matches_node_or_route(grant, src, dst, dst_routes, port))
+        self.grants.iter().any(|grant| {
+            self.grant_matches_node_or_route(grant, src, src_routes, dst, dst_routes, port)
+        })
     }
 
     /// Return true when `viewer` is authorized to use one route prefix
@@ -1894,10 +1895,11 @@ impl AclDoc {
     pub fn can_access_route(
         &self,
         viewer: &NodeView<'_>,
+        viewer_routes: &[String],
         peer: &NodeView<'_>,
         route: &str,
     ) -> bool {
-        self.regular_policy_allows_route(viewer, peer, route)
+        self.regular_policy_allows_route(viewer, viewer_routes, peer, route)
     }
 
     /// Return the routes that `peer` should include or exclude for
@@ -1995,14 +1997,14 @@ impl AclDoc {
             }
 
             for route in result.include.clone() {
-                if self.regular_policy_allows_route(viewer, peer, &route) {
+                if self.regular_policy_allows_route(viewer, &[], peer, &route) {
                     push_unique(&mut result.use_primary, route);
                 }
             }
 
             result
                 .exclude
-                .retain(|route| !self.regular_policy_allows_route(viewer, peer, route));
+                .retain(|route| !self.regular_policy_allows_route(viewer, &[], peer, route));
         }
 
         result.include.sort();
@@ -2017,24 +2019,33 @@ impl AclDoc {
     fn regular_policy_allows_route(
         &self,
         viewer: &NodeView<'_>,
+        viewer_routes: &[String],
         peer: &NodeView<'_>,
         route: &str,
     ) -> bool {
         let routes = vec![route.to_string()];
         for rule in &self.rules {
-            if self.principal_matches(&rule.src, viewer, Some(peer))
-                && self.principals_overlap_routes(&rule.dst, &routes)
-                && (rule.ports.is_empty()
-                    || rule.ports.iter().any(|p| port_matches(p, PortRef::any())))
-            {
+            let port_matches_rule =
+                rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, PortRef::any()));
+            let forward = self.principal_matches(&rule.src, viewer, Some(peer))
+                && self.principals_overlap_routes(&rule.dst, &routes);
+            let reverse = self.principals_overlap_routes(&rule.src, &routes)
+                && (self.principal_matches(&rule.dst, viewer, Some(peer))
+                    || self.principals_overlap_routes(&rule.dst, viewer_routes));
+            if port_matches_rule && (forward || reverse) {
                 return rule.action == AclAction::Accept;
             }
         }
         self.grants.iter().any(|grant| {
-            grant.via.is_empty()
-                && self.grant_src_matches(grant, viewer)
-                && grant_port_matches(grant, PortRef::any())
-                && self.principals_overlap_routes(&grant.dst, &routes)
+            if !grant.via.is_empty() || !grant_port_matches(grant, PortRef::any()) {
+                return false;
+            }
+            let forward = self.grant_src_matches(grant, viewer)
+                && self.principals_overlap_routes(&grant.dst, &routes);
+            let reverse = self.principals_overlap_routes(&grant.src, &routes)
+                && (self.principal_matches(&grant.dst, viewer, Some(peer))
+                    || self.principals_overlap_routes(&grant.dst, viewer_routes));
+            forward || reverse
         })
     }
 
@@ -2042,11 +2053,17 @@ impl AclDoc {
         &self,
         grant: &GrantRule,
         src: &NodeView<'_>,
+        src_routes: &[String],
         dst: &NodeView<'_>,
         dst_routes: &[String],
         port: PortRef<'_>,
     ) -> bool {
-        if !self.grant_src_matches(grant, src) || !grant_port_matches(grant, port) {
+        if !grant_port_matches(grant, port) {
+            return false;
+        }
+        let src_matches = self.grant_src_matches(grant, src)
+            || self.principals_overlap_routes(&grant.src, src_routes);
+        if !src_matches {
             return false;
         }
         if grant.via.is_empty() {
@@ -2100,11 +2117,13 @@ impl AclDoc {
         &self,
         rule: &AclRule,
         src: &NodeView<'_>,
+        src_routes: &[String],
         dst: &NodeView<'_>,
         dst_routes: &[String],
         port: PortRef<'_>,
     ) -> bool {
-        self.principal_matches(&rule.src, src, Some(dst))
+        (self.principal_matches(&rule.src, src, Some(dst))
+            || self.principals_overlap_routes(&rule.src, src_routes))
             && (self.principal_matches(&rule.dst, dst, Some(src))
                 || self.principals_overlap_routes(&rule.dst, dst_routes))
             && (rule.ports.is_empty() || rule.ports.iter().any(|p| port_matches(p, port)))
@@ -4542,8 +4561,8 @@ mod tests {
         let router_b = NodeView::new("100.64.0.2").with_tags(&router_b_tags);
         let routes = vec!["10.0.0.0/24".to_string()];
 
-        assert!(doc.can_access_node(&client, &router_a, &routes, PortRef::any()));
-        assert!(!doc.can_access_node(&client, &router_b, &routes, PortRef::any()));
+        assert!(doc.can_access_node(&client, &[], &router_a, &routes, PortRef::any()));
+        assert!(!doc.can_access_node(&client, &[], &router_b, &routes, PortRef::any()));
     }
 
     #[test]

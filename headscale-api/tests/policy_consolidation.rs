@@ -329,6 +329,43 @@ fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
     assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
 }
 
+#[test]
+fn route_as_acl_source_keeps_router_peer_and_route_visible() {
+    let raw = r#"{
+        "acls": [
+            {"action":"accept","src":["10.10.1.0/24"],"dst":["alice@:*"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let nodes = vec![
+        PeerMapNode {
+            id: 1,
+            addr: "100.64.0.1".into(),
+            user: Some("alice".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 2,
+            addr: "100.64.0.2".into(),
+            user: Some("router-owner".into()),
+            tags: Vec::new(),
+            routes: vec!["10.10.1.0/24".into()],
+        },
+    ];
+
+    let peers = build_peer_map_for_doc(&doc, &nodes);
+    assert_eq!(peers.get(&1).cloned().unwrap_or_default(), vec![2]);
+    assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
+
+    let store = PolicyStore::new();
+    store.set(doc, raw.to_string());
+    assert_eq!(
+        store.can_access_route_for_peer(&nodes, 1, 2, "10.10.1.0/24"),
+        Some(true)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PolicyAction / PolicyDoc / PolicyRule symbol stability
 // ---------------------------------------------------------------------------

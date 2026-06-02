@@ -336,7 +336,7 @@ impl PolicyStore {
         let Some(peer) = nodes.iter().find(|node| node.id == peer_id) else {
             return Some(false);
         };
-        Some(doc.can_access_route(&viewer.view(), &peer.view(), route))
+        Some(doc.can_access_route(&viewer.view(), &viewer.routes, &peer.view(), route))
     }
 
     /// Wake every parked `/map` long-poller without changing the
@@ -464,10 +464,20 @@ pub fn build_peer_map_for_doc(doc: &PolicyDoc, nodes: &[PeerMapNode]) -> BTreeMa
                 continue;
             }
             let view_j = node_j.view();
-            let i_can_access_j =
-                doc.can_access_node(&view_i, &view_j, &node_j.routes, PortRef::any());
-            let j_can_access_i =
-                doc.can_access_node(&view_j, &view_i, &node_i.routes, PortRef::any());
+            let i_can_access_j = doc.can_access_node(
+                &view_i,
+                &node_i.routes,
+                &view_j,
+                &node_j.routes,
+                PortRef::any(),
+            );
+            let j_can_access_i = doc.can_access_node(
+                &view_j,
+                &node_j.routes,
+                &view_i,
+                &node_i.routes,
+                PortRef::any(),
+            );
             if i_can_access_j || j_can_access_i {
                 out.entry(node_i.id).or_default().insert(node_j.id);
                 out.entry(node_j.id).or_default().insert(node_i.id);

@@ -1835,12 +1835,19 @@ pub struct DnsResolver {
 #[serde(rename_all = "PascalCase")]
 pub struct DnsRecord {
     /// FQDN. Trailing dot optional.
+    #[serde(alias = "name")]
     pub name: String,
     /// Record type — `""` ⇒ A or AAAA inferred from `Value`,
     /// `"CNAME"`, `"AAAA"`, `"A"`.
-    #[serde(default, rename = "Type", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "Type",
+        alias = "type",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub record_type: String,
     /// Record value (IP literal for A/AAAA; hostname for CNAME).
+    #[serde(alias = "value")]
     pub value: String,
 }
 

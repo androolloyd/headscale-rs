@@ -1900,6 +1900,18 @@ mod tests {
         }
     }
 
+    fn assert_foreign_key_violation(err: DbError) {
+        match err {
+            DbError::Sqlx(sqlx::Error::Database(db)) => {
+                assert!(
+                    db.is_foreign_key_violation(),
+                    "expected foreign key violation, got database error: {db}"
+                );
+            }
+            other => panic!("expected foreign key violation, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn create_matches_headscale_go_row_shape() {
         let db = fresh_db().await;
@@ -2153,6 +2165,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw_user_id, None);
+    }
+
+    #[tokio::test]
+    async fn create_and_update_enforce_user_fk_except_tag_owned_nodes() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+
+        let mut missing_user = node_params(user_id, auth_key_id);
+        missing_user.user_id = Some(999);
+        assert_foreign_key_violation(create(db.pool(), missing_user).await.unwrap_err());
+
+        let owned = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+
+        let mut update_missing_user = node_params(user_id, auth_key_id);
+        update_missing_user.user_id = Some(999);
+        assert_foreign_key_violation(
+            update_from_auth_path(db.pool(), owned.id, update_missing_user)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(
+            get_by_id(db.pool(), owned.id).await.unwrap().user_id,
+            Some(user_id)
+        );
+
+        let mut tagged_missing_user = node_params(user_id, auth_key_id);
+        tagged_missing_user.user_id = Some(999);
+        tagged_missing_user.tags = vec!["tag:server".into()];
+        let tagged = update_from_auth_path(db.pool(), owned.id, tagged_missing_user)
+            .await
+            .unwrap();
+        assert_eq!(tagged.user_id, None);
+        assert_eq!(tagged.tag_list(), vec!["tag:server"]);
     }
 
     #[tokio::test]

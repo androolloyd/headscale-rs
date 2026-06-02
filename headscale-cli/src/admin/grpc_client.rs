@@ -496,6 +496,7 @@ pub struct UserSelector<'a> {
 }
 
 async fn unix_channel(path: PathBuf, timeout: Duration) -> Result<Channel, AdminError> {
+    let display_path = path.display().to_string();
     Endpoint::try_from("http://[::]:50051")
         .map_err(|e| AdminError::Connection(e.to_string()))?
         .timeout(timeout)
@@ -507,7 +508,11 @@ async fn unix_channel(path: PathBuf, timeout: Duration) -> Result<Channel, Admin
             }
         }))
         .await
-        .map_err(|e| AdminError::Connection(e.to_string()))
+        .map_err(|_| {
+            AdminError::Connection(format!(
+                "connecting to {display_path}: context deadline exceeded"
+            ))
+        })
 }
 
 fn remote_endpoint(uri: Uri, timeout: Duration) -> Result<Endpoint, AdminError> {

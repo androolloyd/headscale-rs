@@ -2432,3 +2432,24 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Matched config-backed remote gRPC CLI connection setup errors by prefixing
   `cli.address`-derived missing API-key failures with
   `connecting to headscale:` while preserving direct flag/env behavior.
+
+## 2026-06-02 second subagent parity edge adoption
+
+- Added current-upstream CLI snapshots for default and
+  `HEADSCALE_UNIX_SOCKET` local gRPC connection failures. Default-loaded local
+  admin commands now emit the upstream no-config warning and wrap setup
+  failures as `connecting to headscale: connecting to <socket>: context
+  deadline exceeded`.
+- Added a `serve` early-fatal snapshot for invalid HTTP-01
+  `tls_letsencrypt_listen`, extending the configtest-equivalent server-init
+  matrix before state startup.
+- Added `DNSConfig.ExtraRecords` serde coverage for lower-case
+  headscale-style `name`/`type`/`value` input while continuing to emit
+  canonical tailcfg PascalCase JSON.
+- Added primitive-level node persistence coverage proving stale `user_id`
+  values hit FK enforcement on create/update, while tagged nodes clear
+  ownership before FK enforcement like upstream.
+- The `22ec6ed` real-client workflow failure was infrastructure-only: Docker
+  timed out pulling `postgres:16` before checkout. The same push's CI failure
+  was a clippy `collapsible_if` in `merged_connect_args`; this batch collapses
+  that branch and passes the exact workspace clippy command locally.

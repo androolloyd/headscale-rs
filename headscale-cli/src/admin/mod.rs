@@ -40,6 +40,7 @@ pub mod users;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::Local;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -185,6 +186,10 @@ pub struct ConnectArgs {
     /// `HEADSCALE_CLI_TIMEOUT`; this is not a Rust-only CLI flag.
     #[arg(skip)]
     pub timeout_secs: Option<u64>,
+    /// True when upstream config discovery fell back to defaults and the local
+    /// Unix-socket gRPC setup should emit Cobra's warning banner.
+    #[arg(skip)]
+    pub warn_no_config_default: bool,
     /// True when the gRPC endpoint was supplied by upstream `cli.address`
     /// config, whose Cobra command wrappers prefix connection setup failures.
     #[arg(skip)]
@@ -205,6 +210,9 @@ impl ConnectArgs {
     }
 
     pub async fn build_grpc_client(&self) -> Result<GrpcAdminClient, AdminError> {
+        if self.warn_no_config_default {
+            print_no_config_default_warning();
+        }
         let result = GrpcAdminClient::connect(
             self.address.as_deref(),
             self.api_key.as_deref(),
@@ -214,7 +222,7 @@ impl ConnectArgs {
         )
         .await;
         if self.wrap_grpc_connect_error {
-            result.map_err(|err| AdminError::Usage(format!("connecting to headscale: {err}")))
+            result.map_err(wrap_grpc_connect_error)
         } else {
             result
         }
@@ -234,6 +242,21 @@ impl ConnectArgs {
     pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
         OutputFormat::from_output(self.output.as_deref())
     }
+}
+
+fn wrap_grpc_connect_error(err: AdminError) -> AdminError {
+    let message = match err {
+        AdminError::Connection(message)
+        | AdminError::Local(message)
+        | AdminError::Usage(message) => message,
+        err => err.to_string(),
+    };
+    AdminError::Usage(format!("connecting to headscale: {message}"))
+}
+
+fn print_no_config_default_warning() {
+    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+    eprintln!("{timestamp} WRN no config file found, using defaults");
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,6 +1246,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
         let e = conn.build_client().unwrap_err();
@@ -1242,6 +1266,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
         assert!(conn.build_client().is_ok());
@@ -1260,6 +1285,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
         assert_eq!(conn.fmt().unwrap(), OutputFormat::JsonLine);
@@ -1278,6 +1304,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
         assert!(!conn.should_use_legacy_http_for_migrated_commands());

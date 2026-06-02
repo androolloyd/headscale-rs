@@ -393,6 +393,27 @@ fn assert_process_stderr_snapshot(
     );
 }
 
+fn assert_process_no_config_warning_stderr_snapshot(
+    output: &Output,
+    expected_status: i32,
+    expected: &str,
+    label: &str,
+) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected_status),
+        "unexpected status for {label}; stdout: {}; stderr: {}",
+        stdout(output),
+        stderr(output)
+    );
+    assert_eq!(stdout(output), "", "stdout snapshot for {label}");
+    assert_eq!(
+        trim_line_end_spaces(&normalize_no_config_warning_timestamp(&stderr(output))),
+        trim_line_end_spaces(expected),
+        "stderr snapshot for {label}"
+    );
+}
+
 fn configtest_expected_stderr(validation_expected: &str) -> String {
     let Some(rest) = validation_expected.strip_prefix("Error: ") else {
         return validation_expected.to_string();
@@ -3594,6 +3615,22 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+tls_letsencrypt_hostname: "headscale.example"
+tls_letsencrypt_listen: "not-a-socket"
+tls_letsencrypt_challenge_type: "HTTP-01"
+"#,
+        include_str!("snapshots/serve_invalid_acme_http01_listen.stderr"),
+        "serve invalid ACME HTTP-01 listener",
+    );
+
+    assert_serve_default_config_snapshot(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
@@ -4518,6 +4555,44 @@ fn implemented_admin_local_errors_match_snapshots() {
         ],
         3,
         include_str!("snapshots/grpc_remote_connection_failure_yaml.stderr"),
+    );
+}
+
+#[test]
+fn local_unix_socket_connection_warnings_match_current_upstream_snapshots() {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let default = headscale_in_with_env(
+        &["users", "list"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_CLI_TIMEOUT", "1s")],
+    );
+    assert_process_no_config_warning_stderr_snapshot(
+        &default,
+        1,
+        include_str!("snapshots/grpc_default_unix_socket_connection_failure.stderr"),
+        "default Unix socket connection failure",
+    );
+
+    let socket = "/tmp/headscale-missing-parity-env.sock";
+    let _ = fs::remove_file(socket);
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let env_socket = headscale_in_with_env(
+        &["users", "list"],
+        cwd.path(),
+        home.path(),
+        &[
+            ("HEADSCALE_UNIX_SOCKET", socket),
+            ("HEADSCALE_CLI_TIMEOUT", "1s"),
+        ],
+    );
+    assert_process_no_config_warning_stderr_snapshot(
+        &env_socket,
+        1,
+        include_str!("snapshots/grpc_env_unix_socket_connection_failure.stderr"),
+        "env Unix socket connection failure",
     );
 }
 

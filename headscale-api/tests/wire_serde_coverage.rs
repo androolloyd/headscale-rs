@@ -1269,6 +1269,38 @@ fn dns_config_preserves_legacy_and_temp_upstream_fields() {
     assert_eq!(back.resolvers[0].bootstrap_resolution, vec!["203.0.113.53"]);
 }
 
+#[test]
+fn dns_config_accepts_headscale_extra_records_lowercase_and_emits_tailcfg_pascalcase() {
+    let cfg: DnsConfig = serde_json::from_value(serde_json::json!({
+        "ExtraRecords": [
+            {
+                "name": "grafana.myvpn.example.com",
+                "type": "A",
+                "value": "100.64.0.3"
+            },
+            {
+                "name": "alias.myvpn.example.com",
+                "value": "target.myvpn.example.com"
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(cfg.extra_records[0].name, "grafana.myvpn.example.com");
+    assert_eq!(cfg.extra_records[0].record_type, "A");
+    assert_eq!(cfg.extra_records[0].value, "100.64.0.3");
+    assert_eq!(cfg.extra_records[1].record_type, "");
+
+    let v = serde_json::to_value(&cfg).unwrap();
+    assert_eq!(v["ExtraRecords"][0]["Name"], "grafana.myvpn.example.com");
+    assert_eq!(v["ExtraRecords"][0]["Type"], "A");
+    assert_eq!(v["ExtraRecords"][0]["Value"], "100.64.0.3");
+    assert!(v["ExtraRecords"][0].get("name").is_none());
+    assert!(v["ExtraRecords"][0].get("type").is_none());
+    assert!(v["ExtraRecords"][0].get("value").is_none());
+    assert!(v["ExtraRecords"][1].get("Type").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // DerpRegion / DerpRegionNode — all-caps DERP/STUN/IPv4/IPv6
 // ---------------------------------------------------------------------------

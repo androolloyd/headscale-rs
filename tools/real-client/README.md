@@ -136,6 +136,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-web-register-route-approve-restart` | `postgres-web-register-route-approve-restart-smoke.sh` | `postgres-web-register-route-approve-restart-headscale-go-smoke.sh` | Production Postgres web registration route approval survives server restart |
 | Database | `postgres-oidc` | `postgres-oidc-smoke.sh` | `postgres-oidc-headscale-go-smoke.sh` | Production Postgres OIDC registration, user profile rows, stock-client netmap, and node state |
 | Database | `postgres-oidc-policy-churn` | `postgres-oidc-policy-churn-smoke.sh` | `postgres-oidc-policy-churn-headscale-go-smoke.sh` | Production Postgres OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer |
+| Database | `postgres-oidc-policy-churn-restart` | `postgres-oidc-policy-churn-restart-smoke.sh` | `postgres-oidc-policy-churn-restart-headscale-go-smoke.sh` | Production Postgres OIDC policy reload peer/profile map churn survives server restart |
 | Database | `postgres-oidc-restart` | `postgres-oidc-restart-smoke.sh` | `postgres-oidc-restart-headscale-go-smoke.sh` | Production Postgres OIDC registration survives server restart |
 | Database | `postgres-oidc-route-approve-restart` | `postgres-oidc-route-approve-restart-smoke.sh` | `postgres-oidc-route-approve-restart-headscale-go-smoke.sh` | Production Postgres OIDC route approval survives server restart |
 | Database | `postgres-ssh` | `postgres-ssh-smoke.sh` | `postgres-ssh-headscale-go-smoke.sh` | Production Postgres Tailscale SSH allow, deny, and ACL timeout |
@@ -842,11 +843,17 @@ Rust and headscale-go with a temporary Postgres database:
 ```sh
 tools/real-client/postgres-oidc-smoke.sh
 tools/real-client/postgres-oidc-headscale-go-smoke.sh
+tools/real-client/postgres-oidc-policy-churn-restart-smoke.sh
+tools/real-client/postgres-oidc-policy-churn-restart-headscale-go-smoke.sh
 ```
 
 It uses the same mock OIDC provider and stock Tailscale client as `oidc`, skips
 cleanly when `HEADSCALE_DB_POSTGRES_TEST_URL` is not set, and asserts the OIDC
 node row, user profile/provider fields, CLI node projection, and client netmap.
+The policy-churn restart variant runs the two-client file-policy reload path on
+the temporary Postgres database, keeps the allow policy in place across a
+production server restart, waits for both clients to reconnect, and reasserts
+the viewer's peer/profile map.
 
 The Postgres ACL rows run stock clients through the production Postgres serving
 path and assert the allow, empty-policy streaming, and `autogroup:self`

@@ -163,6 +163,108 @@ async fn postgres_foundation_rejects_unsupported_rust_managed_database_version()
 }
 
 #[tokio::test]
+async fn postgres_foundation_rejects_multiple_database_version_rows_before_migration() -> TestResult
+{
+    let Some(mut schema) = TempSchema::open("reject_multiple_database_versions").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY,
+                version TEXT NOT NULL,
+                updated_at TIMESTAMPTZ
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO database_versions (id, version, updated_at)
+            VALUES
+                (1, 'v0.28.0', CURRENT_TIMESTAMP),
+                (2, 'v0.28.0', CURRENT_TIMESTAMP)
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        let err = migrate_postgres_foundation_on_connection(&mut schema.conn)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            headscale_db::DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+        ));
+        assert!(
+            err.to_string()
+                .contains("at most the upstream single row with id=1")
+        );
+        assert!(!postgres_table_exists(&mut schema.conn, "_sqlx_migrations").await?);
+        assert!(!postgres_table_exists(&mut schema.conn, "users").await?);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_foundation_rejects_unknown_go_migration_ids_before_migration() -> TestResult {
+    let Some(mut schema) = TempSchema::open("reject_unknown_go_migration_ids").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::query(
+            "
+            CREATE TABLE migrations (
+                id TEXT PRIMARY KEY
+            )
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+        sqlx::query(
+            "
+            INSERT INTO migrations (id)
+            VALUES
+                ('202601121700-migrate-hostinfo-request-tags'),
+                ('299912312359-unknown-future-headscale-go-migration')
+            ",
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        let err = migrate_postgres_foundation_on_connection(&mut schema.conn)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            headscale_db::DbError::UnsupportedHeadscaleGoDatabaseVersion(_)
+        ));
+        assert!(err.to_string().contains(
+            "unsupported migration id(s): 299912312359-unknown-future-headscale-go-migration"
+        ));
+        assert!(!postgres_table_exists(&mut schema.conn, "_sqlx_migrations").await?);
+        assert!(!postgres_table_exists(&mut schema.conn, "users").await?);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_foundation_accepts_supported_go_version_history() -> TestResult {
     let Some(mut schema) = TempSchema::open("accept_supported_go_history").await? else {
         return Ok(());

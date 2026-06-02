@@ -2803,3 +2803,14 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `p0-production-postgres-process-mutations` backlog row remains open for
   broader policy, route, auth-session, config, registration, and map-stream
   churn coverage.
+
+## 2026-06-02 Postgres import guard edge coverage
+
+- Added focused Postgres foundation tests for malformed headscale-go import
+  identity before SQLx migrations run. The new coverage rejects multiple
+  `database_versions` rows and unknown future headscale-go migration IDs while
+  asserting `_sqlx_migrations` and Rust foundation tables are not created after
+  the guard fails.
+- This narrows the P0 production Postgres/drop-in evidence, but the backlog row
+  remains open for the broader production process route, auth/API-session,
+  config/registration, and map-stream churn cases.

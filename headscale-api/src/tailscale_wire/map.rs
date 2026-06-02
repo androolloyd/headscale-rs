@@ -203,8 +203,10 @@ fn build_dns_for_snapshot(
         .collect();
     let requester = snapshot.get(self_node_key).map(|rec| {
         let primary_ip = rec.primary_addr_string();
+        let addrs = rec.address_strings();
         let view = NodeView {
             addr: primary_ip.as_deref(),
+            addrs: &addrs,
             user: Some(&rec.user),
             tags: &rec.forced_tags,
         };
@@ -313,6 +315,7 @@ fn peer_map_nodes_from_snapshot(
         .map(|(node_key, rec)| PeerMapNode {
             id: rec.stable_node_id_for_key(node_key),
             addr: rec.primary_addr_string().unwrap_or_default(),
+            addrs: rec.address_strings(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             tags: rec.forced_tags.clone(),
             routes: served_routes.get(node_key).cloned().unwrap_or_default(),
@@ -797,8 +800,10 @@ fn apply_policy_attrs_to_map_node(
 
 fn node_attrs_for_record(rec: &super::MachineRecord, policy: &PolicyStore) -> Vec<String> {
     let addr = rec.primary_addr_string();
+    let addrs = rec.address_strings();
     let view = NodeView {
         addr: addr.as_deref(),
+        addrs: &addrs,
         user: Some(&rec.user),
         tags: &rec.forced_tags,
     };

@@ -353,6 +353,7 @@ pub(crate) fn auto_approved_routes_for_node(
     let announced = normalize_advertised_routes(announced_routes)?;
     let view = NodeView {
         addr: Some(addr),
+        addrs: &[],
         user,
         tags,
     };

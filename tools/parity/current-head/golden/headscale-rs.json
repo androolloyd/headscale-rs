@@ -1,6 +1,222 @@
 [
   {
     "engine": "headscale-rs",
+    "name": "multi-address-policy-ssh-dns-route-matrix",
+    "filter": [
+      {
+        "SrcIPs": [
+          "fd7a:115c:a1e0::10"
+        ],
+        "DstPorts": [
+          {
+            "IP": "fd7a:115c:a1e0::20",
+            "Ports": {
+              "First": 443,
+              "Last": 443
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "server-secondary-v6-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "fd7a:115c:a1e0::10"
+            ],
+            "DstPorts": [
+              {
+                "IP": "fd7a:115c:a1e0::20",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "router-secondary-v6-route-filter",
+        "rules": [
+          {
+            "SrcIPs": [
+              "fd7a:115c:a1e0::10"
+            ],
+            "DstPorts": [
+              {
+                "IP": "10.44.0.0/16",
+                "Ports": {
+                  "First": 443,
+                  "Last": 443
+                }
+              }
+            ],
+            "IPProto": [
+              6
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-secondary-v6-peers",
+        "peers": [
+          2,
+          3
+        ]
+      },
+      {
+        "name": "server-secondary-v6-peers",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "router-secondary-v6-peers",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "bob-unmatched-peers",
+        "peers": [
+
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "tagged-router-autoapproves-subnet",
+        "approved_routes": [
+          "10.44.0.0/16"
+        ],
+        "changed": true
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "alice-secondary-v6-route-via-router",
+        "include": [
+          "10.44.0.0/16"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      },
+      {
+        "name": "bob-secondary-v6-does-not-route-via-router",
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "alice-secondary-v6-nodeattrs",
+        "attrs": [
+          "drive:access",
+          "nextdns:dual-client"
+        ]
+      },
+      {
+        "name": "server-tag-nodeattrs",
+        "attrs": [
+          "ssh"
+        ]
+      },
+      {
+        "name": "bob-no-secondary-v6-nodeattrs",
+        "attrs": [
+
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-dual-ssh-principals",
+        "rules": [
+          {
+            "principals": [
+              "100.64.44.10",
+              "fd7a:115c:a1e0::10"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            },
+            "accept_env": [
+              "LANG"
+            ]
+          }
+        ]
+      }
+    ],
+    "wire": {
+      "runtime_dns_config": {
+        "Domains": [
+          "tail.example"
+        ],
+        "Proxied": true,
+        "Resolvers": [
+          {
+            "Addr": "https://dns.nextdns.io/global"
+          }
+        ]
+      },
+      "runtime_dns_requesters": [
+        {
+          "name": "alice-secondary-v6-nextdns-profile",
+          "dns_config": {
+            "Domains": [
+              "tail.example"
+            ],
+            "Proxied": true,
+            "Resolvers": [
+              {
+                "Addr": "https://dns.nextdns.io/dual-client?device_ip=100.64.44.10&device_model=linux&device_name=alice-dual"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bob-default-nextdns-profile",
+          "dns_config": {
+            "Domains": [
+              "tail.example"
+            ],
+            "Proxied": true,
+            "Resolvers": [
+              {
+                "Addr": "https://dns.nextdns.io/global?device_ip=100.64.44.40&device_model=windows&device_name=bob-dual"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "engine": "headscale-rs",
     "name": "policy-route-autogroup-internet-exit-visibility",
     "filter": [
       {

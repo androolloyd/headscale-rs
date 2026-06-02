@@ -782,7 +782,7 @@ fn main() -> Result<()> {
                 packet_filter_default_allow,
             )?,
             peer_maps: run_peer_map_checks(&scenario, &doc, &filter_nodes)?,
-            route_approvals: run_route_checks(&scenario, &doc)?,
+            route_approvals: run_route_checks(&scenario, &doc, &filter_nodes)?,
             via_routes: run_via_route_checks(&scenario, &doc, &filter_nodes)?,
             tag_checks: run_tag_checks(&scenario, &doc, &filter_nodes)?,
             node_attrs: run_node_attr_checks(&scenario, &doc, &filter_nodes)?,
@@ -926,6 +926,7 @@ fn run_peer_map_checks(
         .map(|node| PeerMapNode {
             id: node.id,
             addr: node.addrs.first().cloned().unwrap_or_default(),
+            addrs: node.addrs.clone(),
             user: node.user.clone(),
             tags: node.tags.clone(),
             routes: node.routes.clone(),
@@ -971,6 +972,7 @@ fn run_tag_checks(
             })?;
         let view = NodeView {
             addr: node.addrs.first().map(String::as_str),
+            addrs: &node.addrs,
             user: node.user.as_deref(),
             tags: &node.tags,
         };
@@ -1000,6 +1002,7 @@ fn run_node_attr_checks(
             })?;
         let view = NodeView {
             addr: node.addrs.first().map(String::as_str),
+            addrs: &node.addrs,
             user: node.user.as_deref(),
             tags: &node.tags,
         };
@@ -2253,40 +2256,27 @@ fn push_unique_i32(out: &mut Vec<i32>, n: i32) {
 fn run_route_checks(
     scenario: &Scenario,
     doc: &headscale_api::policy::PolicyDoc,
+    nodes: &[FilterNode],
 ) -> Result<Vec<RouteApprovalOut>> {
     if scenario.route_checks.is_empty() {
         return Ok(Vec::new());
     }
 
-    let users = scenario
-        .users
-        .iter()
-        .map(|user| (user.id, user))
-        .collect::<HashMap<_, _>>();
-    let nodes = scenario
-        .nodes
-        .iter()
-        .map(|node| (node.id, node))
-        .collect::<HashMap<_, _>>();
-
     let mut out = Vec::with_capacity(scenario.route_checks.len());
     for check in &scenario.route_checks {
-        let node = nodes.get(&check.node_id).with_context(|| {
-            format!(
-                "route check {} references unknown node {}",
-                check.name, check.node_id
-            )
-        })?;
-        let user = users.get(&node.user_id).map(|user| {
-            if user.email.is_empty() {
-                user.name.as_str()
-            } else {
-                user.email.as_str()
-            }
-        });
+        let node = nodes
+            .iter()
+            .find(|node| node.id == check.node_id)
+            .with_context(|| {
+                format!(
+                    "route check {} references unknown node {}",
+                    check.name, check.node_id
+                )
+            })?;
         let view = NodeView {
-            addr: Some(node.ipv4.as_str()),
-            user,
+            addr: node.addrs.first().map(String::as_str),
+            addrs: &node.addrs,
+            user: node.user.as_deref(),
             tags: &node.tags,
         };
 
@@ -2362,11 +2352,13 @@ fn run_via_route_checks(
             })?;
         let viewer_view = NodeView {
             addr: viewer.addrs.first().map(String::as_str),
+            addrs: &viewer.addrs,
             user: viewer.user.as_deref(),
             tags: &viewer.tags,
         };
         let peer_view = NodeView {
             addr: peer.addrs.first().map(String::as_str),
+            addrs: &peer.addrs,
             user: peer.user.as_deref(),
             tags: &peer.tags,
         };
@@ -2450,6 +2442,7 @@ fn run_runtime_dns_requester_checks(
             })?;
         let view = NodeView {
             addr: filter_node.addrs.first().map(String::as_str),
+            addrs: &filter_node.addrs,
             user: filter_node.user.as_deref(),
             tags: &filter_node.tags,
         };

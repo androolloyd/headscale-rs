@@ -2449,6 +2449,7 @@ mod upstream_tests {
         PeerMapNode {
             id: stable_id_from_key(&spec.node_key),
             addr: spec.ipv4.to_string(),
+            addrs: vec![spec.ipv4.to_string()],
             user: Some(spec.user),
             tags: spec.tags,
             routes: spec.routes,

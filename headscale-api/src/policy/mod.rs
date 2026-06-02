@@ -406,6 +406,7 @@ pub fn validate_requested_tags_for_node(
     tags.dedup();
     let node = NodeView {
         addr: Some(ipv4),
+        addrs: &[],
         user: Some(user),
         tags: &[],
     };
@@ -454,6 +455,7 @@ impl NotifyHandle {
 pub struct PeerMapNode {
     pub id: u64,
     pub addr: String,
+    pub addrs: Vec<String>,
     pub user: Option<String>,
     pub tags: Vec<String>,
     pub routes: Vec<String>,
@@ -461,8 +463,14 @@ pub struct PeerMapNode {
 
 impl PeerMapNode {
     fn view(&self) -> NodeView<'_> {
+        let primary = if self.addr.is_empty() {
+            self.addrs.first().map(String::as_str)
+        } else {
+            Some(self.addr.as_str())
+        };
         NodeView {
-            addr: Some(self.addr.as_str()),
+            addr: primary,
+            addrs: &self.addrs,
             user: self.user.as_deref(),
             tags: &self.tags,
         }

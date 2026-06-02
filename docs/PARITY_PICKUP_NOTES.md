@@ -395,7 +395,7 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-tag-update-invalid`, `postgres-tag-reauth-clear`,
   `postgres-acl-allow`, `postgres-acl-empty`, and
   `postgres-acl-autogroup-self` rows. Push/PR CI now provisions Postgres for
-  all ninety-two Pg rows, including
+  all ninety-three Pg rows, including
   `postgres-authkey-nonreusable`, `postgres-authkey-expired`,
   `postgres-authkey-relogin-same-user`,
   `postgres-authkey-relogin-expired`,
@@ -404,7 +404,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `postgres-authkey-relogin-route-preserve`,
   `postgres-taildrop-capmap`, `postgres-randomize-client-port`,
   `postgres-derp-private`, `postgres-derp-native`,
-  `postgres-online-lastseen`, `postgres-ping-lifecycle`, `postgres-magicdns`,
+  `postgres-online-lastseen`, `postgres-ping-lifecycle`,
+  `postgres-policy-churn`, `postgres-magicdns`,
   `postgres-magicdns-custom-domain`,
   `postgres-extra-records`, `postgres-dns-disabled`, `postgres-dns-edge`,
   `postgres-dns-hot-reload`,
@@ -2088,6 +2089,17 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   DERP-map, and forced-DERP ping assertions.
 - The row is included in the real-client matrix and `PR_SMOKES`, bringing the
   Postgres stock-client matrix to ninety-two rows.
+
+## 2026-06-02 Postgres policy-churn stock-client row
+
+- Extended `tools/real-client/online-lastseen-common.sh` with an optional
+  `REAL_CLIENT_RELOAD_POLICY_JSON` path plus post-reload peer-count assertions.
+- Added paired `postgres-policy-churn` Rust/headscale-go rows. They register two
+  stock clients through production Postgres auth keys, load a self-only database
+  policy, prove no cross-user peers are visible, mutate the stored policy with
+  `policy set`, and prove both live clients see the peer-map wake.
+- The row is included in the real-client matrix and `PR_SMOKES`, bringing the
+  Postgres stock-client matrix to ninety-three rows.
 
 ## 2026-06-02 DNS live resolver evidence slice
 

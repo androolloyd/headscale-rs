@@ -3794,6 +3794,11 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
         1,
         "Error: flag needs an argument: --user\n",
     );
+    assert_stderr_snapshot(
+        &["preauthkeys", "create", "--user"],
+        1,
+        "Error: flag needs an argument: --user\n",
+    );
 }
 
 #[test]
@@ -3836,6 +3841,14 @@ fn implemented_admin_errors_follow_output_format() {
     assert_eq!(
         stderr(&auth_approve),
         "{\"error\":\"required flag(s) \\\"auth-id\\\" not set\"}\n"
+    );
+
+    let preauth_missing_user = headscale_clean(&["-o", "json", "preauthkeys", "create", "--user"]);
+    assert_eq!(preauth_missing_user.status.code(), Some(1));
+    assert_eq!(stdout(&preauth_missing_user), "");
+    assert_eq!(
+        stderr(&preauth_missing_user),
+        "{\n\t\"error\": \"flag needs an argument: --user\"\n}\n"
     );
 
     let users_create = headscale_clean(&["--output", "yaml", "users", "create"]);

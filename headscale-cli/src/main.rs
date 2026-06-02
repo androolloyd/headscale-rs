@@ -1106,6 +1106,10 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
         ));
     }
 
+    if let Some(error) = preauthkeys_create_missing_user_value_error(command_parts) {
+        return Some(admin::output::format_error(output_format, &error));
+    }
+
     if let Some(error) = auth_required_flag_error(command_parts) {
         return Some(admin::output::format_error(output_format, &error));
     }
@@ -1512,6 +1516,53 @@ fn users_create_missing_name_error(parts: &[&str]) -> bool {
     }
 
     true
+}
+
+fn preauthkeys_create_missing_user_value_error(parts: &[&str]) -> Option<String> {
+    let [
+        "preauthkeys" | "preauthkey" | "authkey" | "pre",
+        "create" | "c" | "new",
+        tail @ ..,
+    ] = parts
+    else {
+        return None;
+    };
+
+    let mut i = 0;
+    while i < tail.len() {
+        match tail[i] {
+            "--" => return None,
+            "-u" | "--user" if i + 1 < tail.len() => i += 2,
+            "-u" | "--user" => return Some(cobra_missing_flag_value_error(tail[i])),
+            value if value.starts_with("--user=") || value.starts_with("-u") && value.len() > 2 => {
+                i += 1;
+            }
+            "-e" | "--expiration" | "--tags" if i + 1 < tail.len() => i += 2,
+            "-h" | "--help" | "-e" | "--expiration" | "--tags" => return None,
+            "--reusable" | "--ephemeral" | "--force" | "--insecure" => i += 1,
+            value if is_global_bool_assignment(value) => i += 1,
+            "-c" | "--config" | "-o" | "--output" | "--server" | "--token" | "--address"
+            | "--api-key" | "--unix-socket" | "--log-level"
+                if i + 1 < tail.len() =>
+            {
+                i += 2;
+            }
+            value
+                if value.starts_with("--expiration=")
+                    || value.starts_with("--tags=")
+                    || value.starts_with("--config=")
+                    || value.starts_with("--output=")
+                    || value.starts_with("-e") && value.len() > 2
+                    || value.starts_with("-c") && value.len() > 2
+                    || value.starts_with("-o") && value.len() > 2 =>
+            {
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    None
 }
 
 fn nodes_list_missing_user_error(parts: &[&str]) -> Option<String> {
@@ -3674,6 +3725,10 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_error(&["nodes", "list", "--user"]),
+            Some("Error: flag needs an argument: --user\n".to_string())
+        );
+        assert_eq!(
+            upstream_exact_error(&["preauthkeys", "create", "--user"]),
             Some("Error: flag needs an argument: --user\n".to_string())
         );
         assert_eq!(

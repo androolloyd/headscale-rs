@@ -7838,15 +7838,17 @@ mod tests {
     /// Current headscale-go accepts Tailcfg map-session resume fields but
     /// does not populate `MapResponse.MapSessionHandle`/`Seq`; Tailcfg permits
     /// servers to ignore resume requests and start a fresh stream.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stream_true_ignores_map_session_resume_fields_like_headscale_go() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
         insert_peer(&state, &a, "peer-a", 10);
         insert_peer(&state, &b, "peer-b", 11);
+        let _batcher = start_test_map_batcher(&state).await;
 
-        let app = router(state);
+        let app = router(state.clone());
         let req_body = serde_json::json!({
             "Stream": true,
             "Version": 133,
@@ -7870,16 +7872,25 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let mut body = resp.into_body();
-        let frame = http_body_util::BodyExt::frame(&mut body)
-            .await
-            .unwrap()
-            .unwrap();
-        let chunk = frame.into_data().unwrap();
-        let decoded = decode_framed(&chunk);
-        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(mr.map_session_handle, "");
-        assert_eq!(mr.seq, 0);
-        assert_eq!(mr.peers.len(), 1);
+        let first = next_zstd_map_response(&mut body).await;
+        assert_eq!(first.map_session_handle, "");
+        assert_eq!(first.seq, 0);
+        assert_eq!(first.peers.len(), 1);
+
+        insert_peer(&state, &c, "peer-c", 12);
+        tokio::task::yield_now().await;
+        assert_no_stream_frame(&mut body, Duration::from_millis(24)).await;
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut body).await;
+        assert_eq!(delta.map_session_handle, "");
+        assert_eq!(delta.seq, 0);
+        assert!(
+            delta.peers.is_empty(),
+            "batch-delivered follow-up chunks should use incremental peer deltas"
+        );
+        assert_eq!(delta.peers_changed.len(), 1);
+        assert_eq!(delta.peers_changed[0].id, stable_id_from_key(&c));
     }
 
     /// Wall 7 round-trip: a MapRequest carrying `DiscoKey`,

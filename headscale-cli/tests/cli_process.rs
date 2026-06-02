@@ -4056,6 +4056,91 @@ async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult 
     result
 }
 
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_grpc_gateway_policy_write_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_policy").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret");
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let http = reqwest::Client::new();
+        let policy = r#"{"acls":[{"action":"accept","src":["*"],"dst":["*:443"]}]}"#;
+        let updated = http
+            .put(format!("{server_url}/api/v1/policy"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "policy": policy }))
+            .send()
+            .await?;
+        assert_eq!(updated.status(), reqwest::StatusCode::OK);
+        let updated = updated.json::<serde_json::Value>().await?;
+        assert_eq!(updated["policy"].as_str(), Some(policy));
+        assert!(
+            updated["updatedAt"]
+                .as_str()
+                .is_some_and(|updated_at| updated_at.ends_with('Z')),
+            "updated policy: {updated}"
+        );
+
+        let fetched = http
+            .get(format!("{server_url}/api/v1/policy"))
+            .bearer_auth(api_key_secret)
+            .send()
+            .await?;
+        assert_eq!(fetched.status(), reqwest::StatusCode::OK);
+        let fetched = fetched.json::<serde_json::Value>().await?;
+        assert_eq!(fetched["policy"].as_str(), Some(policy));
+        assert!(
+            fetched["updatedAt"]
+                .as_str()
+                .is_some_and(|updated_at| updated_at.ends_with('Z')),
+            "fetched policy: {fetched}"
+        );
+
+        let checked = http
+            .post(format!("{server_url}/api/v1/policy/check"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({ "policy": r#"{"acls":[]}"# }))
+            .send()
+            .await?;
+        assert_eq!(checked.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            checked.json::<serde_json::Value>().await?,
+            serde_json::json!({})
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;

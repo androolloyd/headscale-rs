@@ -52,6 +52,7 @@ expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_peer_count_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD:-}"
 expected_peer_counts_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD:-}"
+rename_node_after_login="${REAL_CLIENT_RENAME_NODE_AFTER_LOGIN:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 client_user_emails_csv="${REAL_CLIENT_CLIENT_USER_EMAILS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
@@ -377,6 +378,10 @@ case "${expected_tailscale_ip_families}" in
 esac
 if [[ -z "${prefix_v4}" && -z "${prefix_v6}" ]]; then
   echo "at least one of REAL_CLIENT_PREFIX_V4 or REAL_CLIENT_PREFIX_V6 must be non-empty" >&2
+  exit 2
+fi
+if [[ -n "${rename_node_after_login}" && "${client_count}" -lt 2 ]]; then
+  echo "REAL_CLIENT_RENAME_NODE_AFTER_LOGIN requires at least two clients so a peer map can observe the rename" >&2
   exit 2
 fi
 
@@ -1210,6 +1215,107 @@ assert_post_reload_peer_visibility_if_requested() {
     "after policy reload" \
     "${expected_peer_count_after_policy_reload}" \
     "${expected_peer_counts_after_policy_reload}"
+}
+
+assert_node_renamed_file() {
+  local path="$1"
+  local old_name="$2"
+  local new_name="$3"
+  ruby -rjson -e '
+    payload = JSON.parse(File.read(ARGV.fetch(0)))
+    old_name = ARGV.fetch(1)
+    new_name = ARGV.fetch(2)
+    nodes = payload.is_a?(Array) ? payload : payload.fetch("nodes")
+
+    def display_names(node)
+      [
+        node["givenName"],
+        node["given_name"],
+        node["name"],
+      ].compact.map(&:to_s)
+    end
+
+    node = nodes.find { |candidate| display_names(candidate).include?(new_name) }
+    abort("missing renamed node #{new_name.inspect} in #{nodes.inspect}") unless node
+    stale = display_names(node).select { |name| name == old_name }
+    abort("renamed node still exposes old display name #{old_name.inspect}: #{node.inspect}") unless stale.empty?
+    puts JSON.pretty_generate({renamed_node: new_name, old_name: old_name, display_names: display_names(node), node: node})
+  ' "${path}" "${old_name}" "${new_name}"
+}
+
+peer_netmap_has_renamed_node() {
+  local observer_name="$1"
+  local old_name="$2"
+  local new_name="$3"
+  local output_path="$4"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${observer_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      old_name = ARGV.fetch(1)
+      new_name = ARGV.fetch(2)
+      peers = Array(netmap["Peers"] || netmap["peers"])
+
+      def display_names(peer)
+        [
+          peer["HostName"],
+          peer["Name"],
+          peer["DNSName"],
+          peer["ComputedName"],
+        ].compact.map(&:to_s)
+      end
+
+      peer = peers.find do |candidate|
+        display_names(candidate).any? do |name|
+          name == new_name || name.split(".").first == new_name || name.include?(new_name)
+        end
+      end
+      abort("missing renamed peer #{new_name.inspect} in peers #{peers.inspect}") unless peer
+
+      puts JSON.pretty_generate({
+        observer: netmap.dig("SelfNode", "HostName") || netmap.dig("SelfNode", "Name"),
+        renamed_peer: new_name,
+        old_name: old_name,
+        display_names: display_names(peer),
+      })
+    ' "${netmap_path}" "${old_name}" "${new_name}" >"${output_path}"
+}
+
+rename_node_if_requested() {
+  [[ -n "${rename_node_after_login}" ]] || return 0
+  echo "::group::rename node"
+  local old_name="${successful_client_names[0]}"
+  local new_name="${rename_node_after_login}"
+  local nodes_path="${work_dir}/nodes-before-rename.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  local node_id
+  node_id="$(node_id_for_client "${nodes_path}")"
+  headscale_cmd nodes rename "${new_name}" --identifier "${node_id}" \
+    >"${work_dir}/rename-node-${node_id}.stdout" \
+    2>"${work_dir}/rename-node-${node_id}.stderr"
+
+  local renamed_path="${work_dir}/nodes-after-rename.json"
+  wait_for "renamed node admin row" \
+    "headscale_cmd -o json nodes list >'${renamed_path}' && assert_node_renamed_file '${renamed_path}' '${old_name}' '${new_name}'" || {
+      dump_debug
+      echo "::endgroup::"
+      return 1
+    }
+
+  local observer_name output_path safe_observer
+  for observer_name in "${successful_client_names[@]:1}"; do
+    safe_observer="${observer_name//[^a-zA-Z0-9_.-]/-}"
+    output_path="${work_dir}/renamed-peer-${safe_observer}.json"
+    wait_for "renamed peer ${new_name} visible to ${observer_name}" \
+      "peer_netmap_has_renamed_node '${observer_name}' '${old_name}' '${new_name}' '${output_path}'" || {
+        cat "${output_path}.err" >&2 || true
+        dump_client_debug "${observer_name}"
+        echo "::endgroup::"
+        return 1
+      }
+    cat "${output_path}"
+  done
+  echo "::endgroup::"
 }
 
 assert_stun_round_trip() {
@@ -3379,6 +3485,7 @@ assert_node_lifecycle_file() {
   local path="$1"
   local expected_online="$2"
   local min_last_seen="${3:-0}"
+  local lookup_name="${4:-${client_name}}"
   ruby -rjson -rtime -e '
     def last_seen_epoch(value)
       case value
@@ -3411,15 +3518,16 @@ assert_node_lifecycle_file() {
     end
     File.write(ARGV.fetch(4), last_seen.to_s)
     puts JSON.pretty_generate({name: client_name, online: online, last_seen_epoch: last_seen, node: node})
-  ' "${path}" "${expected_online}" "${min_last_seen}" "${client_name}" "${work_dir}/last-seen.epoch"
+  ' "${path}" "${expected_online}" "${min_last_seen}" "${lookup_name}" "${work_dir}/last-seen.epoch"
 }
 
 wait_for_node_lifecycle() {
   local expected_online="$1"
   local label="$2"
   local min_last_seen="${3:-0}"
+  local lookup_name="${rename_node_after_login:-${client_name}}"
   local path="${work_dir}/nodes-${label//[^a-zA-Z0-9_-]/-}.json"
-  wait_for "${label}" "headscale_cmd -o json nodes list >'${path}' && assert_node_lifecycle_file '${path}' '${expected_online}' '${min_last_seen}'" || {
+  wait_for "${label}" "headscale_cmd -o json nodes list >'${path}' && assert_node_lifecycle_file '${path}' '${expected_online}' '${min_last_seen}' '${lookup_name}'" || {
     dump_debug
     return 1
   }
@@ -3486,6 +3594,7 @@ wait_for_client_netmap
 assert_peer_visibility_if_requested
 reload_policy_if_requested
 assert_post_reload_peer_visibility_if_requested
+rename_node_if_requested
 assert_derp_map_if_requested
 assert_derp_ping_if_requested
 assert_ssh_matrix_if_requested

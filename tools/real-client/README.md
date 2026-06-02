@@ -106,6 +106,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
 | Database | `postgres-policy-churn` | `postgres-policy-churn-smoke.sh` | `postgres-policy-churn-headscale-go-smoke.sh` | Production Postgres auth-key registration plus database policy mutation wakes live peer maps |
+| Database | `postgres-node-rename` | `postgres-node-rename-smoke.sh` | `postgres-node-rename-headscale-go-smoke.sh` | Production Postgres admin node rename wakes live peer maps and preserves lifecycle state |
 | Database | `postgres-magicdns` | `postgres-magicdns-smoke.sh` | `postgres-magicdns-headscale-go-smoke.sh` | Production Postgres default MagicDNS suffix |
 | Database | `postgres-magicdns-custom-domain` | `postgres-magicdns-custom-domain-smoke.sh` | `postgres-magicdns-custom-domain-headscale-go-smoke.sh` | Production Postgres custom MagicDNS base domain |
 | Database | `postgres-extra-records` | `postgres-extra-records-smoke.sh` | `postgres-extra-records-headscale-go-smoke.sh` | Production Postgres MagicDNS suffix plus DNS extra record projection and resolver lookup |

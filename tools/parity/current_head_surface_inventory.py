@@ -27,7 +27,6 @@ DEFAULT_UPSTREAM_ROOT = Path(
 )
 UPSTREAM_VERSION = "v0.29.0-beta.2"
 UPSTREAM_COMMIT = "171fd7a3c54156965753a63639cdcafcd50c8d67"
-RUST_MAIN_COMMIT = "c248a887608f816555c1625d1108d83534f11d01"
 
 GO_METHODS = {
     "Get": "GET",
@@ -115,10 +114,10 @@ def find_source_hits(root: Path, pattern: str, suffixes: tuple[str, ...]) -> lis
     return hits
 
 
-def git_ref(root: Path) -> str:
+def git_ref(root: Path, ref: str = "HEAD") -> str:
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", ref],
             cwd=root,
             text=True,
             stderr=subprocess.DEVNULL,
@@ -690,7 +689,13 @@ def compare_integration_test(upstream_test: dict[str, Any], rust_tests: list[dic
     return "needs-review", [], "no Rust integration or real-client smoke name overlap was found"
 
 
-def build_inventory(upstream_root: Path, rust_root: Path, rust_ref: str, audit_date: str) -> dict[str, Any]:
+def build_inventory(
+    upstream_root: Path,
+    rust_root: Path,
+    rust_ref: str,
+    audit_date: str,
+    rust_origin_main_ref: str | None = None,
+) -> dict[str, Any]:
     consts = load_go_string_consts(upstream_root)
     proto_rpcs = parse_proto_rpcs(upstream_root)
     upstream_routes = sorted(
@@ -815,7 +820,7 @@ def build_inventory(upstream_root: Path, rust_root: Path, rust_ref: str, audit_d
             },
             "headscale_rs": {
                 "root": str(rust_root),
-                "origin_main_commit": RUST_MAIN_COMMIT,
+                "origin_main_commit": rust_origin_main_ref or git_ref(rust_root),
                 "compared_ref": rust_ref,
             },
             "notes": [
@@ -884,8 +889,9 @@ def main() -> int:
     args = parse_args()
     upstream_root = args.upstream_root.resolve()
     rust_root = args.rust_root.resolve()
+    rust_origin_main_ref = git_ref(rust_root, "origin/main")
     rust_ref = args.rust_ref or git_ref(rust_root)
-    inventory = build_inventory(upstream_root, rust_root, rust_ref, args.audit_date)
+    inventory = build_inventory(upstream_root, rust_root, rust_ref, args.audit_date, rust_origin_main_ref)
     if args.compact:
         inventory = compact_inventory(inventory)
     payload = json.dumps(inventory, indent=2, sort_keys=True) + "\n"

@@ -72,7 +72,7 @@
         "tools/real-client/acl-autogroup-self-smoke.sh:1",
         "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
         "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1",
-        "headscale-api/tests/policy_e2e.rs:262"
+        "headscale-api/tests/policy_e2e.rs:299"
       ],
       "status": "needs-review",
       "upstream": {
@@ -260,7 +260,7 @@
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-db/tests/postgres_foundation.rs:624",
         "headscale-db/tests/postgres_foundation.rs:725",
-        "headscale-cli/tests/cli_process.rs:4548",
+        "headscale-cli/tests/cli_process.rs:6031",
         "headscale-api/tests/e2e.rs:411",
         "headscale-api/tests/e2e.rs:462",
         "headscale-api/tests/e2e.rs:430",
@@ -281,13 +281,13 @@
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:133",
         "headscale-api/tests/api_keys_e2e.rs:177",
-        "headscale-cli/tests/cli_process.rs:1134",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-cli/tests/cli_process.rs:1486",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
-        "headscale-identity/tests/crypto_tests.rs:6",
-        "headscale-identity/tests/crypto_tests.rs:54"
+        "headscale-identity/tests/crypto_tests.rs:6"
       ],
       "status": "needs-review",
       "upstream": {
@@ -305,12 +305,12 @@
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-api/tests/admin_routes_coverage.rs:549",
-        "headscale-cli/tests/cli_process.rs:1134",
-        "headscale-api/tests/grpc_gateway_e2e.rs:609",
-        "headscale-cli/tests/cli_process.rs:6710",
-        "headscale-db/tests/headscale_go_migrations.rs:1399",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19"
+        "headscale-cli/tests/cli_process.rs:1486",
+        "headscale-api/tests/grpc_gateway_e2e.rs:750",
+        "headscale-cli/tests/cli_process.rs:8228",
+        "headscale-db/tests/headscale_go_migrations.rs:1482",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263"
       ],
       "status": "needs-review",
       "upstream": {
@@ -393,9 +393,11 @@
       "id": "integration-test:testcliwithconfigauthenticationbypass",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-cli/tests/cli_process.rs:147",
+        "headscale-cli/tests/cli_process.rs:144",
         "headscale-identity/tests/crypto_tests.rs:19",
-        "headscale-identity/tests/crypto_tests.rs:6"
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-cli/tests/cli_process.rs:856",
+        "headscale-cli/tests/cli_process.rs:840"
       ],
       "status": "needs-review",
       "upstream": {
@@ -448,7 +450,7 @@
       "id": "integration-test:testdisablenodeexpiry",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-db/tests/headscale_go_migrations.rs:1044",
+        "headscale-db/tests/headscale_go_migrations.rs:1127",
         "headscale-api/tests/e2e.rs:430",
         "headscale-api/tests/e2e.rs:165",
         "headscale-api/tests/e2e.rs:227",
@@ -468,7 +470,7 @@
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
         "headscale-api/tests/admin_routes_coverage.rs:549",
-        "headscale-db/tests/headscale_go_migrations.rs:1465"
+        "headscale-db/tests/headscale_go_migrations.rs:1548"
       ],
       "status": "needs-review",
       "upstream": {
@@ -523,8 +525,9 @@
         "tools/real-client/postgres-acl-autogroup-self-headscale-go-smoke.sh:1",
         "tools/real-client/postgres-acl-autogroup-self-smoke.sh:1",
         "headscale-api/tests/admin_routes_coverage.rs:549",
-        "headscale-api/tests/policy_e2e.rs:254",
-        "headscale-db/tests/headscale_go_migrations.rs:1465",
+        "headscale-api/tests/policy_consolidation.rs:338",
+        "headscale-api/tests/policy_e2e.rs:291",
+        "headscale-db/tests/headscale_go_migrations.rs:1548",
         "headscale-identity/tests/crypto_tests.rs:19",
         "headscale-identity/tests/crypto_tests.rs:6"
       ],
@@ -610,7 +613,7 @@
       "id": "integration-test:testhasubnetrouterfailover",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303"
+        "headscale-api/tests/policy_consolidation.rs:306"
       ],
       "status": "needs-review",
       "upstream": {
@@ -624,7 +627,7 @@
       "id": "integration-test:testhasubnetrouterfailoverbothoffline",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303"
+        "headscale-api/tests/policy_consolidation.rs:306"
       ],
       "status": "needs-review",
       "upstream": {
@@ -638,7 +641,7 @@
       "id": "integration-test:testhasubnetrouterfailoverbothofflinecablepull",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303"
+        "headscale-api/tests/policy_consolidation.rs:306"
       ],
       "status": "needs-review",
       "upstream": {
@@ -652,7 +655,7 @@
       "id": "integration-test:testhasubnetrouterfailoverdockerdisconnect",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303"
+        "headscale-api/tests/policy_consolidation.rs:306"
       ],
       "status": "needs-review",
       "upstream": {
@@ -720,6 +723,8 @@
       "id": "integration-test:testnoderenamecommand",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
+        "tools/real-client/postgres-node-rename-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-node-rename-smoke.sh:1",
         "headscale-api/tests/e2e.rs:430",
         "headscale-api/tests/e2e.rs:165",
         "headscale-api/tests/e2e.rs:227",
@@ -792,16 +797,16 @@
       "id": "integration-test:testoidcexpiryafterrestart",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
+        "tools/real-client/oidc-policy-churn-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/oidc-policy-churn-restart-smoke.sh:1",
         "tools/real-client/oidc-restart-headscale-go-smoke.sh:1",
         "tools/real-client/oidc-restart-smoke.sh:1",
         "tools/real-client/oidc-route-approve-restart-headscale-go-smoke.sh:1",
         "tools/real-client/oidc-route-approve-restart-smoke.sh:1",
+        "tools/real-client/postgres-oidc-policy-churn-restart-headscale-go-smoke.sh:1",
+        "tools/real-client/postgres-oidc-policy-churn-restart-smoke.sh:1",
         "tools/real-client/postgres-oidc-restart-headscale-go-smoke.sh:1",
-        "tools/real-client/postgres-oidc-restart-smoke.sh:1",
-        "tools/real-client/postgres-oidc-route-approve-restart-headscale-go-smoke.sh:1",
-        "tools/real-client/postgres-oidc-route-approve-restart-smoke.sh:1",
-        "tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh:1",
-        "tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh:1"
+        "tools/real-client/postgres-oidc-restart-smoke.sh:1"
       ],
       "status": "needs-review",
       "upstream": {
@@ -871,8 +876,11 @@
     {
       "category": "integration_test",
       "id": "integration-test:testpolicybrokenconfigcommand",
-      "reason": "no Rust integration or real-client smoke name overlap was found",
-      "rust_evidence": [],
+      "reason": "related Rust test or smoke names found, but no normalized exact overlap",
+      "rust_evidence": [
+        "headscale-cli/tests/cli_process.rs:856",
+        "headscale-cli/tests/cli_process.rs:840"
+      ],
       "status": "needs-review",
       "upstream": {
         "name": "TestPolicyBrokenConfigCommand",
@@ -912,15 +920,16 @@
       "id": "integration-test:testpolicyupdatewhilerunningwithcliindatabase",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-db/tests/headscale_go_migrations.rs:668",
-        "headscale-api/tests/grpc_gateway_e2e.rs:3074",
-        "headscale-api/tests/grpc_gateway_e2e.rs:3097",
-        "headscale-cli/tests/cli_process.rs:157",
-        "headscale-cli/tests/cli_process.rs:167",
-        "headscale-cli/tests/cli_process.rs:3473",
+        "headscale-db/tests/headscale_go_migrations.rs:751",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3774",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3797",
+        "headscale-cli/tests/cli_process.rs:154",
+        "headscale-cli/tests/cli_process.rs:164",
+        "headscale-cli/tests/cli_process.rs:4096",
         "headscale-api/tests/admin_routes_coverage.rs:68",
         "headscale-identity/tests/crypto_tests.rs:19",
-        "headscale-identity/tests/crypto_tests.rs:6"
+        "headscale-identity/tests/crypto_tests.rs:6",
+        "headscale-cli/tests/cli_process.rs:856"
       ],
       "status": "needs-review",
       "upstream": {
@@ -936,8 +945,9 @@
       "rust_evidence": [
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
         "headscale-identity/tests/crypto_tests.rs:6",
@@ -957,8 +967,9 @@
       "rust_evidence": [
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
         "headscale-api/tests/preauth_e2e.rs:237",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
@@ -980,13 +991,13 @@
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-api/tests/admin_routes_coverage.rs:884",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
-        "headscale-db/tests/headscale_go_migrations.rs:738",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
+        "headscale-db/tests/headscale_go_migrations.rs:821",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
-        "headscale-identity/tests/crypto_tests.rs:6",
-        "headscale-identity/tests/crypto_tests.rs:54"
+        "headscale-identity/tests/crypto_tests.rs:6"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1002,8 +1013,9 @@
       "rust_evidence": [
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
         "headscale-identity/tests/crypto_tests.rs:6",
@@ -1296,7 +1308,7 @@
       "id": "integration-test:testsetnodeexpiryinfuture",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-db/tests/headscale_go_migrations.rs:1044",
+        "headscale-db/tests/headscale_go_migrations.rs:1127",
         "headscale-api/tests/e2e.rs:430",
         "headscale-api/tests/e2e.rs:165",
         "headscale-api/tests/e2e.rs:227",
@@ -1315,8 +1327,8 @@
       "id": "integration-test:testsubnetrouteacl",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303",
-        "headscale-api/tests/policy_consolidation.rs:333"
+        "headscale-api/tests/policy_consolidation.rs:306",
+        "headscale-api/tests/policy_consolidation.rs:407"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1330,8 +1342,8 @@
       "id": "integration-test:testsubnetrouteaclfiltering",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303",
-        "headscale-api/tests/policy_consolidation.rs:333",
+        "headscale-api/tests/policy_consolidation.rs:306",
+        "headscale-api/tests/policy_consolidation.rs:407",
         "headscale-api/tests/e2e.rs:227"
       ],
       "status": "needs-review",
@@ -1346,7 +1358,7 @@
       "id": "integration-test:testsubnetroutermultinetwork",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-api/tests/policy_consolidation.rs:303",
+        "headscale-api/tests/policy_consolidation.rs:306",
         "headscale-api/tests/e2e.rs:165"
       ],
       "status": "needs-review",
@@ -1365,8 +1377,8 @@
         "tools/real-client/postgres-route-exit-node-smoke.sh:1",
         "tools/real-client/route-exit-node-headscale-go-smoke.sh:1",
         "tools/real-client/route-exit-node-smoke.sh:1",
-        "headscale-api/tests/policy_consolidation.rs:303",
-        "headscale-api/tests/policy_e2e.rs:237",
+        "headscale-api/tests/policy_consolidation.rs:306",
+        "headscale-api/tests/policy_e2e.rs:274",
         "headscale-api/tests/e2e.rs:430",
         "headscale-api/tests/e2e.rs:165",
         "headscale-api/tests/e2e.rs:227",
@@ -1384,7 +1396,7 @@
       "id": "integration-test:testtaggednodesclioutput",
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
-        "headscale-db/tests/headscale_go_migrations.rs:1007"
+        "headscale-db/tests/headscale_go_migrations.rs:1090"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1474,9 +1486,9 @@
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-cli/tests/admin_client.rs:514",
-        "headscale-api/tests/grpc_gateway_e2e.rs:2241",
-        "headscale-api/tests/admin_routes_coverage.rs:861",
-        "headscale-api/tests/wire_serde_coverage.rs:363"
+        "headscale-api/tests/wire_parity_contract.rs:102",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2868",
+        "headscale-api/tests/admin_routes_coverage.rs:861"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1586,12 +1598,12 @@
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-api/tests/admin_routes_coverage.rs:370",
         "headscale-api/tests/admin_routes_coverage.rs:385",
+        "headscale-api/tests/wire_parity_contract.rs:111",
+        "headscale-api/tests/wire_parity_contract.rs:330",
         "headscale-api/tests/admin_routes_coverage.rs:68",
         "headscale-api/tests/preauth_e2e.rs:150",
         "headscale-api/tests/preauth_e2e.rs:133",
-        "headscale-api/tests/preauth_e2e.rs:166",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19"
+        "headscale-api/tests/preauth_e2e.rs:166"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1723,8 +1735,9 @@
         "headscale-api/tests/api_keys_e2e.rs:61",
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-api/tests/admin_routes_coverage.rs:884",
-        "headscale-api/tests/wire_parity_contract.rs:130",
-        "headscale-api/tests/wire_parity_contract.rs:19",
+        "headscale-api/tests/wire_parity_contract.rs:330",
+        "headscale-api/tests/wire_parity_contract.rs:263",
+        "headscale-api/tests/wire_parity_contract.rs:152",
         "headscale-db/tests/postgres_nodes.rs:514",
         "headscale-db/tests/postgres_nodes.rs:518",
         "headscale-identity/tests/crypto_tests.rs:6",
@@ -1749,9 +1762,9 @@
         "headscale-api/tests/admin_routes_coverage.rs:385",
         "headscale-api/tests/admin_routes_coverage.rs:400",
         "headscale-api/tests/preauth_e2e.rs:320",
-        "headscale-cli/tests/cli_process.rs:2734",
+        "headscale-cli/tests/cli_process.rs:3270",
         "headscale-api/tests/admin_routes_coverage.rs:884",
-        "headscale-db/tests/postgres_preauth_keys.rs:241"
+        "headscale-api/tests/wire_parity_contract.rs:330"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1809,7 +1822,7 @@
         "headscale-api/tests/machine_lifecycle.rs:582",
         "headscale-api/tests/machine_lifecycle.rs:134",
         "headscale-api/tests/admin_routes_coverage.rs:861",
-        "headscale-cli/tests/cli_process.rs:3904"
+        "headscale-cli/tests/cli_process.rs:4527"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1831,7 +1844,7 @@
         "headscale-api/tests/admin_routes_coverage.rs:471",
         "headscale-api/tests/admin_routes_coverage.rs:861",
         "headscale-api/tests/preauth_e2e.rs:183",
-        "headscale-cli/tests/cli_process.rs:3904"
+        "headscale-cli/tests/cli_process.rs:4527"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1848,7 +1861,7 @@
         "headscale-api/tests/admin_routes_coverage.rs:370",
         "headscale-api/tests/admin_routes_coverage.rs:385",
         "headscale-api/tests/machine_lifecycle.rs:774",
-        "headscale-api/tests/grpc_gateway_e2e.rs:2126",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2753",
         "headscale-api/tests/admin_routes_coverage.rs:861",
         "headscale-api/tests/e2e.rs:430",
         "headscale-api/tests/e2e.rs:134"
@@ -1869,8 +1882,8 @@
         "headscale-api/tests/admin_routes_coverage.rs:355",
         "headscale-api/tests/admin_routes_coverage.rs:385",
         "headscale-api/tests/admin_routes_coverage.rs:291",
-        "headscale-db/tests/headscale_go_migrations.rs:1376",
-        "headscale-api/tests/grpc_gateway_e2e.rs:2126",
+        "headscale-db/tests/headscale_go_migrations.rs:1459",
+        "headscale-api/tests/grpc_gateway_e2e.rs:2753",
         "headscale-api/tests/wire_serde_coverage.rs:90",
         "headscale-api/tests/admin_routes_coverage.rs:861",
         "headscale-api/tests/admin_routes_coverage.rs:68",
@@ -1960,9 +1973,9 @@
   "metadata": {
     "audit_date": "2026-06-02",
     "headscale_rs": {
-      "compared_ref": "c248a887608f816555c1625d1108d83534f11d01",
-      "origin_main_commit": "c248a887608f816555c1625d1108d83534f11d01",
-      "root": "/Users/androolloyd/Development/headscale-rs.worktrees/current-head-surface-inventory-20260602"
+      "compared_ref": "b437c7ac9ef778198fdccdf67a039c136a69f141",
+      "origin_main_commit": "b437c7ac9ef778198fdccdf67a039c136a69f141",
+      "root": "/Users/androolloyd/Development/headscale-rs-main-coordinator-20260602"
     },
     "notes": [
       "Source-only scanner; results are backlog evidence, not a behavioral parity proof.",
@@ -1995,8 +2008,8 @@
     },
     "rust_evidence_counts": {
       "cli_commands": 55,
-      "integration_or_smoke_tests": 962,
-      "routes": 182
+      "integration_or_smoke_tests": 1032,
+      "routes": 183
     },
     "upstream_counts": {
       "cli_commands": 44,

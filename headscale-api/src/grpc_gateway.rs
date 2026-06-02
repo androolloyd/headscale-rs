@@ -653,10 +653,13 @@ async fn set_tags(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["tags"][..]]).await {
+    let value = match read_json_value(request, &[&["nodeId", "node_id"][..], &["tags"]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
+    if let Err(status) = u64_field(&value, &["nodeId", "node_id"], "nodeId") {
+        return status_response(&status);
+    }
     let tags = match string_array_field(&value, &["tags"], "tags") {
         Ok(tags) => tags,
         Err(status) => return status_response(&status),
@@ -684,10 +687,13 @@ async fn set_approved_routes(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["routes"][..]]).await {
+    let value = match read_json_value(request, &[&["nodeId", "node_id"][..], &["routes"]]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
+    if let Err(status) = u64_field(&value, &["nodeId", "node_id"], "nodeId") {
+        return status_response(&status);
+    }
     let routes = match string_array_field(&value, &["routes"], "routes") {
         Ok(routes) => routes,
         Err(status) => return status_response(&status),

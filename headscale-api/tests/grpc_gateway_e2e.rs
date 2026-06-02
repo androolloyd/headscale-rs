@@ -342,6 +342,24 @@ async fn assert_status_json_exact(
     assert_eq!(body["details"], serde_json::json!([]), "{context}: details");
 }
 
+fn swagger_param_signature(param: &Value) -> String {
+    let name = param["name"].as_str().expect("parameter name");
+    let location = param["in"].as_str().expect("parameter location");
+    if let Some(reference) = param
+        .get("schema")
+        .and_then(|schema| schema.get("$ref"))
+        .and_then(Value::as_str)
+    {
+        return format!("{name}:{location}:{reference}");
+    }
+
+    let kind = param["type"].as_str().expect("parameter type");
+    match param.get("format").and_then(Value::as_str) {
+        Some(format) => format!("{name}:{location}:{kind}:{format}"),
+        None => format!("{name}:{location}:{kind}"),
+    }
+}
+
 async fn assert_not_gateway_route_fallback(resp: Response, context: &str) {
     let status = resp.status();
     assert_eq!(
@@ -565,6 +583,77 @@ async fn grpc_gateway_auth_route_auth_failures_are_plain_unauthorized_before_par
             .clone()
             .oneshot(req_raw_auth(
                 Method::POST,
+                case.uri,
+                case.authorization,
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "{}", case.name);
+        assert_plain_unauthorized(resp).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_current_head_shim_auth_preempts_parser_matrix() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        authorization: Option<&'static str>,
+        body: &'static str,
+    }
+
+    let (app, _token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "preauth delete query parser",
+            method: Method::DELETE,
+            uri: "/api/v1/preauthkey?id=not-a-number",
+            authorization: None,
+            body: "",
+        },
+        Case {
+            name: "debug node body parser",
+            method: Method::POST,
+            uri: "/api/v1/debug/node",
+            authorization: Some("Token definitely-invalid"),
+            body: r#"{"routes":[null]}"#,
+        },
+        Case {
+            name: "backfill bool query parser with malformed body",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed=not-bool",
+            authorization: Some("Bearer definitely-invalid"),
+            body: "{",
+        },
+        Case {
+            name: "apikey expire protojson parser",
+            method: Method::POST,
+            uri: "/api/v1/apikey/expire",
+            authorization: None,
+            body: r#"{"id":"0x1"}"#,
+        },
+        Case {
+            name: "approve routes path and body parsers",
+            method: Method::POST,
+            uri: "/api/v1/node/not-a-number/approve_routes",
+            authorization: Some("Bearer definitely-invalid"),
+            body: r#"{"nodeId":"also-bad","routes":[1]}"#,
+        },
+        Case {
+            name: "auth approve protojson parser",
+            method: Method::POST,
+            uri: "/api/v1/auth/approve",
+            authorization: Some("bearer definitely-invalid"),
+            body: r#"{"authId":42}"#,
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req_raw_auth(
+                case.method,
                 case.uri,
                 case.authorization,
                 Body::from(case.body),
@@ -958,6 +1047,259 @@ async fn grpc_gateway_mounts_all_advertised_swagger_routes() {
         .await
         .unwrap();
     assert_status_json_exact(resp, 404, 5, "Not Found", "tailnet is not grpc-gateway").await;
+}
+
+#[test]
+fn grpc_gateway_current_head_swagger_request_mapping_is_exact() {
+    struct OperationCase {
+        path: &'static str,
+        method: &'static str,
+        operation_id: &'static str,
+        params: &'static [&'static str],
+    }
+
+    const OPERATIONS: &[OperationCase] = &[
+        OperationCase {
+            path: "/api/v1/apikey",
+            method: "GET",
+            operation_id: "HeadscaleService_ListApiKeys",
+            params: &[],
+        },
+        OperationCase {
+            path: "/api/v1/apikey",
+            method: "POST",
+            operation_id: "HeadscaleService_CreateApiKey",
+            params: &["body:body:#/definitions/v1CreateApiKeyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/apikey/expire",
+            method: "POST",
+            operation_id: "HeadscaleService_ExpireApiKey",
+            params: &["body:body:#/definitions/v1ExpireApiKeyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/apikey/{prefix}",
+            method: "DELETE",
+            operation_id: "HeadscaleService_DeleteApiKey",
+            params: &["prefix:path:string", "id:query:string:uint64"],
+        },
+        OperationCase {
+            path: "/api/v1/auth/approve",
+            method: "POST",
+            operation_id: "HeadscaleService_AuthApprove",
+            params: &["body:body:#/definitions/v1AuthApproveRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/auth/register",
+            method: "POST",
+            operation_id: "HeadscaleService_AuthRegister",
+            params: &["body:body:#/definitions/v1AuthRegisterRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/auth/reject",
+            method: "POST",
+            operation_id: "HeadscaleService_AuthReject",
+            params: &["body:body:#/definitions/v1AuthRejectRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/debug/node",
+            method: "POST",
+            operation_id: "HeadscaleService_DebugCreateNode",
+            params: &["body:body:#/definitions/v1DebugCreateNodeRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/health",
+            method: "GET",
+            operation_id: "HeadscaleService_Health",
+            params: &[],
+        },
+        OperationCase {
+            path: "/api/v1/node",
+            method: "GET",
+            operation_id: "HeadscaleService_ListNodes",
+            params: &["user:query:string"],
+        },
+        OperationCase {
+            path: "/api/v1/node/backfillips",
+            method: "POST",
+            operation_id: "HeadscaleService_BackfillNodeIPs",
+            params: &["confirmed:query:boolean"],
+        },
+        OperationCase {
+            path: "/api/v1/node/register",
+            method: "POST",
+            operation_id: "HeadscaleService_RegisterNode",
+            params: &["user:query:string", "key:query:string"],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}",
+            method: "DELETE",
+            operation_id: "HeadscaleService_DeleteNode",
+            params: &["nodeId:path:string:uint64"],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}",
+            method: "GET",
+            operation_id: "HeadscaleService_GetNode",
+            params: &["nodeId:path:string:uint64"],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}/approve_routes",
+            method: "POST",
+            operation_id: "HeadscaleService_SetApprovedRoutes",
+            params: &[
+                "nodeId:path:string:uint64",
+                "body:body:#/definitions/HeadscaleServiceSetApprovedRoutesBody",
+            ],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}/expire",
+            method: "POST",
+            operation_id: "HeadscaleService_ExpireNode",
+            params: &[
+                "nodeId:path:string:uint64",
+                "expiry:query:string:date-time",
+                "disableExpiry:query:boolean",
+            ],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}/rename/{newName}",
+            method: "POST",
+            operation_id: "HeadscaleService_RenameNode",
+            params: &["nodeId:path:string:uint64", "newName:path:string"],
+        },
+        OperationCase {
+            path: "/api/v1/node/{nodeId}/tags",
+            method: "POST",
+            operation_id: "HeadscaleService_SetTags",
+            params: &[
+                "nodeId:path:string:uint64",
+                "body:body:#/definitions/HeadscaleServiceSetTagsBody",
+            ],
+        },
+        OperationCase {
+            path: "/api/v1/policy",
+            method: "GET",
+            operation_id: "HeadscaleService_GetPolicy",
+            params: &[],
+        },
+        OperationCase {
+            path: "/api/v1/policy",
+            method: "PUT",
+            operation_id: "HeadscaleService_SetPolicy",
+            params: &["body:body:#/definitions/v1SetPolicyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/policy/check",
+            method: "POST",
+            operation_id: "HeadscaleService_CheckPolicy",
+            params: &["body:body:#/definitions/v1CheckPolicyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/preauthkey",
+            method: "DELETE",
+            operation_id: "HeadscaleService_DeletePreAuthKey",
+            params: &["id:query:string:uint64"],
+        },
+        OperationCase {
+            path: "/api/v1/preauthkey",
+            method: "GET",
+            operation_id: "HeadscaleService_ListPreAuthKeys",
+            params: &[],
+        },
+        OperationCase {
+            path: "/api/v1/preauthkey",
+            method: "POST",
+            operation_id: "HeadscaleService_CreatePreAuthKey",
+            params: &["body:body:#/definitions/v1CreatePreAuthKeyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/preauthkey/expire",
+            method: "POST",
+            operation_id: "HeadscaleService_ExpirePreAuthKey",
+            params: &["body:body:#/definitions/v1ExpirePreAuthKeyRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/user",
+            method: "GET",
+            operation_id: "HeadscaleService_ListUsers",
+            params: &[
+                "id:query:string:uint64",
+                "name:query:string",
+                "email:query:string",
+            ],
+        },
+        OperationCase {
+            path: "/api/v1/user",
+            method: "POST",
+            operation_id: "HeadscaleService_CreateUser",
+            params: &["body:body:#/definitions/v1CreateUserRequest"],
+        },
+        OperationCase {
+            path: "/api/v1/user/{id}",
+            method: "DELETE",
+            operation_id: "HeadscaleService_DeleteUser",
+            params: &["id:path:string:uint64"],
+        },
+        OperationCase {
+            path: "/api/v1/user/{oldId}/rename/{newName}",
+            method: "POST",
+            operation_id: "HeadscaleService_RenameUser",
+            params: &["oldId:path:string:uint64", "newName:path:string"],
+        },
+    ];
+
+    const SWAGGER: &str = include_str!("../src/tailscale_wire/assets/headscale.swagger.json");
+    let swagger: Value = serde_json::from_str(SWAGGER).expect("swagger JSON parses");
+    let paths = swagger["paths"].as_object().expect("swagger has paths");
+
+    let mut actual = BTreeMap::<(String, String), (String, Vec<String>)>::new();
+    for (path, operations) in paths {
+        let operations = operations.as_object().expect("swagger path has operations");
+        for method in ["delete", "get", "post", "put"] {
+            let Some(operation) = operations.get(method) else {
+                continue;
+            };
+            let operation_id = operation["operationId"]
+                .as_str()
+                .expect("operation has operationId")
+                .to_string();
+            let params = operation
+                .get("parameters")
+                .and_then(Value::as_array)
+                .map(|params| {
+                    params
+                        .iter()
+                        .map(swagger_param_signature)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            actual.insert(
+                (path.clone(), method.to_ascii_uppercase()),
+                (operation_id, params),
+            );
+        }
+    }
+
+    let expected = OPERATIONS
+        .iter()
+        .map(|case| {
+            (
+                (case.path.to_string(), case.method.to_string()),
+                (
+                    case.operation_id.to_string(),
+                    case.params
+                        .iter()
+                        .map(|param| (*param).to_string())
+                        .collect(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual, expected,
+        "current-head grpc-gateway request mapping drifted"
+    );
 }
 
 #[tokio::test]
@@ -1544,6 +1886,79 @@ async fn grpc_gateway_body_decoders_run_before_path_parsers_for_body_routes() {
             .await
             .unwrap();
         assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
+    }
+}
+
+#[tokio::test]
+async fn grpc_gateway_current_head_body_query_parser_matrix_is_exact() {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        uri: &'static str,
+        body: &'static str,
+        expected_http_status: u16,
+        expected_grpc_code: i64,
+        expected_message: &'static str,
+    }
+
+    let (app, token) = fixture().await;
+
+    for case in [
+        Case {
+            name: "set tags body nodeId parser preempts service",
+            method: Method::POST,
+            uri: "/api/v1/node/404/tags",
+            body: r#"{"nodeId":"0x1","tags":["tag:server"]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: r#"invalid value for uint64 field nodeId: "0x1""#,
+        },
+        Case {
+            name: "approve routes body node_id parser preempts service",
+            method: Method::POST,
+            uri: "/api/v1/node/404/approve_routes",
+            body: r#"{"node_id":-1,"routes":[]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: "invalid value for uint64 field nodeId: -1",
+        },
+        Case {
+            name: "approve routes body path field aliases conflict",
+            method: Method::POST,
+            uri: "/api/v1/node/404/approve_routes",
+            body: r#"{"nodeId":"1","node_id":"2","routes":[]}"#,
+            expected_http_status: 400,
+            expected_grpc_code: 3,
+            expected_message: r#"duplicate field "node_id""#,
+        },
+        Case {
+            name: "backfill no-body route ignores malformed JSON body",
+            method: Method::POST,
+            uri: "/api/v1/node/backfillips?confirmed=false",
+            body: "{",
+            expected_http_status: 500,
+            expected_grpc_code: 2,
+            expected_message: "not confirmed, aborting",
+        },
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(
+                case.method,
+                case.uri,
+                Some(&token),
+                Body::from(case.body),
+            ))
+            .await
+            .unwrap();
+        assert_status_json_exact(
+            resp,
+            case.expected_http_status,
+            case.expected_grpc_code,
+            case.expected_message,
+            case.name,
+        )
+        .await;
     }
 }
 

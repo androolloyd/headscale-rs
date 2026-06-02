@@ -2641,6 +2641,7 @@ async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
         body["preAuthKey"]["aclTags"],
         serde_json::json!(["tag:test"])
     );
+    assert_eq!(body["preAuthKey"]["expiration"], "0001-01-01T00:00:00Z");
     assert!(
         body["preAuthKey"]["key"]
             .as_str()
@@ -2673,6 +2674,7 @@ async fn grpc_gateway_preauth_paths_use_upstream_shapes() {
     assert_ne!(listed_key, created_key);
     assert!(listed_key.starts_with("hskey-auth-"));
     assert!(listed_key.ends_with("-***"));
+    assert_eq!(body["preAuthKeys"][0]["expiration"], "0001-01-01T00:00:00Z");
 
     let resp = app
         .clone()
@@ -2733,6 +2735,11 @@ async fn grpc_gateway_apikey_paths_use_protojson_names() {
     let body = body_json(resp).await;
     let keys = body["apiKeys"].as_array().unwrap();
     assert_eq!(keys.len(), 2);
+    let bootstrap_key_row = keys
+        .iter()
+        .find(|key| key["id"] == "1")
+        .expect("bootstrap key row");
+    assert!(bootstrap_key_row.get("expiration").is_none());
     let new_key_row = keys
         .iter()
         .find(|key| key["id"] == "2")
@@ -2740,8 +2747,8 @@ async fn grpc_gateway_apikey_paths_use_protojson_names() {
     let new_prefix = new_key_row["prefix"].as_str().unwrap().to_string();
     assert!(new_prefix.starts_with("hskey-api-"));
     assert!(new_key_row["createdAt"].as_str().unwrap().ends_with('Z'));
-    assert_eq!(new_key_row["expiration"], serde_json::Value::Null);
-    assert_eq!(new_key_row["lastSeen"], serde_json::Value::Null);
+    assert_eq!(new_key_row["expiration"], "0001-01-01T00:00:00Z");
+    assert!(new_key_row.get("lastSeen").is_none());
 
     let resp = app
         .clone()

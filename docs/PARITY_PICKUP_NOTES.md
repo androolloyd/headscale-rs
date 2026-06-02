@@ -1788,3 +1788,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Updated direct SQLite/Postgres bypass expectations and live gRPC coverage so
   `policy set -o json` preserves the text success shape while `policy get`
   remains raw policy text output.
+
+## 2026-06-02 key expiration zero-time parity slice
+
+- `CreateApiKey` and `CreatePreAuthKey` now mirror headscale-go's omitted
+  expiration handling: absent request timestamps are stored as Go's non-nil
+  zero `time.Time`, so create/list responses carry protobuf timestamp
+  `0001-01-01T00:00:00Z` instead of `null` or an infinite sentinel.
+- Gateway key JSON now omits genuinely absent optional timestamps like
+  `lastSeen`, but preserves present zero-time expiration fields for upstream
+  protojson parity.

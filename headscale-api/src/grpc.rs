@@ -192,6 +192,8 @@ pub mod upstream {
     use crate::tailscale_wire::{IpAllocator, MachineRecord, MachineRegistry};
 
     const AUTH_PREFIX: &str = "Bearer ";
+    const GO_ZERO_TIME_UNIX_SECONDS: i64 = -62_135_596_800;
+    const PREAUTH_NEVER_EXPIRES_AT: u64 = i64::MAX as u64;
     const PUBLIC_HEADSCALE_SERVICE_NAME: &str = "headscale.v1.HeadscaleService";
     const PUBLIC_HEADSCALE_DESCRIPTOR_FILES: &[&str] = &[
         "apikey.proto",
@@ -894,11 +896,13 @@ pub mod upstream {
                     .ok_or_else(|| Status::unknown("user not found"))?
                     .name
             };
-            let expiration = body
-                .expiration
-                .as_ref()
-                .map(timestamp_to_unix)
-                .transpose()?;
+            let expiration = Some(
+                body.expiration
+                    .as_ref()
+                    .map(timestamp_to_unix)
+                    .transpose()?
+                    .unwrap_or(GO_ZERO_TIME_UNIX_SECONDS),
+            );
             let created = self
                 .preauth
                 .mint_with_expiration(
@@ -1252,11 +1256,13 @@ pub mod upstream {
         ) -> Result<Response<CreateApiKeyResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let expiration = body
-                .expiration
-                .as_ref()
-                .map(timestamp_to_unix)
-                .transpose()?;
+            let expiration = Some(
+                body.expiration
+                    .as_ref()
+                    .map(timestamp_to_unix)
+                    .transpose()?
+                    .unwrap_or(GO_ZERO_TIME_UNIX_SECONDS),
+            );
             let created = self
                 .api_keys
                 .mint(ApiKeyMintRequest { expiration })
@@ -1461,7 +1467,7 @@ pub mod upstream {
             id: key.id,
             prefix: key.prefix.clone(),
             expiration: key.expiration.map(unix_to_timestamp),
-            created_at: Some(unix_to_timestamp(key.created_at)),
+            created_at: nonzero_i64_timestamp(key.created_at),
             last_seen: key.last_seen.map(unix_to_timestamp),
         }
     }
@@ -1524,10 +1530,20 @@ pub mod upstream {
             reusable: key.reusable,
             ephemeral: key.ephemeral,
             used: key.redemptions > 0,
-            expiration: Some(unix_to_timestamp(saturating_u64_to_i64(key.expires_at))),
-            created_at: Some(unix_to_timestamp(saturating_u64_to_i64(key.created_at))),
+            expiration: nonzero_preauth_expiration_timestamp(key.expires_at),
+            created_at: nonzero_u64_timestamp(key.created_at),
             acl_tags: key.tags.clone(),
         })
+    }
+
+    fn nonzero_preauth_expiration_timestamp(seconds: u64) -> Option<prost_types::Timestamp> {
+        if seconds == PREAUTH_NEVER_EXPIRES_AT {
+            None
+        } else if seconds == 0 {
+            Some(unix_to_timestamp(GO_ZERO_TIME_UNIX_SECONDS))
+        } else {
+            Some(unix_to_timestamp(saturating_u64_to_i64(seconds)))
+        }
     }
 
     fn listed_preauth_display_key(key: &str) -> String {
@@ -1906,6 +1922,14 @@ pub mod upstream {
             None
         } else {
             Some(unix_to_timestamp(saturating_u64_to_i64(seconds)))
+        }
+    }
+
+    fn nonzero_i64_timestamp(seconds: i64) -> Option<prost_types::Timestamp> {
+        if seconds == 0 {
+            None
+        } else {
+            Some(unix_to_timestamp(seconds))
         }
     }
 
@@ -5283,6 +5307,82 @@ mod upstream_tests {
             .unwrap()
             .into_inner();
         assert!(listed.api_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upstream_key_grpc_create_list_uses_go_zero_time_expiration() {
+        const GO_ZERO_TIME_UNIX_SECONDS: i64 = -62_135_596_800;
+
+        let service = admin_service().await;
+
+        let created_api_key = service
+            .create_api_key(Request::new(CreateApiKeyRequest { expiration: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created_api_key.api_key.starts_with("hskey-api-"));
+        let listed = service
+            .list_api_keys(Request::new(ListApiKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let key = listed
+            .api_keys
+            .iter()
+            .find(|key| key.id == 1)
+            .expect("created api key");
+        assert_eq!(
+            key.expiration.as_ref().map(|ts| ts.seconds),
+            Some(GO_ZERO_TIME_UNIX_SECONDS)
+        );
+        assert!(key.created_at.is_some());
+        assert!(key.last_seen.is_none());
+
+        let user = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "zero-expiration".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user");
+        let created_preauth = service
+            .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
+                user: user.id,
+                reusable: false,
+                ephemeral: false,
+                expiration: None,
+                acl_tags: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .pre_auth_key
+            .expect("created preauth key");
+        assert_eq!(
+            created_preauth.expiration.as_ref().map(|ts| ts.seconds),
+            Some(GO_ZERO_TIME_UNIX_SECONDS)
+        );
+
+        let listed = service
+            .list_pre_auth_keys(Request::new(ListPreAuthKeysRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let key = listed
+            .pre_auth_keys
+            .iter()
+            .find(|key| key.id == created_preauth.id)
+            .expect("created preauth key");
+        assert_eq!(
+            key.expiration.as_ref().map(|ts| ts.seconds),
+            Some(GO_ZERO_TIME_UNIX_SECONDS)
+        );
+        assert!(key.created_at.is_some());
     }
 
     #[tokio::test]

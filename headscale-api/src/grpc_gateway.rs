@@ -1401,8 +1401,8 @@ fn preauth_key_json(key: &PreAuthKey) -> Value {
     out.insert("reusable".into(), Value::Bool(key.reusable));
     out.insert("ephemeral".into(), Value::Bool(key.ephemeral));
     out.insert("used".into(), Value::Bool(key.used));
-    out.insert("expiration".into(), timestamp_json(key.expiration.as_ref()));
-    out.insert("createdAt".into(), timestamp_json(key.created_at.as_ref()));
+    insert_timestamp_json(&mut out, "expiration", key.expiration.as_ref());
+    insert_timestamp_json(&mut out, "createdAt", key.created_at.as_ref());
     out.insert(
         "aclTags".into(),
         Value::Array(key.acl_tags.iter().cloned().map(Value::String).collect()),
@@ -1414,10 +1414,28 @@ fn api_key_json(key: &ApiKey) -> Value {
     let mut out = Map::new();
     out.insert("id".into(), Value::String(key.id.to_string()));
     out.insert("prefix".into(), Value::String(key.prefix.clone()));
-    out.insert("expiration".into(), timestamp_json(key.expiration.as_ref()));
-    out.insert("createdAt".into(), timestamp_json(key.created_at.as_ref()));
-    out.insert("lastSeen".into(), timestamp_json(key.last_seen.as_ref()));
+    insert_timestamp_json(&mut out, "expiration", key.expiration.as_ref());
+    insert_timestamp_json(&mut out, "createdAt", key.created_at.as_ref());
+    insert_timestamp_json(&mut out, "lastSeen", key.last_seen.as_ref());
     Value::Object(out)
+}
+
+fn insert_timestamp_json(
+    out: &mut Map<String, Value>,
+    name: &str,
+    ts: Option<&prost_types::Timestamp>,
+) {
+    if let Some(value) = optional_timestamp_json(ts) {
+        out.insert(name.into(), value);
+    }
+}
+
+fn optional_timestamp_json(ts: Option<&prost_types::Timestamp>) -> Option<Value> {
+    let ts = ts?;
+    match timestamp_json(Some(ts)) {
+        Value::Null => None,
+        value => Some(value),
+    }
 }
 
 fn timestamp_json(ts: Option<&prost_types::Timestamp>) -> Value {

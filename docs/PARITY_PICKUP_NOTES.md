@@ -1960,3 +1960,15 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `dumpConfig` failures when `/etc/headscale` is absent. The remaining
   upstream CLI drift is the timestamped default-config warning that
   headscale-go logs before the Cobra error when no config file is found.
+
+## 2026-06-02 native DERP protocol foundation
+
+- Added clean-room DERP wire-frame helpers in `headscale-core`: current
+  frame IDs, 5-byte big-endian headers, server-key magic, encrypted
+  client/server-info envelope shape, packet frame layouts, peer
+  present/gone metadata, ping/pong, health, restarting, unknown-frame
+  preservation, and protocol packet/info caps.
+- This is protocol foundation only. Runtime relay parity still requires a
+  native session registry plus `/derp` upgrade handler; the supported
+  production relay path remains the upstream `derper` sidecar until those
+  pieces pass stock-client smokes.

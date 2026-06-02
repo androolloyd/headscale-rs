@@ -29,6 +29,949 @@ const FRAME_KEEP_ALIVE: u8 = 0x06;
 const FRAME_PEER_GONE: u8 = 0x08;
 const FRAME_PEER_PRESENT: u8 = 0x09;
 
+/// Clean-room DERP wire protocol helpers for the native relay path.
+///
+/// This module intentionally models frame bytes and payload shapes only. The
+/// sidecar runtime remains the default relay implementation until a native
+/// session registry and `/derp` upgrade handler are layered on top.
+pub mod protocol {
+    /// Maximum packet payload visible to DERP, excluding frame headers.
+    pub const MAX_PACKET_SIZE: usize = 64 << 10;
+    /// DERP frame header size: one type byte plus a big-endian u32 length.
+    pub const FRAME_HEADER_LEN: usize = 5;
+    /// DERP node public-key length.
+    pub const KEY_LEN: usize = 32;
+    /// naclbox nonce length used by client/server info envelopes.
+    pub const NONCE_LEN: usize = 24;
+    /// Maximum encrypted client info envelope length accepted by servers.
+    pub const MAX_CLIENT_INFO_LEN: usize = 256 << 10;
+    /// Maximum encrypted server info envelope length accepted by clients.
+    pub const MAX_INFO_LEN: usize = 1 << 20;
+    /// Modern protocol version where received packets include a source key.
+    pub const PROTOCOL_VERSION: u8 = 2;
+    /// Server greeting magic bytes: `DERP` plus the UTF-8 key emoji.
+    pub const MAGIC: &[u8; 8] = b"DERP\xF0\x9F\x94\x91";
+
+    /// DERP frame type byte values.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum FrameType {
+        /// 8B magic + 32B server public key + optional future bytes.
+        ServerKey = 0x01,
+        /// 32B client public key + 24B nonce + encrypted JSON.
+        ClientInfo = 0x02,
+        /// 24B nonce + encrypted JSON.
+        ServerInfo = 0x03,
+        /// 32B destination public key + packet bytes.
+        SendPacket = 0x04,
+        /// 32B source public key + packet bytes.
+        RecvPacket = 0x05,
+        /// Empty keep-alive frame.
+        KeepAlive = 0x06,
+        /// 1 byte boolean home-node preference.
+        NotePreferred = 0x07,
+        /// 32B peer public key + optional 1 byte reason.
+        PeerGone = 0x08,
+        /// 32B peer public key + optional endpoint + optional flags.
+        PeerPresent = 0x09,
+        /// 32B source public key + 32B destination public key + packet bytes.
+        ForwardPacket = 0x0a,
+        /// Subscribe to regional connection state.
+        WatchConns = 0x10,
+        /// Privileged request to close a peer.
+        ClosePeer = 0x11,
+        /// 8B ping payload.
+        Ping = 0x12,
+        /// 8B pong payload.
+        Pong = 0x13,
+        /// UTF-8-ish health/problem string; empty clears health state.
+        Health = 0x14,
+        /// Two u32 millisecond durations: reconnect-in and try-for.
+        Restarting = 0x15,
+    }
+
+    impl FrameType {
+        /// Numeric DERP frame type code.
+        pub const fn code(self) -> u8 {
+            self as u8
+        }
+
+        /// Convert a raw type byte into a known DERP frame type.
+        pub const fn from_code(code: u8) -> Option<Self> {
+            match code {
+                0x01 => Some(Self::ServerKey),
+                0x02 => Some(Self::ClientInfo),
+                0x03 => Some(Self::ServerInfo),
+                0x04 => Some(Self::SendPacket),
+                0x05 => Some(Self::RecvPacket),
+                0x06 => Some(Self::KeepAlive),
+                0x07 => Some(Self::NotePreferred),
+                0x08 => Some(Self::PeerGone),
+                0x09 => Some(Self::PeerPresent),
+                0x0a => Some(Self::ForwardPacket),
+                0x10 => Some(Self::WatchConns),
+                0x11 => Some(Self::ClosePeer),
+                0x12 => Some(Self::Ping),
+                0x13 => Some(Self::Pong),
+                0x14 => Some(Self::Health),
+                0x15 => Some(Self::Restarting),
+                _ => None,
+            }
+        }
+    }
+
+    /// Reason byte carried by `PeerGone`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum PeerGoneReason {
+        /// Peer disconnected from this server.
+        Disconnected = 0x00,
+        /// Server does not know the requested peer.
+        NotHere = 0x01,
+        /// Mesh watcher synthetic value used off-wire by Tailscale clients.
+        MeshConnBroke = 0xf0,
+        /// Future or unknown reason byte.
+        Unknown(u8),
+    }
+
+    impl PeerGoneReason {
+        /// Numeric reason code.
+        pub const fn code(self) -> u8 {
+            match self {
+                Self::Disconnected => 0x00,
+                Self::NotHere => 0x01,
+                Self::MeshConnBroke => 0xf0,
+                Self::Unknown(code) => code,
+            }
+        }
+
+        /// Convert a reason byte to the typed representation.
+        pub const fn from_code(code: u8) -> Self {
+            match code {
+                0x00 => Self::Disconnected,
+                0x01 => Self::NotHere,
+                0xf0 => Self::MeshConnBroke,
+                other => Self::Unknown(other),
+            }
+        }
+    }
+
+    /// Optional flags carried by modern `PeerPresent` frames.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct PeerPresentFlags(pub u8);
+
+    impl PeerPresentFlags {
+        /// Regular client connection flag.
+        pub const IS_REGULAR: u8 = 1 << 0;
+        /// Regional mesh peer connection flag.
+        pub const IS_MESH_PEER: u8 = 1 << 1;
+        /// Prober connection flag.
+        pub const IS_PROBER: u8 = 1 << 2;
+        /// Client connected to a non-ideal DERP node.
+        pub const NOT_IDEAL: u8 = 1 << 3;
+
+        /// Whether this flag byte marks a regular client connection.
+        pub const fn is_regular(self) -> bool {
+            self.0 & Self::IS_REGULAR != 0
+        }
+    }
+
+    /// Endpoint bytes carried in modern `PeerPresent` frames.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PeerEndpoint {
+        /// IPv6-mapped address bytes.
+        pub ip: [u8; 16],
+        /// Big-endian TCP/UDP port.
+        pub port: u16,
+    }
+
+    /// Parsed DERP frame.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Frame {
+        /// Server greeting.
+        ServerKey {
+            /// Server public key.
+            key: [u8; KEY_LEN],
+            /// Future extension bytes after the key.
+            extra: Vec<u8>,
+        },
+        /// Encrypted client info envelope.
+        ClientInfo {
+            /// Client public key.
+            public_key: [u8; KEY_LEN],
+            /// 24B nonce + encrypted JSON.
+            encrypted_info: Vec<u8>,
+        },
+        /// Encrypted server info envelope.
+        ServerInfo {
+            /// 24B nonce + encrypted JSON.
+            encrypted_info: Vec<u8>,
+        },
+        /// Client packet to a destination peer.
+        SendPacket {
+            /// Destination peer key.
+            destination: [u8; KEY_LEN],
+            /// DERP packet bytes.
+            packet: Vec<u8>,
+        },
+        /// Mesh node forwarded packet.
+        ForwardPacket {
+            /// Source peer key.
+            source: [u8; KEY_LEN],
+            /// Destination peer key.
+            destination: [u8; KEY_LEN],
+            /// DERP packet bytes.
+            packet: Vec<u8>,
+        },
+        /// Server packet to a client.
+        RecvPacket {
+            /// Source peer key.
+            source: [u8; KEY_LEN],
+            /// DERP packet bytes.
+            packet: Vec<u8>,
+        },
+        /// Keep-alive no-op.
+        KeepAlive,
+        /// Home-node preference.
+        NotePreferred(bool),
+        /// Peer gone notification.
+        PeerGone {
+            /// Peer key.
+            peer: [u8; KEY_LEN],
+            /// Gone reason.
+            reason: PeerGoneReason,
+        },
+        /// Peer present notification.
+        PeerPresent {
+            /// Peer key.
+            peer: [u8; KEY_LEN],
+            /// Optional endpoint included by modern servers.
+            endpoint: Option<PeerEndpoint>,
+            /// Optional peer flags included by modern servers.
+            flags: Option<PeerPresentFlags>,
+            /// Future extension bytes.
+            extra: Vec<u8>,
+        },
+        /// Watch regional connections.
+        WatchConns,
+        /// Close a peer connection.
+        ClosePeer {
+            /// Peer key to close.
+            peer: [u8; KEY_LEN],
+        },
+        /// Ping payload.
+        Ping([u8; 8]),
+        /// Pong payload.
+        Pong([u8; 8]),
+        /// Health/problem text.
+        Health(String),
+        /// Server restarting advisory.
+        Restarting {
+            /// Delay before reconnecting, in milliseconds.
+            reconnect_in_ms: u32,
+            /// Total retry duration, in milliseconds.
+            try_for_ms: u32,
+        },
+        /// Unknown future frame; callers may ignore it.
+        Unknown {
+            /// Raw frame type byte.
+            frame_type: u8,
+            /// Raw payload.
+            payload: Vec<u8>,
+        },
+    }
+
+    /// DERP frame parsing/encoding error.
+    #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+    pub enum ProtocolError {
+        /// Fewer than five bytes were provided for the frame header.
+        #[error("truncated DERP frame header: got {actual} bytes")]
+        TruncatedHeader {
+            /// Actual bytes available.
+            actual: usize,
+        },
+        /// Payload length in the header exceeds the configured read limit.
+        #[error("DERP frame length {len} exceeds limit {max}")]
+        FrameTooLarge {
+            /// Header-declared payload length.
+            len: usize,
+            /// Caller-provided maximum.
+            max: usize,
+        },
+        /// Header was complete but the full payload was not available.
+        #[error("incomplete DERP frame payload: need {expected} bytes, got {actual}")]
+        IncompleteFrame {
+            /// Total frame bytes required.
+            expected: usize,
+            /// Actual bytes available.
+            actual: usize,
+        },
+        /// Known frame type had an invalid payload shape.
+        #[error("invalid DERP {frame_type:?} payload: {reason}")]
+        InvalidPayload {
+            /// Frame type.
+            frame_type: FrameType,
+            /// Reason.
+            reason: &'static str,
+        },
+        /// Payload was too large to encode as a DERP frame.
+        #[error("DERP payload too large: {0} bytes")]
+        PayloadTooLarge(usize),
+        /// DERP packet payload exceeded the protocol packet cap.
+        #[error("DERP packet too large: {len} bytes exceeds {max}")]
+        PacketTooLarge {
+            /// Actual packet bytes.
+            len: usize,
+            /// Protocol maximum packet bytes.
+            max: usize,
+        },
+    }
+
+    /// Build a DERP frame header.
+    pub fn encode_header(frame_type: u8, payload_len: u32) -> [u8; FRAME_HEADER_LEN] {
+        let mut header = [0u8; FRAME_HEADER_LEN];
+        header[0] = frame_type;
+        header[1..].copy_from_slice(&payload_len.to_be_bytes());
+        header
+    }
+
+    /// Build a complete raw frame from a type byte and payload.
+    pub fn encode_raw_frame(frame_type: u8, payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| ProtocolError::PayloadTooLarge(payload.len()))?;
+        let mut out = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+        out.extend_from_slice(&encode_header(frame_type, payload_len));
+        out.extend_from_slice(payload);
+        Ok(out)
+    }
+
+    /// Build a complete typed frame.
+    pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
+        validate_frame_for_encode(frame)?;
+        let (frame_type, payload) = frame.to_raw_parts();
+        encode_raw_frame(frame_type, &payload)
+    }
+
+    /// Decode one complete frame from the beginning of `data`.
+    ///
+    /// Returns the parsed frame and the number of bytes consumed. Unknown frame
+    /// types are returned as [`Frame::Unknown`] so callers can ignore future
+    /// extensions without losing stream alignment.
+    pub fn decode_frame(
+        data: &[u8],
+        max_payload_len: usize,
+    ) -> Result<(Frame, usize), ProtocolError> {
+        if data.len() < FRAME_HEADER_LEN {
+            return Err(ProtocolError::TruncatedHeader { actual: data.len() });
+        }
+        let frame_type = data[0];
+        let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        if len > max_payload_len {
+            return Err(ProtocolError::FrameTooLarge {
+                len,
+                max: max_payload_len,
+            });
+        }
+        let expected = FRAME_HEADER_LEN + len;
+        if data.len() < expected {
+            return Err(ProtocolError::IncompleteFrame {
+                expected,
+                actual: data.len(),
+            });
+        }
+        let payload = &data[FRAME_HEADER_LEN..expected];
+        let frame = if let Some(known) = FrameType::from_code(frame_type) {
+            parse_payload(known, payload)?
+        } else {
+            Frame::Unknown {
+                frame_type,
+                payload: payload.to_vec(),
+            }
+        };
+        Ok((frame, expected))
+    }
+
+    impl Frame {
+        fn to_raw_parts(&self) -> (u8, Vec<u8>) {
+            match self {
+                Self::ServerKey { key, extra } => {
+                    let mut payload = Vec::with_capacity(MAGIC.len() + KEY_LEN + extra.len());
+                    payload.extend_from_slice(MAGIC);
+                    payload.extend_from_slice(key);
+                    payload.extend_from_slice(extra);
+                    (FrameType::ServerKey.code(), payload)
+                }
+                Self::ClientInfo {
+                    public_key,
+                    encrypted_info,
+                } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN + encrypted_info.len());
+                    payload.extend_from_slice(public_key);
+                    payload.extend_from_slice(encrypted_info);
+                    (FrameType::ClientInfo.code(), payload)
+                }
+                Self::ServerInfo { encrypted_info } => {
+                    (FrameType::ServerInfo.code(), encrypted_info.clone())
+                }
+                Self::SendPacket {
+                    destination,
+                    packet,
+                } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN + packet.len());
+                    payload.extend_from_slice(destination);
+                    payload.extend_from_slice(packet);
+                    (FrameType::SendPacket.code(), payload)
+                }
+                Self::ForwardPacket {
+                    source,
+                    destination,
+                    packet,
+                } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN * 2 + packet.len());
+                    payload.extend_from_slice(source);
+                    payload.extend_from_slice(destination);
+                    payload.extend_from_slice(packet);
+                    (FrameType::ForwardPacket.code(), payload)
+                }
+                Self::RecvPacket { source, packet } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN + packet.len());
+                    payload.extend_from_slice(source);
+                    payload.extend_from_slice(packet);
+                    (FrameType::RecvPacket.code(), payload)
+                }
+                Self::KeepAlive => (FrameType::KeepAlive.code(), Vec::new()),
+                Self::NotePreferred(preferred) => {
+                    (FrameType::NotePreferred.code(), vec![u8::from(*preferred)])
+                }
+                Self::PeerGone { peer, reason } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN + 1);
+                    payload.extend_from_slice(peer);
+                    payload.push(reason.code());
+                    (FrameType::PeerGone.code(), payload)
+                }
+                Self::PeerPresent {
+                    peer,
+                    endpoint,
+                    flags,
+                    extra,
+                } => {
+                    let mut payload = Vec::with_capacity(KEY_LEN + 18 + 1 + extra.len());
+                    payload.extend_from_slice(peer);
+                    if let Some(endpoint) = endpoint {
+                        payload.extend_from_slice(&endpoint.ip);
+                        payload.extend_from_slice(&endpoint.port.to_be_bytes());
+                    }
+                    if let Some(flags) = flags {
+                        payload.push(flags.0);
+                    }
+                    payload.extend_from_slice(extra);
+                    (FrameType::PeerPresent.code(), payload)
+                }
+                Self::WatchConns => (FrameType::WatchConns.code(), Vec::new()),
+                Self::ClosePeer { peer } => (FrameType::ClosePeer.code(), peer.to_vec()),
+                Self::Ping(payload) => (FrameType::Ping.code(), payload.to_vec()),
+                Self::Pong(payload) => (FrameType::Pong.code(), payload.to_vec()),
+                Self::Health(problem) => (FrameType::Health.code(), problem.as_bytes().to_vec()),
+                Self::Restarting {
+                    reconnect_in_ms,
+                    try_for_ms,
+                } => {
+                    let mut payload = Vec::with_capacity(8);
+                    payload.extend_from_slice(&reconnect_in_ms.to_be_bytes());
+                    payload.extend_from_slice(&try_for_ms.to_be_bytes());
+                    (FrameType::Restarting.code(), payload)
+                }
+                Self::Unknown {
+                    frame_type,
+                    payload,
+                } => (*frame_type, payload.clone()),
+            }
+        }
+    }
+
+    fn parse_payload(frame_type: FrameType, payload: &[u8]) -> Result<Frame, ProtocolError> {
+        match frame_type {
+            FrameType::ServerKey => parse_server_key(payload),
+            FrameType::ClientInfo => parse_client_info(payload),
+            FrameType::ServerInfo => parse_server_info(payload),
+            FrameType::SendPacket => parse_send_packet(payload),
+            FrameType::RecvPacket => parse_recv_packet(payload),
+            FrameType::KeepAlive => require_empty(frame_type, payload).map(|()| Frame::KeepAlive),
+            FrameType::NotePreferred => parse_note_preferred(payload),
+            FrameType::PeerGone => parse_peer_gone(payload),
+            FrameType::PeerPresent => parse_peer_present(payload),
+            FrameType::ForwardPacket => parse_forward_packet(payload),
+            FrameType::WatchConns => require_empty(frame_type, payload).map(|()| Frame::WatchConns),
+            FrameType::ClosePeer => parse_close_peer(payload),
+            FrameType::Ping => parse_ping_or_pong(frame_type, payload).map(Frame::Ping),
+            FrameType::Pong => parse_ping_or_pong(frame_type, payload).map(Frame::Pong),
+            FrameType::Health => Ok(Frame::Health(String::from_utf8_lossy(payload).into_owned())),
+            FrameType::Restarting => parse_restarting(payload),
+        }
+    }
+
+    fn parse_server_key(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        if payload.len() < MAGIC.len() + KEY_LEN {
+            return invalid(
+                FrameType::ServerKey,
+                "server greeting is shorter than magic plus key",
+            );
+        }
+        if &payload[..MAGIC.len()] != MAGIC {
+            return invalid(FrameType::ServerKey, "server greeting magic mismatch");
+        }
+        let (key, extra) = split_key(&payload[MAGIC.len()..], FrameType::ServerKey)?;
+        Ok(Frame::ServerKey {
+            key,
+            extra: extra.to_vec(),
+        })
+    }
+
+    fn parse_client_info(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        if payload.len() < KEY_LEN + NONCE_LEN {
+            return invalid(
+                FrameType::ClientInfo,
+                "missing client key or encrypted info nonce",
+            );
+        }
+        let (public_key, encrypted_info) = split_key(payload, FrameType::ClientInfo)?;
+        if encrypted_info.len() > NONCE_LEN + MAX_CLIENT_INFO_LEN {
+            return invalid(FrameType::ClientInfo, "encrypted client info is too large");
+        }
+        Ok(Frame::ClientInfo {
+            public_key,
+            encrypted_info: encrypted_info.to_vec(),
+        })
+    }
+
+    fn parse_server_info(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        if payload.len() < NONCE_LEN {
+            return invalid(FrameType::ServerInfo, "missing encrypted server info nonce");
+        }
+        if payload.len() > NONCE_LEN + MAX_INFO_LEN {
+            return invalid(FrameType::ServerInfo, "encrypted server info is too large");
+        }
+        Ok(Frame::ServerInfo {
+            encrypted_info: payload.to_vec(),
+        })
+    }
+
+    fn parse_send_packet(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (destination, packet) = split_key(payload, FrameType::SendPacket)?;
+        validate_packet_len(packet.len())?;
+        Ok(Frame::SendPacket {
+            destination,
+            packet: packet.to_vec(),
+        })
+    }
+
+    fn parse_forward_packet(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (source, rest) = split_key(payload, FrameType::ForwardPacket)?;
+        let (destination, packet) = split_key(rest, FrameType::ForwardPacket)?;
+        validate_packet_len(packet.len())?;
+        Ok(Frame::ForwardPacket {
+            source,
+            destination,
+            packet: packet.to_vec(),
+        })
+    }
+
+    fn parse_recv_packet(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (source, packet) = split_key(payload, FrameType::RecvPacket)?;
+        validate_packet_len(packet.len())?;
+        Ok(Frame::RecvPacket {
+            source,
+            packet: packet.to_vec(),
+        })
+    }
+
+    fn parse_note_preferred(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        if payload.len() != 1 {
+            return invalid(FrameType::NotePreferred, "expected one boolean byte");
+        }
+        Ok(Frame::NotePreferred(payload[0] != 0))
+    }
+
+    fn parse_peer_gone(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (peer, rest) = split_key(payload, FrameType::PeerGone)?;
+        let reason = rest
+            .first()
+            .copied()
+            .map_or(PeerGoneReason::Disconnected, PeerGoneReason::from_code);
+        Ok(Frame::PeerGone { peer, reason })
+    }
+
+    fn parse_peer_present(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (peer, rest) = split_key(payload, FrameType::PeerPresent)?;
+        let endpoint = if rest.len() >= 18 {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&rest[..16]);
+            Some(PeerEndpoint {
+                ip,
+                port: u16::from_be_bytes([rest[16], rest[17]]),
+            })
+        } else {
+            None
+        };
+        let flags = (rest.len() >= 19).then(|| PeerPresentFlags(rest[18]));
+        let extra_start = if flags.is_some() {
+            19
+        } else if endpoint.is_some() {
+            18
+        } else {
+            0
+        };
+        Ok(Frame::PeerPresent {
+            peer,
+            endpoint,
+            flags,
+            extra: rest[extra_start..].to_vec(),
+        })
+    }
+
+    fn parse_close_peer(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        let (peer, _) = split_key(payload, FrameType::ClosePeer)?;
+        Ok(Frame::ClosePeer { peer })
+    }
+
+    fn parse_ping_or_pong(frame_type: FrameType, payload: &[u8]) -> Result<[u8; 8], ProtocolError> {
+        if payload.len() < 8 {
+            return invalid(frame_type, "expected at least eight payload bytes");
+        }
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&payload[..8]);
+        Ok(out)
+    }
+
+    fn parse_restarting(payload: &[u8]) -> Result<Frame, ProtocolError> {
+        if payload.len() < 8 {
+            return invalid(
+                FrameType::Restarting,
+                "expected two u32 millisecond durations",
+            );
+        }
+        Ok(Frame::Restarting {
+            reconnect_in_ms: u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            try_for_ms: u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        })
+    }
+
+    fn require_empty(frame_type: FrameType, payload: &[u8]) -> Result<(), ProtocolError> {
+        if payload.is_empty() {
+            Ok(())
+        } else {
+            invalid(frame_type, "expected empty payload")
+        }
+    }
+
+    fn validate_frame_for_encode(frame: &Frame) -> Result<(), ProtocolError> {
+        match frame {
+            Frame::SendPacket { packet, .. }
+            | Frame::ForwardPacket { packet, .. }
+            | Frame::RecvPacket { packet, .. } => validate_packet_len(packet.len()),
+            Frame::ClientInfo { encrypted_info, .. }
+                if encrypted_info.len() > NONCE_LEN + MAX_CLIENT_INFO_LEN =>
+            {
+                invalid(FrameType::ClientInfo, "encrypted client info is too large")
+            }
+            Frame::ServerInfo { encrypted_info }
+                if encrypted_info.len() > NONCE_LEN + MAX_INFO_LEN =>
+            {
+                invalid(FrameType::ServerInfo, "encrypted server info is too large")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_packet_len(len: usize) -> Result<(), ProtocolError> {
+        if len <= MAX_PACKET_SIZE {
+            Ok(())
+        } else {
+            Err(ProtocolError::PacketTooLarge {
+                len,
+                max: MAX_PACKET_SIZE,
+            })
+        }
+    }
+
+    fn split_key(
+        payload: &[u8],
+        frame_type: FrameType,
+    ) -> Result<([u8; KEY_LEN], &[u8]), ProtocolError> {
+        if payload.len() < KEY_LEN {
+            return invalid(frame_type, "payload is shorter than a DERP key");
+        }
+        let mut key = [0u8; KEY_LEN];
+        key.copy_from_slice(&payload[..KEY_LEN]);
+        Ok((key, &payload[KEY_LEN..]))
+    }
+
+    fn invalid<T>(frame_type: FrameType, reason: &'static str) -> Result<T, ProtocolError> {
+        Err(ProtocolError::InvalidPayload { frame_type, reason })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn header_uses_big_endian_payload_length() {
+            assert_eq!(
+                encode_header(FrameType::Ping.code(), 0x0102_0304),
+                [0x12, 0x01, 0x02, 0x03, 0x04]
+            );
+            assert_eq!(
+                encode_header(FrameType::Health.code(), 5),
+                [0x14, 0, 0, 0, 5]
+            );
+            assert_eq!(
+                encode_header(FrameType::PeerPresent.code(), 51),
+                [0x09, 0, 0, 0, 0x33]
+            );
+        }
+
+        #[test]
+        fn server_key_greeting_round_trips_magic_key_and_future_bytes() {
+            let mut key = [0u8; KEY_LEN];
+            for (i, byte) in key.iter_mut().enumerate() {
+                *byte = i as u8;
+            }
+            let frame = Frame::ServerKey {
+                key,
+                extra: vec![0xff],
+            };
+            let encoded = encode_frame(&frame).unwrap();
+            assert_eq!(
+                &encoded[..FRAME_HEADER_LEN],
+                &[FrameType::ServerKey.code(), 0, 0, 0, 41]
+            );
+            assert_eq!(
+                &encoded[FRAME_HEADER_LEN..FRAME_HEADER_LEN + MAGIC.len()],
+                MAGIC
+            );
+            assert_eq!(
+                &encoded[FRAME_HEADER_LEN + MAGIC.len()..FRAME_HEADER_LEN + MAGIC.len() + KEY_LEN],
+                &key
+            );
+
+            let (decoded, consumed) = decode_frame(&encoded, MAX_INFO_LEN).unwrap();
+            assert_eq!(consumed, encoded.len());
+            assert_eq!(decoded, frame);
+        }
+
+        #[test]
+        fn client_info_requires_public_key_and_encrypted_nonce() {
+            let mut payload = vec![4u8; KEY_LEN + NONCE_LEN];
+            payload.extend_from_slice(b"encrypted-json");
+            let encoded = encode_raw_frame(FrameType::ClientInfo.code(), &payload).unwrap();
+
+            let (decoded, _) = decode_frame(&encoded, MAX_INFO_LEN).unwrap();
+            assert_eq!(
+                decoded,
+                Frame::ClientInfo {
+                    public_key: [4u8; KEY_LEN],
+                    encrypted_info: payload[KEY_LEN..].to_vec(),
+                }
+            );
+
+            let short = encode_raw_frame(FrameType::ClientInfo.code(), &[0u8; KEY_LEN]).unwrap();
+            assert!(matches!(
+                decode_frame(&short, MAX_INFO_LEN),
+                Err(ProtocolError::InvalidPayload {
+                    frame_type: FrameType::ClientInfo,
+                    ..
+                })
+            ));
+
+            let too_large = Frame::ClientInfo {
+                public_key: [1u8; KEY_LEN],
+                encrypted_info: vec![0u8; NONCE_LEN + MAX_CLIENT_INFO_LEN + 1],
+            };
+            assert!(matches!(
+                encode_frame(&too_large),
+                Err(ProtocolError::InvalidPayload {
+                    frame_type: FrameType::ClientInfo,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn go_client_recv_vectors_decode() {
+            for (frame, expected) in [
+                (
+                    vec![FrameType::Ping.code(), 0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8],
+                    Frame::Ping([1, 2, 3, 4, 5, 6, 7, 8]),
+                ),
+                (
+                    vec![FrameType::Pong.code(), 0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8],
+                    Frame::Pong([1, 2, 3, 4, 5, 6, 7, 8]),
+                ),
+                (
+                    vec![FrameType::Health.code(), 0, 0, 0, 3, b'B', b'A', b'D'],
+                    Frame::Health("BAD".to_string()),
+                ),
+                (
+                    vec![FrameType::Health.code(), 0, 0, 0, 0],
+                    Frame::Health(String::new()),
+                ),
+                (
+                    vec![
+                        FrameType::Restarting.code(),
+                        0,
+                        0,
+                        0,
+                        8,
+                        0,
+                        0,
+                        0,
+                        1,
+                        0,
+                        0,
+                        0,
+                        2,
+                    ],
+                    Frame::Restarting {
+                        reconnect_in_ms: 1,
+                        try_for_ms: 2,
+                    },
+                ),
+            ] {
+                let (decoded, consumed) = decode_frame(&frame, MAX_INFO_LEN).unwrap();
+                assert_eq!(consumed, frame.len());
+                assert_eq!(decoded, expected);
+            }
+        }
+
+        #[test]
+        fn packet_frame_shapes_round_trip() {
+            let source = [1u8; KEY_LEN];
+            let destination = [2u8; KEY_LEN];
+            let packet = b"wireguard-packet".to_vec();
+
+            let send = Frame::SendPacket {
+                destination,
+                packet: packet.clone(),
+            };
+            let (decoded, _) =
+                decode_frame(&encode_frame(&send).unwrap(), MAX_PACKET_SIZE).unwrap();
+            assert_eq!(decoded, send);
+
+            let recv = Frame::RecvPacket {
+                source,
+                packet: packet.clone(),
+            };
+            let (decoded, _) =
+                decode_frame(&encode_frame(&recv).unwrap(), MAX_PACKET_SIZE).unwrap();
+            assert_eq!(decoded, recv);
+
+            let forward = Frame::ForwardPacket {
+                source,
+                destination,
+                packet,
+            };
+            let (decoded, _) =
+                decode_frame(&encode_frame(&forward).unwrap(), MAX_PACKET_SIZE).unwrap();
+            assert_eq!(decoded, forward);
+
+            let oversized = Frame::SendPacket {
+                destination,
+                packet: vec![0; MAX_PACKET_SIZE + 1],
+            };
+            assert!(matches!(
+                encode_frame(&oversized),
+                Err(ProtocolError::PacketTooLarge {
+                    len,
+                    max: MAX_PACKET_SIZE,
+                }) if len == MAX_PACKET_SIZE + 1
+            ));
+
+            let mut raw_oversized = Vec::with_capacity(KEY_LEN + MAX_PACKET_SIZE + 1);
+            raw_oversized.extend_from_slice(&destination);
+            raw_oversized.extend_from_slice(&vec![0; MAX_PACKET_SIZE + 1]);
+            let encoded = encode_raw_frame(FrameType::SendPacket.code(), &raw_oversized).unwrap();
+            assert!(matches!(
+                decode_frame(&encoded, KEY_LEN + MAX_PACKET_SIZE + 1),
+                Err(ProtocolError::PacketTooLarge {
+                    len,
+                    max: MAX_PACKET_SIZE,
+                }) if len == MAX_PACKET_SIZE + 1
+            ));
+        }
+
+        #[test]
+        fn peer_state_frames_parse_legacy_and_modern_shapes() {
+            let peer = [9u8; KEY_LEN];
+            let gone_legacy = encode_raw_frame(FrameType::PeerGone.code(), &peer).unwrap();
+            assert_eq!(
+                decode_frame(&gone_legacy, MAX_INFO_LEN).unwrap().0,
+                Frame::PeerGone {
+                    peer,
+                    reason: PeerGoneReason::Disconnected,
+                }
+            );
+
+            let mut modern_present_payload = Vec::new();
+            modern_present_payload.extend_from_slice(&peer);
+            modern_present_payload.extend_from_slice(&[0; 15]);
+            modern_present_payload.push(1);
+            modern_present_payload.extend_from_slice(&443u16.to_be_bytes());
+            modern_present_payload.push(PeerPresentFlags::IS_REGULAR);
+            modern_present_payload.extend_from_slice(&[0xaa, 0xbb]);
+            let modern_present =
+                encode_raw_frame(FrameType::PeerPresent.code(), &modern_present_payload).unwrap();
+
+            assert_eq!(
+                decode_frame(&modern_present, MAX_INFO_LEN).unwrap().0,
+                Frame::PeerPresent {
+                    peer,
+                    endpoint: Some(PeerEndpoint {
+                        ip: {
+                            let mut ip = [0u8; 16];
+                            ip[15] = 1;
+                            ip
+                        },
+                        port: 443,
+                    }),
+                    flags: Some(PeerPresentFlags(PeerPresentFlags::IS_REGULAR)),
+                    extra: vec![0xaa, 0xbb],
+                }
+            );
+        }
+
+        #[test]
+        fn incomplete_and_oversized_frames_are_errors() {
+            assert!(matches!(
+                decode_frame(&[FrameType::Ping.code(), 0], MAX_INFO_LEN),
+                Err(ProtocolError::TruncatedHeader { actual: 2 })
+            ));
+            assert!(matches!(
+                decode_frame(&[FrameType::Ping.code(), 0, 0, 0, 8, 1, 2], MAX_INFO_LEN),
+                Err(ProtocolError::IncompleteFrame {
+                    expected: 13,
+                    actual: 7
+                })
+            ));
+            assert!(matches!(
+                decode_frame(&[FrameType::Ping.code(), 0, 0, 0, 9], 8),
+                Err(ProtocolError::FrameTooLarge { len: 9, max: 8 })
+            ));
+        }
+
+        #[test]
+        fn unknown_frame_preserves_payload_for_future_compatibility() {
+            let encoded = encode_raw_frame(0xfe, b"future").unwrap();
+            assert_eq!(
+                decode_frame(&encoded, MAX_INFO_LEN).unwrap().0,
+                Frame::Unknown {
+                    frame_type: 0xfe,
+                    payload: b"future".to_vec(),
+                }
+            );
+        }
+    }
+}
+
 /// A DERP server entry.
 #[derive(Debug, Clone)]
 pub struct DerpServer {

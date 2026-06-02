@@ -738,6 +738,13 @@ same route/tag state through CLI output, `/debug/nodestore`,
 focused process-level convergence check across the Pg DB rows, hydrated live
 registry, loaded policy manager, and map-response inputs after restart.
 
+Recent coverage note (2026-06-02): an env-gated production Postgres `serve`
+process smoke now runs file-backed policy mode, registers a route-advertising
+node, mutates `policy.path`, sends SIGHUP, and asserts the policy reload
+auto-approves the advertised route through CLI node state and `/debug/routes`.
+This adds a focused process-level config-mutation check without duplicating the
+existing database-policy restart or grpc-gateway CRUD smokes.
+
 ## Next Implementation Order
 
 1. Broaden production Postgres process-level serve/mutation smokes beyond the

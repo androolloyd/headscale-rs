@@ -825,7 +825,7 @@ async fn ephemeralinalternatetimezone() {
         .with_timezone(&chrono::Utc);
     reg.upsert("b0".repeat(32), stale);
 
-    let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
+    let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
     assert_eq!(removed, vec!["b0".repeat(32)]);
     assert!(reg.get(&"b0".repeat(32)).is_none());
 }

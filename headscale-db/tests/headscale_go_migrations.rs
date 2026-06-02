@@ -16,6 +16,8 @@ const CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION: &str =
     include_str!("../migrations/20260530000015_clear_zero_time_node_expiry.sql");
 const HEADSCALE_GO_V028_AUTH_ROWS_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_28_0_sqlite_auth_rows.sql");
+const HEADSCALE_GO_V028_REQUEST_TAGS_ROWS_FIXTURE: &str =
+    include_str!("fixtures/headscale_go/v0_28_0_sqlite_request_tags_rows.sql");
 const HEADSCALE_GO_V0260_EMPTY_FIXTURE: &str =
     include_str!("fixtures/headscale_go/v0_26_0_sqlite_empty.sql");
 const HEADSCALE_GO_V0271_EMPTY_FIXTURE: &str =
@@ -615,6 +617,87 @@ async fn imports_headscale_go_v028_modern_auth_rows() {
     db.migrate()
         .await
         .expect("repeat migration stays idempotent");
+}
+
+#[tokio::test]
+async fn imports_request_tags_migration_outcome_and_applies_current_node_migrations() {
+    let (_dir, db) = file_db().await;
+    seed_fixture(
+        &db,
+        HEADSCALE_GO_V028_REQUEST_TAGS_ROWS_FIXTURE,
+        "headscale-go request-tags rows fixture",
+    )
+    .await;
+
+    let before = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check import compatibility");
+    assert!(matches!(
+        before,
+        HeadscaleGoImportCompatibility::GoMigrations { required_migration }
+            if required_migration == "202601121700-migrate-hostinfo-request-tags"
+    ));
+
+    db.migrate()
+        .await
+        .expect("migrate imported headscale-go request-tags db");
+
+    let mixed = headscale_nodes::get_by_id(db.pool(), 1)
+        .await
+        .expect("read mixed RequestTags node");
+    assert_eq!(
+        mixed.host_info_value()["RequestTags"],
+        serde_json::json!(["tag:server", "tag:db"])
+    );
+    assert_eq!(
+        mixed.tag_list(),
+        vec!["tag:server"],
+        "authorized RequestTags are present in nodes.tags and unauthorized tags are skipped"
+    );
+    assert_eq!(
+        mixed.user_id, None,
+        "tagged nodes are tag-owned after the current upstream user_id migration"
+    );
+    assert_eq!(
+        mixed.expiry, None,
+        "Go zero-time node expiry reads as non-expiring after import"
+    );
+    let mixed_raw_expiry: Option<String> =
+        sqlx::query_scalar("SELECT expiry FROM nodes WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .expect("query raw mixed node expiry");
+    assert_eq!(
+        mixed_raw_expiry, None,
+        "Go zero-time node expiry is normalized to SQL NULL"
+    );
+
+    let denied = headscale_nodes::get_by_id(db.pool(), 2)
+        .await
+        .expect("read denied RequestTags node");
+    assert_eq!(
+        denied.host_info_value()["RequestTags"],
+        serde_json::json!(["tag:db"])
+    );
+    assert!(
+        denied.tag_list().is_empty(),
+        "unauthorized-only RequestTags do not populate nodes.tags"
+    );
+    assert_eq!(denied.user_id, Some(1), "untagged nodes remain user-owned");
+    assert_eq!(denied.expiry, None);
+
+    let policy = headscale_db::policies::get_latest(db.pool())
+        .await
+        .expect("query imported policy")
+        .expect("imported policy");
+    assert_eq!(policy.data, r#"{"tagOwners":{"tag:server":["alice@"]}}"#);
+
+    let after = db
+        .check_headscale_go_import_compatibility()
+        .await
+        .expect("check post-migration compatibility");
+    assert_eq!(after, HeadscaleGoImportCompatibility::RustManaged);
 }
 
 #[tokio::test]

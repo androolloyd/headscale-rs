@@ -2051,6 +2051,11 @@ fn rebuild_peer_delta_chunk(
         return None;
     }
 
+    let pure_self_update = self_node_changed
+        && !options.include_dns_config
+        && full_peers_changed.is_empty()
+        && peers_removed.is_empty()
+        && peer_patches.is_empty();
     let mr = MapResponse {
         node: if self_node_changed {
             current_self_node.clone()
@@ -2063,13 +2068,21 @@ fn rebuild_peer_delta_chunk(
         dns_config: options
             .include_dns_config
             .then(|| build_dns_for_snapshot(dns, policy, &snapshot, self_node_key)),
-        user_profiles: user_profiles_for_snapshot(
-            &snapshot,
-            self_node_key,
-            allowed_peer_ids.as_ref(),
-        ),
-        packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
+        user_profiles: if pure_self_update {
+            Vec::new()
+        } else {
+            user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref())
+        },
+        packet_filters: if pure_self_update {
+            BTreeMap::new()
+        } else {
+            packet_filters_for_node(policy, &packet_filter_nodes, self_node_id)
+        },
+        ssh_policy: if pure_self_update {
+            None
+        } else {
+            ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url)
+        },
         control_time: Some(chrono::Utc::now()),
         keep_alive: false,
         ..MapResponse::default()
@@ -5529,6 +5542,50 @@ mod tests {
         assert!(mr.peers_removed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert!(mr.dns_config.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_admin_rename_emits_self_only_node_update() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+
+        let app = router(state.clone());
+        let mut body = open_zstd_stream(app, &a).await;
+        let first_mr = next_zstd_map_response(&mut body).await;
+        assert_eq!(first_mr.node.as_ref().unwrap().name, "peer-a");
+        assert_eq!(first_mr.peers.len(), 1);
+        assert_eq!(first_mr.peers[0].id, stable_id_from_key(&b));
+
+        let history_len = state.machines.map_change_history().len();
+        assert!(state.machines.rename(&a, "admin-renamed".into()));
+
+        let changes = state.machines.map_change_history();
+        assert_eq!(changes.len(), history_len + 1);
+        assert_eq!(
+            changes[history_len].reasons,
+            vec![MapChangeReason::FullSelfUpdate]
+        );
+        assert_eq!(
+            changes[history_len].target_node_id,
+            Some(stable_id_from_key(&a))
+        );
+
+        let mr = next_zstd_map_response(&mut body).await;
+        let self_node = mr.node.as_ref().expect("self rename update");
+        assert_eq!(self_node.id, stable_id_from_key(&a));
+        assert_eq!(self_node.name, "admin-renamed");
+        assert!(mr.peers.is_empty());
+        assert!(mr.peers_changed.is_empty());
+        assert!(mr.peers_removed.is_empty());
+        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.dns_config.is_none());
+        assert!(mr.derp_map.is_none());
+        assert!(mr.user_profiles.is_empty());
+        assert!(mr.packet_filters.is_empty());
+        assert!(mr.ssh_policy.is_none());
     }
 
     #[tokio::test]

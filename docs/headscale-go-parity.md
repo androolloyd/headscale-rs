@@ -564,7 +564,9 @@ Recent coverage note (2026-06-02): map-stream churn coverage now proves
 same-key auth completion records the upstream `node added` reason and wakes an
 active observer `/map` stream with an incremental `PeersChanged` delta for the
 reauthenticated node, without emitting DNS/config, peer-removal, or patch
-payloads.
+payloads. Admin rename churn now mirrors headscale-go's self-map response path:
+the renamed node receives a self `Node` update without peer, DNS, DERP,
+user-profile, packet-filter, or SSH-policy payloads.
 
 ## Next Implementation Order
 

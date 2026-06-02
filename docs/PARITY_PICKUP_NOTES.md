@@ -1967,6 +1967,13 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   balance, and transfer aliases return the standard HTTP 404/code 5 `Not Found`
   status JSON instead of being accepted by the headscale replacement gateway.
 
+## 2026-06-02 grpc-gateway raw semicolon query parser
+
+- Matched current headscale-go/grpc-gateway query parsing for raw semicolon
+  separators: authenticated URL query parameters and POST form fallback bodies
+  now return HTTP 400/code 3 with `invalid semicolon separator in query`
+  instead of letting `serde_urlencoded` treat the semicolon as ordinary text.
+
 ## 2026-06-02 dumpConfig v0.29 error-shape pin
 
 - Updated hidden `dumpConfig` execution to match the pinned headscale-go

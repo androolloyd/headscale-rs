@@ -287,6 +287,7 @@ fn packet_filter_nodes_from_snapshot(
         .iter()
         .map(|(node_key, rec)| PacketFilterNode {
             id: rec.stable_node_id_for_key(node_key),
+            user_id: rec.user_id,
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
             addrs: rec.address_strings(),
             tags: rec.forced_tags.clone(),
@@ -6745,6 +6746,140 @@ mod tests {
         );
         let peer = changed_peer(&delta, "router").expect("router peer delta");
         assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_worker_batched_map_request_auto_approval_waits_for_map_tick() {
+        let (state, _dir) = fixture();
+        let policy = r#"{
+            "acls": [
+                {"action":"accept","src":["alice@"],"dst":["10.32.0.0/16:*"]}
+            ],
+            "autoApprovers": {
+                "routes": {"10.32.0.0/16": ["router@"]}
+            }
+        }"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(policy).unwrap(),
+            policy.into(),
+        );
+
+        let alice = "32".repeat(32);
+        let router_key = "33".repeat(32);
+        let route = "10.32.1.0/24";
+        state.machines.upsert(
+            alice.clone(),
+            policy_record(&alice, "alice", 10, "alice", Vec::new()),
+        );
+        state.machines.upsert(
+            router_key.clone(),
+            policy_record(&router_key, "router", 11, "router", Vec::new()),
+        );
+        let _nodestore_batcher = state
+            .machines
+            .configure_nodestore_write_batcher(1, Duration::from_secs(5));
+        let _map_batcher = start_test_map_batcher(&state).await;
+
+        let app = router(state.clone());
+        let mut router_body = open_zstd_stream(app.clone(), &router_key).await;
+        let _router_first = next_zstd_map_response(&mut router_body).await;
+        let mut alice_body = open_zstd_stream(app.clone(), &alice).await;
+        let first_mr = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            first_mr.peers.is_empty(),
+            "router is hidden until it serves an auto-approved route"
+        );
+        let _ = state.machines.drain_pending_map_changes();
+
+        let history_len = state.machines.map_change_history().len();
+        let generated_before = state.machines.mapresponse_generated_metrics();
+        let full_before = generated_before.get("full").copied().unwrap_or_default();
+        let policy_before = generated_before.get("policy").copied().unwrap_or_default();
+        let update_req = serde_json::json!({
+            "Version": 113,
+            "OmitPeers": true,
+            "Hostinfo": {
+                "RoutableIPs": [route]
+            },
+        });
+        let update_resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{router_key}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&update_req).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let raw = to_bytes(update_resp.into_body(), 32 * 1024).await.unwrap();
+        assert!(raw.is_empty());
+
+        let changes = state.machines.map_change_history();
+        let change = changes
+            .get(history_len)
+            .expect("worker auto-approval map request records a map change");
+        assert_eq!(change.reason_labels(), vec!["policy change"]);
+        assert_eq!(change.change_type(), "policy");
+        assert!(change.content.include_policy);
+        assert!(change.content.requires_runtime_peer_computation);
+        assert!(
+            state
+                .machines
+                .pending_map_changes()
+                .contains_key(&stable_id_from_key(&alice)),
+            "worker-applied auto-approval should be queued for the map batcher"
+        );
+
+        tokio::task::yield_now().await;
+        let immediate = http_body_util::BodyExt::frame(&mut alice_body).now_or_never();
+        assert!(
+            immediate.is_none(),
+            "worker auto-approval map changes should wait for the map-batch tick"
+        );
+        assert_eq!(
+            state
+                .machines
+                .mapresponse_generated_metrics()
+                .get("full")
+                .copied()
+                .unwrap_or_default(),
+            full_before,
+            "worker-applied auto-approval must not emit a stale full update before the batch tick"
+        );
+
+        publish_test_map_batch().await;
+
+        let delta = next_zstd_map_response(&mut alice_body).await;
+        assert!(
+            delta.node.is_none(),
+            "worker-batched route auto-approval should be a peer delta, not a full map"
+        );
+        assert!(delta.peers.is_empty());
+        assert!(delta.peers_removed.is_empty());
+        assert!(delta.peers_changed_patch.is_empty());
+        assert!(
+            delta.dns_config.is_some(),
+            "policy-reasoned route auto-approval should carry policy-derived DNS updates"
+        );
+        let peer = changed_peer(&delta, "router").expect("router peer delta");
+        assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
+
+        let generated_after = state.machines.mapresponse_generated_metrics();
+        assert_eq!(
+            generated_after.get("full").copied().unwrap_or_default(),
+            full_before,
+            "worker-batched route auto-approval must not generate a full follow-up response"
+        );
+        assert_eq!(
+            generated_after.get("policy").copied().unwrap_or_default(),
+            policy_before + 1,
+            "worker-batched route auto-approval should generate one policy peer delta"
+        );
     }
 
     #[tokio::test]

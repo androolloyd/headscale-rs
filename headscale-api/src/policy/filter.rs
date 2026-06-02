@@ -53,6 +53,7 @@ use crate::tailscale_wire::wire::{CapGrant, FilterRule, NetPortRange, PortRange}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PacketFilterNode {
     pub id: u64,
+    pub user_id: Option<u64>,
     pub user: Option<String>,
     pub addrs: Vec<String>,
     pub tags: Vec<String>,
@@ -603,19 +604,34 @@ fn same_user_untagged_nodes<'a>(
     nodes: &'a [PacketFilterNode],
     node: &PacketFilterNode,
 ) -> Vec<&'a PacketFilterNode> {
-    let Some(user) = node.user.as_deref().filter(|user| !user.is_empty()) else {
+    let Some(owner) = node_owner_key(node) else {
         return Vec::new();
     };
 
     nodes
         .iter()
         .filter(|candidate| is_untagged_user_owned(candidate))
-        .filter(|candidate| candidate.user.as_deref() == Some(user))
+        .filter(|candidate| node_owner_key(candidate).as_ref() == Some(&owner))
         .collect()
 }
 
 fn is_untagged_user_owned(node: &PacketFilterNode) -> bool {
-    node.tags.is_empty() && node.user.as_deref().is_some_and(|user| !user.is_empty())
+    node.tags.is_empty() && node_owner_key(node).is_some()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NodeOwnerKey<'a> {
+    Id(u64),
+    User(&'a str),
+}
+
+fn node_owner_key(node: &PacketFilterNode) -> Option<NodeOwnerKey<'_>> {
+    node.user_id.map(NodeOwnerKey::Id).or_else(|| {
+        node.user
+            .as_deref()
+            .filter(|user| !user.is_empty())
+            .map(NodeOwnerKey::User)
+    })
 }
 
 fn nodes_matching_prefixes(nodes: &[&PacketFilterNode], prefixes: &[String]) -> Vec<String> {
@@ -1528,6 +1544,7 @@ mod tests {
         let nodes = vec![
             PacketFilterNode {
                 id: 1,
+                user_id: Some(1),
                 user: Some("alice".into()),
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
@@ -1535,6 +1552,7 @@ mod tests {
             },
             PacketFilterNode {
                 id: 2,
+                user_id: None,
                 user: None,
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
@@ -1559,6 +1577,56 @@ mod tests {
     }
 
     #[test]
+    fn autogroup_self_uses_user_id_when_login_name_is_unhydrated() {
+        let d = doc(
+            vec![PolicyRule {
+                action: PolicyAction::Accept,
+                src: vec!["autogroup:member".into()],
+                dst: vec!["autogroup:self".into()],
+                ports: vec!["tcp/22".into()],
+            }],
+            BTreeMap::new(),
+        );
+        let nodes = vec![
+            PacketFilterNode {
+                id: 1,
+                user_id: Some(7),
+                user: None,
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 2,
+                user_id: Some(7),
+                user: None,
+                addrs: vec!["100.64.0.2".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+            PacketFilterNode {
+                id: 3,
+                user_id: Some(8),
+                user: None,
+                addrs: vec!["100.64.0.3".into()],
+                tags: Vec::new(),
+                routes: Vec::new(),
+            },
+        ];
+
+        let first_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
+        assert_eq!(first_rules.len(), 1);
+        assert_eq!(first_rules[0].src_ips, vec!["100.64.0.1-100.64.0.2"]);
+        assert_eq!(first_rules[0].dst_ports[0].ip, "100.64.0.1");
+        assert_eq!(first_rules[0].dst_ports[0].ports.first, 22);
+
+        let second_rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
+        assert_eq!(second_rules.len(), 1);
+        assert_eq!(second_rules[0].src_ips, vec!["100.64.0.1-100.64.0.2"]);
+        assert_eq!(second_rules[0].dst_ports[0].ip, "100.64.0.2");
+    }
+
+    #[test]
     fn app_grant_emits_reduced_cap_grant_for_destination_node() {
         let d = crate::policy::parse_hujson_policy(
             r#"{
@@ -1574,6 +1642,7 @@ mod tests {
         let nodes = vec![
             PacketFilterNode {
                 id: 1,
+                user_id: Some(1),
                 user: Some("client".into()),
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
@@ -1581,6 +1650,7 @@ mod tests {
             },
             PacketFilterNode {
                 id: 2,
+                user_id: Some(2),
                 user: Some("ops".into()),
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:server".into()],
@@ -1619,6 +1689,7 @@ mod tests {
         let nodes = vec![
             PacketFilterNode {
                 id: 1,
+                user_id: Some(1),
                 user: Some("client".into()),
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
@@ -1626,6 +1697,7 @@ mod tests {
             },
             PacketFilterNode {
                 id: 2,
+                user_id: Some(2),
                 user: Some("server".into()),
                 addrs: vec!["100.64.0.2".into()],
                 tags: Vec::new(),
@@ -1680,6 +1752,7 @@ mod tests {
         let nodes = vec![
             PacketFilterNode {
                 id: 1,
+                user_id: Some(1),
                 user: Some("client".into()),
                 addrs: vec!["100.64.0.1".into()],
                 tags: Vec::new(),
@@ -1687,6 +1760,7 @@ mod tests {
             },
             PacketFilterNode {
                 id: 2,
+                user_id: Some(2),
                 user: Some("router".into()),
                 addrs: vec!["100.64.0.2".into()],
                 tags: vec!["tag:router".into()],

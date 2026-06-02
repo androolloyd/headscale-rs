@@ -2023,6 +2023,20 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   rejection, and an in-memory native DERP login plus ping/pong stream.
 - Remaining native DERP runtime gaps: `Derp-Fast-Start` no-response hijack,
   actual DERP-over-WebSocket transport, verify-client admission through the
-  headscale registry, keepalive/restarting/health runtime scheduling, config
-  wiring to enable the native runtime from `serve`, and stock-client native DERP
-  smokes.
+  headscale registry, keepalive/restarting/health runtime scheduling, and
+  stock-client native DERP smokes.
+
+## 2026-06-02 native DERP config/runtime enablement
+
+- Added explicit embedded DERP relay modes: sidecar remains the default for
+  hand-authored Rust `server.embedded_derp` blocks, while upstream-shaped
+  `derp.server.enabled` projects to native relay mode with `stun_only = false`.
+- The CLI server now mounts the native `/derp` runtime when embedded native
+  relay is enabled, persists the DERP private key as Tailscale's
+  `privkey:<64 lowercase hex chars>` format, creates missing key directories,
+  writes generated keys with `0600` on Unix, and rejects reuse of the server
+  Noise key.
+- Focused tests cover native relay configtest acceptance without a sidecar
+  binary, sidecar validation preservation, native runtime attachment, Noise-key
+  collision rejection, native relay startup without spawning a sidecar, and
+  DERP key create/reload/malformed-key paths.

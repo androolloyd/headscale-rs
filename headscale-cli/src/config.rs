@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use headscale_api::dns::{DnsConfigSpec, parse_extra_records};
-use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
+use headscale_core::config::{EmbeddedDerpConfig, EmbeddedDerpRelayMode, OidcConfig};
 use headscale_db::DatabaseBackend;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -1260,7 +1260,8 @@ impl CliConfig {
             && server.embedded_derp.region_code == derp.server.region_code
             && server.embedded_derp.region_name == derp.server.region_name
             && server.embedded_derp.stun_addr == derp.server.stun_listen_addr
-            && server.embedded_derp.stun_only
+            && !server.embedded_derp.stun_only
+            && server.embedded_derp.relay_mode == EmbeddedDerpRelayMode::Native
             && server.embedded_derp.verify_clients == derp.server.verify_clients
             && server.embedded_derp.derper_config_path == derp.server.private_key_path
             && server.embedded_derp.ipv4 == derp.server.ipv4.clone().unwrap_or_default()
@@ -1391,7 +1392,8 @@ impl CliConfig {
                 .region_name
                 .clone_from(&derp.server.region_name);
             server.embedded_derp.stun_addr = derp.server.stun_listen_addr;
-            server.embedded_derp.stun_only = true;
+            server.embedded_derp.stun_only = false;
+            server.embedded_derp.relay_mode = EmbeddedDerpRelayMode::Native;
             server.embedded_derp.verify_clients = derp.server.verify_clients;
             server
                 .embedded_derp
@@ -1511,7 +1513,7 @@ impl CliConfig {
             if server.embedded_derp.stun_addr.is_none() {
                 bail!("server.embedded_derp.stun_addr is required when embedded DERP is enabled");
             }
-            if server.embedded_derp.relay_enabled()
+            if server.embedded_derp.sidecar_relay_enabled()
                 && server.embedded_derp.derper_binary.as_os_str().is_empty()
             {
                 bail!(
@@ -3157,7 +3159,8 @@ expiry = 0
         assert_eq!(embedded.region_code, "env");
         assert_eq!(embedded.region_name, "Env DERP");
         assert_eq!(embedded.stun_addr, Some("127.0.0.1:3479".parse().unwrap()));
-        assert!(embedded.stun_only);
+        assert!(!embedded.stun_only);
+        assert_eq!(embedded.relay_mode, EmbeddedDerpRelayMode::Native);
         assert!(!embedded.verify_clients);
         assert_eq!(
             embedded.derper_config_path,
@@ -4644,6 +4647,7 @@ region_name = "Test DERP"
 derp_port = 8443
 stun_addr = "0.0.0.0:3478"
 stun_only = true
+relay_mode = "sidecar"
 omit_default_regions = true
 insecure_for_tests = true
 derper_binary = "/usr/local/bin/derper"
@@ -4666,6 +4670,7 @@ verify_clients = true
         assert_eq!(embedded.derp_port, 8443);
         assert_eq!(embedded.stun_addr, Some("0.0.0.0:3478".parse().unwrap()));
         assert!(embedded.stun_only);
+        assert_eq!(embedded.relay_mode, EmbeddedDerpRelayMode::Sidecar);
         assert!(embedded.omit_default_regions);
         assert!(embedded.insecure_for_tests);
         assert_eq!(
@@ -4701,6 +4706,9 @@ server_url = "https://headscale.example"
 [noise]
 private_key_path = "/var/lib/headscale/noise_private.key"
 
+[database]
+type = "sqlite"
+
 [dns]
 magic_dns = false
 override_local_dns = false
@@ -4720,6 +4728,35 @@ stun_only = true
             ),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn configtest_accepts_native_embedded_derp_without_sidecar_binary() {
+        let source = r#"
+[server]
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "/var/lib/headscale/noise_private.key"
+
+[database]
+type = "sqlite"
+
+[dns]
+magic_dns = false
+override_local_dns = false
+
+[server.embedded_derp]
+enabled = true
+host_name = "headscale.example"
+stun_addr = "127.0.0.1:3478"
+relay_mode = "native"
+derper_config_path = "/var/lib/headscale/derp_server_private.key"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+
+        config.validate_for_configtest().unwrap();
     }
 
     #[test]
@@ -4780,7 +4817,8 @@ derp:
         assert_eq!(embedded.region_name, "Headscale Embedded DERP");
         assert_eq!(embedded.host_name, "headscale.example");
         assert_eq!(embedded.stun_addr, Some("0.0.0.0:3478".parse().unwrap()));
-        assert!(embedded.stun_only);
+        assert!(!embedded.stun_only);
+        assert_eq!(embedded.relay_mode, EmbeddedDerpRelayMode::Native);
         assert!(embedded.verify_clients);
         assert_eq!(
             embedded.derper_config_path,
@@ -4842,7 +4880,8 @@ region_name = "Headscale Embedded DERP"
         assert_eq!(embedded.host_name, "headscale.example");
         assert_eq!(embedded.region_id, 999);
         assert_eq!(embedded.region_code, "headscale");
-        assert!(embedded.stun_only);
+        assert!(!embedded.stun_only);
+        assert_eq!(embedded.relay_mode, EmbeddedDerpRelayMode::Native);
     }
 
     #[test]

@@ -5,7 +5,12 @@
 //! normal HTTP upgrade, DERP login frames, and local relay routing. Upstream's
 //! `Derp-Fast-Start` no-response hijack and WebSocket transport remain open.
 
-use std::sync::Arc;
+use std::{
+    fs,
+    io::{ErrorKind, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use axum::{
     body::Body,
@@ -30,6 +35,7 @@ const DERP_FAST_START_HEADER: &str = "Derp-Fast-Start";
 const DERP_VERSION_HEADER: &str = "Derp-Version";
 const DERP_PUBLIC_KEY_HEADER: &str = "Derp-Public-Key";
 const READ_BUF_LEN: usize = 16 * 1024;
+const DERP_PRIVATE_KEY_PREFIX: &str = "privkey:";
 
 /// Shared native DERP runtime.
 #[derive(Clone, Debug)]
@@ -44,6 +50,43 @@ impl NativeDerpRuntime {
         Self::new(DerpNodeKeyPair::generate(), NativeDerpRelay::new())
     }
 
+    /// Load a native DERP private key from `path`, generating and persisting one
+    /// in Tailscale's `privkey:<64 lowercase hex chars>` format if absent.
+    ///
+    /// Parent directories are created when the key is generated. On Unix the
+    /// generated file is written with mode `0600`.
+    pub fn load_or_generate_key(path: impl AsRef<Path>) -> Result<DerpNodeKeyPair, WireError> {
+        let path = path.as_ref();
+        match fs::read_to_string(path) {
+            Ok(contents) => parse_derp_private_key(path, &contents),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    fs::create_dir_all(parent)?;
+                }
+
+                let key = DerpNodeKeyPair::generate();
+                let encoded = format!(
+                    "{DERP_PRIVATE_KEY_PREFIX}{}\n",
+                    hex::encode(key.private_key())
+                );
+                write_derp_private_key(path, encoded.as_bytes())?;
+                Ok(key)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Create a runtime using a persisted native DERP private key and explicit
+    /// relay.
+    pub fn load_or_generate(
+        path: impl AsRef<Path>,
+        relay: NativeDerpRelay,
+    ) -> Result<Self, WireError> {
+        Ok(Self::new(Self::load_or_generate_key(path)?, relay))
+    }
+
     /// Create a runtime from explicit protocol pieces.
     pub fn new(server_key: DerpNodeKeyPair, relay: NativeDerpRelay) -> Self {
         Self {
@@ -56,6 +99,61 @@ impl NativeDerpRuntime {
     pub fn public_key(&self) -> [u8; KEY_LEN] {
         self.server_key.public_key()
     }
+}
+
+fn parse_derp_private_key(path: &Path, contents: &str) -> Result<DerpNodeKeyPair, WireError> {
+    let text = contents.trim();
+    let Some(hex_key) = text.strip_prefix(DERP_PRIVATE_KEY_PREFIX) else {
+        return Err(WireError::Internal(format!(
+            "DERP private key at {} must start with {DERP_PRIVATE_KEY_PREFIX}",
+            path.display()
+        )));
+    };
+    if hex_key.len() != KEY_LEN * 2
+        || !hex_key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(WireError::Internal(format!(
+            "DERP private key at {} must be {DERP_PRIVATE_KEY_PREFIX}<64 lowercase hex chars>",
+            path.display()
+        )));
+    }
+
+    let decoded = hex::decode(hex_key).map_err(|err| {
+        WireError::Internal(format!(
+            "parse DERP private key at {}: {err}",
+            path.display()
+        ))
+    })?;
+    let private: [u8; KEY_LEN] = decoded.try_into().map_err(|decoded: Vec<u8>| {
+        WireError::Internal(format!(
+            "DERP private key at {} decoded to {} bytes; expected {KEY_LEN}",
+            path.display(),
+            decoded.len()
+        ))
+    })?;
+    DerpNodeKeyPair::from_private_key(private).map_err(|err| {
+        WireError::Internal(format!(
+            "invalid DERP private key at {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn write_derp_private_key(path: &Path, contents: &[u8]) -> Result<(), WireError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Native `/derp` handler.
@@ -371,6 +469,68 @@ mod tests {
             NativeDerpRelay::new(),
         );
         assert_eq!(runtime.public_key(), runtime.server_key.public_key());
+    }
+
+    #[test]
+    fn native_derp_load_or_generate_key_creates_and_reloads_text_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("derp.private");
+
+        let generated = NativeDerpRuntime::load_or_generate_key(&path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            format!("privkey:{}\n", hex::encode(generated.private_key()))
+        );
+
+        let reloaded = NativeDerpRuntime::load_or_generate_key(&path).unwrap();
+        assert_eq!(reloaded.private_key(), generated.private_key());
+    }
+
+    #[test]
+    fn native_derp_load_or_generate_key_loads_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("derp.key");
+        let private = [6u8; KEY_LEN];
+        std::fs::write(&path, format!("privkey:{}\n", hex::encode(private))).unwrap();
+
+        let loaded = NativeDerpRuntime::load_or_generate_key(&path).unwrap();
+        assert_eq!(loaded.private_key(), private);
+
+        let runtime = NativeDerpRuntime::load_or_generate(&path, NativeDerpRelay::new()).unwrap();
+        assert_eq!(runtime.public_key(), loaded.public_key());
+    }
+
+    #[test]
+    fn native_derp_load_or_generate_key_rejects_malformed_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("derp.key");
+
+        for contents in [
+            "not-a-key",
+            "privkey:abc",
+            "privkey:0000000000000000000000000000000000000000000000000000000000000000",
+            "privkey:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(
+                NativeDerpRuntime::load_or_generate_key(&path).is_err(),
+                "expected malformed key to be rejected: {contents}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_derp_load_or_generate_key_writes_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("derp.key");
+        NativeDerpRuntime::load_or_generate_key(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     fn test_state_with_native_derp() -> WireState {

@@ -39,6 +39,7 @@ use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
 use headscale_api::policy::{PolicyStore, parse_hujson_policy};
+use headscale_api::tailscale_wire::derp::NativeDerpRuntime;
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
@@ -51,7 +52,7 @@ use headscale_api::tailscale_wire::{
     spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
-use headscale_core::derp::EmbeddedDerpRuntime;
+use headscale_core::derp::{EmbeddedDerpRuntime, native::NativeDerpRelay};
 
 use crate::acme_issuer::{
     AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate,
@@ -337,7 +338,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     )
     .context("load DNS runtime config")?;
     let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
-    let runtime = build_persistent_wire_runtime_from_database(
+    let mut runtime = build_persistent_wire_runtime_from_database(
         &db,
         &cfg.state_dir,
         server_url,
@@ -351,6 +352,8 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         runtime_config,
     )
     .await?;
+    attach_native_derp_runtime(&mut runtime.state, embedded_derp_runtime.config())
+        .context("start native DERP relay runtime")?;
     let ephemeral_gc = runtime.state.machines.configure_ephemeral_gc(
         runtime
             .state
@@ -556,6 +559,25 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     }
     drop(embedded_derp_runtime);
     serve_result
+}
+
+fn attach_native_derp_runtime(state: &mut WireState, cfg: &EmbeddedDerpConfig) -> Result<()> {
+    if !cfg.native_relay_enabled() {
+        return Ok(());
+    }
+
+    let native_derp =
+        NativeDerpRuntime::load_or_generate(&cfg.derper_config_path, NativeDerpRelay::new())?;
+    if native_derp.public_key() == state.server_noise_key.public_bytes() {
+        bail!("embedded DERP private key must not be the same as the Noise private key");
+    }
+    tracing::info!(
+        public_key = %hex::encode(native_derp.public_key()),
+        path = %cfg.derper_config_path.display(),
+        "embedded native DERP relay ready"
+    );
+    state.native_derp = Some(Arc::new(native_derp));
+    Ok(())
 }
 
 struct PersistentWireRuntime {
@@ -921,6 +943,7 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         machines: wire_registry,
         registration_store: Some(stores.registration_store()),
         derp_map: DerpMapStore::shared(derp_map),
+        native_derp: None,
         policy,
         knock: KnockConfig::disabled(),
         dns,
@@ -1003,6 +1026,7 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
         machines: wire_registry,
         registration_store: Some(stores.registration_store()),
         derp_map: DerpMapStore::shared(derp_map),
+        native_derp: None,
         policy,
         knock: KnockConfig::disabled(),
         dns,
@@ -2645,6 +2669,7 @@ mod tests {
         register as wire_register_handlers,
         wire::{MapResponse, RegisterResponse},
     };
+    use headscale_core::config::EmbeddedDerpRelayMode;
     use hyper_util::rt::TokioIo;
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -3457,6 +3482,76 @@ regions:
             Some("https://headscale.example")
         );
         assert!(runtime.state.machines.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_derp_runtime_attaches_from_embedded_config() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+        let key_path = dir.path().join("derp").join("server.key");
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "headscale.example".into(),
+            stun_addr: Some("127.0.0.1:3478".parse().unwrap()),
+            relay_mode: EmbeddedDerpRelayMode::Native,
+            derper_config_path: key_path.clone(),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        attach_native_derp_runtime(&mut runtime.state, &cfg).unwrap();
+
+        assert!(runtime.state.native_derp.is_some());
+        let contents = std::fs::read_to_string(&key_path).unwrap();
+        let text = contents.trim();
+        assert!(text.starts_with("privkey:"));
+        assert_eq!(text.len(), "privkey:".len() + 64);
+    }
+
+    #[tokio::test]
+    async fn native_derp_runtime_rejects_noise_key_reuse() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+        let noise_key = std::fs::read(dir.path().join("noise_static.key")).unwrap();
+        assert_eq!(noise_key.len(), 32);
+        let key_path = dir.path().join("derp.key");
+        std::fs::write(&key_path, format!("privkey:{}", hex::encode(noise_key))).unwrap();
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "headscale.example".into(),
+            stun_addr: Some("127.0.0.1:3478".parse().unwrap()),
+            relay_mode: EmbeddedDerpRelayMode::Native,
+            derper_config_path: key_path,
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let err = attach_native_derp_runtime(&mut runtime.state, &cfg).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("embedded DERP private key must not be the same"),
+            "{err:#}"
+        );
     }
 
     #[cfg(feature = "postgres-sqlx")]

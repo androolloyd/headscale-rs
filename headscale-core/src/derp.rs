@@ -2354,9 +2354,9 @@ pub enum DerpError {
 
 /// Embedded DERP/STUN runtime.
 ///
-/// The Rust runtime owns the lightweight STUN responder. DERP relay traffic is
-/// delegated to the upstream `derper` binary because DERP's relay protocol has
-/// no maintained Rust implementation in this repository.
+/// The Rust runtime owns the lightweight STUN responder and can either spawn
+/// the upstream `derper` binary for relay traffic or leave relay ownership to
+/// the native `/derp` runtime mounted by the API layer.
 pub struct EmbeddedDerpRuntime {
     cfg: EmbeddedDerpConfig,
     stun: Option<StunListener>,
@@ -2380,7 +2380,7 @@ impl EmbeddedDerpRuntime {
             Some(addr) => Some(StunListener::bind(addr).await?),
             None => None,
         };
-        let sidecar = if cfg.relay_enabled() {
+        let sidecar = if cfg.sidecar_relay_enabled() {
             Some(DerperSidecar::spawn(&cfg)?)
         } else {
             None
@@ -2423,7 +2423,10 @@ fn validate_embedded_derp_config(cfg: &EmbeddedDerpConfig) -> Result<(), Embedde
     if cfg.stun_addr.is_none() {
         return Err(EmbeddedDerpError::MissingStunAddress);
     }
-    if cfg.relay_enabled() {
+    if cfg.relay_enabled() && cfg.derper_config_path.as_os_str().is_empty() {
+        return Err(EmbeddedDerpError::MissingDerperConfigPath);
+    }
+    if cfg.sidecar_relay_enabled() {
         if cfg.derper_binary.as_os_str().is_empty() {
             return Err(EmbeddedDerpError::MissingDerperBinary(PathBuf::new()));
         }
@@ -2431,9 +2434,6 @@ fn validate_embedded_derp_config(cfg: &EmbeddedDerpConfig) -> Result<(), Embedde
             return Err(EmbeddedDerpError::MissingDerperBinary(
                 cfg.derper_binary.clone(),
             ));
-        }
-        if cfg.derper_config_path.as_os_str().is_empty() {
-            return Err(EmbeddedDerpError::MissingDerperConfigPath);
         }
     }
     Ok(())
@@ -2451,7 +2451,7 @@ pub enum EmbeddedDerpError {
     #[error("embedded DERP derper_binary is missing or not a file: {0:?}")]
     MissingDerperBinary(PathBuf),
 
-    #[error("embedded DERP derper_config_path is required when the relay sidecar is enabled")]
+    #[error("embedded DERP derper_config_path is required when DERP relay is enabled")]
     MissingDerperConfigPath,
 
     #[error("embedded DERP/STUN I/O error: {0}")]
@@ -2680,6 +2680,25 @@ mod tests {
             result,
             Err(EmbeddedDerpError::MissingDerperBinary(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_native_relay_does_not_spawn_sidecar() {
+        let cfg = EmbeddedDerpConfig {
+            enabled: true,
+            host_name: "derp.local".to_string(),
+            stun_addr: Some("127.0.0.1:0".parse().unwrap()),
+            relay_mode: crate::config::EmbeddedDerpRelayMode::Native,
+            derper_config_path: "/tmp/headscale-rs-test-native-derp.key".into(),
+            ..EmbeddedDerpConfig::default()
+        };
+
+        let runtime = EmbeddedDerpRuntime::start(cfg).await.unwrap();
+        let addr = runtime.stun_local_addr().unwrap();
+
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert!(runtime.config().native_relay_enabled());
+        assert!(runtime.sidecar_status().is_none());
     }
 
     #[tokio::test]

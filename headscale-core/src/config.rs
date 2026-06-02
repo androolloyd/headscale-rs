@@ -59,12 +59,23 @@ impl Default for Config {
     }
 }
 
+/// Embedded DERP relay implementation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedDerpRelayMode {
+    /// Spawn the upstream `derper` binary and let it own DERP relay traffic.
+    #[default]
+    Sidecar,
+    /// Serve DERP relay traffic through the native Rust `/derp` runtime.
+    Native,
+}
+
 /// Embedded DERP/STUN runtime configuration.
 ///
 /// This mirrors the operator-facing slice that headscale-go exposes for its
-/// embedded DERP server, while leaving the actual DERP relay protocol to the
-/// upstream `derper` binary. Native Rust owns the STUN responder and the DERP
-/// map shape.
+/// embedded DERP server. Rust owns the STUN responder and DERP map shape; relay
+/// traffic can either use the upstream `derper` sidecar or the native Rust
+/// runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EmbeddedDerpConfig {
@@ -80,6 +91,8 @@ pub struct EmbeddedDerpConfig {
     pub stun_addr: Option<SocketAddr>,
     /// Run a STUN-only DERP-map node without spawning a DERP relay process.
     pub stun_only: bool,
+    /// Relay implementation used when `enabled = true` and `stun_only = false`.
+    pub relay_mode: EmbeddedDerpRelayMode,
     /// Numeric DERP region ID advertised to clients.
     pub region_id: u16,
     /// Short region code advertised to clients.
@@ -94,12 +107,13 @@ pub struct EmbeddedDerpConfig {
     pub ipv4: String,
     /// Optional public IPv6 hint advertised for the embedded DERP node.
     pub ipv6: String,
-    /// Path to the upstream `derper` binary. Required unless `stun_only = true`.
+    /// Path to the upstream `derper` binary. Required for sidecar relay mode.
     pub derper_binary: PathBuf,
     /// TCP bind address passed to `derper -a`.
     pub derper_listen_addr: SocketAddr,
-    /// Path passed to `derper -c`. If empty, the CLI server resolves it under
-    /// the server state directory before starting the runtime.
+    /// DERP private key path. In sidecar mode this is passed to `derper -c`.
+    /// If empty, the CLI server resolves it under the server state directory
+    /// before starting the runtime.
     pub derper_config_path: PathBuf,
     /// Certificate mode passed to `derper -certmode`.
     pub derper_cert_mode: String,
@@ -121,6 +135,7 @@ impl Default for EmbeddedDerpConfig {
             derp_port: 443,
             stun_addr: None,
             stun_only: false,
+            relay_mode: EmbeddedDerpRelayMode::default(),
             region_id: 900,
             region_code: "embedded".to_string(),
             region_name: "Embedded headscale-rs DERP".to_string(),
@@ -145,12 +160,22 @@ impl EmbeddedDerpConfig {
         Self::default()
     }
 
-    /// Whether this config should spawn a DERP relay process.
+    /// Whether this config should start any DERP relay implementation.
     pub fn relay_enabled(&self) -> bool {
-        self.enabled && !self.stun_only
+        self.sidecar_relay_enabled() || self.native_relay_enabled()
     }
 
-    /// Resolve the `derper -c` config path against the server state directory.
+    /// Whether this config should spawn the upstream `derper` relay process.
+    pub fn sidecar_relay_enabled(&self) -> bool {
+        self.enabled && !self.stun_only && self.relay_mode == EmbeddedDerpRelayMode::Sidecar
+    }
+
+    /// Whether this config should mount the native Rust DERP relay runtime.
+    pub fn native_relay_enabled(&self) -> bool {
+        self.enabled && !self.stun_only && self.relay_mode == EmbeddedDerpRelayMode::Native
+    }
+
+    /// Resolve the DERP private-key path against the server state directory.
     pub fn with_default_derper_config_path(mut self, state_dir: &std::path::Path) -> Self {
         if self.derper_config_path.as_os_str().is_empty() {
             self.derper_config_path = state_dir.join("derper.key");
@@ -704,6 +729,9 @@ mod tests {
 
         assert!(!cfg.enabled);
         assert!(!cfg.relay_enabled());
+        assert!(!cfg.sidecar_relay_enabled());
+        assert!(!cfg.native_relay_enabled());
+        assert_eq!(cfg.relay_mode, EmbeddedDerpRelayMode::Sidecar);
         assert_eq!(cfg.derp_port, 443);
         assert_eq!(cfg.region_id, 900);
         assert!(cfg.derper_binary.as_os_str().is_empty());

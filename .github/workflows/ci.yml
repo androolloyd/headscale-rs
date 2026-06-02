@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Check headscale-go reference pins
+        run: python3 scripts/check_headscale_go_refs.py --remote
       - name: Check fuzz corpus coverage
         run: ./scripts/check_fuzz_corpus.sh
       - name: Check parity golden coverage

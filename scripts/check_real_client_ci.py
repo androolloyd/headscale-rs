@@ -100,6 +100,11 @@ def main() -> int:
 
         require_snippet(text, "pull_request:", "pull_request trigger")
         require_snippet(text, "schedule:", "scheduled trigger")
+        require_snippet(
+            text,
+            "python3 scripts/check_headscale_go_refs.py --remote",
+            "headscale-go current-head pin check",
+        )
         require_snippet(text, 'smokes="${PR_SMOKES}"', "PR/push smoke selection")
         require_snippet(text, 'smokes="all"', "scheduled full matrix selection")
         require_snippet(text, 'default: "all"', "workflow_dispatch full-matrix default")

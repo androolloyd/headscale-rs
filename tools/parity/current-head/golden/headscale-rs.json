@@ -1,0 +1,540 @@
+[
+  {
+    "engine": "headscale-rs",
+    "name": "policy-route-autogroup-internet-exit-visibility",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+          {
+            "IP": "0.0.0.0/5",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "100.0.0.0/10",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "100.128.0.0/9",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "101.0.0.0/8",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "102.0.0.0/7",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "104.0.0.0/5",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "11.0.0.0/8",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "112.0.0.0/4",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "12.0.0.0/6",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "128.0.0.0/3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "16.0.0.0/4",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "160.0.0.0/5",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "168.0.0.0/8",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.0.0.0/9",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.128.0.0/10",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.192.0.0/11",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.224.0.0/12",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.240.0.0/13",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.248.0.0/14",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.252.0.0/15",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "169.255.0.0/16",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "170.0.0.0/7",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "172.0.0.0/12",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "172.128.0.0/9",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "172.32.0.0/11",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "172.64.0.0/10",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "173.0.0.0/8",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "174.0.0.0/7",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "176.0.0.0/4",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.0.0.0/9",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.128.0.0/11",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.160.0.0/13",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.169.0.0/16",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.170.0.0/15",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.172.0.0/14",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.176.0.0/12",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "192.192.0.0/10",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "193.0.0.0/8",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "194.0.0.0/7",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "196.0.0.0/6",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "200.0.0.0/5",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "2000::/3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "208.0.0.0/4",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "224.0.0.0/3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "32.0.0.0/3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "64.0.0.0/3",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "8.0.0.0/7",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          },
+          {
+            "IP": "96.0.0.0/6",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "alice-sees-exit-only",
+        "peers": [
+          2
+        ]
+      },
+      {
+        "name": "exit-sees-alice",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "private-router-hidden-from-internet-acl",
+        "peers": [
+
+        ]
+      },
+      {
+        "name": "unmatched-client-hidden",
+        "peers": [
+
+        ]
+      }
+    ],
+    "route_approvals": [
+      {
+        "name": "exit-node-defaults-autoapproved",
+        "approved_routes": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "changed": true
+      },
+      {
+        "name": "private-router-route-autoapproved",
+        "approved_routes": [
+          "10.0.0.0/8"
+        ],
+        "changed": true
+      }
+    ]
+  },
+  {
+    "engine": "headscale-rs",
+    "name": "policy-v2-taildrive-taildrop-caps",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.11"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.12/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive": [
+                {
+                  "mode": "rw"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.12"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.11/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive-sharer": null
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "client-receives-drive-sharer-companion",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.12"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.11/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive-sharer": null
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "server-receives-taildrive-grant",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.11"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.12/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive": [
+                    {
+                      "mode": "rw"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "plain-client-receives-no-cap-grant-filter",
+        "rules": [
+
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "client-sees-cap-grant-target",
+        "peers": [
+          2
+        ]
+      },
+      {
+        "name": "server-sees-cap-grant-source",
+        "peers": [
+          1
+        ]
+      },
+      {
+        "name": "plain-client-has-no-cap-grant-peers",
+        "peers": [
+
+        ]
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "client-taildrive-access",
+        "attrs": [
+          "drive:access"
+        ]
+      },
+      {
+        "name": "server-taildrive-share-access-and-taildrop",
+        "attrs": [
+          "drive:access",
+          "drive:share",
+          "https://tailscale.com/cap/file-sharing"
+        ]
+      },
+      {
+        "name": "plain-taildrive-access-only",
+        "attrs": [
+          "drive:access"
+        ]
+      }
+    ]
+  }
+]

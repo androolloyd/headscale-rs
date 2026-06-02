@@ -330,6 +330,71 @@ fn build_peer_map_includes_subnet_router_when_rule_targets_served_route() {
 }
 
 #[test]
+fn build_peer_map_autogroup_internet_surfaces_exit_nodes_only() {
+    // Distilled from upstream policy v2 route capture
+    // routes-b17-autogroup-internet-with-exit-autoapprover (#3212).
+    // `autogroup:internet` should make approved exit-route advertisers
+    // visible to the source, without turning every tailnet node into a
+    // direct peer.
+    let raw = r#"{
+        "tagOwners": {
+            "tag:exit": ["alice@example.com"],
+            "tag:router": ["alice@example.com"]
+        },
+        "autoApprovers": {
+            "exitNode": ["tag:exit"],
+            "routes": {"10.0.0.0/8": ["tag:router"]}
+        },
+        "acls": [
+            {"action":"accept","src":["alice@example.com"],"dst":["autogroup:internet:*"]}
+        ]
+    }"#;
+    let doc = parse_hujson_policy(raw).unwrap();
+    let nodes = vec![
+        PeerMapNode {
+            id: 1,
+            addr: "100.64.0.1".into(),
+            user: Some("alice@example.com".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+        PeerMapNode {
+            id: 2,
+            addr: "100.64.0.2".into(),
+            user: Some("router-owner".into()),
+            tags: vec!["tag:exit".into()],
+            routes: vec!["0.0.0.0/0".into(), "::/0".into()],
+        },
+        PeerMapNode {
+            id: 3,
+            addr: "100.64.0.3".into(),
+            user: Some("router-owner".into()),
+            tags: vec!["tag:router".into()],
+            routes: vec!["10.0.0.0/8".into()],
+        },
+        PeerMapNode {
+            id: 4,
+            addr: "100.64.0.4".into(),
+            user: Some("bob@example.com".into()),
+            tags: Vec::new(),
+            routes: Vec::new(),
+        },
+    ];
+
+    let peers = build_peer_map_for_doc(&doc, &nodes);
+    assert_eq!(peers.get(&1).cloned().unwrap_or_default(), vec![2]);
+    assert_eq!(peers.get(&2).cloned().unwrap_or_default(), vec![1]);
+    assert_eq!(
+        peers.get(&3).cloned().unwrap_or_default(),
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        peers.get(&4).cloned().unwrap_or_default(),
+        Vec::<u64>::new()
+    );
+}
+
+#[test]
 fn route_as_acl_source_keeps_router_peer_and_route_visible() {
     let raw = r#"{
         "acls": [

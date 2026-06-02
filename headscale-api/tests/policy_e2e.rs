@@ -16,10 +16,21 @@
 use headscale_api::policy::{NodeView, PolicyDoc, PolicyStore, parse_hujson_policy};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/policy");
+const CURRENT_HEAD_FIXTURES: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/parity/current-head");
 
 fn load(name: &str) -> String {
     let path = format!("{FIXTURES}/{name}");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+}
+
+fn load_current_head_policy(name: &str) -> String {
+    let path = format!("{CURRENT_HEAD_FIXTURES}/{name}");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
+    let scenario: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {path}: {e}"));
+    serde_json::to_string(&scenario["policy"])
+        .unwrap_or_else(|e| panic!("serialize fixture policy {path}: {e}"))
 }
 
 fn nodeattrs_doc() -> PolicyDoc {
@@ -131,6 +142,32 @@ fn parses_internal_nodeattrs_toml() {
         doc.node_attrs_for(&custom_node)
             .contains(&"custom-node-attr".to_string())
     );
+}
+
+#[test]
+fn parses_current_head_taildrive_taildrop_caps_fixture() {
+    let raw = load_current_head_policy("policy-v2-taildrive-taildrop-caps.json");
+    let doc = parse_hujson_policy(&raw).expect("taildrive current-head fixture must parse");
+    assert_eq!(doc.node_attrs.len(), 2);
+    assert_eq!(doc.grants.len(), 1);
+    assert!(doc.grants[0].app.contains_key("tailscale.com/cap/drive"));
+
+    let client_tags = vec!["tag:client".to_string()];
+    let server_tags = vec!["tag:server".to_string()];
+    let client = NodeView::new("100.64.0.11").with_tags(&client_tags);
+    let server = NodeView::new("100.64.0.12").with_tags(&server_tags);
+    let plain = NodeView::new("100.64.0.13").with_user("carol@example.com");
+
+    assert_eq!(doc.node_attrs_for(&client), vec!["drive:access"]);
+    assert_eq!(
+        doc.node_attrs_for(&server),
+        vec![
+            "drive:access".to_string(),
+            "drive:share".to_string(),
+            "https://tailscale.com/cap/file-sharing".to_string(),
+        ]
+    );
+    assert_eq!(doc.node_attrs_for(&plain), vec!["drive:access"]);
 }
 
 // ---------------------------------------------------------------------------

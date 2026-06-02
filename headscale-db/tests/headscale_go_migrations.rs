@@ -1008,7 +1008,7 @@ async fn development_database_versions_require_supported_go_migration_history_fo
 }
 
 #[tokio::test]
-async fn node_uniqueness_indexes_are_partial() {
+async fn node_address_uniqueness_indexes_are_partial() {
     let db = Database::in_memory().await.expect("open db");
     db.migrate().await.expect("migrate");
 
@@ -1025,7 +1025,7 @@ async fn node_uniqueness_indexes_are_partial() {
     .await
     .expect("query node address indexes");
 
-    assert_eq!(indexes.len(), 3);
+    assert_eq!(indexes.len(), 2);
     assert_eq!(indexes[0].0, "idx_nodes_ipv4");
     assert!(indexes[0].1.contains("UNIQUE INDEX"));
     assert!(
@@ -1039,13 +1039,6 @@ async fn node_uniqueness_indexes_are_partial() {
         indexes[1]
             .1
             .contains("WHERE ipv6 IS NOT NULL AND ipv6 != ''")
-    );
-    assert_eq!(indexes[2].0, "idx_nodes_node_key_live");
-    assert!(indexes[2].1.contains("UNIQUE INDEX"));
-    assert!(
-        indexes[2]
-            .1
-            .contains("WHERE node_key IS NOT NULL AND node_key != '' AND deleted_at IS NULL")
     );
 }
 

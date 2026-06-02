@@ -341,7 +341,8 @@ async fn register_inner(
     let existing_machine = state
         .machines
         .get_by_machine_key_for_user(&machine_key_hex, &user);
-    if let Some((old_node_key_hex, _)) = existing_machine.as_ref()
+    if state.registration_store.is_none()
+        && let Some((old_node_key_hex, _)) = existing_machine.as_ref()
         && old_node_key_hex != &node_key_hex
         && let Some(existing_target) = state.machines.get(&node_key_hex)
         && (existing_target.machine_key_hex != machine_key_hex || existing_target.user != user)

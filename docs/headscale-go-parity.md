@@ -166,7 +166,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   `HEADSCALE_TUNING_NODE_STORE_BATCH_TIMEOUT`. NodeStore worker batches now
   suppress stale auth-completion rekey map-change reasons when a same-batch
   delete removes the final node, leaving observers with only delayed peer
-  removal churn. Database env overrides now
+  removal churn. Persistent auth-key reauth now matches headscale-go's
+  duplicate live NodeKey storage behavior when the same machine registers as a
+  different user; NodeKey lookups intentionally return the earliest live row.
+  Database env overrides now
   match Viper for `HEADSCALE_DATABASE_TYPE`, `HEADSCALE_DATABASE_DEBUG`,
   `HEADSCALE_DATABASE_GORM_*`, `HEADSCALE_DATABASE_SQLITE_*`, and
   `HEADSCALE_DATABASE_POSTGRES_*`. Batched policy reloads that narrow
@@ -175,7 +178,10 @@ Current-head audit overlay, refreshed 2026-05-30:
   full-map churn. Paired Postgres web-registration policy churn restart smokes
   now carry the no-auth registration plus database-policy map convergence path
   across a same-URL production server restart. Remote gRPC duplicate-user server errors now have
-  text, JSON, json-line, and YAML CLI output snapshots.
+  text, JSON, json-line, and YAML CLI output snapshots. gRPC/REST preauth-key
+  list responses now mask fixed-width URL-safe prefixes even when the prefix
+  itself contains `-`, while create responses still return the one-time full
+  key.
 - Active P0 default-scenario regressions against the current-head executable
   baseline: none known from the 2026-05-23 audit. Full replacement parity still
   has P0 upgrade/drop-in backlog, led by broader production Postgres

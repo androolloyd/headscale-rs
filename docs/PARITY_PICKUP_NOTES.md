@@ -2370,3 +2370,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `ssh-it-user@sub.example.com` profile emails and assert the denied stock-client
   status `255`, empty stdout, and stable first stderr line against both
   headscale-rs and current headscale-go.
+
+## 2026-06-02 duplicate NodeKey and preauth display parity
+
+- Removed Rust's live `node_key` uniqueness index and updated SQLite/Postgres
+  node helpers so duplicate live NodeKeys are stored like headscale-go while
+  `get_by_node_key` keeps deterministic earliest-row lookup semantics.
+- Persistent auth-key reauth paths now allow the current upstream case where
+  the same machine and NodeKey register as a different user, and the
+  registration-store return path fetches by numeric node ID so duplicate
+  NodeKeys do not hydrate the wrong row. The in-memory wire registry still
+  rejects occupied rekeys because that registry cannot represent duplicate live
+  NodeKeys without overwriting an entry.
+- Fixed gRPC/REST preauth-key list display masking for URL-safe prefixes that
+  contain `-`: list responses now slice the fixed 12-character prefix and
+  return `hskey-auth-<prefix>-***`, while create responses still return the
+  one-time full token.

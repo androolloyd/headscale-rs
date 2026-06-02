@@ -652,7 +652,6 @@ impl PersistentMachineAdmin {
         {
             record.expiry = None;
         }
-        let node_key = key_with_prefix("nodekey:", record.id.trim());
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
 
         let existing_for_user = match user_id {
@@ -685,13 +684,6 @@ impl PersistentMachineAdmin {
 
         if let Some(existing) = existing {
             let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
-            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
-                Ok(row) if row.id != existing.id => {
-                    return Err(MachineAdminError::BadRequest("node already exists".into()));
-                }
-                Ok(_) | Err(headscale_db::DbError::NotFound(_)) => {}
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            }
             if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv4.clone_from(ipv4);
             }
@@ -1139,7 +1131,6 @@ impl PersistentPostgresMachineAdmin {
         {
             record.expiry = None;
         }
-        let node_key = key_with_prefix("nodekey:", record.id.trim());
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
 
         let existing_for_user = match user_id {
@@ -1177,15 +1168,6 @@ impl PersistentPostgresMachineAdmin {
 
         if let Some(existing) = existing {
             let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
-            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
-                .await
-            {
-                Ok(row) if row.id != existing.id => {
-                    return Err(MachineAdminError::BadRequest("node already exists".into()));
-                }
-                Ok(_) | Err(headscale_db::DbError::NotFound(_)) => {}
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            }
             if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv4.clone_from(ipv4);
             }
@@ -1861,10 +1843,10 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             .create_or_update_auth_key_path(record, policy, auth_key_id)
             .await
             .map_err(|err| err.to_string())?;
-        let row = self
-            .row_by_slug(&result.record.id)
-            .await
-            .map_err(|err| err.to_string())?;
+        let row =
+            headscale_db::headscale_nodes::get_by_id(&self.pool, result.record.node_id as i64)
+                .await
+                .map_err(|err| err.to_string())?;
         let mut record = self
             .row_to_wire_record(row)
             .await
@@ -1926,10 +1908,12 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
             .create_or_update_auth_key_path(record, policy, auth_key_id)
             .await
             .map_err(|err| err.to_string())?;
-        let row = self
-            .row_by_slug(&result.record.id)
-            .await
-            .map_err(|err| err.to_string())?;
+        let row = headscale_db::headscale_nodes::get_postgres_by_id(
+            &self.pool,
+            result.record.node_id as i64,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
         let mut record = self
             .row_to_wire_record(row)
             .await
@@ -4540,7 +4524,6 @@ mod tests {
             .unwrap();
 
         let mut relogin = original.clone();
-        relogin.node_key_hex = "cd".repeat(32);
         relogin.user = "bob".into();
         relogin.hostname = "bob-relogin".into();
         relogin.host_info.hostname = "bob-relogin".into();
@@ -4553,7 +4536,7 @@ mod tests {
         assert!(result.new_node);
         assert_eq!(result.replaced_node_key_hex, None);
         assert_ne!(result.record.node_id, created.record.node_id);
-        assert_eq!(result.record.id, "cd".repeat(32));
+        assert_eq!(result.record.id, original.node_key_hex);
         assert_eq!(result.record.user, "bob");
         assert_eq!(result.record.user_id, Some(bob.id));
         assert_eq!(result.record.auth_key_id, Some(second_key.row.id));
@@ -4569,14 +4552,117 @@ mod tests {
         assert_eq!(raw.node_key, format!("nodekey:{}", original.node_key_hex));
         assert_eq!(raw.user_id, Some(1));
         assert_eq!(raw.auth_key_id, Some(first_key.row.id));
+        assert_eq!(
+            headscale_db::headscale_nodes::get_by_node_key(
+                db.pool(),
+                &format!("nodekey:{}", original.node_key_hex)
+            )
+            .await
+            .unwrap()
+            .id,
+            raw.id,
+            "NodeKey lookup follows headscale-go's first-row ambiguity"
+        );
         let relogin_raw =
             headscale_db::headscale_nodes::get_by_id(db.pool(), result.record.node_id as i64)
                 .await
                 .unwrap();
-        assert_eq!(relogin_raw.node_key, format!("nodekey:{}", "cd".repeat(32)));
+        assert_eq!(relogin_raw.node_key, raw.node_key);
         assert_eq!(relogin_raw.machine_key, raw.machine_key);
         assert_eq!(relogin_raw.user_id, Some(bob.id as i64));
         assert_eq!(relogin_raw.auth_key_id, Some(second_key.row.id));
+    }
+
+    #[tokio::test]
+    async fn persistent_auth_key_registration_same_node_key_different_user_returns_new_row() {
+        let (admin, db, users) = persistent_fixture().await;
+        let bob = users.create("bob").await.unwrap();
+        let first_key = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: "1".into(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let second_key = headscale_db::preauth_keys::create_for_test(
+            db.pool(),
+            headscale_db::preauth_keys::CreateParams {
+                user_id: bob.id.to_string(),
+                reusable: false,
+                ephemeral: false,
+                tags: Vec::new(),
+                expiration: None,
+            },
+        )
+        .await
+        .unwrap();
+        let original = MachineRecord::new_at(
+            Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            "dc".repeat(32),
+            "dd".repeat(32),
+            "alice".into(),
+            "alice-duplicate-nodekey".into(),
+            Ipv4Addr::new(100, 64, 0, 111),
+            false,
+        );
+        let created = admin
+            .create_or_update_auth_key_registration(
+                original.clone(),
+                &PolicyStore::new(),
+                Some(first_key.row.id),
+            )
+            .await
+            .unwrap()
+            .record;
+
+        let mut relogin = original.clone();
+        relogin.user = "bob".into();
+        relogin.hostname = "bob-duplicate-nodekey".into();
+        relogin.host_info.hostname = "bob-duplicate-nodekey".into();
+        relogin.ipv4 = Some(Ipv4Addr::new(100, 64, 0, 112));
+        let saved = admin
+            .create_or_update_auth_key_registration(
+                relogin,
+                &PolicyStore::new(),
+                Some(second_key.row.id),
+            )
+            .await
+            .unwrap()
+            .record;
+
+        assert_eq!(created.node_key_hex, original.node_key_hex);
+        assert_eq!(saved.node_key_hex, original.node_key_hex);
+        assert_ne!(saved.node_id, created.node_id);
+        let created_node_id = created.node_id.expect("created node id");
+        let saved_node_id = saved.node_id.expect("saved node id");
+        assert_eq!(saved.user, "bob");
+        assert_eq!(saved.user_id, Some(bob.id));
+        assert_eq!(saved.auth_key_id, Some(second_key.row.id));
+        let rows: Vec<(i64, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, node_key, user_id FROM nodes ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    created_node_id as i64,
+                    format!("nodekey:{}", original.node_key_hex),
+                    Some(1)
+                ),
+                (
+                    saved_node_id as i64,
+                    format!("nodekey:{}", original.node_key_hex),
+                    Some(bob.id as i64)
+                )
+            ]
+        );
     }
 
     #[tokio::test]

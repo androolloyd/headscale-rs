@@ -247,12 +247,11 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         duplicate_node_key.given_name = "node-key".into();
         duplicate_node_key.ipv4 = Some("100.64.0.12".into());
         duplicate_node_key.ipv6 = Some("fd7a:115c:a1e0::12".into());
-        assert!(matches!(
+        let duplicate_node_key =
             headscale_nodes::create_postgres_on_connection(&mut schema.conn, duplicate_node_key)
-                .await
-                .unwrap_err(),
-            DbError::General(_)
-        ));
+                .await?;
+        assert_ne!(duplicate_node_key.id, node.id);
+        assert_eq!(duplicate_node_key.node_key, node.node_key);
 
         let mut second_params = node_params(alice.id, auth_key_id);
         second_params.machine_key = "mkey:second".into();
@@ -272,16 +271,22 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         duplicate_update.given_name = "duplicate-update".into();
         duplicate_update.ipv4 = Some("100.64.0.14".into());
         duplicate_update.ipv6 = Some("fd7a:115c:a1e0::14".into());
-        assert!(matches!(
-            headscale_nodes::update_postgres_from_auth_path_on_connection(
+        let updated = headscale_nodes::update_postgres_from_auth_path_on_connection(
+            &mut schema.conn,
+            second.id,
+            duplicate_update,
+        )
+        .await?;
+        assert_eq!(updated.node_key, node.node_key);
+        assert_eq!(
+            headscale_nodes::get_postgres_by_node_key_on_connection(
                 &mut schema.conn,
-                second.id,
-                duplicate_update,
+                &node.node_key,
             )
-            .await
-            .unwrap_err(),
-            DbError::General(_)
-        ));
+            .await?
+            .id,
+            node.id
+        );
 
         Ok::<(), DbError>(())
     }

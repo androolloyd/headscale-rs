@@ -1566,12 +1566,10 @@ pub mod upstream {
         let Some(rest) = key.strip_prefix(PREAUTH_KEY_PREFIX) else {
             return key.to_string();
         };
-        let Some((prefix, _secret)) = rest.split_once('-') else {
-            return key.to_string();
-        };
-        if prefix.len() != PREAUTH_KEY_DISPLAY_PREFIX_LEN {
+        if rest.len() < PREAUTH_KEY_DISPLAY_PREFIX_LEN {
             return key.to_string();
         }
+        let prefix = &rest[..PREAUTH_KEY_DISPLAY_PREFIX_LEN];
 
         format!("{PREAUTH_KEY_PREFIX}{prefix}-***")
     }

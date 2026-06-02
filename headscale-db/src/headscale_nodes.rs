@@ -686,7 +686,7 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
 }
 
 pub async fn get_by_node_key(pool: &SqlitePool, node_key: &str) -> Result<HeadscaleNodeRow> {
-    let query = node_select("WHERE node_key = ? AND deleted_at IS NULL");
+    let query = node_select("WHERE node_key = ? AND deleted_at IS NULL ORDER BY id LIMIT 1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(node_key)
         .fetch_one(pool)
@@ -765,7 +765,8 @@ pub async fn get_postgres_by_node_key_on_connection(
     conn: &mut PgConnection,
     node_key: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let query = postgres_node_select("WHERE node_key = $1 AND deleted_at IS NULL");
+    let query =
+        postgres_node_select("WHERE node_key = $1 AND deleted_at IS NULL ORDER BY id LIMIT 1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(node_key)
         .fetch_one(&mut *conn)
@@ -2506,11 +2507,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_duplicate_live_node_key() {
+    async fn create_allows_duplicate_live_node_key_like_headscale_go() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;
         let auth_key_id = auth_key_id(&db, user_id).await;
-        create(db.pool(), node_params(user_id, auth_key_id))
+        let first = create(db.pool(), node_params(user_id, auth_key_id))
             .await
             .unwrap();
 
@@ -2521,8 +2522,17 @@ mod tests {
         duplicate.given_name = "duplicate-node-key".into();
         duplicate.ipv4 = Some("100.64.0.44".into());
         duplicate.ipv6 = Some("fd7a:115c:a1e0::44".into());
-        let err = create(db.pool(), duplicate).await.unwrap_err();
-        assert!(matches!(err, DbError::General(_)));
+        let duplicate = create(db.pool(), duplicate).await.unwrap();
+        assert_ne!(duplicate.id, first.id);
+        assert_eq!(duplicate.node_key, first.node_key);
+        assert_eq!(
+            get_by_node_key(db.pool(), &first.node_key)
+                .await
+                .unwrap()
+                .id,
+            first.id,
+            "NodeKey lookup should follow headscale-go's first-row ambiguity"
+        );
 
         let mut empty_key = node_params(user_id, auth_key_id);
         empty_key.machine_key = "mkey:empty-node-key".into();
@@ -2546,7 +2556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_from_auth_path_rejects_duplicate_live_node_key() {
+    async fn update_from_auth_path_allows_duplicate_live_node_key_like_headscale_go() {
         let db = fresh_db().await;
         let user_id = alice_id(&db).await;
         let auth_key_id = auth_key_id(&db, user_id).await;
@@ -2566,20 +2576,29 @@ mod tests {
 
         let mut duplicate = node_params(user_id, auth_key_id);
         duplicate.machine_key = "mkey:def".into();
-        duplicate.node_key = first.node_key;
+        let duplicate_node_key = first.node_key.clone();
+        duplicate.node_key = duplicate_node_key.clone();
         duplicate.disco_key = "discokey:duplicate-node-key-update".into();
         duplicate.hostname = "duplicate-node-key-update".into();
         duplicate.given_name = "duplicate-node-key-update".into();
         duplicate.ipv4 = Some("100.64.0.47".into());
         duplicate.ipv6 = Some("fd7a:115c:a1e0::47".into());
-        let err = update_from_auth_path(db.pool(), second.id, duplicate)
+        let updated = update_from_auth_path(db.pool(), second.id, duplicate)
             .await
-            .unwrap_err();
-        assert!(matches!(err, DbError::General(_)));
+            .unwrap();
 
         assert_eq!(
             get_by_id(db.pool(), second.id).await.unwrap().node_key,
-            "nodekey:def"
+            duplicate_node_key
+        );
+        assert_eq!(updated.node_key, duplicate_node_key);
+        assert_eq!(
+            get_by_node_key(db.pool(), &first.node_key)
+                .await
+                .unwrap()
+                .id,
+            first.id,
+            "NodeKey lookup should keep returning the earliest live row"
         );
     }
 

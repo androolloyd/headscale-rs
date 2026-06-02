@@ -5319,6 +5319,173 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("gateway_auth_register").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let server_url = format!("http://{listen}");
+    let metrics_url = format!("http://{metrics}");
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let api_key = headscale_with_config(
+            &config,
+            &["-o", "json", "apikeys", "create", "--expiration", "1h"],
+        );
+        assert!(api_key.status.success(), "stderr: {}", stderr(&api_key));
+        let api_key = json_output(&api_key);
+        let api_key_secret = api_key.as_str().expect("api key secret");
+        assert!(
+            api_key_secret.starts_with("hskey-api-"),
+            "api key: {api_key_secret}"
+        );
+
+        let auth_id = "hskey-authreq-eeeeeeeeeeeeeeeeeeeeeeee";
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                auth_id,
+                "--name",
+                "pg-web-register-node",
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let http = reqwest::Client::new();
+        let web_register = http
+            .get(format!("{server_url}/register/{auth_id}"))
+            .send()
+            .await?;
+        assert_eq!(web_register.status(), reqwest::StatusCode::OK);
+        let web_register = web_register.text().await?;
+        assert!(
+            web_register
+                .contains("headscale auth register --auth-id hskey-authreq-eeeeeeeeeeeeeeeeeeeeeeee --user USERNAME"),
+            "web register page: {web_register}"
+        );
+
+        let gateway_register = http
+            .post(format!("{server_url}/api/v1/auth/register"))
+            .bearer_auth(api_key_secret)
+            .json(&serde_json::json!({
+                "user": "alice",
+                "authId": auth_id
+            }))
+            .send()
+            .await?;
+        assert_eq!(gateway_register.status(), reqwest::StatusCode::OK);
+        let gateway_register = gateway_register.json::<serde_json::Value>().await?;
+        let node_id = gateway_register["node"]["id"]
+            .as_str()
+            .expect("registered node id")
+            .to_string();
+        assert!(!node_id.is_empty());
+        assert_eq!(
+            gateway_register["node"]["name"].as_str(),
+            Some("pg-web-register-node")
+        );
+        assert_eq!(
+            gateway_register["node"]["registerMethod"].as_str(),
+            Some("REGISTER_METHOD_CLI")
+        );
+        assert!(
+            gateway_register["node"]["ipAddresses"]
+                .as_array()
+                .is_some_and(|ips| {
+                    ips.iter()
+                        .any(|ip| ip.as_str().is_some_and(|ip| ip.starts_with("100.")))
+                }),
+            "gateway registered node: {gateway_register}"
+        );
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
+        let nodes = json_output(&nodes);
+        assert_eq!(nodes.as_array().expect("nodes").len(), 1);
+        assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
+        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes[0]["name"].as_str(), Some("pg-web-register-node"));
+        assert_eq!(
+            nodes[0]["given_name"].as_str(),
+            Some("pg-web-register-node")
+        );
+        assert_eq!(nodes[0]["register_method"].as_i64(), Some(2));
+
+        let nodestore = http
+            .get(format!("{metrics_url}/debug/nodestore"))
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await?;
+        assert_eq!(nodestore.status(), reqwest::StatusCode::OK);
+        let nodestore = nodestore.json::<serde_json::Value>().await?;
+        let live_node = nodestore
+            .as_object()
+            .and_then(|nodes| {
+                nodes.values().find(|node| {
+                    node["user"].as_str() == Some("alice")
+                        && node["hostname"].as_str() == Some("pg-web-register-node")
+                })
+            })
+            .unwrap_or_else(|| panic!("missing hydrated node {node_id}: {nodestore}"));
+        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(
+            live_node["hostname"].as_str(),
+            Some("pg-web-register-node")
+        );
+        assert!(
+            live_node["ipv4"]
+                .as_str()
+                .is_some_and(|ip| ip.starts_with("100.")),
+            "hydrated node: {live_node}"
+        );
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_user_crud").await? else {
         return Ok(());

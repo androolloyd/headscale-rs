@@ -184,6 +184,7 @@ smoke_ids=(
   postgres-route-health-reload
   postgres-route-health-all-unhealthy
   postgres-route-health-all-unhealthy-reload
+  postgres-route-health-both-offline-reconnect
   postgres-route-health-restart
   postgres-route-health-primary-restart
   postgres-route-health-reload-restart
@@ -267,6 +268,7 @@ smoke_ids=(
   route-health-primary-restart
   route-health-all-unhealthy
   route-health-all-unhealthy-reload
+  route-health-both-offline-reconnect
   route-health-all-unhealthy-restart
   route-health-all-unhealthy-reload-restart
   route-health-mixed-exit
@@ -404,6 +406,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -447,6 +450,7 @@ smoke_areas=(
   acl
   acl
   acl
+  routes
   routes
   routes
   routes
@@ -598,6 +602,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-health-reload-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-smoke.sh
+  tools/real-client/postgres-route-health-both-offline-reconnect-smoke.sh
   tools/real-client/postgres-route-health-restart-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-smoke.sh
@@ -681,6 +686,7 @@ smoke_rust_scripts=(
   tools/real-client/route-health-primary-restart-smoke.sh
   tools/real-client/route-health-all-unhealthy-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-smoke.sh
+  tools/real-client/route-health-both-offline-reconnect-smoke.sh
   tools/real-client/route-health-all-unhealthy-restart-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-restart-smoke.sh
   tools/real-client/route-health-mixed-exit-smoke.sh
@@ -805,6 +811,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-health-reload-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-all-unhealthy-reload-headscale-go-smoke.sh
+  tools/real-client/postgres-route-health-both-offline-reconnect-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-primary-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-health-reload-restart-headscale-go-smoke.sh
@@ -888,6 +895,7 @@ smoke_go_scripts=(
   tools/real-client/route-health-primary-restart-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-headscale-go-smoke.sh
+  tools/real-client/route-health-both-offline-reconnect-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-restart-headscale-go-smoke.sh
   tools/real-client/route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh
   tools/real-client/route-health-mixed-exit-headscale-go-smoke.sh
@@ -1012,6 +1020,7 @@ smoke_assertions=(
   "production Postgres current-head route-health policy reload failover"
   "production Postgres route-health all-unhealthy retention"
   "production Postgres route-health policy reload preserves all-unhealthy retention"
+  "production Postgres current-head route-health clears primary while both HA routers are offline and promotes the secondary on reconnect"
   "production Postgres current-head route-health survives server restart"
   "production Postgres route-health primary selection survives server restart"
   "production Postgres route-health policy reload survives server restart"
@@ -1095,6 +1104,7 @@ smoke_assertions=(
   "current-head route-health primary selection survives server restart"
   "current-head route-health all-unavailable last-known-primary retention"
   "current-head route-health policy reload preserves all-unavailable last-known-primary retention"
+  "current-head route-health clears primary while both HA routers are offline and promotes the secondary on reconnect"
   "current-head route-health production restart preserves all-unavailable last-known-primary retention"
   "current-head route-health policy reload plus production restart preserves all-unavailable last-known-primary retention"
   "current-head route-health ignores exit-only routes during HA failover"
@@ -1105,7 +1115,7 @@ smoke_assertions=(
   "current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention"
   "current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart"
   "current-head route-health mixed exit-node all-unavailable policy reload survives server restart"
-  "evidence-only current-head route-via/route-health matrix symmetry audit plus uncovered upstream gap report"
+  "evidence-only current-head route-via/route-health matrix symmetry audit and current-head pinning"
   "taildrop disabled removes file-sharing from stock-client self CapMap"
   "private DERP relay, STUN, verify-client admission, and DERP map metadata"
   "Tailscale SSH allow, deny, and ACL timeout"

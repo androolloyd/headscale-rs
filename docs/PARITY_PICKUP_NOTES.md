@@ -1,6 +1,6 @@
 # Headscale-Go Parity Pickup Notes
 
-Updated: 2026-06-02 15:58 ADT
+Updated: 2026-06-02 19:31 ADT
 
 ## Current State
 
@@ -16,6 +16,14 @@ Updated: 2026-06-02 15:58 ADT
 
 Recent accepted slices:
 
+- This route-health slice adds paired `route-health-both-offline-reconnect`
+  and `postgres-route-health-both-offline-reconnect` Rust/headscale-go
+  current-head stock-client rows. The shared restart harness now stops both HA
+  subnet router clients, asserts no primary route while both are offline,
+  reconnects only the secondary router, and asserts the observer sees that
+  secondary as the route owner. This satisfies the
+  `p1-route-via-health-edge-coverage` backlog row, which is removed from
+  `docs/headscale-go-parity-backlog.json`.
 - This route/via pure Rust slice pins current-head
   `TestIssue3233ViaInternetExitVisibility`: an `autogroup:internet`
   `grants[].via` rule includes the matching tagged exit node's default routes
@@ -2610,7 +2618,8 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
 - Extended the route-edge audit and real-client matrix to include the new
   default/Postgres mirrors. The `p1-route-via-health-edge-coverage` row remains
   open because broader route-via/route-health edge matrices remain before full
-  route parity closure.
+  route parity closure. A later 2026-06-02 both-offline secondary reconnect
+  slice closed this backlog row.
 
 ## 2026-06-02 ACME public-CA no-network drift closure
 

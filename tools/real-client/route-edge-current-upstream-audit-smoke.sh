@@ -49,6 +49,7 @@ route_health_ids=(
   route-health-primary-restart
   route-health-all-unhealthy
   route-health-all-unhealthy-reload
+  route-health-both-offline-reconnect
   route-health-all-unhealthy-restart
   route-health-all-unhealthy-reload-restart
   route-health-mixed-exit
@@ -61,9 +62,7 @@ route_health_ids=(
   route-health-mixed-exit-all-unhealthy-reload-restart
 )
 
-uncovered_upstream_route_cases=(
-  "route-health-both-offline-reconnect|integration/route_test.go|TestHASubnetRouterFailoverBothOffline|route-health-both-offline-reconnect|after both HA subnet routers go offline, current headscale-go expects no primary until the secondary router reconnects and returns as the stock-client-visible primary"
-)
+uncovered_upstream_route_cases=()
 
 fail() {
   echo "route edge audit: $*" >&2
@@ -260,8 +259,12 @@ fi
 
 echo "route edge current-head audit passed for ${audit_target}: ${expected_edge_count} default route-via/route-health rows, ${expected_edge_count} Postgres mirrors, and current-head headscale-go pinning are present"
 echo "headscale-go current-head pin: ${HEADSCALE_GO_CURRENT_VERSION}"
-echo "route edge current-head audit identified ${#uncovered_messages[@]} uncovered upstream route case(s):"
-printf ' - %s\n' "${uncovered_messages[@]}"
-if [[ -z "${upstream_source_root}" ]]; then
+if ((${#uncovered_messages[@]} > 0)); then
+  echo "route edge current-head audit identified ${#uncovered_messages[@]} uncovered upstream route case(s):"
+  printf ' - %s\n' "${uncovered_messages[@]}"
+else
+  echo "route edge current-head audit identified no uncovered upstream route cases"
+fi
+if ((${#uncovered_messages[@]} > 0)) && [[ -z "${upstream_source_root}" ]]; then
   echo "set REAL_CLIENT_ROUTE_EDGE_UPSTREAM_SOURCE to a headscale-go checkout to validate uncovered-case test names against source"
 fi

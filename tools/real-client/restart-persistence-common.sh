@@ -33,6 +33,7 @@ route_health_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH:-false}"
 route_health_reload_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_RELOAD:-false}"
 route_health_mixed_exit_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT:-false}"
 route_health_all_unhealthy_restart="${REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY:-false}"
+route_health_both_offline_reconnect="${REAL_CLIENT_RESTART_ROUTE_HEALTH_BOTH_OFFLINE_RECONNECT:-false}"
 route_health_no_restart="${REAL_CLIENT_ROUTE_HEALTH_NO_RESTART:-false}"
 route_primary_restart="${REAL_CLIENT_RESTART_ROUTE_PRIMARY:-false}"
 route_primary_failover="${REAL_CLIENT_RESTART_ROUTE_PRIMARY_FAILOVER:-false}"
@@ -164,6 +165,18 @@ case "${route_health_all_unhealthy_restart}" in
     exit 2
     ;;
 esac
+case "${route_health_both_offline_reconnect}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    route_health_both_offline_reconnect_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    route_health_both_offline_reconnect_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_BOTH_OFFLINE_RECONNECT must be true or false, got ${route_health_both_offline_reconnect}" >&2
+    exit 2
+    ;;
+esac
 case "${route_health_no_restart}" in
   1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
     route_health_no_restart_flag=1
@@ -283,8 +296,8 @@ if ((route_via_restart_flag && route_health_restart_flag)); then
     echo "combined route-via/route-health mode requires REAL_CLIENT_RESTART_ROUTE_VIA_SAME_TAG=true without route-via reload or multiprefix modes" >&2
     exit 2
   fi
-  if ((route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag)); then
-    echo "combined route-via/route-health mode cannot use route-health mixed-exit or all-unhealthy modes" >&2
+  if ((route_health_mixed_exit_restart_flag || route_health_all_unhealthy_restart_flag || route_health_both_offline_reconnect_flag)); then
+    echo "combined route-via/route-health mode cannot use route-health mixed-exit, all-unhealthy, or both-offline reconnect modes" >&2
     exit 2
   fi
   if ((route_via_no_restart_flag != route_health_no_restart_flag)); then
@@ -322,6 +335,18 @@ if ((route_health_mixed_exit_restart_flag && ! route_health_restart_flag)); then
 fi
 if ((route_health_all_unhealthy_restart_flag && ! route_health_restart_flag)); then
   echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
+  exit 2
+fi
+if ((route_health_both_offline_reconnect_flag && ! route_health_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_BOTH_OFFLINE_RECONNECT requires REAL_CLIENT_RESTART_ROUTE_HEALTH=true" >&2
+  exit 2
+fi
+if ((route_health_both_offline_reconnect_flag && route_health_all_unhealthy_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_BOTH_OFFLINE_RECONNECT cannot be combined with REAL_CLIENT_RESTART_ROUTE_HEALTH_ALL_UNHEALTHY" >&2
+  exit 2
+fi
+if ((route_health_both_offline_reconnect_flag && route_health_mixed_exit_restart_flag)); then
+  echo "REAL_CLIENT_RESTART_ROUTE_HEALTH_BOTH_OFFLINE_RECONNECT cannot be combined with REAL_CLIENT_RESTART_ROUTE_HEALTH_MIXED_EXIT" >&2
   exit 2
 fi
 if ((route_health_restart_flag)); then
@@ -2313,6 +2338,182 @@ assert_route_via_health_peer_failover() {
   echo "::endgroup::"
 }
 
+assert_route_health_both_offline_secondary_reconnect() {
+  local before_path="${work_dir}/route-health-both-offline-before.json"
+  local owner_path="${work_dir}/route-health-both-offline-before.owner"
+  local both_offline_path="${work_dir}/route-health-both-offline-no-primary.json"
+  local secondary_admin_path="${work_dir}/route-health-both-offline-secondary-primary.json"
+  local observer_path="${work_dir}/route-health-both-offline-observer-secondary.json"
+  local route_health_primary_name route_health_secondary_name
+
+  echo "::group::assert route-health both-offline secondary reconnect"
+  wait_for "observer sees initial route-health owner before both-offline reconnect" \
+    "route_health_peer_owner_from_netmap '${observer_name}' '${route}' '${before_path}' '${owner_path}'" || {
+      cat "${before_path}.err" >&2 || true
+      dump_debug
+      return 1
+    }
+  cat "${before_path}"
+  route_health_primary_name="$(cat "${owner_path}")"
+  case "${route_health_primary_name}" in
+    "${router_name}") route_health_secondary_name="${router_b_name}" ;;
+    "${router_b_name}") route_health_secondary_name="${router_name}" ;;
+    *)
+      echo "route-health primary ${route_health_primary_name} is not ${router_name} or ${router_b_name}" >&2
+      dump_debug
+      return 1
+      ;;
+  esac
+
+  if ! docker stop -t 2 "${route_health_primary_name}" >/dev/null; then
+    echo "failed to stop initial route-health primary ${route_health_primary_name}" >&2
+    dump_debug
+    return 1
+  fi
+  if ! docker stop -t 2 "${route_health_secondary_name}" >/dev/null; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    echo "failed to stop initial route-health secondary ${route_health_secondary_name}" >&2
+    dump_debug
+    return 1
+  fi
+
+  if ! wait_for "both route-health routers offline with no primary route" \
+    "headscale_cmd -o json nodes list >'${both_offline_path}' && ruby -rjson -e '
+      route = ARGV.fetch(1)
+      router_names = ARGV.fetch(2).split(\",\")
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch(\"nodes\")
+
+      def node_name(node)
+        node[\"givenName\"] || node[\"given_name\"] || node[\"name\"] || node[\"hostname\"]
+      end
+
+      def online(node)
+        node.key?(\"online\") ? node[\"online\"] : node[\"Online\"]
+      end
+
+      def primary_routes(node)
+        Array(
+          node[\"subnetRoutes\"] ||
+          node[\"subnet_routes\"] ||
+          node[\"primaryRoutes\"] ||
+          node[\"primary_routes\"]
+        ).map(&:to_s)
+      end
+
+      routers = router_names.map do |name|
+        nodes.find { |node| node_name(node).to_s == name } ||
+          abort(\"missing route-health router #{name.inspect} in #{nodes.inspect}\")
+      end
+      routers.each do |router|
+        abort(\"expected router #{node_name(router).inspect} to be offline, got #{online(router).inspect}\") unless online(router) == false
+      end
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort(\"no primary should be assigned while both routers are offline, got #{primary_nodes.inspect}\") unless primary_nodes.empty?
+
+      puts JSON.pretty_generate({
+        route: route,
+        offline_routers: routers.map { |router| node_name(router) },
+        no_primary_while_both_offline: true,
+        routers: routers,
+      })
+    ' '${both_offline_path}' '${route}' '${router_name},${router_b_name}' >'${both_offline_path}.summary'"; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    docker start "${route_health_secondary_name}" >/dev/null 2>&1 || true
+    cat "${both_offline_path}.summary" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${both_offline_path}.summary"
+
+  if ! docker start "${route_health_secondary_name}" >/dev/null; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    echo "failed to restart route-health secondary ${route_health_secondary_name}" >&2
+    dump_debug
+    return 1
+  fi
+  if ! wait_for "route-health secondary reconnected after both-offline" "tailscale_logged_in '${route_health_secondary_name}'"; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    dump_debug
+    return 1
+  fi
+  if ! wait_for "route-health secondary primary after reconnect" \
+    "headscale_cmd -o json nodes list >'${secondary_admin_path}' && ruby -rjson -e '
+      route = ARGV.fetch(1)
+      primary_name = ARGV.fetch(2)
+      offline_name = ARGV.fetch(3)
+      payload = JSON.parse(File.read(ARGV.fetch(0)))
+      nodes = payload.is_a?(Array) ? payload : payload.fetch(\"nodes\")
+
+      def node_name(node)
+        node[\"givenName\"] || node[\"given_name\"] || node[\"name\"] || node[\"hostname\"]
+      end
+
+      def online(node)
+        node.key?(\"online\") ? node[\"online\"] : node[\"Online\"]
+      end
+
+      def routes(node, camel, snake)
+        Array(node[camel] || node[snake]).map(&:to_s)
+      end
+
+      def primary_routes(node)
+        Array(
+          node[\"subnetRoutes\"] ||
+          node[\"subnet_routes\"] ||
+          node[\"primaryRoutes\"] ||
+          node[\"primary_routes\"]
+        ).map(&:to_s)
+      end
+
+      primary_router = nodes.find { |node| node_name(node).to_s == primary_name } ||
+        abort(\"missing reconnected route-health secondary #{primary_name.inspect}\")
+      offline_router = nodes.find { |node| node_name(node).to_s == offline_name } ||
+        abort(\"missing still-offline route-health primary #{offline_name.inspect}\")
+      abort(\"expected reconnected secondary #{primary_name.inspect} online, got #{online(primary_router).inspect}\") unless online(primary_router) == true
+      abort(\"expected original primary #{offline_name.inspect} to remain offline, got #{online(offline_router).inspect}\") unless online(offline_router) == false
+      unless routes(primary_router, \"availableRoutes\", \"available_routes\").include?(route)
+        abort(\"reconnected secondary missing available route #{route.inspect}: #{primary_router.inspect}\")
+      end
+      unless routes(primary_router, \"approvedRoutes\", \"approved_routes\").include?(route)
+        abort(\"reconnected secondary missing approved route #{route.inspect}: #{primary_router.inspect}\")
+      end
+      primary_nodes = nodes.select { |node| primary_routes(node).include?(route) }
+      abort(\"expected one primary after secondary reconnect, got #{primary_nodes.length}: #{primary_nodes.inspect}\") unless primary_nodes.length == 1
+      owner = node_name(primary_nodes.fetch(0)).to_s
+      abort(\"r2 should be re-registered as primary after reconnect, got #{owner.inspect}, expected #{primary_name.inspect}\") unless owner == primary_name
+
+      puts JSON.pretty_generate({
+        route: route,
+        primary_after_secondary_reconnect: owner,
+        original_primary_still_offline: offline_name,
+        secondary: primary_router,
+      })
+    ' '${secondary_admin_path}' '${route}' '${route_health_secondary_name}' '${route_health_primary_name}' >'${secondary_admin_path}.summary'"; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    cat "${secondary_admin_path}.summary" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${secondary_admin_path}.summary"
+
+  if ! wait_for "observer sees route-health secondary owner after reconnect" \
+    "peer_netmap_route_owner_matches '${observer_name}' '${route_health_secondary_name}' '${route}' '${observer_path}'"; then
+    docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+    cat "${observer_path}.err" >&2 || true
+    dump_debug
+    return 1
+  fi
+  cat "${observer_path}"
+
+  docker start "${route_health_primary_name}" >/dev/null 2>&1 || true
+  if ! wait_for "route-health original primary reconnected after both-offline cleanup" "tailscale_logged_in '${route_health_primary_name}'"; then
+    dump_debug
+    return 1
+  fi
+  echo "::endgroup::"
+}
+
 assert_route_health_all_unhealthy_after_restart() {
   local before_path="${work_dir}/route-health-peer-before-all-unhealthy.json"
   local first_unhealthy_path="${work_dir}/route-health-peer-after-first-unhealthy.json"
@@ -2912,7 +3113,9 @@ elif ((route_health_restart_flag)); then
   fi
 
   if ((route_health_no_restart_flag)); then
-    if ((route_health_all_unhealthy_restart_flag)); then
+    if ((route_health_both_offline_reconnect_flag)); then
+      assert_route_health_both_offline_secondary_reconnect
+    elif ((route_health_all_unhealthy_restart_flag)); then
       assert_route_health_all_unhealthy_after_restart
     else
       assert_route_health_peer_failover_after_restart
@@ -2942,6 +3145,8 @@ elif ((route_health_restart_flag)); then
   fi
   if ((route_health_all_unhealthy_restart_flag)); then
     assert_route_health_all_unhealthy_after_restart
+  elif ((route_health_both_offline_reconnect_flag)); then
+    assert_route_health_both_offline_secondary_reconnect
   else
     assert_route_health_peer_failover_after_restart
   fi

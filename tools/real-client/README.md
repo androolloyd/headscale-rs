@@ -184,6 +184,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-route-health-reload` | `postgres-route-health-reload-smoke.sh` | `postgres-route-health-reload-headscale-go-smoke.sh` | Production Postgres current-head route-health policy reload failover |
 | Database | `postgres-route-health-all-unhealthy` | `postgres-route-health-all-unhealthy-smoke.sh` | `postgres-route-health-all-unhealthy-headscale-go-smoke.sh` | Production Postgres route-health all-unhealthy retention |
 | Database | `postgres-route-health-all-unhealthy-reload` | `postgres-route-health-all-unhealthy-reload-smoke.sh` | `postgres-route-health-all-unhealthy-reload-headscale-go-smoke.sh` | Production Postgres route-health policy reload preserves all-unhealthy retention |
+| Database | `postgres-route-health-both-offline-reconnect` | `postgres-route-health-both-offline-reconnect-smoke.sh` | `postgres-route-health-both-offline-reconnect-headscale-go-smoke.sh` | Production Postgres current-head route-health clears primary while both HA routers are offline and promotes the secondary on reconnect |
 | Database | `postgres-route-health-restart` | `postgres-route-health-restart-smoke.sh` | `postgres-route-health-restart-headscale-go-smoke.sh` | Production Postgres current-head route-health survives server restart |
 | Database | `postgres-route-health-primary-restart` | `postgres-route-health-primary-restart-smoke.sh` | `postgres-route-health-primary-restart-headscale-go-smoke.sh` | Production Postgres route-health primary selection survives server restart |
 | Database | `postgres-route-health-reload-restart` | `postgres-route-health-reload-restart-smoke.sh` | `postgres-route-health-reload-restart-headscale-go-smoke.sh` | Production Postgres route-health policy reload survives server restart |
@@ -267,6 +268,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-health-primary-restart` | `route-health-primary-restart-smoke.sh` | `route-health-primary-restart-headscale-go-smoke.sh` | Current-head route-health primary selection survives server restart |
 | Routes | `route-health-all-unhealthy` | `route-health-all-unhealthy-smoke.sh` | `route-health-all-unhealthy-headscale-go-smoke.sh` | Current-head route-health last-known-primary retention when all candidates are unavailable |
 | Routes | `route-health-all-unhealthy-reload` | `route-health-all-unhealthy-reload-smoke.sh` | `route-health-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves all-unavailable last-known-primary retention |
+| Routes | `route-health-both-offline-reconnect` | `route-health-both-offline-reconnect-smoke.sh` | `route-health-both-offline-reconnect-headscale-go-smoke.sh` | Current-head route-health clears primary while both HA routers are offline and promotes the secondary on reconnect |
 | Routes | `route-health-all-unhealthy-restart` | `route-health-all-unhealthy-restart-smoke.sh` | `route-health-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health production restart preserves all-unavailable last-known-primary retention |
 | Routes | `route-health-all-unhealthy-reload-restart` | `route-health-all-unhealthy-reload-restart-smoke.sh` | `route-health-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health policy reload plus production restart preserves all-unavailable last-known-primary retention |
 | Routes | `route-health-mixed-exit` | `route-health-mixed-exit-smoke.sh` | `route-health-mixed-exit-headscale-go-smoke.sh` | Current-head route-health ignores exit-only routes during HA failover |
@@ -277,7 +279,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-health-mixed-exit-all-unhealthy-reload` | `route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention |
 | Routes | `route-health-mixed-exit-all-unhealthy-restart` | `route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart |
 | Routes | `route-health-mixed-exit-all-unhealthy-reload-restart` | `route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable policy reload survives server restart |
-| Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health matrix symmetry audit plus uncovered upstream gap report |
+| Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health matrix symmetry audit and current-head pinning |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow/check-period exact success status/stdout/stderr plus deny and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails with exact stable success status/stdout/stderr |
@@ -967,6 +969,8 @@ tools/real-client/postgres-route-health-all-unhealthy-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-reload-smoke.sh
 tools/real-client/postgres-route-health-all-unhealthy-reload-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-both-offline-reconnect-smoke.sh
+tools/real-client/postgres-route-health-both-offline-reconnect-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-restart-smoke.sh
 tools/real-client/postgres-route-health-restart-headscale-go-smoke.sh
 tools/real-client/postgres-route-health-primary-restart-smoke.sh
@@ -1190,6 +1194,8 @@ tools/real-client/route-health-all-unhealthy-smoke.sh
 tools/real-client/route-health-all-unhealthy-headscale-go-smoke.sh
 tools/real-client/route-health-all-unhealthy-reload-smoke.sh
 tools/real-client/route-health-all-unhealthy-reload-headscale-go-smoke.sh
+tools/real-client/route-health-both-offline-reconnect-smoke.sh
+tools/real-client/route-health-both-offline-reconnect-headscale-go-smoke.sh
 tools/real-client/route-health-all-unhealthy-restart-smoke.sh
 tools/real-client/route-health-all-unhealthy-restart-headscale-go-smoke.sh
 tools/real-client/route-health-all-unhealthy-reload-restart-smoke.sh
@@ -1230,18 +1236,26 @@ tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh
 tools/real-client/route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh
 ```
 
+The both-offline reconnect variants cover the current-head upstream
+`TestHASubnetRouterFailoverBothOffline` / `ha_secondary_recovers_after_all_offline`
+case. They stop both HA subnet router clients, assert no route primary exists
+while both are offline, restart only the secondary client, and assert the
+observer sees that secondary as the sole route owner:
+
+```sh
+tools/real-client/route-health-both-offline-reconnect-smoke.sh
+tools/real-client/route-health-both-offline-reconnect-headscale-go-smoke.sh
+tools/real-client/postgres-route-health-both-offline-reconnect-smoke.sh
+tools/real-client/postgres-route-health-both-offline-reconnect-headscale-go-smoke.sh
+```
+
 The headscale-go wrapper also defaults to the audited current-head commit
 because pinned v0.28 does not expose `node.routes.ha`.
 
 The `route-edge-current-upstream-audit` row keeps the default/Postgres matrix
-symmetry checks and now also reports the concrete uncovered current-head
-route-health case from `integration/route_test.go`:
-`TestHASubnetRouterFailoverBothOffline`. That upstream case drives both HA
-subnet routers offline, expects no primary route while both are offline, then
-reconnects the secondary router and expects the stock-client observer to see
-that secondary router online with the route in `PrimaryRoutes`. Set
-`REAL_CLIENT_ROUTE_EDGE_UPSTREAM_SOURCE` to a headscale-go checkout to validate
-the audited test name and assertions against source while running the audit.
+symmetry checks and now expects the both-offline reconnect row in both the
+default and Postgres route-health sets. With that row present, the audit reports
+no uncovered current-head route-via/route-health cases.
 
 Additional knobs:
 

@@ -260,7 +260,7 @@
         "headscale-api/tests/api_keys_e2e.rs:177",
         "headscale-db/tests/postgres_foundation.rs:624",
         "headscale-db/tests/postgres_foundation.rs:725",
-        "headscale-cli/tests/cli_process.rs:6031",
+        "headscale-cli/tests/cli_process.rs:6423",
         "headscale-api/tests/e2e.rs:411",
         "headscale-api/tests/e2e.rs:462",
         "headscale-api/tests/e2e.rs:430",
@@ -307,7 +307,7 @@
         "headscale-api/tests/admin_routes_coverage.rs:549",
         "headscale-cli/tests/cli_process.rs:1486",
         "headscale-api/tests/grpc_gateway_e2e.rs:750",
-        "headscale-cli/tests/cli_process.rs:8228",
+        "headscale-cli/tests/cli_process.rs:8620",
         "headscale-db/tests/headscale_go_migrations.rs:1482",
         "headscale-api/tests/wire_parity_contract.rs:330",
         "headscale-api/tests/wire_parity_contract.rs:263"
@@ -921,15 +921,15 @@
       "reason": "related Rust test or smoke names found, but no normalized exact overlap",
       "rust_evidence": [
         "headscale-db/tests/headscale_go_migrations.rs:751",
-        "headscale-api/tests/grpc_gateway_e2e.rs:3774",
-        "headscale-api/tests/grpc_gateway_e2e.rs:3797",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3825",
+        "headscale-api/tests/grpc_gateway_e2e.rs:3848",
         "headscale-cli/tests/cli_process.rs:154",
         "headscale-cli/tests/cli_process.rs:164",
-        "headscale-cli/tests/cli_process.rs:4096",
+        "headscale-cli/tests/cli_process.rs:4108",
         "headscale-api/tests/admin_routes_coverage.rs:68",
+        "headscale-cli/tests/cli_process.rs:5631",
         "headscale-identity/tests/crypto_tests.rs:19",
-        "headscale-identity/tests/crypto_tests.rs:6",
-        "headscale-cli/tests/cli_process.rs:856"
+        "headscale-identity/tests/crypto_tests.rs:6"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1762,7 +1762,7 @@
         "headscale-api/tests/admin_routes_coverage.rs:385",
         "headscale-api/tests/admin_routes_coverage.rs:400",
         "headscale-api/tests/preauth_e2e.rs:320",
-        "headscale-cli/tests/cli_process.rs:3270",
+        "headscale-cli/tests/cli_process.rs:3282",
         "headscale-api/tests/admin_routes_coverage.rs:884",
         "headscale-api/tests/wire_parity_contract.rs:330"
       ],
@@ -1822,7 +1822,7 @@
         "headscale-api/tests/machine_lifecycle.rs:582",
         "headscale-api/tests/machine_lifecycle.rs:134",
         "headscale-api/tests/admin_routes_coverage.rs:861",
-        "headscale-cli/tests/cli_process.rs:4527"
+        "headscale-cli/tests/cli_process.rs:4539"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1844,7 +1844,7 @@
         "headscale-api/tests/admin_routes_coverage.rs:471",
         "headscale-api/tests/admin_routes_coverage.rs:861",
         "headscale-api/tests/preauth_e2e.rs:183",
-        "headscale-cli/tests/cli_process.rs:4527"
+        "headscale-cli/tests/cli_process.rs:4539"
       ],
       "status": "needs-review",
       "upstream": {
@@ -1973,8 +1973,8 @@
   "metadata": {
     "audit_date": "2026-06-02",
     "headscale_rs": {
-      "compared_ref": "b437c7ac9ef778198fdccdf67a039c136a69f141",
-      "origin_main_commit": "b437c7ac9ef778198fdccdf67a039c136a69f141",
+      "compared_ref": "4b8462ee1061e310b94de16c8f1a6a0e524bd8ad",
+      "origin_main_commit": "4b8462ee1061e310b94de16c8f1a6a0e524bd8ad",
       "root": "/Users/androolloyd/Development/headscale-rs-main-coordinator-20260602"
     },
     "notes": [
@@ -2008,7 +2008,7 @@
     },
     "rust_evidence_counts": {
       "cli_commands": 55,
-      "integration_or_smoke_tests": 1032,
+      "integration_or_smoke_tests": 1038,
       "routes": 183
     },
     "upstream_counts": {

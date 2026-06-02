@@ -875,6 +875,15 @@ async fn grpc_gateway_post_form_path_length_fallback_matches_current_upstream() 
             expected_message: Some(r#"invalid path: "user" is not a message"#),
         },
         Case {
+            name: "form body rejects raw semicolon separator",
+            uri: "/api/v1/node",
+            content_type: "application/x-www-form-urlencoded",
+            body: "user=form-fallback-user;ignored=true",
+            expected_http_status: 400,
+            expected_grpc_code: Some(3),
+            expected_message: Some("invalid semicolon separator in query"),
+        },
+        Case {
             name: "JSON POST remains method mismatch",
             uri: "/api/v1/node",
             content_type: "application/json",
@@ -2104,6 +2113,12 @@ async fn grpc_gateway_query_parser_failures_are_status_json() {
             method: Method::GET,
             uri: "/api/v1/user?name=%ZZ",
             message_fragment: r#"invalid URL escape "%ZZ""#,
+        },
+        Case {
+            name: "query semicolon separator",
+            method: Method::GET,
+            uri: "/api/v1/node?user=alice;ignored=bob",
+            message_fragment: "invalid semicolon separator in query",
         },
         Case {
             name: "duplicate uint64 query field",

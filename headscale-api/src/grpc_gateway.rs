@@ -1128,6 +1128,7 @@ fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String
     let Some(query) = query.filter(|query| !query.is_empty()) else {
         return Ok(BTreeMap::new());
     };
+    validate_query_semicolons(query)?;
     validate_query_percent_escapes(query)?;
     let pairs: Vec<(String, String)> =
         serde_urlencoded::from_str(query).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -1142,6 +1143,15 @@ fn parse_query_values(query: Option<&str>) -> Result<BTreeMap<String, Vec<String
         }
     }
     Ok(values)
+}
+
+fn validate_query_semicolons(query: &str) -> Result<(), Status> {
+    if query.contains(';') {
+        return Err(Status::invalid_argument(
+            "invalid semicolon separator in query",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_query_percent_escapes(query: &str) -> Result<(), Status> {

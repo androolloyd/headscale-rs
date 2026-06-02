@@ -312,6 +312,9 @@ fuzz smoke and compiles the real-client Rust harness. The dedicated
 `Real-client parity` workflow runs selected paired rows on pull requests that
 touch the control-plane surface, runs `REAL_CLIENT_SMOKES=all` on a nightly
 schedule, and supports manual dispatch for arbitrary smoke/target selections.
+The main CI harness runs `scripts/check_real_client_ci.py` to keep the PR row
+set broad, deterministic, secret-free, and backed by the nightly full-matrix
+selection.
 For local parity branches, run the fuzz gate first and then the real-client
 matrix so a crash-only protocol failure is separated from a stock-client
 behavior mismatch:

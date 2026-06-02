@@ -2091,6 +2091,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 "#,
@@ -2485,6 +2487,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: file
   path: missing-policy.hujson
@@ -2526,6 +2530,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#,
@@ -2560,6 +2566,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#,
@@ -2594,6 +2602,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#,
@@ -2634,6 +2644,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#,
@@ -2679,6 +2691,8 @@ noise:
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: database
 "#,

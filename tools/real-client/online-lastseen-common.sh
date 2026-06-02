@@ -44,11 +44,14 @@ authkey_relogin_different_user="${REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER:-fa
 authkey_relogin_deleted="${REAL_CLIENT_AUTHKEY_RELOGIN_DELETED:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
+policy_reload_json="${REAL_CLIENT_RELOAD_POLICY_JSON:-}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
 prefix_v6="${REAL_CLIENT_PREFIX_V6:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
 expected_peer_count="${REAL_CLIENT_EXPECT_PEER_COUNT:-}"
 expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
+expected_peer_count_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD:-}"
+expected_peer_counts_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD:-}"
 client_users_csv="${REAL_CLIENT_CLIENT_USERS:-}"
 client_user_emails_csv="${REAL_CLIENT_CLIENT_USER_EMAILS:-}"
 work_root="${REAL_CLIENT_WORKDIR:-target/real-client/online-lastseen-${target}}"
@@ -708,6 +711,34 @@ if [[ -n "${expected_peer_counts}" ]]; then
     fi
   done
 fi
+if [[ -n "${expected_peer_count_after_policy_reload}" ]] &&
+  ! [[ "${expected_peer_count_after_policy_reload}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD must be a non-negative integer, got ${expected_peer_count_after_policy_reload}" >&2
+  exit 2
+fi
+if [[ -n "${expected_peer_counts_after_policy_reload}" ]]; then
+  IFS=',' read -r -a expected_peer_counts_after_policy_reload_values <<<"${expected_peer_counts_after_policy_reload}"
+  if ((${#expected_peer_counts_after_policy_reload_values[@]} != client_count)); then
+    echo "REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD must contain ${client_count} comma-separated counts, got ${expected_peer_counts_after_policy_reload}" >&2
+    exit 2
+  fi
+  for count in "${expected_peer_counts_after_policy_reload_values[@]}"; do
+    if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+      echo "REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD must contain non-negative integers, got ${expected_peer_counts_after_policy_reload}" >&2
+      exit 2
+    fi
+  done
+fi
+if [[ -n "${policy_reload_json}" &&
+  -z "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]]; then
+  echo "REAL_CLIENT_RELOAD_POLICY_JSON requires REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD or REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD" >&2
+  exit 2
+fi
+if [[ -z "${policy_reload_json}" &&
+  -n "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]]; then
+  echo "post-reload peer expectations require REAL_CLIENT_RELOAD_POLICY_JSON" >&2
+  exit 2
+fi
 authkey_failure_flags=()
 for ((idx = 0; idx < client_count; idx++)); do
   authkey_failure_flags+=(0)
@@ -820,6 +851,7 @@ grpc_port=""
 server_pid=""
 config_path="${work_dir}/config.yaml"
 policy_path="${work_dir}/policy.hujson"
+policy_reload_path="${work_dir}/policy-reload.hujson"
 db_path="${work_dir}/db.sqlite"
 socket_path="/tmp/${run_id}.sock"
 control_url=""
@@ -1120,17 +1152,26 @@ tailscale_peer_count_matches() {
   ' "${count}" <<<"${status_json}"
 }
 
-assert_peer_visibility_if_requested() {
-  [[ -n "${expected_peer_count}" || -n "${expected_peer_counts}" ]] || return 0
-  echo "::group::assert client peer visibility"
+assert_peer_visibility_counts() {
+  local label="$1"
+  local expected_count_all="$2"
+  local expected_counts_csv="$3"
+  [[ -n "${expected_count_all}" || -n "${expected_counts_csv}" ]] || return 0
+  echo "::group::assert client peer visibility${label:+ (${label})}"
   local peer_status_paths=()
   local peer_expected_counts=()
-  local idx peer_client_name expected_count status_path peer_expected_counts_csv
+  local expected_count_values=()
+  local idx peer_client_name expected_count status_path peer_expected_counts_joined safe_label
+  safe_label="${label:-initial}"
+  safe_label="${safe_label//[^a-zA-Z0-9_-]/-}"
+  if [[ -n "${expected_counts_csv}" ]]; then
+    IFS=',' read -r -a expected_count_values <<<"${expected_counts_csv}"
+  fi
   for idx in "${!client_names[@]}"; do
     peer_client_name="${client_names[$idx]}"
-    expected_count="${expected_peer_count}"
-    if [[ -n "${expected_peer_counts}" ]]; then
-      expected_count="${expected_peer_counts_values[$idx]}"
+    expected_count="${expected_count_all}"
+    if [[ -n "${expected_counts_csv}" ]]; then
+      expected_count="${expected_count_values[$idx]}"
     fi
     if ! wait_for "tailscale peer count ${expected_count} for ${peer_client_name}" \
       "tailscale_peer_count_matches '${peer_client_name}' '${expected_count}'"; then
@@ -1138,12 +1179,12 @@ assert_peer_visibility_if_requested() {
       echo "::endgroup::"
       return 1
     fi
-    status_path="${work_dir}/${peer_client_name}.peer-status.json"
+    status_path="${work_dir}/${peer_client_name}.${safe_label}-peer-status.json"
     docker exec "${peer_client_name}" tailscale status --json >"${status_path}" || true
     peer_status_paths+=("${status_path}")
     peer_expected_counts+=("${expected_count}")
   done
-  peer_expected_counts_csv="$(IFS=,; echo "${peer_expected_counts[*]}")"
+  peer_expected_counts_joined="$(IFS=,; echo "${peer_expected_counts[*]}")"
   ruby -rjson -e '
     expected_counts = ARGV.fetch(0).split(",").map { |value| Integer(value) }
     status_paths = ARGV.drop(1)
@@ -1156,8 +1197,19 @@ assert_peer_visibility_if_requested() {
       peer_hosts = peers.each_value.map { |peer| peer.fetch("HostName") }.sort
       puts JSON.pretty_generate({self: self_host, peer_count: peers.length, peers: peer_hosts})
     end
-  ' "${peer_expected_counts_csv}" "${peer_status_paths[@]}"
+  ' "${peer_expected_counts_joined}" "${peer_status_paths[@]}"
   echo "::endgroup::"
+}
+
+assert_peer_visibility_if_requested() {
+  assert_peer_visibility_counts "" "${expected_peer_count}" "${expected_peer_counts}"
+}
+
+assert_post_reload_peer_visibility_if_requested() {
+  assert_peer_visibility_counts \
+    "after policy reload" \
+    "${expected_peer_count_after_policy_reload}" \
+    "${expected_peer_counts_after_policy_reload}"
 }
 
 assert_stun_round_trip() {
@@ -1670,8 +1722,13 @@ EOF
 }
 
 write_policy_file() {
-  [[ -n "${policy_json}" ]] || return 0
-  printf '%s\n' "${policy_json}" >"${policy_path}"
+  [[ -n "${policy_json}${policy_reload_json}" ]] || return 0
+  if [[ -n "${policy_json}" ]]; then
+    printf '%s\n' "${policy_json}" >"${policy_path}"
+  fi
+  if [[ -n "${policy_reload_json}" ]]; then
+    printf '%s\n' "${policy_reload_json}" >"${policy_reload_path}"
+  fi
 }
 
 append_dns_extra_records_config() {
@@ -2051,6 +2108,14 @@ load_policy_if_requested() {
   echo "::group::load policy"
   headscale_cmd --force -o json policy set --file "${policy_path}" \
     >"${work_dir}/policy-set.json"
+  echo "::endgroup::"
+}
+
+reload_policy_if_requested() {
+  [[ -n "${policy_reload_json}" ]] || return 0
+  echo "::group::reload policy"
+  headscale_cmd --force -o json policy set --file "${policy_reload_path}" \
+    >"${work_dir}/policy-reload-set.json"
   echo "::endgroup::"
 }
 
@@ -3419,6 +3484,8 @@ set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_peer_visibility_if_requested
+reload_policy_if_requested
+assert_post_reload_peer_visibility_if_requested
 assert_derp_map_if_requested
 assert_derp_ping_if_requested
 assert_ssh_matrix_if_requested

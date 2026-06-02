@@ -451,6 +451,7 @@ prepare_postgres_database() {
     exit 0
   fi
   need psql
+  need ruby
   postgres_database_name="headscale_rs_pg_restart_${target//[^a-zA-Z0-9]/_}_$(date +%s)_$$"
   parse_postgres_test_url
   if ! [[ "${postgres_database_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
@@ -2661,10 +2662,10 @@ wait_for_debug_batcher_nodes() {
   echo "::endgroup::"
 }
 
+prepare_postgres_database
 need curl
 need docker
 need ruby
-prepare_postgres_database
 case "${target}" in
   rust) need cargo ;;
   headscale-go)
@@ -2718,6 +2719,8 @@ if ((web_register_restart_flag)); then
     exit 1
   fi
 elif ((route_primary_restart_flag)); then
+  primary_route_before_restart=""
+  primary_route_after_restart=""
   create_user_and_key
   start_client "${router_name}"
   start_client "${router_b_name}"
@@ -2739,11 +2742,21 @@ elif ((route_primary_restart_flag)); then
     echo "${target} primary-route real-client smoke passed"
     exit 0
   fi
+  primary_route_before_restart="$(
+    route_health_primary_name_from_nodes "${work_dir}/primary-route-before-restart-owner.json"
+  )"
   stop_server
   start_server
   wait_for "router-a reconnected after primary-route restart" "tailscale_logged_in '${router_name}'"
   wait_for "router-b reconnected after primary-route restart" "tailscale_logged_in '${router_b_name}'"
   wait_for_primary_route "after-restart"
+  primary_route_after_restart="$(
+    route_health_primary_name_from_nodes "${work_dir}/primary-route-after-restart-owner.json"
+  )"
+  if [[ "${primary_route_before_restart}" != "${primary_route_after_restart}" ]]; then
+    echo "expected primary route owner to survive restart, before=${primary_route_before_restart}, after=${primary_route_after_restart}" >&2
+    exit 1
+  fi
 elif ((route_via_health_flag)); then
   create_route_via_users_and_keys
   start_client "${router_name}"

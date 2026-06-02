@@ -126,6 +126,7 @@ smoke_ids=(
   postgres-route-advertise
   postgres-route-approve
   postgres-route-primary
+  postgres-route-primary-restart
   postgres-route-primary-failover
   postgres-route-primary-sticky
   postgres-route-primary-withdraw
@@ -373,6 +374,7 @@ smoke_areas=(
   database
   database
   database
+  database
   registration
   registration
   registration
@@ -502,6 +504,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-route-advertise-smoke.sh
   tools/real-client/postgres-route-approve-smoke.sh
   tools/real-client/postgres-route-primary-smoke.sh
+  tools/real-client/postgres-route-primary-restart-smoke.sh
   tools/real-client/postgres-route-primary-failover-smoke.sh
   tools/real-client/postgres-route-primary-sticky-smoke.sh
   tools/real-client/postgres-route-primary-withdraw-smoke.sh
@@ -690,6 +693,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-route-advertise-headscale-go-smoke.sh
   tools/real-client/postgres-route-approve-headscale-go-smoke.sh
   tools/real-client/postgres-route-primary-headscale-go-smoke.sh
+  tools/real-client/postgres-route-primary-restart-headscale-go-smoke.sh
   tools/real-client/postgres-route-primary-failover-headscale-go-smoke.sh
   tools/real-client/postgres-route-primary-sticky-headscale-go-smoke.sh
   tools/real-client/postgres-route-primary-withdraw-headscale-go-smoke.sh
@@ -878,6 +882,7 @@ smoke_assertions=(
   "production Postgres route advertisement without approval"
   "production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen"
   "production Postgres primary route selection"
+  "production Postgres primary route owner survives server restart"
   "production Postgres primary route failover after unapproval"
   "production Postgres primary route sticky owner after old primary return"
   "production Postgres primary route withdrawal preserves approval and fails over"

@@ -2,9 +2,10 @@ target
 corpus
 !corpus/
 corpus/*
-!corpus/fuzz_policy_hujson/
-corpus/fuzz_policy_hujson/*
-!corpus/fuzz_policy_hujson/*.json
+!corpus/*/
+!corpus/*/seed
+!corpus/*/*.json
+!corpus/*/*.hujson
 artifacts
 logs
 coverage

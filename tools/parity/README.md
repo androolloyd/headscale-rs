@@ -15,6 +15,17 @@ Run it from the repository root:
 ./scripts/headscale_go_diff.sh
 ```
 
+CI also runs a Docker-free metadata check before the differential harness:
+
+```sh
+python3 scripts/check_parity_golden.py
+```
+
+It verifies that the pinned headscale-go version in
+`tools/parity/headscale-go/go.mod` has a matching active golden, that scenario
+file names and `name` fields line up, and that pinned/current-head goldens cover
+the checked-in scenario sets exactly.
+
 Scenario files for the pinned differential gate live in
 `tools/parity/scenarios/*.json`. Each scenario carries an upstream-shaped HuJSON
 policy object. The checked-in scenarios use headscale-go's native ACL syntax,

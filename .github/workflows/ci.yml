@@ -24,6 +24,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  harness:
+    name: parity harness metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check fuzz corpus coverage
+        run: ./scripts/check_fuzz_corpus.sh
+      - name: Check parity golden coverage
+        run: python3 scripts/check_parity_golden.py
+      - name: Check real-client smoke matrix metadata
+        run: tools/real-client/smoke-matrix.sh --check --all --both
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest

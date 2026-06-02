@@ -74,6 +74,12 @@ same stock `tailscaled` image. Most headscale-go rows use the pinned
 v0.29.0-beta.2 baseline; current-head-specific rows keep using the audited
 upstream commit from `headscale-go-current.sh`.
 
+Validate smoke IDs, target names, and script paths without Docker:
+
+```sh
+tools/real-client/smoke-matrix.sh --check --all --both
+```
+
 | Area | Smoke ID | headscale-rs | headscale-go | Assertion focus |
 | --- | --- | --- | --- | --- |
 | Registration | `authkey` | `authkey-smoke.sh` | `authkey-headscale-go-smoke.sh` | Auth-key login and one `alice` node |

@@ -37,4 +37,17 @@ if ((${#stale[@]} > 0)); then
   exit 1
 fi
 
-echo "checked ${#checked_in_corpus_dirs[@]} checked-in fuzz corpus directories against ${#targets[@]} fuzz targets"
+missing=()
+for target in "${!targets[@]}"; do
+  if [[ -z "${checked_in_corpus_dirs[${target}]:-}" ]]; then
+    missing+=("${target}")
+  fi
+done
+
+if ((${#missing[@]} > 0)); then
+  printf 'fuzz targets missing checked-in corpus seeds:\n' >&2
+  printf '  %s\n' "${missing[@]}" | sort >&2
+  exit 1
+fi
+
+echo "checked ${#checked_in_corpus_dirs[@]} checked-in fuzz corpus directories covering ${#targets[@]} fuzz targets"

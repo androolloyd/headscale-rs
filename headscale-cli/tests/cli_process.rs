@@ -4436,6 +4436,179 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
 
 #[cfg(feature = "postgres-sqlx")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> BoxTestResult {
+    let Some(database) = TempPostgresServeDatabase::open("local_grpc_restart").await? else {
+        return Ok(());
+    };
+    let dir = tempfile::tempdir()?;
+    let listen = unused_loopback_addr();
+    let metrics = unused_loopback_addr();
+    let grpc = unused_loopback_addr();
+    let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        assert_eq!(stdout(&create_user), "User created\n");
+        assert_eq!(stderr(&create_user), "");
+
+        let policy_path = dir.path().join("restart-policy.hujson");
+        fs::write(
+            &policy_path,
+            r#"{"tagOwners":{"tag:router":["alice@"]},"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}"#,
+        )?;
+        let policy_path = policy_path.to_string_lossy().to_string();
+        let set_policy = headscale_with_config(
+            &config,
+            &["-o", "json", "policy", "set", "--file", &policy_path],
+        );
+        assert!(
+            set_policy.status.success(),
+            "stderr: {}",
+            stderr(&set_policy)
+        );
+        assert_eq!(stdout(&set_policy), "Policy updated.\n");
+        assert_eq!(stderr(&set_policy), "");
+
+        let auth_id = "hskey-authreq-bcbcbcbcbcbcbcbcbcbcbcbc";
+        let debug_create = headscale_with_config(
+            &config,
+            &[
+                "debug",
+                "create-node",
+                "--user",
+                "alice",
+                "--key",
+                auth_id,
+                "--name",
+                "pg-restart-node",
+                "--route",
+                "10.40.0.0/24",
+            ],
+        );
+        assert!(
+            debug_create.status.success(),
+            "stderr: {}",
+            stderr(&debug_create)
+        );
+        assert_eq!(stdout(&debug_create), "Node created\n");
+        assert_eq!(stderr(&debug_create), "");
+
+        let auth_register = headscale_with_config(
+            &config,
+            &["auth", "register", "--user", "alice", "--auth-id", auth_id],
+        );
+        assert!(
+            auth_register.status.success(),
+            "stderr: {}",
+            stderr(&auth_register)
+        );
+        assert_eq!(stdout(&auth_register), "Node pg-restart-node registered\n");
+        assert_eq!(stderr(&auth_register), "");
+
+        let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        let nodes_json = json_output(&nodes_json);
+        let node_id = nodes_json[0]["id"].as_u64().expect("node id").to_string();
+        assert_eq!(nodes_json[0]["user"]["name"].as_str(), Some("alice"));
+
+        let approve_routes = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "approve-routes",
+                "--identifier",
+                &node_id,
+                "--routes",
+                "10.40.0.0/24",
+            ],
+        );
+        assert!(
+            approve_routes.status.success(),
+            "stderr: {}",
+            stderr(&approve_routes)
+        );
+        assert_eq!(stdout(&approve_routes), "Node updated\n");
+        assert_eq!(stderr(&approve_routes), "");
+
+        stop_child(&mut child);
+        child = spawn_headscale_serve(&config, dir.path())?;
+
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(stderr(&health), "");
+
+        let users = headscale_with_config(&config, &["-o", "json", "users", "list"]);
+        let users = json_output(&users);
+        assert_eq!(users.as_array().expect("users").len(), 1);
+        assert_eq!(users[0]["name"].as_str(), Some("alice"));
+
+        let policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+        assert!(policy.status.success(), "stderr: {}", stderr(&policy));
+        assert_eq!(
+            stdout(&policy),
+            "{\"tagOwners\":{\"tag:router\":[\"alice@\"]},\"acls\":[{\"action\":\"accept\",\"src\":[\"*\"],\"dst\":[\"*:*\"]}]}\n"
+        );
+        assert_eq!(stderr(&policy), "");
+
+        let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        let nodes = json_output(&nodes);
+        assert_eq!(nodes.as_array().expect("nodes").len(), 1);
+        assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
+        assert_eq!(nodes[0]["name"].as_str(), Some("pg-restart-node"));
+        assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-restart-node"));
+        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+
+        let routes = headscale_with_config(&config, &["nodes", "list-routes"]);
+        assert!(routes.status.success(), "stderr: {}", stderr(&routes));
+        let routes_stdout = stdout(&routes);
+        assert!(
+            routes_stdout.contains("10.40.0.0/24"),
+            "routes stdout: {routes_stdout}"
+        );
+        assert_eq!(stderr(&routes), "");
+
+        let rename_after_restart = headscale_with_config(
+            &config,
+            &[
+                "nodes",
+                "rename",
+                "pg-restart-renamed",
+                "--identifier",
+                &node_id,
+            ],
+        );
+        assert!(
+            rename_after_restart.status.success(),
+            "stderr: {}",
+            stderr(&rename_after_restart)
+        );
+        assert_eq!(stdout(&rename_after_restart), "Node renamed\n");
+        assert_eq!(stderr(&rename_after_restart), "");
+
+        let renamed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        let renamed = json_output(&renamed);
+        assert_eq!(renamed[0]["name"].as_str(), Some("pg-restart-renamed"));
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    database.cleanup().await?;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult {
     let Some(database) = TempPostgresServeDatabase::open("gateway_user_crud").await? else {
         return Ok(());

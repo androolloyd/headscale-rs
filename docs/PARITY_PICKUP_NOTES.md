@@ -1633,3 +1633,19 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   for some different-user same-machine paths, but the stock-client real-client
   row at `171fd7a3` remains logged out and preserves the original node. This
   slice matches the stock-client observable behavior that failed CI.
+
+## 2026-06-02 policy danger-all source parity slice
+
+- `autogroup:danger-all` now follows current headscale-go's source-only
+  semantics in the Rust policy stack.
+- HuJSON ACLs and non-via network grants accept `autogroup:danger-all` as a
+  source, while ACL/grant destinations reject it with the upstream-shaped
+  `cannot use autogroup:danger-all as a dst` error.
+- Canonical route-overlap expansion treats it as the full IPv4/IPv6 default
+  prefix pair, and per-node packet-filter compilation emits `SrcIPs: ["*"]`
+  for both direct ACL rules and `grants[].via` route-steering rules.
+- Validation: focused `headscale-api-acl` and `headscale-api`
+  `danger_all`/`autogroup_danger_all` tests, `cargo fmt -p headscale-api -p
+  headscale-api-acl --check`, `cargo clippy -p headscale-api-acl
+  --all-targets -- -D warnings`, `cargo clippy -p headscale-api
+  --all-targets -- -D warnings`, and `git diff --check`.

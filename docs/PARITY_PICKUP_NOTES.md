@@ -2671,3 +2671,18 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   recently expanded `--no-descriptions -- bad` separator snapshots. The
   `p2-cli-output-error-residuals` row remains open for broader residual utility
   and process-level CLI output/error drift.
+
+## 2026-06-02 DNS search-domain live resolver smoke
+
+- Added paired `dns-search-live-resolver` Rust/headscale-go stock-client
+  smokes. The row configures a live split-DNS UDP resolver under
+  `search.live.test`, adds that suffix to `DNSConfig.Domains`, asserts the
+  client-observed domains and split route, then resolves the fully qualified
+  live record under that suffix with `tailscale debug resolve`.
+- The shared auth-key harnesses now accept
+  `REAL_CLIENT_DNS_SEARCH_DOMAINS_JSON` and
+  `REAL_CLIENT_EXPECT_DNS_DOMAINS`; the Rust real-client harness forwards the
+  matching `HSRS_HARNESS_DNS_SEARCH_DOMAINS_JSON` into `DnsConfigSpec`.
+- The `p2-dns-live-resolver-behavior` row remains open because the new
+  search-domain row is wired but still needs a passing live run; deterministic
+  multi-resolver/failure fallback client behavior also remains.

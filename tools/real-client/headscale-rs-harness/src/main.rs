@@ -152,6 +152,8 @@ struct Args {
     dns_split_nameservers_json: Option<String>,
     #[arg(long, env = "HSRS_HARNESS_DNS_FALLBACK_NAMESERVERS_JSON")]
     dns_fallback_nameservers_json: Option<String>,
+    #[arg(long, env = "HSRS_HARNESS_DNS_SEARCH_DOMAINS_JSON")]
+    dns_search_domains_json: Option<String>,
     #[arg(long, env = "HSRS_HARNESS_DNS_OVERRIDE_LOCAL")]
     dns_override_local: Option<bool>,
     #[arg(
@@ -452,6 +454,7 @@ async fn main() -> Result<()> {
         parse_dns_split_resolvers_json(args.dns_split_nameservers_json.as_deref())?;
     let (fallback_nameservers, fallback_resolvers) =
         parse_dns_resolvers_json(args.dns_fallback_nameservers_json.as_deref())?;
+    let search_domains = parse_dns_search_domains_json(args.dns_search_domains_json.as_deref())?;
     let dns = Arc::new(DnsStore::from_spec(DnsConfigSpec {
         magic_dns: args.base_domain.is_some(),
         base_domain: args.base_domain.clone().unwrap_or_default(),
@@ -461,6 +464,7 @@ async fn main() -> Result<()> {
         restricted_nameservers,
         restricted_resolvers,
         extra_records: dns_extra_records,
+        search_domains,
         fallback_nameservers,
         fallback_resolvers,
         ..DnsConfigSpec::default()
@@ -670,6 +674,13 @@ fn parse_dns_split_resolvers_json(
         resolvers_by_suffix.insert(suffix, resolvers);
     }
     Ok((addrs_by_suffix, resolvers_by_suffix))
+}
+
+fn parse_dns_search_domains_json(raw: Option<&str>) -> Result<Vec<String>> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(raw).context("parse DNS search domains JSON array")
 }
 
 fn value_to_dns_resolver(value: serde_json::Value) -> Result<DnsResolver> {

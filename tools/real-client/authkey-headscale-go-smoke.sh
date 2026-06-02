@@ -68,9 +68,11 @@ dns_extra_records_json="${REAL_CLIENT_DNS_EXTRA_RECORDS_JSON:-}"
 dns_nameservers_json="${REAL_CLIENT_DNS_NAMESERVERS_JSON:-}"
 dns_split_nameservers_json="${REAL_CLIENT_DNS_SPLIT_NAMESERVERS_JSON:-}"
 dns_fallback_nameservers_json="${REAL_CLIENT_DNS_FALLBACK_NAMESERVERS_JSON:-}"
+dns_search_domains_json="${REAL_CLIENT_DNS_SEARCH_DOMAINS_JSON:-}"
 dns_override_local="${REAL_CLIENT_DNS_OVERRIDE_LOCAL:-}"
 expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIENT_EXPECT_DNS_RESOLUTIONS:-}}"
 expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
+expected_dns_domains="${REAL_CLIENT_EXPECT_DNS_DOMAINS:-}"
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
@@ -1322,6 +1324,21 @@ assert_dns_resolver_list() {
     ' "${netmap_path}" "${field}" "${expected_csv}" "${expect_objects}" >"${output_path}"
 }
 
+assert_dns_domains() {
+  local client_name="$1"
+  local expected_csv="$2"
+  local output_path="$3"
+  local netmap_path="${output_path}.netmap"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${output_path}.err" &&
+    ruby -rjson -e '
+      netmap = JSON.parse(File.read(ARGV.fetch(0)))
+      expected = ARGV.fetch(1).split(",").reject(&:empty?)
+      domains = Array(netmap.dig("DNS", "Domains")).map(&:to_s)
+      abort("expected DNS Domains #{expected.inspect}, got #{domains.inspect}") unless domains == expected
+      puts JSON.pretty_generate({"Domains" => domains})
+    ' "${netmap_path}" "${expected_csv}" >"${output_path}"
+}
+
 assert_dns_route() {
   local client_name="$1"
   local suffix="$2"
@@ -1713,9 +1730,17 @@ if [[ -n "${dns_split_nameservers_json}" ]]; then
 else
   printf '    split: {}\n' >>"${config_path}"
 fi
-cat >>"${config_path}" <<EOF
-  search_domains: []
-EOF
+if [[ -n "${dns_search_domains_json}" ]]; then
+  ruby -rjson -e '
+    puts "  search_domains:"
+    JSON.parse(ARGV.fetch(0)).each do |domain|
+      abort("DNS search domain must be a string: #{domain.inspect}") unless domain.is_a?(String)
+      puts "    - #{domain.to_json}"
+    end
+  ' "${dns_search_domains_json}" >>"${config_path}"
+else
+  printf '  search_domains: []\n' >>"${config_path}"
+fi
 if [[ -n "${dns_extra_records_json}" ]]; then
   printf '  extra_records:\n' >>"${config_path}"
   ruby -rjson -e '
@@ -2780,6 +2805,18 @@ if [[ -n "${expected_dns_fallback_resolvers}" ]]; then
       exit 1
     }
   cat "${work_dir}/dns-fallback-resolvers.json"
+  echo "::endgroup::"
+fi
+
+if [[ -n "${expected_dns_domains}" ]]; then
+  echo "::group::assert DNS domains"
+  resolver_client="${client_names[0]}"
+  wait_for "DNS domains ${expected_dns_domains}" \
+    "assert_dns_domains '${resolver_client}' '${expected_dns_domains}' '${work_dir}/dns-domains.json'" || {
+      dump_client_debug "${resolver_client}"
+      exit 1
+    }
+  cat "${work_dir}/dns-domains.json"
   echo "::endgroup::"
 fi
 

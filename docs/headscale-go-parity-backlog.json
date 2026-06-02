@@ -96,7 +96,7 @@
       "upstream_evidence": [
         "integration/dns_test.go"
       ],
-      "exit_criteria": "Continue broadening live resolver client behavior beyond current netmap/DNSConfig, stock-client MagicDNS, live split-resolver A/AAAA, and extra-record reload coverage."
+      "exit_criteria": "Continue broadening live resolver client behavior beyond current netmap/DNSConfig, stock-client MagicDNS, live split-resolver A/AAAA, and extra-record reload coverage. The paired search-domain live-resolver row is wired but still needs a passing live run; remaining deterministic DNS resolver behavior includes search-domain live resolver execution and multi-resolver/failure fallback."
     }
   ]
 }

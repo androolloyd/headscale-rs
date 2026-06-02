@@ -229,6 +229,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | DNS | `extra-records` | `extra-records-smoke.sh` | `extra-records-headscale-go-smoke.sh` | Extra DNS A record in client netmap and resolver |
 | DNS | `dns-edge` | `dns-edge-smoke.sh` | `dns-edge-headscale-go-smoke.sh` | Split DNS routes plus AAAA/CNAME extra records and resolver lookups |
 | DNS | `dns-split-live-records` | `dns-split-live-records-smoke.sh` | `dns-split-live-records-headscale-go-smoke.sh` | Split DNS live resolver A and AAAA stock-client lookups |
+| DNS | `dns-search-live-resolver` | `dns-search-live-resolver-smoke.sh` | `dns-search-live-resolver-headscale-go-smoke.sh` | Search-domain live resolver stock-client lookup |
 | DNS | `dns-hot-reload` | `dns-hot-reload-smoke.sh` | `dns-hot-reload-headscale-go-smoke.sh` | Production `extra_records_path` hot reload in client netmap and resolver |
 | DNS | `magicdns-ipv6-only` | `magicdns-ipv6-only-smoke.sh` | `magicdns-ipv6-only-headscale-go-smoke.sh` | MagicDNS with IPv6-only prefix-family allocation and peer resolver lookup |
 | DNS | `dns-disabled` | `dns-disabled-smoke.sh` | `dns-disabled-headscale-go-smoke.sh` | MagicDNS disabled fallback names |
@@ -668,6 +669,16 @@ tools/real-client/dns-split-live-records-smoke.sh
 tools/real-client/dns-split-live-records-headscale-go-smoke.sh
 ```
 
+The search-live-resolver variant points a split DNS route at the same live
+fixture, adds that route suffix to `DNSConfig.Domains` as an operator search
+domain, asserts the client-observed domain list, and resolves a live record
+under that suffix through the stock-client resolver:
+
+```sh
+tools/real-client/dns-search-live-resolver-smoke.sh
+tools/real-client/dns-search-live-resolver-headscale-go-smoke.sh
+```
+
 The DNS hot-reload variant starts the production server with
 `dns.extra_records_path`, logs in a stock client, edits the JSON records file,
 and asserts that both the client-observed netmap and `tailscale debug resolve`
@@ -702,6 +713,10 @@ Useful knobs:
   status shape.
 - `REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE=true` resolves peer MagicDNS names
   with `tailscale debug resolve`.
+- `REAL_CLIENT_DNS_SEARCH_DOMAINS_JSON` configures operator search domains as a
+  JSON string array for both Rust and headscale-go smokes.
+- `REAL_CLIENT_EXPECT_DNS_DOMAINS` asserts the exact client-observed
+  `DNSConfig.Domains` list as comma-separated values.
 - `REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES` accepts comma-separated
   `name=ip4:value` or `name=ip6:value` entries for extra-record resolver
   assertions.

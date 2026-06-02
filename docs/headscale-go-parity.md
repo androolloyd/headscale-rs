@@ -172,11 +172,11 @@ Current-head audit overlay, refreshed 2026-05-30:
   has P0 upgrade/drop-in backlog, led by broader production Postgres
   process-level serve/mutation coverage beyond the CI-backed paired
   stock-client matrix, remaining NodeStore reason/churn map-stream tests,
-  current-upstream route edge cases beyond the covered default/Postgres row
-  symmetry set, and broader stock-client SSH status coverage.
-- Remaining P1 current-head gaps from the audit: broader paired
-  stock-client route-via/route-health edge matrices beyond the now-symmetric
-  default/Postgres reload, restart, mixed-exit, and failure-mode rows, broader SSH
+  and broader stock-client SSH status coverage. Current-upstream
+  route-via/route-health row mirroring is guarded by the checked-in
+  `route-edge-current-upstream-audit` row; remaining route work is new upstream
+  semantics rather than another default/Postgres mirror row.
+- Remaining P1 current-head gaps from the audit: broader SSH
   client-facing status/stderr and profile-variant edges beyond the
   covered `localpart:*@domain` compiler/checker plus localpart/profile
   stock-client allow/deny snapshots,
@@ -457,6 +457,16 @@ Recent coverage note (2026-06-02): paired `route-via-health-restart` and
 production restart, bringing the Postgres stock-client matrix to ninety-six
 rows.
 
+Recent coverage note (2026-06-02): paired
+`route-edge-current-upstream-audit` matrix scripts now check the audited
+current-head upstream pin and assert all twenty-nine default
+route-via/route-health rows have matching twenty-nine Postgres mirrors with
+checked-in Rust/headscale-go scripts. This is evidence-only because every
+reload, restart, all-unhealthy, mixed-exit, same-tag, multiprefix, and
+route-via-health symmetry row is already covered by live stock-client scripts;
+future route work should add new upstream semantics rather than another mirror
+row.
+
 Recent coverage note (2026-06-01): paired `postgres-route-primary`,
 `postgres-route-primary-failover`, `postgres-route-primary-sticky`, and
 `postgres-route-primary-withdraw` stock-client rows now cover production
@@ -733,9 +743,10 @@ registry, loaded policy manager, and map-response inputs after restart.
    gRPC slice: add current-upstream byte-for-byte output/error snapshots for
    the remaining live-server cases and broader auth/server error variants.
 3. Keep paired stock-client route coverage tracking current upstream route-via
-   and route-health behavior; the checked-in default/Postgres reload, restart,
-   mixed-exit, all-unhealthy, and route-via symmetry rows are present, so the
-   remaining work is new edge semantics rather than row mirroring.
+   and route-health behavior; `route-edge-current-upstream-audit` now guards
+   the checked-in default/Postgres reload, restart, mixed-exit, all-unhealthy,
+   and route-via symmetry set, so remaining work is new edge semantics rather
+   than row mirroring.
 4. Finish config-runtime gaps: HTTP-01/TLS-ALPN now have production-listener
    controlled-CA process coverage, and HTTP-01 challenge-listener bind failure
    is pinned without public-CA traffic; continue with lower-frequency config

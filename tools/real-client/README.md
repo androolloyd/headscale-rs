@@ -68,11 +68,11 @@ headscale-rs wire surface.
 ## Smoke Coverage Matrix
 
 Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
-truth for the checked-in real-client matrix. Each row has a Rust harness script
-and a matching headscale-go script so parity work can compare behavior with the
-same stock `tailscaled` image. Most headscale-go rows use the pinned
-v0.29.0-beta.2 baseline; current-head-specific rows keep using the audited
-upstream commit from `headscale-go-current.sh`.
+truth for the checked-in real-client matrix. Except for evidence-only audit
+rows, each row has a Rust harness script and a matching headscale-go script so
+parity work can compare behavior with the same stock `tailscaled` image. Most
+headscale-go rows use the pinned v0.29.0-beta.2 baseline; current-head-specific
+rows keep using the audited upstream commit from `headscale-go-current.sh`.
 
 Validate smoke IDs, target names, and script paths without Docker:
 
@@ -162,6 +162,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Database | `postgres-route-via` | `postgres-route-via-smoke.sh` | `postgres-route-via-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` route steering |
 | Database | `postgres-route-via-same-tag` | `postgres-route-via-same-tag-smoke.sh` | `postgres-route-via-same-tag-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route steering |
 | Database | `postgres-route-via-health` | `postgres-route-via-health-smoke.sh` | `postgres-route-via-health-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route owner follows route-health failover |
+| Database | `postgres-route-via-health-restart` | `postgres-route-via-health-restart-smoke.sh` | `postgres-route-via-health-restart-headscale-go-smoke.sh` | Production Postgres current-head same-tag `grants[].via` route-health failover survives server restart |
 | Database | `postgres-route-via-reload` | `postgres-route-via-reload-smoke.sh` | `postgres-route-via-reload-headscale-go-smoke.sh` | Production Postgres current-head `grants[].via` policy reload steering |
 | Database | `postgres-route-via-multiprefix` | `postgres-route-via-multiprefix-smoke.sh` | `postgres-route-via-multiprefix-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` route steering |
 | Database | `postgres-route-via-multiprefix-reload` | `postgres-route-via-multiprefix-reload-smoke.sh` | `postgres-route-via-multiprefix-reload-headscale-go-smoke.sh` | Production Postgres current-head multi-prefix `grants[].via` policy reload steering |
@@ -239,6 +240,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-via-same-tag` | `route-via-same-tag-smoke.sh` | `route-via-same-tag-headscale-go-smoke.sh` | Current-head same-tag multi-router `grants[].via` election |
 | Routes | `route-via-same-tag-restart` | `route-via-same-tag-restart-smoke.sh` | `route-via-same-tag-restart-headscale-go-smoke.sh` | Current-head same-tag route steering with `grants[].via` survives server restart |
 | Routes | `route-via-health` | `route-via-health-smoke.sh` | `route-via-health-headscale-go-smoke.sh` | Current-head regular-overlap same-tag `grants[].via` route owner follows route-health failover |
+| Routes | `route-via-health-restart` | `route-via-health-restart-smoke.sh` | `route-via-health-restart-headscale-go-smoke.sh` | Current-head same-tag `grants[].via` route-health failover survives server restart |
 | Routes | `route-via-reload` | `route-via-reload-smoke.sh` | `route-via-reload-headscale-go-smoke.sh` | Current-head `grants[].via` policy reload steering |
 | Routes | `route-via-reload-restart` | `route-via-reload-restart-smoke.sh` | `route-via-reload-restart-headscale-go-smoke.sh` | Current-head route steering policy reload survives server restart |
 | Routes | `route-via-restart` | `route-via-restart-smoke.sh` | `route-via-restart-headscale-go-smoke.sh` | Current-head `grants[].via` restart persistence |
@@ -263,6 +265,7 @@ tools/real-client/smoke-matrix.sh --check --all --both
 | Routes | `route-health-mixed-exit-all-unhealthy-reload` | `route-health-mixed-exit-all-unhealthy-reload-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-headscale-go-smoke.sh` | Current-head route-health policy reload preserves mixed exit-node all-unavailable subnet primary retention |
 | Routes | `route-health-mixed-exit-all-unhealthy-restart` | `route-health-mixed-exit-all-unhealthy-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable subnet primary retention survives server restart |
 | Routes | `route-health-mixed-exit-all-unhealthy-reload-restart` | `route-health-mixed-exit-all-unhealthy-reload-restart-smoke.sh` | `route-health-mixed-exit-all-unhealthy-reload-restart-headscale-go-smoke.sh` | Current-head route-health mixed exit-node all-unavailable policy reload survives server restart |
+| Routes | `route-edge-current-upstream-audit` | `route-edge-current-upstream-audit-smoke.sh` | `route-edge-current-upstream-audit-headscale-go-smoke.sh` | Evidence-only current-head route-via/route-health default and Postgres matrix symmetry audit |
 | DERP | `derp-private` | `derp-private-smoke.sh` | `derp-private-headscale-go-smoke.sh` | Private DERP relay, STUN, verify-client admission, and DERP map metadata |
 | SSH | `ssh` | `ssh-smoke.sh` | `ssh-headscale-go-smoke.sh` | Tailscale SSH allow, deny, and ACL timeout |
 | SSH | `ssh-localpart` | `ssh-localpart-smoke.sh` | `ssh-localpart-headscale-go-smoke.sh` | Current-head Tailscale SSH localpart login users from profile emails |

@@ -47,9 +47,11 @@
         "hscontrol/policy/v2/tailscale_grants_compat_test.go",
         "hscontrol/policy/v2/tailscale_nodeattrs_compat_test.go",
         "hscontrol/policy/v2/tailscale_routes_data_compat_test.go",
-        "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go"
+        "hscontrol/policy/v2/tailscale_ssh_data_compat_test.go",
+        "hscontrol/policy/v2/policytester_compat_test.go",
+        "hscontrol/policy/v2/sshtester_compat_test.go"
       ],
-      "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/nodeAttrs/routes/SSH compatibility fixtures in the differential harness."
+      "exit_criteria": "Audit and pin remaining Tailscale ACL/grants/nodeAttrs/routes/SSH/policyTest/sshTest compatibility fixtures in the differential harness."
     },
     {
       "id": "p2-cli-output-error-residuals",

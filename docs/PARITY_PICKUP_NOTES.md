@@ -2611,6 +2611,24 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   backlog evidence list. The row remains open because the upstream ACL,
   grants, nodeAttrs, route, policyTest, and sshTest captures are not exhausted.
 
+## 2026-06-02 policy compat fixture batch 3
+
+- Audited upstream `hscontrol/policy/v2/*compat*` at
+  `171fd7a3c54156965753a63639cdcafcd50c8d67`: 215 ACL, 266 grant, 56
+  nodeAttrs, 125 route, 108 SSH, 57 policyTest, and 37 sshTest captures.
+- Added `policy-v2-compat-fixture-batch-3` to the pinned Go/Rust
+  differential suite for policy tester and SSH tester compatibility shapes:
+  mixed ACL/grant policy `tests`, duplicate accepted test entries, bracketed
+  IPv6 literal grant destinations, numeric TCP `tests[].proto`, `sshTests`
+  accept/check/deny/localpart assertions, wildcard/unknown/suggest-exit
+  `nodeAttrs`, and `autogroup:member` excluding tagged nodes.
+- Matched headscale-go by accepting and canonicalizing numeric TCP
+  `tests[].proto` (`"6"` -> `"tcp"`) in Rust policy parsing and semantic
+  evaluation.
+- Added `policytester_compat_test.go` and `sshtester_compat_test.go` to the
+  P1 backlog evidence list. The row remains open because this batch still pins
+  representative differential slices rather than all 864 upstream captures.
+
 ## 2026-06-02 SSH stock-client exactness closure
 
 - Broadened paired stock-client SSH success assertions across the shared

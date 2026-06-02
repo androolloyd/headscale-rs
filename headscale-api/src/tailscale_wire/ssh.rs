@@ -262,6 +262,7 @@ mod tests {
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
             derp_map: DerpMapStore::shared(DerpMap::default()),
+            native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),

@@ -2007,3 +2007,22 @@ map/session churn parity, and remaining route/SSH stock-client edge rows.
   `Upgrade: DERP`/websocket boundaries, `Derp-Fast-Start`, server-key header
   behavior, verify-client admission, keepalive/ping runtime, and stock-client
   native DERP smokes.
+
+## 2026-06-02 native DERP HTTP upgrade foundation
+
+- Added an optional `WireState::native_derp` runtime and conditional `/derp`
+  route in `headscale-api`. The route remains unmounted when the runtime is
+  absent, preserving sidecar-owned deployments.
+- The native route now handles the normal `Upgrade: DERP` path through Hyper
+  upgrade, emits upstream-shaped `101` response headers (`Upgrade: DERP`,
+  `Derp-Version`, `Derp-Public-Key`), sends the DERP server-key frame, opens
+  encrypted `ClientInfo`, sends encrypted `ServerInfo`, registers the client in
+  the native relay registry, and relays ping/pong plus packet frames through the
+  core registry.
+- Tests cover missing-upgrade `426` body parity, websocket-without-DERP-protocol
+  rejection, and an in-memory native DERP login plus ping/pong stream.
+- Remaining native DERP runtime gaps: `Derp-Fast-Start` no-response hijack,
+  actual DERP-over-WebSocket transport, verify-client admission through the
+  headscale registry, keepalive/restarting/health runtime scheduling, config
+  wiring to enable the native runtime from `serve`, and stock-client native DERP
+  smokes.

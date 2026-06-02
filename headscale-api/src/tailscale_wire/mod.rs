@@ -90,6 +90,8 @@ pub mod acme;
 pub mod basic_handlers;
 pub mod be_transport;
 pub mod controlbase;
+#[cfg(feature = "full")]
+pub mod derp;
 pub mod derp_config;
 pub mod key_handler;
 pub mod knock;
@@ -998,6 +1000,11 @@ pub struct WireState {
     /// handler a cheap cloned snapshot and wakes long-poll streams when
     /// runtime DERP refresh replaces it.
     pub derp_map: Arc<DerpMapStore>,
+    /// Optional native DERP relay runtime. When absent, `/derp` remains
+    /// unmounted so sidecar-backed deployments keep their existing route
+    /// ownership.
+    #[cfg(feature = "full")]
+    pub native_derp: Option<Arc<derp::NativeDerpRuntime>>,
     /// Live policy store. `/map` reads
     /// [`crate::policy::PolicyStore::filter_rules`] to populate
     /// `MapResponse.PacketFilter`; the admin PUT route mutates the
@@ -5175,6 +5182,7 @@ mod registry_tests {
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
             derp_map: DerpMapStore::shared(wire::DerpMap::default()),
+            native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
             knock: KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),
@@ -9135,6 +9143,11 @@ fn control_router_with_optional_oidc_inner(
 
     if options.include_health_route {
         inner = inner.route("/health", get(basic_handlers::handle_health));
+    }
+
+    #[cfg(feature = "full")]
+    if state.native_derp.is_some() {
+        inner = inner.route("/derp", any(derp::handle_derp));
     }
 
     inner = if let Some(oidc) = oidc {

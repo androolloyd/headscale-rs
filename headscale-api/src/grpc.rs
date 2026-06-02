@@ -3900,6 +3900,7 @@ mod upstream_tests {
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),
+            native_derp: None,
             policy: Arc::new(policy),
             knock: crate::tailscale_wire::KnockConfig::disabled(),
             dns: Arc::new(crate::dns::DnsStore::new()),

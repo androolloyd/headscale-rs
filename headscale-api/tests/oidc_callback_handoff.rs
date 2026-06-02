@@ -294,6 +294,7 @@ fn wire_state() -> (WireState, TempDir) {
         machines: Arc::new(MachineRegistry::new()),
         registration_store: None,
         derp_map: headscale_api::tailscale_wire::DerpMapStore::shared(DerpMap::default()),
+        native_derp: None,
         policy: Arc::new(PolicyStore::new()),
         knock: KnockConfig::disabled(),
         dns: Arc::new(DnsStore::new()),

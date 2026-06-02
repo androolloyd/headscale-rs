@@ -196,6 +196,7 @@ smoke_ids=(
   web-register-route-approve-restart
   oidc
   oidc-policy-churn
+  oidc-policy-churn-restart
   ssh-oidc-check
   ssh-cli-check
   ssh-oidc-check-period-cache
@@ -388,6 +389,7 @@ smoke_areas=(
   registration
   registration
   registration
+  lifecycle
   ssh
   ssh
   ssh
@@ -580,6 +582,7 @@ smoke_rust_scripts=(
   tools/real-client/web-register-route-approve-restart-smoke.sh
   tools/real-client/oidc-smoke.sh
   tools/real-client/oidc-policy-churn-smoke.sh
+  tools/real-client/oidc-policy-churn-restart-smoke.sh
   tools/real-client/ssh-oidc-check-smoke.sh
   tools/real-client/ssh-cli-check-smoke.sh
   tools/real-client/ssh-oidc-check-period-cache-smoke.sh
@@ -772,6 +775,7 @@ smoke_go_scripts=(
   tools/real-client/web-register-route-approve-restart-headscale-go-smoke.sh
   tools/real-client/oidc-headscale-go-smoke.sh
   tools/real-client/oidc-policy-churn-headscale-go-smoke.sh
+  tools/real-client/oidc-policy-churn-restart-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/ssh-oidc-check-period-cache-headscale-go-smoke.sh
@@ -964,6 +968,7 @@ smoke_assertions=(
   "Production web/CLI registration route approval survives server restart"
   "OIDC callback, node row, and user profile"
   "OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer"
+  "Production OIDC policy reload peer/profile map churn survives server restart"
   "OIDC-backed Tailscale SSH check approval; opt-in checkPeriod cache variant"
   "CLI-approved Tailscale SSH check approval"
   "OIDC-backed Tailscale SSH checkPeriod cache"

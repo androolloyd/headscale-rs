@@ -996,6 +996,30 @@ reload_oidc_policy_churn_policy() {
   echo "::endgroup::"
 }
 
+restart_oidc_policy_churn_server_and_assert_maps() {
+  ((oidc_restart_flag)) || return 0
+
+  echo "::group::restart OIDC policy-churn server"
+  stop_server
+  if [[ "${target}" == "rust" ]]; then
+    start_rust_server
+  else
+    start_headscale_go_server
+  fi
+  wait_for "policy-churn viewer logged-in netmap after OIDC policy restart" \
+    "tailscale_logged_in '${policy_churn_viewer_name}'"
+  wait_for "policy-churn OIDC peer logged-in netmap after OIDC policy restart" \
+    "tailscale_logged_in '${policy_churn_peer_name}'"
+  wait_for "OIDC peer visible to viewer after policy restart" \
+    "tailscale_peer_visible_with_profile '${policy_churn_viewer_name}' '${policy_churn_peer_name}' '${work_dir}/policy-churn-viewer-after-restart-status.json'" || {
+      dump_client_debug "${policy_churn_viewer_name}"
+      exit 1
+    }
+  cat "${work_dir}/policy-churn-viewer-after-restart-status.json"
+  assert_policy_churn_cli_state
+  echo "::endgroup::"
+}
+
 run_oidc_policy_churn_smoke() {
   create_policy_churn_viewer_authkey
   start_client "${policy_churn_viewer_name}"
@@ -1274,7 +1298,12 @@ else
 fi
 if ((oidc_policy_churn_flag)); then
   run_oidc_policy_churn_smoke
-  echo "${target} OIDC policy-churn real-client smoke passed"
+  restart_oidc_policy_churn_server_and_assert_maps
+  if ((oidc_restart_flag)); then
+    echo "${target} OIDC policy-churn restart real-client smoke passed"
+  else
+    echo "${target} OIDC policy-churn real-client smoke passed"
+  fi
   exit 0
 fi
 start_client

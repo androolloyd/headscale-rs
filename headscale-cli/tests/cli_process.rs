@@ -2155,6 +2155,33 @@ fn serve_unknown_flags_honor_output_format_like_current_upstream() {
 }
 
 #[test]
+fn global_config_utility_unknown_flags_honor_output_format_like_current_upstream() {
+    assert_stderr_snapshot(
+        &["health", "-o", "json", "--bad"],
+        1,
+        include_str!("snapshots/utility_health_unknown_flag_json.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["health", "--output", "weird", "--bad"],
+        1,
+        include_str!("snapshots/utility_health_unknown_flag_unknown_output.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["configtest", "-o", "json-line", "--bad"],
+        1,
+        include_str!("snapshots/utility_configtest_unknown_flag_json_line.stderr"),
+    );
+    assert_stderr_snapshot(
+        &["dumpConfig", "-oyaml", "--bad"],
+        1,
+        &format!(
+            "{}\n",
+            include_str!("snapshots/utility_dump_config_unknown_flag_yaml.stderr")
+        ),
+    );
+}
+
+#[test]
 fn generate_private_key_unknown_flags_honor_output_format_like_current_upstream() {
     assert_stderr_snapshot(
         &["-o", "json", "generate", "private-key", "--bad"],

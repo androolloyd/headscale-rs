@@ -807,6 +807,12 @@ no-space unknown-flag form `--no-descriptions --bad` is now pinned for
 `completion fish`, `completion powershell`, and `completion zsh` against the
 same current-upstream CLI behavior.
 
+Recent coverage note (2026-06-02): utility-command output-format parser
+coverage now pins current-upstream headscale-go `171fd7a3` for
+`health -o json --bad`, `health --output weird --bad`, `configtest -o json-line --bad`,
+and `dumpConfig -oyaml --bad`, including structured JSON/JSON-line/YAML errors
+and unknown-output fallback to human stderr.
+
 Recent coverage note (2026-06-02): CLI process snapshots now pin
 current-upstream headscale-go `171fd7a3` default-config warning stderr for
 `headscale help <topic>` dispatch. The focused `help <topic> <extra>` and

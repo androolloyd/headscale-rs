@@ -675,7 +675,25 @@ impl PersistentMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(e) => return Err(db_error_to_machine(e, &record.id)),
             };
-        let existing = existing_for_user.or_else(|| {
+        // The same node key re-registering from the same machine is the
+        // same node — `tailscale up` after a control-plane restart, or a
+        // `--reset` — whatever its tag state. Without this rule a
+        // row persisted without a user id (no users store attached) could
+        // only be matched by the tagged-machine rule, so an untagged node's
+        // re-registration fell into `create` and was rejected with
+        // "IPv4 address … already in use" — by its own row.
+        let node_key = key_with_prefix("nodekey:", &record.id);
+        let existing_for_node =
+            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
+                // …but a different user is a different node (upstream parity:
+                // the same key registering under another user gets a new row).
+                Ok(row) => {
+                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
+                }
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            };
+        let existing = existing_for_user.or(existing_for_node).or_else(|| {
             existing_for_machine
                 .as_ref()
                 .filter(|row| !row.tag_list().is_empty())
@@ -1159,7 +1177,27 @@ impl PersistentPostgresMachineAdmin {
             Err(headscale_db::DbError::NotFound(_)) => None,
             Err(e) => return Err(db_error_to_machine(e, &record.id)),
         };
-        let existing = existing_for_user.or_else(|| {
+        // The same node key re-registering from the same machine is the
+        // same node — `tailscale up` after a control-plane restart, or a
+        // `--reset` — whatever its tag state. Without this rule a
+        // row persisted without a user id (no users store attached) could
+        // only be matched by the tagged-machine rule, so an untagged node's
+        // re-registration fell into `create` and was rejected with
+        // "IPv4 address … already in use" — by its own row.
+        let node_key = key_with_prefix("nodekey:", &record.id);
+        let existing_for_node =
+            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+                .await
+            {
+                // …but a different user is a different node (upstream parity:
+                // the same key registering under another user gets a new row).
+                Ok(row) => {
+                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
+                }
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            };
+        let existing = existing_for_user.or(existing_for_node).or_else(|| {
             existing_for_machine
                 .as_ref()
                 .filter(|row| !row.tag_list().is_empty())
@@ -2019,7 +2057,25 @@ impl MachineAdmin for PersistentMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(_) => return None,
             };
-        let existing = existing_for_user.or_else(|| {
+        // The same node key re-registering from the same machine is the
+        // same node — `tailscale up` after a control-plane restart, or a
+        // `--reset` — whatever its tag state. Without this rule a
+        // row persisted without a user id (no users store attached) could
+        // only be matched by the tagged-machine rule, so an untagged node's
+        // re-registration fell into `create` and was rejected with
+        // "IPv4 address … already in use" — by its own row.
+        let node_key = key_with_prefix("nodekey:", &record.id);
+        let existing_for_node =
+            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
+                // …but a different user is a different node (upstream parity:
+                // the same key registering under another user gets a new row).
+                Ok(row) => {
+                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
+                }
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(_) => return None,
+            };
+        let existing = existing_for_user.or(existing_for_node).or_else(|| {
             existing_for_machine
                 .as_ref()
                 .filter(|row| !row.tag_list().is_empty())
@@ -2310,7 +2366,27 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
             Err(headscale_db::DbError::NotFound(_)) => None,
             Err(_) => return None,
         };
-        let existing = existing_for_user.or_else(|| {
+        // The same node key re-registering from the same machine is the
+        // same node — `tailscale up` after a control-plane restart, or a
+        // `--reset` — whatever its tag state. Without this rule a
+        // row persisted without a user id (no users store attached) could
+        // only be matched by the tagged-machine rule, so an untagged node's
+        // re-registration fell into `create` and was rejected with
+        // "IPv4 address … already in use" — by its own row.
+        let node_key = key_with_prefix("nodekey:", &record.id);
+        let existing_for_node =
+            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+                .await
+            {
+                // …but a different user is a different node (upstream parity:
+                // the same key registering under another user gets a new row).
+                Ok(row) => {
+                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
+                }
+                Err(headscale_db::DbError::NotFound(_)) => None,
+                Err(_) => return None,
+            };
+        let existing = existing_for_user.or(existing_for_node).or_else(|| {
             existing_for_machine
                 .as_ref()
                 .filter(|row| !row.tag_list().is_empty())
@@ -3626,6 +3702,50 @@ mod tests {
             register_method: 2,
             expired: false,
         }
+    }
+
+    /// A node re-registering with the same node key from the same machine
+    /// (`tailscale up` after a control-plane restart) updates its row —
+    /// even with no users store attached, where the row carries no user id
+    /// and the user/machine lookup cannot match it. Before this, the second
+    /// registration fell into `create` and was rejected with
+    /// "IPv4 address … already in use" by its own row.
+    #[tokio::test]
+    async fn persistent_auth_key_path_reregisters_same_node_key_without_users_store() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let admin = PersistentMachineAdmin::new(db.pool().clone());
+        let policy = crate::policy::PolicyStore::new();
+        let record = || {
+            crate::tailscale_wire::MachineRecord::new_at(
+                chrono::Utc::now(),
+                "13".repeat(32),
+                "0b".repeat(32),
+                "interop-test".to_string(),
+                "peer-a".to_string(),
+                std::net::Ipv4Addr::new(100, 83, 93, 76),
+                false,
+            )
+        };
+        let first = admin
+            .create_or_update_auth_key_registration(record(), &policy, None)
+            .await
+            .expect("first registration");
+        let second = admin
+            .create_or_update_auth_key_registration(record(), &policy, None)
+            .await
+            .expect("re-registration of the same node key must update, not collide");
+        assert_eq!(first.record.node_id, second.record.node_id);
+        assert_eq!(
+            second.record.ipv4,
+            Some(std::net::Ipv4Addr::new(100, 83, 93, 76))
+        );
+        assert!(second.replaced_node_key_hex.is_none());
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "one row, updated in place");
     }
 
     #[tokio::test]

@@ -953,6 +953,9 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
         ip_allocator,
         machines: wire_registry,
         registration_store: Some(stores.registration_store()),
+        // Upstream headscale admits every key that clears preauth or
+        // interactive login; an embedder supplies a gate here instead.
+        registration_gate: None,
         derp_map: DerpMapStore::shared(derp_map),
         native_derp: None,
         policy,
@@ -1036,6 +1039,9 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
         ip_allocator,
         machines: wire_registry,
         registration_store: Some(stores.registration_store()),
+        // Upstream headscale admits every key that clears preauth or
+        // interactive login; an embedder supplies a gate here instead.
+        registration_gate: None,
         derp_map: DerpMapStore::shared(derp_map),
         native_derp: None,
         policy,

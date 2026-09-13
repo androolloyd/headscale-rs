@@ -693,12 +693,29 @@ impl PersistentMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(e) => return Err(db_error_to_machine(e, &record.id)),
             };
-        let existing = existing_for_user.or(existing_for_node).or_else(|| {
+        // With no users store attached, `user_id` is NULL on both sides and
+        // the (machine key, user) lookup above cannot match. The machine
+        // key alone is then the device's identity, so a re-registration
+        // under a rotated node key — what a stock client does on every
+        // re-auth — must reuse its row instead of leaving a second one
+        // behind, which would show up as a duplicate peer in every netmap.
+        // With a users store, `existing_for_user` is authoritative and this
+        // never fires.
+        let existing_for_unscoped_machine = user_id.is_none().then(|| {
             existing_for_machine
                 .as_ref()
-                .filter(|row| !row.tag_list().is_empty())
+                .filter(|row| row.user_id.is_none())
                 .cloned()
         });
+        let existing = existing_for_user
+            .or(existing_for_node)
+            .or_else(|| existing_for_unscoped_machine.flatten())
+            .or_else(|| {
+                existing_for_machine
+                    .as_ref()
+                    .filter(|row| !row.tag_list().is_empty())
+                    .cloned()
+            });
 
         if let Some(existing) = existing {
             let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
@@ -1197,12 +1214,29 @@ impl PersistentPostgresMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(e) => return Err(db_error_to_machine(e, &record.id)),
             };
-        let existing = existing_for_user.or(existing_for_node).or_else(|| {
+        // With no users store attached, `user_id` is NULL on both sides and
+        // the (machine key, user) lookup above cannot match. The machine
+        // key alone is then the device's identity, so a re-registration
+        // under a rotated node key — what a stock client does on every
+        // re-auth — must reuse its row instead of leaving a second one
+        // behind, which would show up as a duplicate peer in every netmap.
+        // With a users store, `existing_for_user` is authoritative and this
+        // never fires.
+        let existing_for_unscoped_machine = user_id.is_none().then(|| {
             existing_for_machine
                 .as_ref()
-                .filter(|row| !row.tag_list().is_empty())
+                .filter(|row| row.user_id.is_none())
                 .cloned()
         });
+        let existing = existing_for_user
+            .or(existing_for_node)
+            .or_else(|| existing_for_unscoped_machine.flatten())
+            .or_else(|| {
+                existing_for_machine
+                    .as_ref()
+                    .filter(|row| !row.tag_list().is_empty())
+                    .cloned()
+            });
 
         if let Some(existing) = existing {
             let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
@@ -2075,12 +2109,29 @@ impl MachineAdmin for PersistentMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(_) => return None,
             };
-        let existing = existing_for_user.or(existing_for_node).or_else(|| {
+        // With no users store attached, `user_id` is NULL on both sides and
+        // the (machine key, user) lookup above cannot match. The machine
+        // key alone is then the device's identity, so a re-registration
+        // under a rotated node key — what a stock client does on every
+        // re-auth — must reuse its row instead of leaving a second one
+        // behind, which would show up as a duplicate peer in every netmap.
+        // With a users store, `existing_for_user` is authoritative and this
+        // never fires.
+        let existing_for_unscoped_machine = user_id.is_none().then(|| {
             existing_for_machine
                 .as_ref()
-                .filter(|row| !row.tag_list().is_empty())
+                .filter(|row| row.user_id.is_none())
                 .cloned()
-        })?;
+        });
+        let existing = existing_for_user
+            .or(existing_for_node)
+            .or_else(|| existing_for_unscoped_machine.flatten())
+            .or_else(|| {
+                existing_for_machine
+                    .as_ref()
+                    .filter(|row| !row.tag_list().is_empty())
+                    .cloned()
+            })?;
         Some(self.row_to_record(existing).await)
     }
 
@@ -2386,12 +2437,29 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
                 Err(headscale_db::DbError::NotFound(_)) => None,
                 Err(_) => return None,
             };
-        let existing = existing_for_user.or(existing_for_node).or_else(|| {
+        // With no users store attached, `user_id` is NULL on both sides and
+        // the (machine key, user) lookup above cannot match. The machine
+        // key alone is then the device's identity, so a re-registration
+        // under a rotated node key — what a stock client does on every
+        // re-auth — must reuse its row instead of leaving a second one
+        // behind, which would show up as a duplicate peer in every netmap.
+        // With a users store, `existing_for_user` is authoritative and this
+        // never fires.
+        let existing_for_unscoped_machine = user_id.is_none().then(|| {
             existing_for_machine
                 .as_ref()
-                .filter(|row| !row.tag_list().is_empty())
+                .filter(|row| row.user_id.is_none())
                 .cloned()
-        })?;
+        });
+        let existing = existing_for_user
+            .or(existing_for_node)
+            .or_else(|| existing_for_unscoped_machine.flatten())
+            .or_else(|| {
+                existing_for_machine
+                    .as_ref()
+                    .filter(|row| !row.tag_list().is_empty())
+                    .cloned()
+            })?;
         Some(self.row_to_record(existing).await)
     }
 
@@ -3702,6 +3770,53 @@ mod tests {
             register_method: 2,
             expired: false,
         }
+    }
+
+    /// A stock client rotates its node key on every re-authentication. With
+    /// no users store attached — how octravpn's `mesh serve` runs — the
+    /// (machine key, user) lookup cannot match, so before this the rotated
+    /// key created a second row for the same device and both showed up as
+    /// peers in every netmap.
+    #[tokio::test]
+    async fn persistent_auth_key_path_reuses_the_row_when_the_node_key_rotates() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let admin = PersistentMachineAdmin::new(db.pool().clone());
+        let policy = crate::policy::PolicyStore::new();
+        let record = |node_key: &str, ip: u8| {
+            crate::tailscale_wire::MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_key.to_string(),
+                "e3".repeat(32),
+                "interop-test".to_string(),
+                "peer-b".to_string(),
+                std::net::Ipv4Addr::new(100, 64, 0, ip),
+                false,
+            )
+        };
+        let first = admin
+            .create_or_update_auth_key_registration(record(&"11".repeat(32), 1), &policy, None)
+            .await
+            .expect("first registration");
+        let rotated = admin
+            .create_or_update_auth_key_registration(record(&"22".repeat(32), 2), &policy, None)
+            .await
+            .expect("re-registration under a rotated node key");
+
+        assert_eq!(
+            first.record.node_id, rotated.record.node_id,
+            "same device, same row"
+        );
+        assert_eq!(
+            rotated.replaced_node_key_hex.as_deref(),
+            Some("11".repeat(32).as_str()),
+            "the wire registry is told which key to drop"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "one row per device, not one per node key");
     }
 
     /// A node re-registering with the same node key from the same machine

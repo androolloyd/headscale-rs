@@ -230,7 +230,18 @@ async fn register_inner(
     // and ahead of everything else, so a refused key cannot acquire a
     // record, an address, or a place in any peer's netmap by any path
     // (auth key, interactive login, followup poll, existing-node refresh).
-    if let Some(gate) = state.registration_gate.as_ref() {
+    //
+    // A logout-shaped request that carries no auth key is exempt even when
+    // we hold no record for the key (the branch above only covers keys we
+    // know): it can never do more than drop access, and refusing it turns a
+    // plain `tailscale logout` into an error for the operator. The
+    // no-auth-key condition matters — an expiry in the past *plus* an auth
+    // key is a registration attempt wearing a logout's clothes.
+    let is_logout_attempt = authkey.is_empty()
+        && body
+            .expiry
+            .is_some_and(|expiry| !is_go_zero_expiry(expiry) && expiry <= now);
+    if !is_logout_attempt && let Some(gate) = state.registration_gate.as_ref() {
         let hostname = body
             .hostinfo
             .as_ref()
@@ -244,9 +255,13 @@ async fn register_inner(
             })
             .await
         {
+            // The machine key is in the line on purpose: it is the device's
+            // stable identity (node keys rotate on every refused attempt),
+            // so it is what an operator can act on.
             tracing::info!(
                 target: "tailscale_wire::register",
                 node_key = %node_key_hex,
+                machine_key = %machine_key_hex,
                 hostname = hostname.unwrap_or("-"),
                 reason = %reason,
                 "registration refused by the admission gate"
@@ -1660,6 +1675,62 @@ mod tests {
                 Some("peer-a".to_string())
             )]
         );
+    }
+
+    /// A logout-shaped request for a key the control plane has no record of
+    /// — the operator already deleted it — is exempt too, so `tailscale
+    /// logout` does not error. An auth key in the same request makes it a
+    /// registration attempt again, and that is gated.
+    #[tokio::test]
+    async fn register_gate_exempts_recordless_logout_but_not_a_logout_shaped_registration() {
+        let (mut state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-gate-expired";
+        redeemer.insert(authkey, "alice");
+        state.registration_gate = Some(Arc::new(GateFixture::refuse("not a member")));
+        let node_key_hex = "c4".repeat(32);
+
+        // No record, expiry in the past, no auth key ⇒ not gated.
+        let mut body = req_body(&node_key_hex, "");
+        body["Auth"] = serde_json::Value::Null;
+        body["Expiry"] = serde_json::json!("2000-01-01T00:00:00Z");
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_ne!(
+            parsed["Error"], "not a member",
+            "a record-less logout must not be refused by the gate: {parsed}"
+        );
+        assert!(state.machines.get(&node_key_hex).is_none());
+
+        // Same shape, but with an auth key: a registration attempt, gated.
+        let mut body = req_body(&node_key_hex, authkey);
+        body["Expiry"] = serde_json::json!("2000-01-01T00:00:00Z");
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(parsed["Error"], "not a member", "{parsed}");
+        assert!(state.machines.get(&node_key_hex).is_none());
+        assert!(redeemer.contains(authkey), "the key was not spent");
     }
 
     /// Logging out is exempt: a node whose admission was revoked can still

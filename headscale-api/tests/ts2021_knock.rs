@@ -65,6 +65,7 @@ fn fixture(knock: KnockConfig) -> (WireState, tempfile::TempDir) {
         ip_allocator: Arc::new(FixedIpAllocator),
         machines: Arc::new(MachineRegistry::new()),
         registration_store: None,
+        registration_gate: None,
         derp_map: tailscale_wire::DerpMapStore::shared(tailscale_wire::wire::DerpMap::default()),
         #[cfg(feature = "full")]
         native_derp: None,

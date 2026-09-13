@@ -973,6 +973,46 @@ pub trait MachineRegistrationStore: Send + Sync {
     }
 }
 
+/// What the wire layer knows about a node asking to register.
+///
+/// Passed to [`RegistrationGate::admit`] before any record, address or
+/// netmap entry exists for the key.
+#[derive(Debug, Clone, Copy)]
+pub struct RegistrationAdmission<'a> {
+    /// Node key (hex, no `nodekey:` prefix) the client is registering.
+    pub node_key_hex: &'a str,
+    /// Noise machine key (hex) the request arrived under.
+    pub machine_key_hex: &'a str,
+    /// Hostname the client reported, when it sent hostinfo. Advisory —
+    /// client-supplied and unauthenticated; useful in refusal logs, not
+    /// as an admission input.
+    pub hostname: Option<&'a str>,
+}
+
+/// Decides whether a node key may hold a registration at all.
+///
+/// The wire layer carries no opinion about *why* a key is admissible;
+/// the implementation owns that policy (OctraVPN gates on its
+/// chain-anchored member set). `None` on
+/// [`WireState::registration_gate`] admits every key — the behaviour
+/// before this hook existed.
+///
+/// This is a hard gate, not a filter: a refused key never gets a
+/// record, an address, or a place in any peer's netmap. Contrast
+/// [`crate::policy::PolicyStore`], which admits the node and then drops
+/// its packets — visible peer, no connectivity.
+///
+/// The gate runs on every register path except logout: a node being
+/// deregistered must always be able to finish, even after its
+/// admission was revoked.
+#[async_trait]
+pub trait RegistrationGate: Send + Sync {
+    /// `Ok(())` admits. `Err(reason)` refuses, and `reason` is returned
+    /// to the client in `RegisterResponse.error` — stock `tailscale up`
+    /// prints it — so write it for whoever is running the client.
+    async fn admit(&self, req: RegistrationAdmission<'_>) -> Result<(), String>;
+}
+
 /// Shared state for every handler under [`router`].
 ///
 /// Cheap to clone: every field is an `Arc`. Construct once at node
@@ -996,6 +1036,10 @@ pub struct WireState {
     /// registration writes to this store first and treats
     /// [`Self::machines`] as a projection of the persisted row.
     pub registration_store: Option<Arc<dyn MachineRegistrationStore>>,
+    /// Optional admission gate for registration. `None` ⇒ every node key
+    /// that clears the preauth/interactive flow may register. See
+    /// [`RegistrationGate`].
+    pub registration_gate: Option<Arc<dyn RegistrationGate>>,
     /// DERP map served on `/machine/map`. The store gives each map
     /// handler a cheap cloned snapshot and wakes long-poll streams when
     /// runtime DERP refresh replaces it.
@@ -5284,6 +5328,7 @@ mod registry_tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
+            registration_gate: None,
             derp_map: DerpMapStore::shared(wire::DerpMap::default()),
             #[cfg(feature = "full")]
             native_derp: None,

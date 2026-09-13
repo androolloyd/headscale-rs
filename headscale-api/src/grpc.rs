@@ -4246,6 +4246,7 @@ mod upstream_tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: machines.clone(),
             registration_store: None,
+            registration_gate: None,
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),

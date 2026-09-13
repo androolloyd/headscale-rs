@@ -217,6 +217,7 @@ fn wire_state(registry: Arc<MachineRegistry>, policy: PolicyStore) -> (WireState
         ip_allocator: Arc::new(SequentialIp::default()),
         machines: registry,
         registration_store: None,
+        registration_gate: None,
         derp_map: DerpMapStore::shared(DerpMap::default()),
         #[cfg(feature = "full")]
         native_derp: None,

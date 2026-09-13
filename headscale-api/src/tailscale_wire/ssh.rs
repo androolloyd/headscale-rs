@@ -261,6 +261,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
+            registration_gate: None,
             derp_map: DerpMapStore::shared(DerpMap::default()),
             #[cfg(feature = "full")]
             native_derp: None,

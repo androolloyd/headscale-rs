@@ -2996,6 +2996,7 @@ mod tests {
             ip_allocator: Arc::new(crate::tailscale_wire::test_support::MockIpAllocator),
             machines: Arc::new(crate::tailscale_wire::MachineRegistry::new()),
             registration_store: None,
+            registration_gate: None,
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),

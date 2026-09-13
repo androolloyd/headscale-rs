@@ -1136,6 +1136,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
+            registration_gate: None,
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),

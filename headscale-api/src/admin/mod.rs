@@ -38,6 +38,7 @@
 //!     # ip_allocator: todo!(),
 //!     # machines: Arc::new(tailscale_wire::MachineRegistry::new()),
 //!     # registration_store: None,
+//!     registration_gate: None,
 //!     # derp_map: crate::tailscale_wire::DerpMapStore::shared(Default::default()),
 //!     # policy: Arc::new(Default::default()),
 //!     # knock: tailscale_wire::KnockConfig::disabled(),

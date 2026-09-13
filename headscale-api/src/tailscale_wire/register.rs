@@ -82,7 +82,9 @@ use super::wire::{
     is_auto_derived_given_name, is_supported_capability_version, strip_key_prefix,
     unsupported_client_error,
 };
-use super::{MachineRecord, RedeemError, RegistrationWaitOutcome, WireState};
+use super::{
+    MachineRecord, RedeemError, RegistrationAdmission, RegistrationWaitOutcome, WireState,
+};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 const AUTH_ID_PREFIX: &str = "hskey-authreq-";
@@ -221,6 +223,36 @@ async fn register_inner(
             return Json(node_key_expired_response(false)).into_response();
         }
         return logout_existing_node(&state, &node_key_hex, &record, expiry);
+    }
+
+    // Admission gate. Deliberately after the logout branch — a node being
+    // deregistered must be able to finish even once its admission is gone —
+    // and ahead of everything else, so a refused key cannot acquire a
+    // record, an address, or a place in any peer's netmap by any path
+    // (auth key, interactive login, followup poll, existing-node refresh).
+    if let Some(gate) = state.registration_gate.as_ref() {
+        let hostname = body
+            .hostinfo
+            .as_ref()
+            .map(|info| info.hostname.as_str())
+            .filter(|name| !name.is_empty());
+        if let Err(reason) = gate
+            .admit(RegistrationAdmission {
+                node_key_hex: &node_key_hex,
+                machine_key_hex: &machine_key_hex,
+                hostname,
+            })
+            .await
+        {
+            tracing::info!(
+                target: "tailscale_wire::register",
+                node_key = %node_key_hex,
+                hostname = hostname.unwrap_or("-"),
+                reason = %reason,
+                "registration refused by the admission gate"
+            );
+            return register_error_response(reason);
+        }
     }
 
     if authkey.is_empty() {
@@ -1106,6 +1138,7 @@ fn default_node_cap_map() -> BTreeMap<String, Vec<serde_json::Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tailscale_wire::RegistrationGate;
     use crate::tailscale_wire::{
         AllocError, IpAllocator, MachineRegistrationStore, MachineRegistry,
         PersistedMachineRegistration, PreauthRedeemer, RedeemOk, WireState,
@@ -1113,6 +1146,7 @@ mod tests {
         router_with_oidc,
         test_support::{MockIpAllocator, MockRedeemer},
     };
+    use async_trait::async_trait;
     use axum::body::to_bytes;
     use std::collections::BTreeMap;
     use std::{sync::Arc, time::Duration};
@@ -1152,6 +1186,7 @@ mod tests {
             ip_allocator: Arc::new(MockIpAllocator),
             machines: Arc::new(MachineRegistry::new()),
             registration_store: None,
+            registration_gate: None,
             derp_map: crate::tailscale_wire::DerpMapStore::shared(
                 crate::tailscale_wire::wire::DerpMap::default(),
             ),
@@ -1167,6 +1202,46 @@ mod tests {
             mapresponse_debug: Arc::new(crate::tailscale_wire::MapResponseDebugStore::disabled()),
         };
         (state, redeemer, dir)
+    }
+
+    /// Test double for [`RegistrationGate`]: records what it was asked
+    /// about and answers with a fixed verdict.
+    #[derive(Default)]
+    struct GateFixture {
+        refusal: Option<String>,
+        seen: parking_lot::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl GateFixture {
+        fn admit() -> Self {
+            Self::default()
+        }
+
+        fn refuse(reason: &str) -> Self {
+            Self {
+                refusal: Some(reason.to_string()),
+                seen: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<(String, String, Option<String>)> {
+            self.seen.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl RegistrationGate for GateFixture {
+        async fn admit(&self, req: RegistrationAdmission<'_>) -> Result<(), String> {
+            self.seen.lock().push((
+                req.node_key_hex.to_string(),
+                req.machine_key_hex.to_string(),
+                req.hostname.map(str::to_string),
+            ));
+            match &self.refusal {
+                Some(reason) => Err(reason.clone()),
+                None => Ok(()),
+            }
+        }
     }
 
     fn req_body(node_key_hex: &str, authkey: &str) -> serde_json::Value {
@@ -1498,6 +1573,141 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert!(state.machines.get(&node_key_hex).is_none());
+    }
+
+    /// A refused key gets no record, keeps its preauth key unspent, and the
+    /// client is told why (stock `tailscale up` prints `RegisterResponse.error`).
+    #[tokio::test]
+    async fn register_gate_refusal_leaves_no_record_and_returns_the_reason() {
+        let (mut state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-gate-refused";
+        redeemer.insert(authkey, "alice");
+        state.registration_gate = Some(Arc::new(GateFixture::refuse(
+            "node key is not in the anchored member set",
+        )));
+        let app = router(state.clone());
+        let node_key_hex = "c1".repeat(32);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body(&node_key_hex, authkey)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            body["Error"], "node key is not in the anchored member set",
+            "{body}"
+        );
+        assert_eq!(body["MachineAuthorized"], serde_json::json!(false));
+        assert!(
+            state.machines.get(&node_key_hex).is_none(),
+            "a refused key must not land in the registry"
+        );
+        assert!(
+            redeemer.contains(authkey),
+            "the gate runs before redemption, so the key is still spendable"
+        );
+    }
+
+    /// The gate sees the key pair and the reported hostname, and an admitting
+    /// gate changes nothing about a normal registration.
+    #[tokio::test]
+    async fn register_gate_sees_keys_and_admits_unchanged() {
+        let (mut state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-gate-admitted";
+        redeemer.insert(authkey, "alice");
+        let gate = Arc::new(GateFixture::admit());
+        state.registration_gate = Some(gate.clone());
+        let app = router(state.clone());
+        let node_key_hex = "c2".repeat(32);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body(&node_key_hex, authkey)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(body["Error"], "", "{body}");
+        assert_eq!(body["MachineAuthorized"], serde_json::json!(true));
+        assert!(state.machines.get(&node_key_hex).is_some());
+        assert_eq!(
+            gate.seen(),
+            vec![(
+                node_key_hex.clone(),
+                TEST_MACHINE_KEY_HEX.to_string(),
+                Some("peer-a".to_string())
+            )]
+        );
+    }
+
+    /// Logging out is exempt: a node whose admission was revoked can still
+    /// complete the deregistration it started.
+    #[tokio::test]
+    async fn register_gate_does_not_block_logout() {
+        let (mut state, redeemer, _dir) = fixture();
+        let authkey = "hskey-auth-gate-logout";
+        redeemer.insert(authkey, "alice");
+        let node_key_hex = "c3".repeat(32);
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&req_body(&node_key_hex, authkey)).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.machines.get(&node_key_hex).is_some());
+
+        // Admission revoked after the node registered.
+        state.registration_gate = Some(Arc::new(GateFixture::refuse("evicted")));
+        let mut body = req_body(&node_key_hex, "");
+        body["Auth"] = serde_json::Value::Null;
+        body["Expiry"] = serde_json::json!("2000-01-01T00:00:00Z");
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(parsed["Error"], "", "logout must not be gated: {parsed}");
     }
 
     #[tokio::test]

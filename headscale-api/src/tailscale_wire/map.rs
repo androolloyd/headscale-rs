@@ -2208,7 +2208,7 @@ fn rebuild_peer_delta_chunk(
     let mut next_peer_state = if filter_peer_ids.is_some() {
         last_peer_state.clone()
     } else {
-        current_peer_state.clone()
+        current_peer_state
     };
     for peer_id in &peers_removed {
         next_peer_state.remove(peer_id);
@@ -2230,16 +2230,14 @@ fn rebuild_peer_delta_chunk(
                 full_peers_changed.push(peer);
             }
             Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
-            Some(previous) => match peer_patch_if_only_patchable_fields_changed(previous, &peer) {
-                Some(patch) => {
-                    next_peer_state.insert(peer.id, peer.clone());
+            Some(previous) => {
+                next_peer_state.insert(peer.id, peer.clone());
+                if let Some(patch) = peer_patch_if_only_patchable_fields_changed(previous, &peer) {
                     peer_patches.push(patch);
-                }
-                None => {
-                    next_peer_state.insert(peer.id, peer.clone());
+                } else {
                     full_peers_changed.push(peer);
                 }
-            },
+            }
         }
     }
 

@@ -1,5 +1,23 @@
 # Changes
 
+## 2026-10-15 — YAML maintenance and isolated protobuf generation
+
+- Replace the retired `serde_yaml`/`unsafe-libyaml` backend with pinned
+  `serde-saphyr` 2.0.0. Configuration, DERP YAML maps, config dumps and
+  `-o yaml` remain supported. Optional file inclusion, property interpolation,
+  robotics and comment-retention extensions are disabled.
+- Preserve YAML 1.2 boolean spelling, duplicate-key rejection, anchors and
+  unexpanded merge keys, and removed-key detection through nested mappings.
+  Existing CLI output snapshots remain unchanged. Quoted canonical
+  `true`/`false` can additionally deserialize as booleans; YAML 1.1 `yes`/`on`
+  shorthand remains rejected. Unicode U+2028/U+2029 strings now use escaped
+  double-quoted presentation with identical decoded values. Parser diagnostic
+  details come from the maintained backend; outer error contexts are preserved.
+- Generate protobuf modules and descriptors under Cargo `OUT_DIR`, preserving
+  source checkouts during builds. Identical generator versions produce identical
+  generated Rust/API output.
+- The new YAML backend requires Rust 1.89; the qualified toolchain is 1.96.0.
+
 ## 2026-05-20 — workspace member trim
 
 Four crates were demoted from `[workspace.members]` to `[workspace.exclude]`:

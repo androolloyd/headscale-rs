@@ -74,7 +74,7 @@ pub fn print_structured<T: Serialize>(fmt: OutputFormat, value: &T) -> Result<()
             Ok(())
         }
         OutputFormat::Yaml => {
-            let s = serde_yaml::to_string(value)
+            let s = crate::yaml::to_string(value)
                 .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
             println!("{s}");
             Ok(())
@@ -95,7 +95,7 @@ pub fn format_error(fmt: OutputFormat, message: &str) -> String {
             |_| format!("Error: {message}\n"),
             |json| format!("{json}\n"),
         ),
-        OutputFormat::Yaml => serde_yaml::to_string(&value).map_or_else(
+        OutputFormat::Yaml => crate::yaml::to_string(&value).map_or_else(
             |_| format!("Error: {message}\n"),
             |yaml| format!("{yaml}\n"),
         ),

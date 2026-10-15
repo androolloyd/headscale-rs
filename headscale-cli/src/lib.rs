@@ -32,6 +32,7 @@
 #![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 pub mod admin;
+pub mod yaml;
 
 use clap::Subcommand;
 

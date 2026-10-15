@@ -55,7 +55,7 @@ clap_complete = { workspace = true }
 
 # Config file support
 toml = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true }
 crc = "3.4"
 hex = "0.4"
 rand_core = { workspace = true }

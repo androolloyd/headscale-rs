@@ -278,6 +278,7 @@ pub struct SshRule {
     pub accept_env: Vec<String>,
 }
 
+#[allow(clippy::ref_option)] // serde serialize_with requires &Option<String>.
 fn serialize_ssh_check_period<S>(
     check_period: &Option<String>,
     serializer: S,
@@ -1906,7 +1907,7 @@ fn push_decimal_duration_unit(
     let fraction = total_nanos % unit_nanos;
     out.push_str(&whole.to_string());
     if fraction != 0 {
-        let mut fraction = format!("{:0width$}", fraction, width = width);
+        let mut fraction = format!("{fraction:0width$}");
         while fraction.ends_with('0') {
             fraction.pop();
         }

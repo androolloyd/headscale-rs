@@ -1356,9 +1356,9 @@ fn json_output(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn yaml_output(output: &Output) -> serde_yaml::Value {
+fn yaml_output(output: &Output) -> serde_json::Value {
     assert!(output.status.success(), "stderr: {}", stderr(output));
-    serde_yaml::from_slice(&output.stdout).unwrap()
+    headscale_cli::yaml::from_slice(&output.stdout).unwrap()
 }
 
 fn assert_status_command_failed(output: &Output) {
@@ -9130,7 +9130,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&destroy_user_yaml).as_mapping().unwrap().len(),
+        yaml_output(&destroy_user_yaml).as_object().unwrap().len(),
         0
     );
     assert_eq!(stderr(&destroy_user_yaml), "");
@@ -9426,9 +9426,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(created_preauth_yaml.get("ephemeral").is_none());
     assert_eq!(
         created_preauth_yaml["acl_tags"],
-        serde_yaml::Value::Sequence(vec![
-            serde_yaml::Value::String("tag:test1".into()),
-            serde_yaml::Value::String("tag:test2".into()),
+        serde_json::Value::Array(vec![
+            serde_json::Value::String("tag:test1".into()),
+            serde_json::Value::String("tag:test2".into()),
         ])
     );
     assert!(created_preauth_yaml.get("aclTags").is_none());
@@ -9458,9 +9458,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(listed_preauth_yaml["reusable"].as_bool(), Some(true));
     assert_eq!(
         listed_preauth_yaml["acl_tags"],
-        serde_yaml::Value::Sequence(vec![
-            serde_yaml::Value::String("tag:test1".into()),
-            serde_yaml::Value::String("tag:test2".into()),
+        serde_json::Value::Array(vec![
+            serde_json::Value::String("tag:test1".into()),
+            serde_json::Value::String("tag:test2".into()),
         ])
     );
     assert!(
@@ -9486,7 +9486,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(
         yaml_output(&expire_preauth_yaml)
-            .as_mapping()
+            .as_object()
             .unwrap()
             .len(),
         0
@@ -9506,7 +9506,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(
         yaml_output(&delete_preauth_yaml)
-            .as_mapping()
+            .as_object()
             .unwrap()
             .len(),
         0
@@ -9726,7 +9726,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(
         yaml_output(&expire_api_key_yaml)
-            .as_mapping()
+            .as_object()
             .unwrap()
             .len(),
         0
@@ -9746,7 +9746,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(
         yaml_output(&delete_api_key_yaml)
-            .as_mapping()
+            .as_object()
             .unwrap()
             .len(),
         0

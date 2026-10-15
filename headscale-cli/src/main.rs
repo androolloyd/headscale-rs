@@ -2341,7 +2341,7 @@ Flags:
 Use "headscale [command] --help" for more information about a command.
 "#;
 
-const UPSTREAM_HELP_HELP: &str = r#"Help provides help for any command in the application.
+const UPSTREAM_HELP_HELP: &str = r"Help provides help for any command in the application.
 Simply type headscale help [path to command] for full details.
 
 Usage:
@@ -2354,7 +2354,7 @@ Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
       --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-"#;
+";
 
 const UPSTREAM_VERSION_HELP: &str = r"The version of headscale.
 
@@ -3378,7 +3378,7 @@ fn print_no_config_default_warning() {
 }
 
 fn dump_config_to(config: &CliConfig, path: &Path) -> Result<()> {
-    let contents = serde_yaml::to_string(config)?;
+    let contents = headscale_cli::yaml::to_string(config)?;
     std::fs::write(path, contents)
         .map_err(|err| anyhow::anyhow!("{}", go_style_open_error("dumping config", path, &err)))?;
     Ok(())
@@ -3422,7 +3422,7 @@ fn go_style_json_string<T: serde::Serialize>(value: &T) -> Result<String> {
 }
 
 fn go_style_yaml_string<T: serde::Serialize>(value: &T) -> Result<String> {
-    let yaml = serde_yaml::to_string(value)?;
+    let yaml = headscale_cli::yaml::to_string(value)?;
     let mut formatted = String::with_capacity(yaml.len());
     for line in yaml.lines() {
         let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();

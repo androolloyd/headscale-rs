@@ -1316,7 +1316,9 @@ fn debug_routes_info(
 pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMap) -> Response {
     let derp_map = state.derp_map.snapshot();
     if wants_json(&headers) {
-        let mut info = debug_derp_info(&derp_map);
+        let info = debug_derp_info(&derp_map);
+        #[cfg(feature = "full")]
+        let mut info = info;
         #[cfg(feature = "full")]
         {
             info.native = state.native_derp.as_deref().map(debug_native_derp_info);

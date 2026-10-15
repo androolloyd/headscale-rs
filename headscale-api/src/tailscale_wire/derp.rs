@@ -171,7 +171,7 @@ impl fmt::Debug for NativeDerpRuntime {
                 &self.connection_sequence.load(Ordering::Relaxed),
             )
             .field("health_problem", &self.health_problem)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

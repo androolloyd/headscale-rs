@@ -170,7 +170,7 @@ pub(crate) async fn load_derp_map(config: &DerpConfig, base_domain: &str) -> Res
 fn load_derp_path_map(path: &Path) -> Result<DerpPathMap> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read DERP YAML path map {}", path.display()))?;
-    serde_yaml::from_str(&contents)
+    headscale_cli::yaml::from_str(&contents)
         .with_context(|| format!("parse DERP YAML path map {}", path.display()))
 }
 

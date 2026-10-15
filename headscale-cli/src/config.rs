@@ -621,7 +621,7 @@ impl CliConfig {
         let mut config: Self = match format {
             ConfigFormat::Toml => toml::from_str(contents).context("failed to parse TOML config"),
             ConfigFormat::Yaml => {
-                serde_yaml::from_str(contents).context("failed to parse YAML config")
+                headscale_cli::yaml::from_str(contents).context("failed to parse YAML config")
             }
             ConfigFormat::Json => {
                 serde_json::from_str(contents).context("failed to parse JSON config")
@@ -2279,8 +2279,8 @@ fn reject_removed_config_keys(contents: &str, format: ConfigFormat) -> Result<()
             }
         }
         ConfigFormat::Yaml => {
-            let value: serde_yaml::Value =
-                serde_yaml::from_str(contents).context("failed to parse YAML config")?;
+            let value: headscale_cli::yaml::Presence =
+                headscale_cli::yaml::from_str(contents).context("failed to parse YAML config")?;
             for key in REMOVED_CONFIG_KEYS {
                 if yaml_has_path(&value, key.path) {
                     bail!("{}", removed_config_key_message(*key));
@@ -2361,16 +2361,8 @@ fn json_has_path(value: &serde_json::Value, path: &[&str]) -> bool {
         .is_some_and(|value| json_has_path(value, rest))
 }
 
-fn yaml_has_path(value: &serde_yaml::Value, path: &[&str]) -> bool {
-    let Some((first, rest)) = path.split_first() else {
-        return true;
-    };
-    let serde_yaml::Value::Mapping(mapping) = value else {
-        return false;
-    };
-    mapping
-        .get(serde_yaml::Value::String((*first).to_string()))
-        .is_some_and(|value| yaml_has_path(value, rest))
+fn yaml_has_path(value: &headscale_cli::yaml::Presence, path: &[&str]) -> bool {
+    value.contains_path(path)
 }
 
 fn deserialize_u32_from_int_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>

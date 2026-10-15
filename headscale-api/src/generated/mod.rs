@@ -9,17 +9,20 @@
     clippy::default_trait_access,
     clippy::use_self
 )]
-#[path = "google.api.rs"]
-pub mod google_api;
+pub mod google_api {
+    include!(concat!(env!("OUT_DIR"), "/google.api.rs"));
+}
 #[allow(
     clippy::derive_partial_eq_without_eq,
     clippy::default_trait_access,
     clippy::use_self
 )]
-#[path = "headscale.v1.rs"]
-pub mod headscale_v1;
+pub mod headscale_v1 {
+    include!(concat!(env!("OUT_DIR"), "/headscale.v1.rs"));
+}
 
-pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("headscale_descriptor.bin");
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/headscale_descriptor.bin"));
 
 // Re-export for convenience
 pub use headscale_v1::*;

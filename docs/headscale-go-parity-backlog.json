@@ -1,19 +1,39 @@
 {
   "metadata": {
-    "generated_on": "2026-06-02",
+    "generated_on": "2026-10-16",
     "status": "incomplete",
-    "upstream_baseline": "github.com/juanfont/headscale v0.29.0-beta.2",
-    "upstream_commit": "171fd7a3c54156965753a63639cdcafcd50c8d67",
+    "upstream_baseline": "github.com/juanfont/headscale v0.29.5",
+    "upstream_commit": "0f7d1e536bed9f01dd7161f7637af19bb0908335",
     "source": "docs/headscale-go-parity.md",
     "purpose": "Machine-readable blocker list for full headscale-go replacement parity claims."
   },
   "summary": {
-    "open_p0": 1,
+    "open_p0": 2,
     "open_p1": 1,
     "open_p2": 2,
-    "total_open": 4
+    "total_open": 5
   },
   "open_items": [
+    {
+      "id": "p0-v0295-release-regression-qualification",
+      "priority": "P0",
+      "lane": "v0.29.1-v0.29.5 production release behavior",
+      "status": "open",
+      "type": "implementation/evidence",
+      "owner_scope": [
+        "headscale-api/src/**",
+        "headscale-cli/src/**",
+        "headscale-db/src/**",
+        "tools/real-client/**"
+      ],
+      "upstream_evidence": [
+        "CHANGELOG.md",
+        "hscontrol/policy/v2/**",
+        "hscontrol/mapper/**",
+        "hscontrol/state/**"
+      ],
+      "exit_criteria": "Qualify the v0.29.1-v0.29.5 release fixes outside the 101 policy/wire differential scenarios, including map-stream peer removal/rekey and SSH revocation/replay, OIDC callback safety, node lifecycle, DNS, and database upgrade/drop-in behavior, with paired process or stock-client evidence."
+    },
     {
       "id": "p0-production-postgres-process-mutations",
       "priority": "P0",

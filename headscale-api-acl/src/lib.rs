@@ -2143,15 +2143,18 @@ impl AclDoc {
                 }
             }
 
+            // A regular destination overlapping an included exit route defers
+            // that route to HA election. Only internet-wide access can lift an
+            // exclusion from an unselected exit node.
             for route in result.include.clone() {
-                if self.non_via_policy_overlaps_route(viewer, &route) {
+                if self.non_via_policy_overlaps_route(viewer, &route, true) {
                     push_unique(&mut result.use_primary, route);
                 }
             }
 
             result
                 .exclude
-                .retain(|route| !self.non_via_policy_overlaps_route(viewer, route));
+                .retain(|route| !self.non_via_policy_overlaps_route(viewer, route, false));
         }
 
         result.include.sort();
@@ -2231,12 +2234,33 @@ impl AclDoc {
         self.principal_matches(&grant.src, src, None)
     }
 
-    fn non_via_policy_overlaps_route(&self, viewer: &NodeView<'_>, route: &str) -> bool {
+    fn non_via_policy_overlaps_route(
+        &self,
+        viewer: &NodeView<'_>,
+        route: &str,
+        for_primary: bool,
+    ) -> bool {
+        let overlaps = |destinations: &[String]| {
+            self.route_destinations_overlap(destinations, route)
+                || (for_primary
+                    && parse_cidr(route).is_some_and(|route| {
+                        is_default_route(&route)
+                            && destinations.iter().any(|destination| {
+                                destination == "*"
+                                    || self.expand_route_destination(destination).iter().any(
+                                        |expanded| {
+                                            parse_cidr(expanded)
+                                                .is_some_and(|dst| nets_overlap(&dst, &route))
+                                        },
+                                    )
+                            })
+                    }))
+        };
         let grant_match = self.grants.iter().any(|grant| {
             grant.via.is_empty()
                 && grant_port_matches(grant, PortRef::any())
                 && self.grant_src_matches(grant, viewer)
-                && self.grant_dsts_overlap_route(grant, route)
+                && overlaps(&grant.dst)
         });
         if grant_match {
             return true;
@@ -2250,7 +2274,7 @@ impl AclDoc {
                         .ports
                         .iter()
                         .any(|port| port_matches(port, PortRef::any())))
-                && self.route_destinations_overlap(&rule.dst, route)
+                && overlaps(&rule.dst)
         })
     }
 

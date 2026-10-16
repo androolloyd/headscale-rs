@@ -1,9 +1,16 @@
 # Headscale-go Parity Ledger
 
-Baseline: `github.com/juanfont/headscale` at
-`v0.29.0-beta.2`, pinned by
-`tools/parity/headscale-go/go.mod`. This upstream tag resolves to
-commit `171fd7a3c54156965753a63639cdcafcd50c8d67`.
+Differential baseline: `github.com/juanfont/headscale` at `v0.29.5`, pinned by
+`tools/parity/headscale-go/go.mod` at commit
+`0f7d1e536bed9f01dd7161f7637af19bb0908335`. The 101 checked-in
+policy/wire scenarios compare against this release, including its unknown-user
+group via-route behavior and exit steering under an unrelated ACL. This is a
+bounded differential slice, not complete release or stock-client parity.
+
+The Rust database import guard still stamps `v0.29.0-beta.2`; a v0.29.5
+database migration/drop-in qualification is outstanding. The historical
+current-head audit below records the earlier beta.2 baseline and is not an
+audit of every intervening release change.
 
 Current-head audit overlay, refreshed 2026-05-30:
 

@@ -58,7 +58,7 @@ Use the upstream headscale-go v0.28 integration tests as the scenario inventory:
 
 Each scenario should run the same stock `tailscaled` image against:
 
-1. headscale-go v0.29.0-beta.2, pinned by `tools/parity/headscale-go/go.mod`
+1. headscale-go v0.29.5, pinned by `tools/parity/headscale-go/go.mod`
 2. this headscale-rs harness
 
 Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
@@ -71,7 +71,7 @@ Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
 truth for the checked-in real-client matrix. Except for evidence-only audit
 rows, each row has a Rust harness script and a matching headscale-go script so
 parity work can compare behavior with the same stock `tailscaled` image. Most
-headscale-go rows use the pinned v0.29.0-beta.2 baseline; current-head-specific
+headscale-go rows use the pinned v0.29.5 baseline; current-head-specific
 rows keep using the audited upstream commit from `headscale-go-current.sh`.
 
 Validate smoke IDs, target names, and script paths without Docker:
@@ -386,7 +386,7 @@ Useful knobs:
   must fail auth-key login; use it with `REAL_CLIENT_EXPECT_MACHINE_COUNT` for
   negative lifecycle rows.
 
-The matching headscale-go v0.29.0-beta.2 smoke is:
+The matching headscale-go v0.29.5 smoke is:
 
 ```sh
 tools/real-client/authkey-headscale-go-smoke.sh

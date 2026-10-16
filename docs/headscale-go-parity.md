@@ -18,6 +18,13 @@ for exact pins, hashes, commands, initial failures and the qualification boundar
 The four replacement-parity backlog items remain open. Historical notes and
 registered matrix counts below do not mean that every row ran for this release.
 
+Follow-up differential coverage adds three v0.29.5 release regressions for
+unknown-user groups in `via` subnet/exit grants and unrelated-ACL exit steering.
+All 103 checked-in policy/wire scenarios now match the pinned Go release. This
+follow-up does not change the 100-scenario historical qualification checkpoint.
+See [`qualification/headscale-v0.29.5-via-followup.json`](qualification/headscale-v0.29.5-via-followup.json)
+for the focused test results and golden hash.
+
 Release baseline audit, refreshed 2026-10-15:
 
 - Pinned upstream `juanfont/headscale` release used for the parity

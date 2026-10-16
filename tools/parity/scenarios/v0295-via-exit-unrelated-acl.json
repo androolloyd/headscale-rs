@@ -1,0 +1,15 @@
+{
+  "name":"v0295-via-exit-unrelated-acl",
+  "policy":{
+    "tagOwners":{"tag:exit-a":["alice@example.com"],"tag:exit-b":["alice@example.com"]},
+    "acls":[{"action":"accept","src":["autogroup:member"],"dst":["100.64.0.15:53"]}],
+    "grants":[{"src":["autogroup:member"],"dst":["autogroup:internet"],"ip":["*"],"via":["tag:exit-a"]}]
+  },
+  "users":[{"id":1,"name":"alice","email":"alice@example.com"}],
+  "nodes":[
+    {"id":1,"user_id":1,"hostname":"client","ipv4":"100.64.0.10"},
+    {"id":2,"user_id":1,"hostname":"exit-a","ipv4":"100.64.0.11","tags":["tag:exit-a"],"routes":["0.0.0.0/0","::/0"],"approved_routes":["0.0.0.0/0","::/0"]},
+    {"id":3,"user_id":1,"hostname":"exit-b","ipv4":"100.64.0.12","tags":["tag:exit-b"],"routes":["0.0.0.0/0","::/0"],"approved_routes":["0.0.0.0/0","::/0"]}
+  ],
+  "via_route_checks":[{"name":"selected","viewer_id":1,"peer_id":2},{"name":"unselected","viewer_id":1,"peer_id":3}]
+}

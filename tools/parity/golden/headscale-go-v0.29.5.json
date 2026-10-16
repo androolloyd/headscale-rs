@@ -105,7 +105,9 @@
       },
       {
         "name": "tagged-router-filter",
-        "rules": []
+        "rules": [
+
+        ]
       }
     ],
     "peer_maps": [
@@ -125,7 +127,9 @@
       },
       {
         "name": "bob-a-peers",
-        "peers": []
+        "peers": [
+
+        ]
       },
       {
         "name": "tagged-router-peers",
@@ -228,157 +232,209 @@
   {
     "engine": "headscale",
     "name": "acl-validation-bare-ipv6-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "alias"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-dst-missing-port",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "hostport must contain a colon"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-gre-specific-port",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "does not support specific ports"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-icmp-specific-port",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "does not support specific ports"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-internet-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:internet"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-invalid-autogroup-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:invalid"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-nonroot-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:nonroot"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-port-invalid-number",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "invalid"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-port-out-of-range",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "port number out of range"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-port-range-inverted",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "invalid port range: first port is greater than last port"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-port-zero",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "first port must be >0"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-proto-invalid-name",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "must be a known protocol name or valid protocol number"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-proto-leading-zero",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "leading 0 not permitted"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-proto-wildcard",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "proto name \"*\" not known"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-self-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:self"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-tag-src-self-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:self can only be used with users"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-undefined-group-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "group:notdefined"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-undefined-host-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "missinghost"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-undefined-tag-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tag:notdefined"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-unknown-autoapprover-field",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "INVALID_AUTO_APPROVER_FIELD"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-unknown-policy-field",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "INVALID_POLICY_FIELD"
   },
   {
     "engine": "headscale",
     "name": "acl-validation-unknown-rule-field",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "INVALID_ACL_FIELD"
   },
   {
     "engine": "headscale",
     "name": "autoapprovers-validation-undefined-tag-route",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tag:notdefined"
   },
   {
     "engine": "headscale",
     "name": "groups-validation-nested-group",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "group:ops"
   },
   {
     "engine": "headscale",
     "name": "groups-validation-non-user-member",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "contain @"
   },
   {
     "engine": "headscale",
     "name": "groups-validation-short-name",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "start"
   },
   {
@@ -646,7 +702,9 @@
       },
       {
         "name": "bob-unmatched-peers",
-        "peers": []
+        "peers": [
+
+        ]
       }
     ],
     "route_approvals": [
@@ -664,14 +722,24 @@
         "include": [
           "10.44.0.0/16"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "bob-secondary-v6-does-not-route-via-router",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ],
     "node_attrs": [
@@ -690,7 +758,9 @@
       },
       {
         "name": "bob-no-secondary-v6-nodeattrs",
-        "attrs": []
+        "attrs": [
+
+        ]
       }
     ],
     "ssh_policies": [
@@ -883,11 +953,15 @@
     "ssh_policies": [
       {
         "name": "alice-dual",
-        "rules": []
+        "rules": [
+
+        ]
       },
       {
         "name": "alice-v6-only",
-        "rules": []
+        "rules": [
+
+        ]
       },
       {
         "name": "server-dual",
@@ -955,7 +1029,9 @@
       },
       {
         "name": "unapproved-router-peers",
-        "peers": []
+        "peers": [
+
+        ]
       }
     ]
   },
@@ -993,7 +1069,9 @@
       },
       {
         "name": "bob-peers",
-        "peers": []
+        "peers": [
+
+        ]
       }
     ]
   },
@@ -1360,11 +1438,15 @@
       },
       {
         "name": "private-router-hidden-from-internet-acl",
-        "peers": []
+        "peers": [
+
+        ]
       },
       {
         "name": "unmatched-client-hidden",
-        "peers": []
+        "peers": [
+
+        ]
       }
     ],
     "route_approvals": [
@@ -1393,7 +1475,9 @@
         "SrcIPs": [
           "100.64.0.1"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -1401,7 +1485,8 @@
             ],
             "CapMap": {
               "tailscale.com/cap/drive": [
-                {}
+                {
+                }
               ]
             }
           }
@@ -1411,7 +1496,9 @@
         "SrcIPs": [
           "100.64.0.2"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -1427,14 +1514,18 @@
         "SrcIPs": [
           "100.64.0.1"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
               "100.64.0.3/32"
             ],
             "CapMap": {
-              "tailscale.com/cap/relay": []
+              "tailscale.com/cap/relay": [
+
+              ]
             }
           }
         ]
@@ -1443,7 +1534,9 @@
         "SrcIPs": [
           "100.64.0.3"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -1464,7 +1557,9 @@
             "SrcIPs": [
               "100.64.0.2"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -1480,7 +1575,9 @@
             "SrcIPs": [
               "100.64.0.3"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -1501,7 +1598,9 @@
             "SrcIPs": [
               "100.64.0.1"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -1509,7 +1608,8 @@
                 ],
                 "CapMap": {
                   "tailscale.com/cap/drive": [
-                    {}
+                    {
+                    }
                   ]
                 }
               }
@@ -1524,14 +1624,18 @@
             "SrcIPs": [
               "100.64.0.1"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
                   "100.64.0.3/32"
                 ],
                 "CapMap": {
-                  "tailscale.com/cap/relay": []
+                  "tailscale.com/cap/relay": [
+
+                  ]
                 }
               }
             ]
@@ -1603,7 +1707,9 @@
           "100.64.0.11-100.64.0.12",
           "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -1625,7 +1731,9 @@
           "100.64.0.13",
           "fd7a:115c:a1e0::13"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -1752,7 +1860,9 @@
               "100.64.0.11-100.64.0.12",
               "fd7a:115c:a1e0::11-fd7a:115c:a1e0::12"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -1774,7 +1884,9 @@
               "100.64.0.13",
               "fd7a:115c:a1e0::13"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -1928,14 +2040,24 @@
         "include": [
           "10.33.0.0/16"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "developer-does-not-use-group-a-via-grant",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ],
     "tag_checks": [
@@ -2376,7 +2498,9 @@
       },
       {
         "name": "client-filter-ipv6-literal-grant",
-        "rules": []
+        "rules": [
+
+        ]
       }
     ],
     "peer_maps": [
@@ -2612,7 +2736,9 @@
   {
     "engine": "headscale",
     "name": "policy-v2-compat-fixture-batch-4",
-    "filter": [],
+    "filter": [
+
+    ],
     "node_attrs": [
       {
         "name": "cidr-target-gets-randomize",
@@ -2635,7 +2761,9 @@
       },
       {
         "name": "unmatched-client-no-nodeattrs",
-        "attrs": []
+        "attrs": [
+
+        ]
       }
     ]
   },
@@ -2670,7 +2798,9 @@
           "100.64.0.11-100.64.0.13",
           "fd7a:115c:a1e0::11-fd7a:115c:a1e0::13"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -2724,7 +2854,9 @@
           "100.64.0.13",
           "fd7a:115c:a1e0::13"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -2896,7 +3028,9 @@
               "100.64.0.11-100.64.0.13",
               "fd7a:115c:a1e0::11-fd7a:115c:a1e0::13"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -2943,7 +3077,9 @@
               "100.64.0.13",
               "fd7a:115c:a1e0::13"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -3233,7 +3369,9 @@
       },
       {
         "name": "exit-autoapproves-defaults",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       }
     ],
@@ -3243,14 +3381,24 @@
         "include": [
           "10.33.0.0/16"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "developer-does-not-use-client-via-grant",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ],
     "node_attrs": [
@@ -3585,7 +3733,9 @@
       },
       {
         "name": "bob-deny-test-has-no-peers",
-        "peers": []
+        "peers": [
+
+        ]
       },
       {
         "name": "server-test-target-peers",
@@ -3798,14 +3948,24 @@
         "include": [
           "10.88.4.0/24"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "bob-does-not-inherit-alice-via-route",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ],
     "node_attrs": [
@@ -3830,7 +3990,9 @@
       },
       {
         "name": "server-v6-only-nodeattrs",
-        "attrs": []
+        "attrs": [
+
+        ]
       }
     ],
     "ssh_policies": [
@@ -3903,13 +4065,17 @@
   {
     "engine": "headscale",
     "name": "policy-v2-nodeattrs-ippool-unsupported",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "nodeAttrs ipPool requires the IP allocator"
   },
   {
     "engine": "headscale",
     "name": "policy-v2-randomize-client-port-nodeattrs",
-    "filter": [],
+    "filter": [
+
+    ],
     "node_attrs": [
       {
         "name": "global-randomize-user-node",
@@ -3935,7 +4101,9 @@
           "100.64.0.11",
           "fd7a:115c:a1e0::11"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -3957,7 +4125,9 @@
           "100.64.0.12",
           "fd7a:115c:a1e0::12"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -3980,7 +4150,9 @@
               "100.64.0.12",
               "fd7a:115c:a1e0::12"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -4003,7 +4175,9 @@
               "100.64.0.11",
               "fd7a:115c:a1e0::11"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -4024,7 +4198,9 @@
       },
       {
         "name": "plain-client-receives-no-cap-grant-filter",
-        "rules": []
+        "rules": [
+
+        ]
       }
     ],
     "peer_maps": [
@@ -4042,7 +4218,9 @@
       },
       {
         "name": "plain-client-has-no-cap-grant-peers",
-        "peers": []
+        "peers": [
+
+        ]
       }
     ],
     "node_attrs": [
@@ -4080,7 +4258,9 @@
           "192.168.1.0/24",
           "fd7a:115c:a1e0::/48"
         ],
-        "DstPorts": [],
+        "DstPorts": [
+
+        ],
         "CapGrant": [
           {
             "Dsts": [
@@ -4101,7 +4281,8 @@
             ],
             "CapMap": {
               "example.com/cap/basic": [
-                {}
+                {
+                }
               ]
             }
           }
@@ -4207,7 +4388,9 @@
               "192.168.1.0/24",
               "fd7a:115c:a1e0::/48"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -4216,7 +4399,8 @@
                 ],
                 "CapMap": {
                   "example.com/cap/basic": [
-                    {}
+                    {
+                    }
                   ]
                 }
               }
@@ -4308,7 +4492,9 @@
               "192.168.1.0/24",
               "fd7a:115c:a1e0::/48"
             ],
-            "DstPorts": [],
+            "DstPorts": [
+
+            ],
             "CapGrant": [
               {
                 "Dsts": [
@@ -4317,7 +4503,8 @@
                 ],
                 "CapMap": {
                   "example.com/cap/basic": [
-                    {}
+                    {
+                    }
                   ]
                 }
               }
@@ -4441,7 +4628,9 @@
       },
       {
         "name": "grant-a1-exit-tag-autoapproves-defaults",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       }
     ],
@@ -4451,14 +4640,24 @@
         "include": [
           "172.16.0.0/24"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "via-grant-thor-does-not-use-odin-router",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ],
     "ssh_policies": [
@@ -4609,7 +4808,9 @@
   {
     "engine": "headscale",
     "name": "policy-validation-unknown-ipsets",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "ipsets"
   },
   {
@@ -4634,14 +4835,18 @@
     "ssh_policies": [
       {
         "name": "explicit-revocation",
-        "rules": []
+        "rules": [
+
+        ]
       }
     ]
   },
   {
     "engine": "headscale",
     "name": "release-0295-policy-metadata",
-    "filter": [],
+    "filter": [
+
+    ],
     "ssh_policies": [
       {
         "name": "alice-laptop",
@@ -4670,7 +4875,9 @@
       },
       {
         "name": "bob-laptop",
-        "rules": []
+        "rules": [
+
+        ]
       },
       {
         "name": "server",
@@ -4786,12 +4993,16 @@
       },
       {
         "name": "all-v4-policy-rejects-default-v4-without-exitnode",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
         "name": "all-v4-policy-does-not-approve-v6",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -4812,7 +5023,9 @@
       },
       {
         "name": "exitnode-approver-does-not-approve-specific-route",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -4831,12 +5044,16 @@
       },
       {
         "name": "wider-prefix-rejected",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
         "name": "adjacent-prefix-rejected",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -4863,7 +5080,9 @@
       },
       {
         "name": "tagged-node-does-not-inherit-user-group-autoapprover",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -4921,17 +5140,23 @@
       },
       {
         "name": "user-superprefix-rejected",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
         "name": "plain-user-not-in-approvers-rejected",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
         "name": "tagged-node-does-not-inherit-user-approver",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -4998,7 +5223,9 @@
       },
       {
         "name": "plain-user-cannot-add-admin-route",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
@@ -5035,12 +5262,16 @@
     "route_approvals": [
       {
         "name": "route-autoapprovers-do-not-grant-v4-default",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       },
       {
         "name": "route-autoapprovers-do-not-grant-v6-default",
-        "approved_routes": [],
+        "approved_routes": [
+
+        ],
         "changed": false
       }
     ]
@@ -5086,7 +5317,9 @@
       },
       {
         "name": "router-disjoint-no-via-filter",
-        "rules": []
+        "rules": [
+
+        ]
       }
     ],
     "via_routes": [
@@ -5095,62 +5328,96 @@
         "include": [
           "10.33.5.0/24"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "narrower-destination-includes-advertised-prefix",
         "include": [
           "10.66.5.0/24"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "disjoint-destination-does-not-include-advertised-prefix",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "ipv6-broader-destination-includes-4via6-advertised-prefix",
         "include": [
           "fd7a:115c:a1e0:b1a:0:13:ad2:7300/120"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "multi-router-low-id-keeps-include",
         "include": [
           "10.44.0.0/24"
         ],
-        "exclude": [],
-        "use_primary": []
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       },
       {
         "name": "multi-router-high-id-is-excluded",
-        "include": [],
+        "include": [
+
+        ],
         "exclude": [
           "10.44.0.0/24"
         ],
-        "use_primary": []
+        "use_primary": [
+
+        ]
       },
       {
         "name": "regular-overlap-uses-primary",
         "include": [
           "10.55.0.0/24"
         ],
-        "exclude": [],
+        "exclude": [
+
+        ],
         "use_primary": [
           "10.55.0.0/24"
         ]
       },
       {
         "name": "regular-overlap-clears-non-via-exclude",
-        "include": [],
-        "exclude": [],
-        "use_primary": []
+        "include": [
+
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
       }
     ]
   },
@@ -5351,7 +5618,9 @@
   {
     "engine": "headscale",
     "name": "ssh-policy-matrix",
-    "filter": [],
+    "filter": [
+
+    ],
     "ssh_policies": [
       {
         "name": "alice-laptop",
@@ -5380,7 +5649,9 @@
       },
       {
         "name": "bob-laptop",
-        "rules": []
+        "rules": [
+
+        ]
       },
       {
         "name": "server",
@@ -5468,79 +5739,105 @@
   {
     "engine": "headscale",
     "name": "ssh-validation-action-blank",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "action must be specified"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-action-missing",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "action must be specified"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-group-src-user-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "user destination requires source to contain only that same user"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-host-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "invalid dst \"server\""
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-internet-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:internet"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-internet-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "autogroup:internet"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-invalid-action",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "\"invalid\" is not a valid action"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-invalid-check-period",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "invalid"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-tag-src-member-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tags in SSH source cannot access autogroup:member"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-tag-src-user-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tags in SSH source cannot access user-owned devices"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-undefined-group-src",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "group:notdefined"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-undefined-tag-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tag:notdefined"
   },
   {
     "engine": "headscale",
     "name": "ssh-validation-unknown-field",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "INVALID_SSH_FIELD"
   },
   {
@@ -5566,13 +5863,17 @@
   {
     "engine": "headscale",
     "name": "ssh-validation-wildcard-dst",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "wildcard (*) is not supported as SSH destination"
   },
   {
     "engine": "headscale",
     "name": "tag-owners-matrix",
-    "filter": [],
+    "filter": [
+
+    ],
     "tag_checks": [
       {
         "name": "alice-can-claim-router",
@@ -5599,7 +5900,9 @@
   {
     "engine": "headscale",
     "name": "tagowners-nested-tag-owner",
-    "filter": [],
+    "filter": [
+
+    ],
     "tag_checks": [
       {
         "name": "alice-can-claim-derived-through-base",
@@ -5630,24 +5933,489 @@
   {
     "engine": "headscale",
     "name": "tagowners-validation-circular-tag-owner",
-    "filter": []
+    "filter": [
+
+    ]
   },
   {
     "engine": "headscale",
     "name": "tagowners-validation-undefined-group",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "group:notdefined"
   },
   {
     "engine": "headscale",
     "name": "tagowners-validation-undefined-tag-owner",
-    "filter": [],
+    "filter": [
+
+    ],
     "policy_error": "tag:missing"
   },
   {
     "engine": "headscale",
+    "name": "v0295-unknown-group-exit",
+    "filter": [
+
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "exit",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.1"
+            ],
+            "DstPorts": [
+              {
+                "IP": "0.0.0.0/5",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "100.0.0.0/10",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "100.128.0.0/9",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "101.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "102.0.0.0/7",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "104.0.0.0/5",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "11.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "112.0.0.0/4",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "12.0.0.0/6",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "128.0.0.0/3",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "16.0.0.0/4",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "160.0.0.0/5",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "168.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.0.0.0/9",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.128.0.0/10",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.192.0.0/11",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.224.0.0/12",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.240.0.0/13",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.248.0.0/14",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.252.0.0/15",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "169.255.0.0/16",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "170.0.0.0/7",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "172.0.0.0/12",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "172.128.0.0/9",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "172.32.0.0/11",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "172.64.0.0/10",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "173.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "174.0.0.0/7",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "176.0.0.0/4",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.0.0.0/9",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.128.0.0/11",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.160.0.0/13",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.169.0.0/16",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.170.0.0/15",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.172.0.0/14",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.176.0.0/12",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "192.192.0.0/10",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "193.0.0.0/8",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "194.0.0.0/7",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "196.0.0.0/6",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "200.0.0.0/5",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "2000::/3",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "208.0.0.0/4",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "224.0.0.0/3",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "32.0.0.0/3",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "64.0.0.0/3",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "8.0.0.0/7",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              },
+              {
+                "IP": "96.0.0.0/6",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "peer_maps": [
+      {
+        "name": "client",
+        "peers": [
+          2
+        ]
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "client-router",
+        "include": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "v0295-unknown-group-via",
+    "filter": [
+
+    ],
+    "peer_maps": [
+      {
+        "name": "client",
+        "peers": [
+          2
+        ]
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "client-router",
+        "include": [
+          "10.10.0.0/24"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "v0295-via-exit-unrelated-acl",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.10"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.15",
+            "Ports": {
+              "First": 53,
+              "Last": 53
+            }
+          }
+        ]
+      }
+    ],
+    "via_routes": [
+      {
+        "name": "selected",
+        "include": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "exclude": [
+
+        ],
+        "use_primary": [
+          "0.0.0.0/0"
+        ]
+      },
+      {
+        "name": "unselected",
+        "include": [
+
+        ],
+        "exclude": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "use_primary": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "wire-dns-derp-extended",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "dns_config": {
         "Resolvers": [
@@ -5668,7 +6436,9 @@
               ]
             }
           ],
-          "tail.example": []
+          "tail.example": [
+
+          ]
         },
         "FallbackResolvers": [
           {
@@ -5744,7 +6514,9 @@
   {
     "engine": "headscale",
     "name": "wire-dns-derp-register-map",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "dns_config": {
         "Resolvers": [
@@ -5888,7 +6660,8 @@
           "Proxied": true
         },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         }
       }
@@ -5897,7 +6670,9 @@
   {
     "engine": "headscale",
     "name": "wire-dns-nextdns-nodeattrs",
-    "filter": [],
+    "filter": [
+
+    ],
     "node_attrs": [
       {
         "name": "client-nextdns-profile-nodeattrs",
@@ -6039,7 +6814,9 @@
   {
     "engine": "headscale",
     "name": "wire-dns-runtime-magic-extra-records",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "runtime_dns_config": {
         "Routes": {
@@ -6072,7 +6849,9 @@
   {
     "engine": "headscale",
     "name": "wire-hostinfo-netinfo-metadata",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "register_request": {
         "version": 96,
@@ -6221,7 +7000,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-node-lifecycle",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_response": {
         "keep_alive": false,
@@ -6300,9 +7081,11 @@
             "last_seen": "2026-05-21T10:00:00Z"
           }
         ],
-        "dns_config": {},
+        "dns_config": {
+        },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         }
       }
@@ -6311,7 +7094,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-node-metadata",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_response": {
         "keep_alive": false,
@@ -6352,7 +7137,9 @@
             "https://tailscale.com/cap/ssh"
           ],
           "cap_map": {
-            "funnel": []
+            "funnel": [
+
+            ]
           },
           "expired": true,
           "home_derp": 900,
@@ -6372,9 +7159,11 @@
           ]
         },
         "peer_count": 0,
-        "dns_config": {},
+        "dns_config": {
+        },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         }
       }
@@ -6383,7 +7172,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-request-connection-handle",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_request": {
         "version": 96,
@@ -6419,7 +7210,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-request-session-userprofiles",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_request": {
         "version": 68,
@@ -6484,9 +7277,11 @@
             "profile_pic_url": "https://example.com/alice.png"
           }
         ],
-        "dns_config": {},
+        "dns_config": {
+        },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         }
       }
@@ -6495,7 +7290,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-response-deltas-control",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_request": {
         "version": 112,
@@ -6558,7 +7355,9 @@
             "DERPRegion": 1,
             "Cap": 112,
             "CapMap": {
-              "funnel": []
+              "funnel": [
+
+              ]
             },
             "Endpoints": [
               "198.51.100.2:41641"
@@ -6650,7 +7449,9 @@
   {
     "engine": "headscale",
     "name": "wire-map-response-ssh-policy",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "map_response": {
         "keep_alive": true,
@@ -6680,9 +7481,11 @@
           "machine_authorized": true
         },
         "peer_count": 0,
-        "dns_config": {},
+        "dns_config": {
+        },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         },
         "ssh_policy": [
@@ -6711,7 +7514,9 @@
   {
     "engine": "headscale",
     "name": "wire-register-map-request-peer-flags",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "register_request": {
         "node_key": "nodekey:1100000000000000000000000000000000000000000000000000000000000000",
@@ -6841,7 +7646,8 @@
           "Proxied": true
         },
         "derp_map": {
-          "Regions": {},
+          "Regions": {
+          },
           "omitDefaultRegions": true
         }
       }
@@ -6850,7 +7656,9 @@
   {
     "engine": "headscale",
     "name": "wire-register-map-zero-node-key-defaults",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "register_request": {
         "version": 113,
@@ -6864,7 +7672,9 @@
   {
     "engine": "headscale",
     "name": "wire-register-request-rotation-tailnet",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "register_request": {
         "version": 96,
@@ -6891,7 +7701,9 @@
   {
     "engine": "headscale",
     "name": "wire-register-signatures",
-    "filter": [],
+    "filter": [
+
+    ],
     "wire": {
       "register_request": {
         "version": 96,

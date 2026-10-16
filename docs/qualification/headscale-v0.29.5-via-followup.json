@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-16",
+  "base_commit": "b896380835789e28d46043b8120fdd02125a5ae2",
+  "upstream": {
+    "tag": "v0.29.5",
+    "commit": "0f7d1e536bed9f01dd7161f7637af19bb0908335"
+  },
+  "change": "Preserve global primary-route election for a selected via exit route when a narrower regular ACL also matches the viewer, while retaining exclusions on unselected exit nodes.",
+  "added_scenarios": [
+    "v0295-unknown-group-exit",
+    "v0295-unknown-group-via",
+    "v0295-via-exit-unrelated-acl"
+  ],
+  "checks": {
+    "go_rust_differential": "103 scenarios matched",
+    "acl_tests": "147 passed, 0 failed",
+    "acl_all_targets_clippy": "passed with -D warnings",
+    "parity_metadata": "passed",
+    "golden_sha256": "360d3fbdbbddf12c33cfceecd52da2638c14f1951cee1691209d5edeed1baf26"
+  },
+  "boundary": "The broader 100-scenario release and process qualification remains recorded at b896380. This follow-up adds focused policy evidence and does not close the four full-replacement parity backlog items."
+}

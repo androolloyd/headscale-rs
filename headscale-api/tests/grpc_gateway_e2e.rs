@@ -3207,8 +3207,7 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let node_id = body["node"]["id"].as_str().unwrap().to_string();
-    let _guard =
-        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
+
     assert!(!node_id.is_empty());
     assert!(
         body["node"]["machineKey"]
@@ -3248,6 +3247,8 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
     let body = body_json(resp).await;
     assert_eq!(body["node"]["id"], node_id);
     assert_eq!(body["node"]["registerMethod"], "REGISTER_METHOD_CLI");
@@ -3661,8 +3662,7 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let node_id = body["node"]["id"].as_str().unwrap().to_string();
-    let _guard =
-        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
+
     assert_eq!(
         body["node"]["availableRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])
@@ -3679,6 +3679,8 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
 
     let resp = app
         .clone()

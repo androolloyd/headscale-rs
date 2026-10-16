@@ -226,6 +226,7 @@ impl DatabasePool {
         match self {
             Self::Sqlite(pool) => {
                 version_guard::check_headscale_go_import_compatibility(pool).await?;
+                version_guard::prepare_untagged_import(pool).await?;
                 sqlx::migrate!("./migrations").run(pool).await?;
                 version_guard::stamp_rust_managed_database_version(pool).await?;
                 Ok(())

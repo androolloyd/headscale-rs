@@ -161,12 +161,8 @@ pub async fn rename_grpc(
     new_name: &str,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let _user = resolve_single_user(client, id, name).await?;
-    let renamed = UserOutput::from(
-        client
-            .rename_user_by_id(upstream_rename_request_id(id), new_name)
-            .await?,
-    );
+    let user = resolve_single_user(client, id, name).await?;
+    let renamed = UserOutput::from(client.rename_user_by_id(user.id, new_name).await?);
     if fmt.is_structured() {
         print_structured(fmt, &renamed)?;
     } else {
@@ -274,12 +270,6 @@ fn grpc_user_id_filter(id: Option<i64>) -> Option<u64> {
 
 fn upstream_user_id_was_supplied(id: Option<i64>) -> bool {
     id.is_some_and(|id| id >= 0)
-}
-
-fn upstream_rename_request_id(id: Option<i64>) -> u64 {
-    id.filter(|id| *id >= 0)
-        .and_then(|id| u64::try_from(id).ok())
-        .unwrap_or_default()
 }
 
 fn validate_picture_url(url: &str) -> Result<(), AdminError> {
@@ -431,9 +421,6 @@ mod tests {
             parse_user_identifier(Some("abc")).unwrap_err().to_string(),
             "invalid argument \"abc\" for \"-i, --identifier\" flag: strconv.ParseInt: parsing \"abc\": invalid syntax"
         );
-        assert_eq!(upstream_rename_request_id(None), 0);
-        assert_eq!(upstream_rename_request_id(Some(-1)), 0);
-        assert_eq!(upstream_rename_request_id(Some(42)), 42);
     }
 
     #[test]

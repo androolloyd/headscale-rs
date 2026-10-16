@@ -45,7 +45,7 @@ pub fn compile_ssh_policy_with_base_url(
     base_url: &str,
 ) -> Option<SshPolicy> {
     if doc.ssh.is_empty() {
-        return None;
+        return Some(SshPolicy { rules: Vec::new() });
     }
     let target_node = nodes.iter().find(|node| node.id == target_node_id)?;
     let mut out = Vec::new();
@@ -120,6 +120,16 @@ pub fn ssh_check_period_for(
     src_node_id: u64,
     dst_node_id: u64,
 ) -> Option<Duration> {
+    ssh_check_period_for_user(doc, nodes, src_node_id, dst_node_id, "")
+}
+
+pub fn ssh_check_period_for_user(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    src_node_id: u64,
+    dst_node_id: u64,
+    local_user: &str,
+) -> Option<Duration> {
     if doc.ssh.is_empty() {
         return None;
     }
@@ -128,6 +138,19 @@ pub fn ssh_check_period_for(
 
     for rule in &doc.ssh {
         if rule.action != "check" {
+            continue;
+        }
+        if !local_user.is_empty()
+            && !ssh_user_rules(&rule.users, &[src_node])
+                .iter()
+                .any(|user_rule| {
+                    user_rule
+                        .ssh_users
+                        .get(local_user)
+                        .is_some_and(|target| !target.is_empty())
+                        || (user_rule.ssh_users.contains_key("*") && local_user != "root")
+                })
+        {
             continue;
         }
         let source_nodes = resolve_ssh_source_nodes(doc, &rule.src, nodes);
@@ -145,6 +168,13 @@ pub fn ssh_check_period_for(
             if ssh_destination_matches(dst, dst_node) {
                 return Some(check_period_from_rule(rule.check_period.as_deref()));
             }
+        }
+        if users_have_canonical_localpart(&rule.users)
+            && rule.dst.iter().any(|dst| dst != "autogroup:self")
+            && source_nodes.iter().any(|node| node.id == dst_node.id)
+            && (src_node.id == dst_node.id || same_ssh_user_owner(src_node, dst_node))
+        {
+            return Some(check_period_from_rule(rule.check_period.as_deref()));
         }
     }
 
@@ -509,8 +539,19 @@ fn ssh_check_hold_url(base_url: &str, auth_id: Option<&str>) -> String {
     url
 }
 
-pub(crate) fn ssh_check_hold_url_with_auth(base_url: &str, auth_id: &str) -> String {
-    ssh_check_hold_url(base_url, Some(auth_id))
+pub(crate) fn ssh_check_hold_url_with_auth(
+    base_url: &str,
+    auth_id: &str,
+    local_user: &str,
+) -> String {
+    let query = form_urlencoded::Serializer::new(String::new())
+        .append_pair("auth_id", auth_id)
+        .append_pair("local_user", local_user)
+        .finish();
+    format!(
+        "{}/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?{query}",
+        base_url.trim_end_matches('/')
+    )
 }
 
 fn check_period_from_rule(check_period: Option<&str>) -> Duration {

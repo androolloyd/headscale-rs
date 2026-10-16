@@ -622,7 +622,7 @@ mod tests {
         }
     }
 
-    /// Bind both listeners on ephemeral ports and probe `GET /key?v=39`
+    /// Bind both listeners on ephemeral ports and probe `GET /key?v=113`
     /// over plain HTTP. We don't drive a TLS client in-process — the
     /// docker harness does that — but we *do* assert the HTTPS
     /// listener accepts the rustls config without panicking.
@@ -660,7 +660,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let url = format!("http://{addr}/key?v=39");
+        let url = format!("http://{addr}/key?v=113");
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_success());
         handle.abort();
@@ -998,7 +998,7 @@ mod tests {
             .build()
             .unwrap();
         let control_resp = no_redirects
-            .get(format!("http://{acme_addr}/key?v=39"))
+            .get(format!("http://{acme_addr}/key?v=113"))
             .send()
             .await
             .unwrap();
@@ -1008,7 +1008,7 @@ mod tests {
                 .headers()
                 .get(axum::http::header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
-            Some("https://control.example/key?v=39")
+            Some("https://control.example/key?v=113")
         );
 
         handle.http.unwrap().abort();

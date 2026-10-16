@@ -1814,3 +1814,78 @@ async fn migrates_legacy_routes_table_without_synthesizing_opposite_exit_route()
         assert_eq!(migrated.approved_route_list(), vec![prefix]);
     }
 }
+
+#[tokio::test]
+async fn release_0295_runtime_persist_cannot_restore_deleted_auth_key_or_admin_expiry() {
+    let (_dir, db) = file_db().await;
+    db.migrate().await.unwrap();
+    let user = user_id(&db).await;
+    let auth = preauth_key_id(&db, user).await;
+    let row = node_with_route(&db, user, auth).await;
+    let stale = headscale_nodes::CreateParams {
+        machine_key: row.machine_key.clone(),
+        node_key: row.node_key.clone(),
+        disco_key: row.disco_key.clone(),
+        endpoints: vec!["127.0.0.1:4242".into()],
+        host_info: row.host_info_value(),
+        ipv4: row.ipv4.clone(),
+        ipv6: row.ipv6.clone(),
+        hostname: row.hostname.clone(),
+        given_name: row.given_name.clone(),
+        user_id: row.user_id,
+        register_method: row.register_method.clone(),
+        tags: row.tag_list(),
+        auth_key_id: row.auth_key_id,
+        expiry: None,
+        last_seen: Some(123_456),
+        approved_routes: row.approved_route_list(),
+    };
+    headscale_nodes::set_expiry(db.pool(), row.id, Some(1_900_000_000))
+        .await
+        .unwrap();
+    preauth_keys::destroy(db.pool(), auth).await.unwrap();
+    let updated = headscale_nodes::update_from_runtime(db.pool(), row.id, stale)
+        .await
+        .unwrap();
+    assert_eq!(updated.auth_key_id, None);
+    assert_eq!(updated.expiry, Some(1_900_000_000));
+    assert_eq!(updated.endpoint_list(), ["127.0.0.1:4242"]);
+    assert_eq!(updated.last_seen, Some(123_456));
+}
+
+#[tokio::test]
+async fn release_0295_repair_only_changes_tagged_expiry_and_recoverable_owner() {
+    let (_dir, db) = file_db().await;
+    db.migrate().await.unwrap();
+    let user = user_id(&db).await;
+    let auth = preauth_key_id(&db, user).await;
+    let row = node_with_route(&db, user, auth).await;
+    sqlx::query("UPDATE nodes SET tags='null', user_id=NULL, expiry=datetime(1900000000,'unixepoch') WHERE id=?").bind(row.id).execute(db.pool()).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261015000018_repair_native_0295_nodes.sql"
+    ))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let recovered = headscale_nodes::get_by_id(db.pool(), row.id).await.unwrap();
+    assert_eq!(recovered.user_id, Some(user));
+    assert_eq!(recovered.expiry, Some(1_900_000_000));
+    sqlx::query("UPDATE nodes SET tags='[\"tag:server\"]' WHERE id=?")
+        .bind(row.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261015000018_repair_native_0295_nodes.sql"
+    ))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        headscale_nodes::get_by_id(db.pool(), row.id)
+            .await
+            .unwrap()
+            .expiry,
+        None
+    );
+}

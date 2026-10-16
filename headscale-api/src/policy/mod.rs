@@ -30,7 +30,10 @@ pub mod ssh;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use parking_lot::RwLock;
@@ -70,6 +73,7 @@ struct Inner {
     /// `MachineRegistry` does — `notify_waiters` is enqueue-free and
     /// the wake fans out to every parked task in one shot.
     notify: Notify,
+    auth_revision: AtomicU64,
 }
 
 #[derive(Default)]
@@ -134,7 +138,19 @@ impl PolicyStore {
             g.updated_at = Some(updated_at);
             g.filters = filters;
             g.packet_filter_default_allow = packet_filter_default_allow;
+            self.inner.auth_revision.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    // SSH check approvals are invalidated on every successful policy replacement,
+    // including two reloads in one wall-clock second or identical DB timestamps.
+    pub(crate) fn auth_revision(&self) -> i64 {
+        i64::from_ne_bytes(
+            self.inner
+                .auth_revision
+                .load(Ordering::Acquire)
+                .to_ne_bytes(),
+        )
     }
 
     /// Notify parked `/map` pollers after a policy update is fully observable.
@@ -259,7 +275,7 @@ impl PolicyStore {
     ) -> Option<SshPolicy> {
         match self.inner.state.read().doc.as_ref() {
             Some(doc) => compile_ssh_policy_with_base_url(doc, nodes, target_node_id, base_url),
-            None => None,
+            None => Some(SshPolicy { rules: Vec::new() }),
         }
     }
 
@@ -273,6 +289,18 @@ impl PolicyStore {
             Some(doc) => ssh::ssh_check_period_for(doc, nodes, src_node_id, dst_node_id),
             None => None,
         }
+    }
+
+    pub fn ssh_check_period_for_user(
+        &self,
+        nodes: &[SshPolicyNode],
+        src_node_id: u64,
+        dst_node_id: u64,
+        local_user: &str,
+    ) -> Option<std::time::Duration> {
+        self.inner.state.read().doc.as_ref().and_then(|doc| {
+            ssh::ssh_check_period_for_user(doc, nodes, src_node_id, dst_node_id, local_user)
+        })
     }
 
     /// True iff `node` should have a route covering `prefix`
@@ -516,4 +544,25 @@ pub fn build_peer_map_for_doc(doc: &PolicyDoc, nodes: &[PeerMapNode]) -> BTreeMa
     out.into_iter()
         .map(|(id, peers)| (id, peers.into_iter().collect()))
         .collect()
+}
+
+#[cfg(test)]
+mod release_0295_tests {
+    use super::*;
+    #[test]
+    fn release_0295_revoked_ssh_policy_is_explicit_and_each_reload_invalidates_auth() {
+        let store = PolicyStore::new();
+        let raw = r#"{"ssh": [{"action":"check", "src":["alice@"], "dst":["autogroup:self"], "users":["root"]}]}"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        store.set(doc.clone(), raw.into());
+        let first = store.auth_revision();
+        store.set(doc, raw.into());
+        assert_ne!(
+            first,
+            store.auth_revision(),
+            "reloads within one second invalidate cached SSH authorization"
+        );
+        store.set(parse_hujson_policy("{}").unwrap(), "{}".into());
+        assert!(store.ssh_policy_for(&[], 1, "").unwrap().rules.is_empty());
+    }
 }

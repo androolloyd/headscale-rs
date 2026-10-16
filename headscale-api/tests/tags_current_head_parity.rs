@@ -316,7 +316,7 @@ async fn register_rejected_requested_tags(
 fn authkey_fixture(auth_key: &str, ok: RedeemOk) -> (WireState, Arc<MachineRegistry>) {
     let registry = Arc::new(MachineRegistry::new());
     let (state, redeemer) = wire_state(registry.clone(), tag_policy());
-    redeemer.insert(auth_key, ok);
+    redeemer.insert(auth_key, ok.auth_key_id(1));
     (state, registry)
 }
 

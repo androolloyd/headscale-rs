@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-10-16 — headscale-go v0.29.5 compatibility update
+
+- Pin the official v0.29.5 release and refresh its Go/Rust differential golden
+  to 100 executed scenarios. Preserve the explicit four-item replacement-parity
+  backlog and the observed upstream rename-projection limitation.
+- Match release capability checks, authenticated registration and single-use SSH
+  approval, OIDC confirmation/cookies, empty SSH policy revocation, split map
+  removal frames, peer metadata/key classification and connection lifecycle.
+- Preserve canonical node IDs, expiry and preauth-key deletion during runtime
+  persistence; add append-only SQLite/PostgreSQL repair migrations and native
+  import guards. Keep active route indexes separate from durable approvals.
+- Vendor the minimal upstream SQLite WAL-reset race backport for the standalone
+  bundled SQLite graph. See `vendor/libsqlite3-sys/OCTRA-PATCHES.md`.
+- See `docs/qualification/headscale-v0.29.5.json` for executed gates, exact hashes,
+  preserved failures and exclusions. This update does not claim full 1:1 parity.
+
 ## 2026-10-15 — YAML maintenance and isolated protobuf generation
 
 - Replace the retired `serde_yaml`/`unsafe-libyaml` backend with pinned

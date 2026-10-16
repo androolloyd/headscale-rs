@@ -651,8 +651,9 @@ fn sort_map_of_vecs(m: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<S
 /// `POST /api/v1/policy/validate` and `PUT /api/v1/policy`.
 pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     let stripped = strip_hujson(raw);
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
+    strip_metadata_members(&mut value);
     let value = normalize_go_policy_top_level(value)?;
     let mut doc = serde_json::from_value::<AclDoc>(value)
         .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
@@ -664,6 +665,23 @@ pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
     }
     validate_policy(&doc).map_err(PolicyParseError::Schema)?;
     Ok(doc)
+}
+
+fn strip_metadata_members(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(members) => {
+            members.retain(|key, _| !key.starts_with('#'));
+            for value in members.values_mut() {
+                strip_metadata_members(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                strip_metadata_members(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn normalize_go_policy_top_level(
@@ -2264,7 +2282,9 @@ impl AclDoc {
             return false;
         };
         if is_default_route(&route) {
-            return destinations.iter().any(|dst| dst == "autogroup:internet");
+            return destinations
+                .iter()
+                .any(|dst| matches!(dst.as_str(), "autogroup:internet" | "*"));
         }
 
         destinations.iter().any(|dst| {

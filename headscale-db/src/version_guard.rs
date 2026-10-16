@@ -11,7 +11,7 @@ use sqlx::PgConnection;
 use sqlx::SqlitePool;
 
 pub const HEADSCALE_GO_IMPORT_BASELINE: &str = "v0.28.0";
-pub const HEADSCALE_GO_CURRENT_VERSION: &str = "v0.29.0-beta.2";
+pub const HEADSCALE_GO_CURRENT_VERSION: &str = "v0.29.5";
 
 const SUPPORTED_MAJOR: u64 = 0;
 const SUPPORTED_MINOR: u64 = 28;
@@ -51,6 +51,8 @@ const KNOWN_GO_MIGRATIONS: &[&str] = &[
     REQUIRED_GO_MIGRATION,
     CLEAR_TAGGED_NODE_USER_ID_MIGRATION,
     CLEAR_ZERO_TIME_NODE_EXPIRY_MIGRATION,
+    "202606181200-recover-null-tags-node-user-id",
+    "202607241200-clear-tagged-node-expiry",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +96,33 @@ pub async fn check_headscale_go_import_compatibility(
     Ok(HeadscaleGoImportCompatibility::Fresh)
 }
 
+pub(crate) async fn prepare_untagged_import(pool: &SqlitePool) -> Result<()> {
+    if !table_exists(pool, "nodes").await? {
+        return Ok(());
+    }
+    let tags_exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name = 'tags'")
+            .fetch_one(pool)
+            .await?;
+    if tags_exists == 0 {
+        return Ok(());
+    }
+    if table_exists(pool, "_sqlx_migrations").await? {
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260524000014 AND success = 1",
+        )
+        .fetch_one(pool)
+        .await?;
+        if applied != 0 {
+            return Ok(());
+        }
+    }
+    sqlx::query("UPDATE nodes SET tags = '[]' WHERE tags = 'null'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn stamp_rust_managed_database_version(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "
@@ -116,6 +145,21 @@ pub(crate) async fn migrate_postgres_foundation_on_connection(
     conn: &mut PgConnection,
 ) -> Result<()> {
     check_postgres_headscale_go_import_compatibility(conn).await?;
+    if postgres_table_exists(conn, "nodes").await? {
+        let tags_exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nodes' AND column_name = 'tags')")
+            .fetch_one(&mut *conn).await?;
+        let applied = if postgres_table_exists(conn, "_sqlx_migrations").await? {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 20260601000009 AND success)")
+                .fetch_one(&mut *conn).await?
+        } else {
+            false
+        };
+        if tags_exists && !applied {
+            sqlx::query("UPDATE nodes SET tags = '[]' WHERE tags = 'null'")
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
     POSTGRES_FOUNDATION_MIGRATOR.run(&mut *conn).await?;
     stamp_postgres_database_version(conn).await
 }

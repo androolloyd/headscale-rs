@@ -6,11 +6,10 @@
 //! also consume a `LegacyPublicKey` field, which we leave empty
 //! because we have no legacy bridge.
 //!
-//! Stock `tailscale up` appends a `?v=<capver>` query parameter
-//! advertising the client's capability version. Upstream headscale
-//! rejects requests without a parsable `v`, returns the Noise public
-//! key for TS2021-capable clients (`v >= 39`), and otherwise writes an
-//! empty 200 response because there is no legacy bridge.
+//! Stock `tailscale up` sends `?v=<capver>`. Headscale v0.29.5
+//! rejects missing or invalid versions and clients below the supported
+//! capability floor (113, Tailscale1.80). Supported clients receive the
+//! Noise public key; the legacy TS2021 threshold39 is not an admission floor.
 //!
 //! ## Decision log
 //!
@@ -28,7 +27,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{WireState, noise::NOISE_CAPABILITY_VERSION};
+use super::{
+    WireState,
+    wire::{is_supported_capability_version, unsupported_client_error},
+};
 
 /// `GET /key` response.
 ///
@@ -48,8 +50,8 @@ pub async fn handle_key(State(state): State<WireState>, RawQuery(raw_query): Raw
         Ok(cap_ver) => cap_ver,
         Err(resp) => return resp,
     };
-    if cap_ver < u32::from(NOISE_CAPABILITY_VERSION) {
-        return StatusCode::OK.into_response();
+    if !is_supported_capability_version(cap_ver) {
+        return text_error(StatusCode::BAD_REQUEST, &unsupported_client_error(cap_ver));
     }
 
     let body = OverTLSPublicKeyResponse {
@@ -139,7 +141,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=113")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -188,7 +190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_endpoint_returns_empty_200_for_legacy_capability() {
+    async fn key_endpoint_rejects_unsupported_legacy_capability() {
         let (state, _dir) = fixture_state();
         let app = router(state);
         let resp = app
@@ -200,8 +202,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert!(body.is_empty());
+        assert_eq!(
+            body.as_ref(),
+            format!("{}\n", unsupported_client_error(38)).as_bytes()
+        );
     }
 }

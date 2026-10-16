@@ -5911,7 +5911,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
         assert_eq!(nodes[0]["name"].as_str(), Some("pg-restart-node"));
         assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-restart-node"));
-        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("tagged-devices"));
         assert_eq!(nodes[0]["tags"], serde_json::json!(["tag:router"]));
         assert_eq!(
             nodes[0]["available_routes"],
@@ -5943,7 +5943,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             .get(&node_id)
             .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
         assert_eq!(live_node["hostname"].as_str(), Some("pg-restart-node"));
-        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(live_node["user"].as_str(), Some(""), "tagged node has no public owner");
         assert_eq!(live_node["forced_tags"], serde_json::json!(["tag:router"]));
         assert_eq!(
             live_node["available_routes"],
@@ -5961,14 +5961,10 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!(["10.40.0.0/24"])
-        );
-        assert_eq!(
-            debug_routes["primary_routes"]["10.40.0.0/24"],
-            serde_json::json!(node_id_number)
-        );
+        // Approval survives restart, but this debug-created node has no live
+        // map session and therefore is not an active or primary route candidate.
+        assert_eq!(debug_routes["available_routes"], serde_json::json!({}));
+        assert_eq!(debug_routes["primary_routes"], serde_json::json!({}));
 
         let policy_manager = http
             .get(format!("{metrics_url}/debug/policy-manager"))
@@ -6298,7 +6294,11 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
                 .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
             if live_node["forced_tags"] == serde_json::json!(["tag:server"]) {
                 assert_eq!(live_node["hostname"].as_str(), Some("pg-live-tag-node"));
-                assert_eq!(live_node["user"].as_str(), Some("alice"));
+                assert_eq!(
+                    live_node["user"].as_str(),
+                    Some(""),
+                    "tagged node has no public owner"
+                );
                 break;
             }
             assert!(
@@ -6479,13 +6479,19 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!([advertised_route])
+        // This debug-created node has no control session. Native primary
+        // routes stay empty until Connect, independently of approval.
+        assert!(
+            debug_routes["available_routes"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
-        assert_eq!(
-            debug_routes["primary_routes"][advertised_route],
-            serde_json::json!(node_id_number)
+        assert!(
+            debug_routes["primary_routes"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
 
         let policy_manager = http
@@ -6660,13 +6666,19 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!([advertised_route])
+        // This debug-created node has no control session. Native primary
+        // routes stay empty until Connect, independently of approval.
+        assert!(
+            debug_routes["available_routes"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
-        assert_eq!(
-            debug_routes["primary_routes"][advertised_route],
-            serde_json::json!(node_id_number)
+        assert!(
+            debug_routes["primary_routes"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -7295,11 +7307,15 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
             .and_then(|nodes| {
                 nodes.values().find(|node| {
                     node["hostname"].as_str() == Some("pg-user-rename-node")
-                        && node["user"].as_str() == Some("bob")
+                        && node["user"].as_str() == Some("alice@example.com")
                 })
             })
             .unwrap_or_else(|| panic!("missing hydrated renamed-user node {node_id}: {nodestore}"));
-        assert_eq!(live_node["user"].as_str(), Some("bob"));
+        assert_eq!(
+            live_node["user"].as_str(),
+            Some("alice@example.com"),
+            "native User.Username prefers the retained email over the renamed display name"
+        );
         assert_eq!(live_node["hostname"].as_str(), Some("pg-user-rename-node"));
         assert!(
             live_node["ipv4"]
@@ -7666,7 +7682,11 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             .await?;
         assert_eq!(registered.status(), reqwest::StatusCode::OK);
         let registered = registered.json::<serde_json::Value>().await?;
-        assert_eq!(registered["node"]["id"].as_str(), Some(node_id.as_str()));
+        let node_id = registered["node"]["id"]
+            .as_str()
+            .expect("persisted registered node ID")
+            .to_owned();
+        assert_ne!(node_id, "0");
         assert_eq!(
             registered["node"]["registerMethod"].as_str(),
             Some("REGISTER_METHOD_CLI")
@@ -7734,7 +7754,7 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
         );
         assert_eq!(
             approved_routes["node"]["subnetRoutes"],
-            serde_json::json!(["10.30.0.0/24"])
+            serde_json::json!([])
         );
 
         let renamed = http
@@ -9485,10 +9505,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&expire_preauth_yaml)
-            .as_object()
-            .unwrap()
-            .len(),
+        yaml_output(&expire_preauth_yaml).as_object().unwrap().len(),
         0
     );
     assert_eq!(stderr(&expire_preauth_yaml), "");
@@ -9505,10 +9522,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&delete_preauth_yaml)
-            .as_object()
-            .unwrap()
-            .len(),
+        yaml_output(&delete_preauth_yaml).as_object().unwrap().len(),
         0
     );
     assert_eq!(stderr(&delete_preauth_yaml), "");
@@ -9725,10 +9739,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&expire_api_key_yaml)
-            .as_object()
-            .unwrap()
-            .len(),
+        yaml_output(&expire_api_key_yaml).as_object().unwrap().len(),
         0
     );
     assert_eq!(stderr(&expire_api_key_yaml), "");
@@ -9745,10 +9756,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&delete_api_key_yaml)
-            .as_object()
-            .unwrap()
-            .len(),
+        yaml_output(&delete_api_key_yaml).as_object().unwrap().len(),
         0
     );
     assert_eq!(stderr(&delete_api_key_yaml), "");
@@ -10285,7 +10293,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         6,
         include_str!("snapshots/grpc_live_user_selector_required_json.stderr"),
     );
-    assert_config_stderr_snapshot(
+    let renamed = headscale_with_config(
         &config,
         &[
             "users",
@@ -10295,9 +10303,21 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--new-name",
             "alice-renamed-by-name",
         ],
-        6,
-        include_str!("snapshots/grpc_live_user_rename_name_server_error.stderr"),
     );
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+    assert_eq!(stdout(&renamed), "User renamed\n");
+    let restored = headscale_with_config(
+        &config,
+        &[
+            "users",
+            "rename",
+            "--name",
+            "alice-renamed-by-name",
+            "--new-name",
+            "alice",
+        ],
+    );
+    assert!(restored.status.success(), "{}", stderr(&restored));
     assert_config_stderr_snapshot(
         &config,
         &[

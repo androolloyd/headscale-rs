@@ -900,10 +900,30 @@ pub async fn update_from_auth_path(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
+    update_sqlite_node(pool, id, params, false).await
+}
+
+/// Map persistence cannot overwrite an administrator's expiry or a deleted auth-key FK.
+pub async fn update_from_runtime(
+    pool: &SqlitePool,
+    id: i64,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    update_sqlite_node(pool, id, params, true).await
+}
+
+async fn update_sqlite_node(
+    pool: &SqlitePool,
+    id: i64,
+    params: CreateParams,
+    runtime_only: bool,
+) -> Result<HeadscaleNodeRow> {
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
         let given_name = auth_path_given_name(pool, id, &params).await?;
-        match update_from_auth_path_with_given_name(pool, id, &params, &given_name).await {
+        match update_from_auth_path_with_given_name(pool, id, &params, &given_name, runtime_only)
+            .await
+        {
             Ok(node) => return Ok(node),
             Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
@@ -918,6 +938,7 @@ async fn update_from_auth_path_with_given_name(
     id: i64,
     params: &CreateParams,
     given_name: &str,
+    runtime_only: bool,
 ) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
@@ -942,8 +963,8 @@ async fn update_from_auth_path_with_given_name(
             user_id = ?,
             register_method = NULLIF(?, ''),
             tags = ?,
-            auth_key_id = ?,
-            expiry = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            auth_key_id = CASE WHEN ? THEN auth_key_id ELSE ? END,
+            expiry = CASE WHEN ? THEN expiry WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
             last_seen = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
             approved_routes = ?,
             updated_at = datetime(?, 'unixepoch')
@@ -962,7 +983,9 @@ async fn update_from_auth_path_with_given_name(
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
+    .bind(runtime_only)
     .bind(params.auth_key_id)
+    .bind(runtime_only)
     .bind(params.expiry)
     .bind(params.expiry)
     .bind(params.last_seen)
@@ -1001,10 +1024,38 @@ pub async fn update_postgres_from_auth_path_on_connection(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
+    update_postgres_node(conn, id, params, false).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn update_postgres_from_runtime(
+    pool: &PgPool,
+    id: i64,
+    params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    update_postgres_node(&mut conn, id, params, true).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn update_postgres_node(
+    conn: &mut PgConnection,
+    id: i64,
+    params: CreateParams,
+    runtime_only: bool,
+) -> Result<HeadscaleNodeRow> {
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
         let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
-        match update_postgres_from_auth_path_with_given_name(conn, id, &params, &given_name).await {
+        match update_postgres_from_auth_path_with_given_name(
+            conn,
+            id,
+            &params,
+            &given_name,
+            runtime_only,
+        )
+        .await
+        {
             Ok(node) => return Ok(node),
             Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
@@ -1020,6 +1071,7 @@ async fn update_postgres_from_auth_path_with_given_name(
     id: i64,
     params: &CreateParams,
     given_name: &str,
+    runtime_only: bool,
 ) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
@@ -1044,8 +1096,9 @@ async fn update_postgres_from_auth_path_with_given_name(
             user_id = $10,
             register_method = NULLIF($11, ''),
             tags = $12,
-            auth_key_id = $13,
+            auth_key_id = CASE WHEN $19 THEN auth_key_id ELSE $13 END,
             expiry = CASE
+                WHEN $19 THEN expiry
                 WHEN $14::BIGINT IS NULL THEN NULL
                 ELSE to_timestamp(($14::BIGINT)::DOUBLE PRECISION)
             END,
@@ -1076,6 +1129,7 @@ async fn update_postgres_from_auth_path_with_given_name(
     .bind(&approved_routes)
     .bind(now)
     .bind(id)
+    .bind(runtime_only)
     .execute(&mut *conn)
     .await
     .map_err(DbError::from)?

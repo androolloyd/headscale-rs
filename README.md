@@ -9,13 +9,19 @@ escrow, payments, or settlement — those belong in an integration
 layer that consumes the `MeteringSnapshot` events surfaced by
 `headscale-core::metering::MeteringService`.
 
+The current compatibility target is headscale-go **v0.29.5**. The qualified
+release update and remaining replacement-parity gaps are recorded in the
+[parity ledger](docs/headscale-go-parity.md) and
+[qualification checkpoint](docs/qualification/headscale-v0.29.5.json).
+
 ## Workspace layout
 
-Three crates are first-class workspace members and participate in
+Four crates are first-class workspace members and participate in
 `cargo build --workspace` / `cargo test --workspace` / `cargo clippy
 --workspace`:
 
 ```
+headscale-api-acl   native policy syntax and shared ACL types
 headscale-api       gRPC + HTTP control plane, Tailscale wire, admin GUI
 headscale-db        sqlite-backed persistence (preauth keys, nodes, ...)
 headscale-cli       headscale-rs daemon + operator CLI
@@ -24,9 +30,8 @@ headscale-cli       headscale-rs daemon + operator CLI
 Four crates are **on disk but not workspace members** as of
 2026-05-20 (see [`CHANGES.md`](./CHANGES.md)). They are still
 compiled when the active crates above pull them in via path
-dependencies, so production builds are byte-identical; they just no
-longer get their own per-crate test/clippy scope at the workspace
-level.
+dependencies. Their own per-crate tests and lint checks require the separate
+manifest commands; workspace tests do not execute those excluded test targets.
 
 ```
 headscale-core      mesh, WireGuard, DERP, metering, routing, authorization

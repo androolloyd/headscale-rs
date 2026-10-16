@@ -500,6 +500,7 @@ async fn main() -> Result<()> {
         }),
         machines: machines.clone(),
         registration_store: None,
+        registration_gate: None,
         derp_map,
         policy: policy.clone(),
         knock: KnockConfig::disabled(),

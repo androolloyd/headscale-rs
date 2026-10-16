@@ -459,6 +459,7 @@ pub struct PersistentMachineAdmin {
     pool: SqlitePool,
     users: Option<Arc<dyn UserAdmin>>,
     wire_registry: Option<Arc<MachineRegistry>>,
+    persist: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Postgres-backed node admin adapter over the canonical headscale-go
@@ -473,6 +474,7 @@ pub struct PersistentPostgresMachineAdmin {
     pool: PgPool,
     users: Option<Arc<dyn UserAdmin>>,
     wire_registry: Option<Arc<MachineRegistry>>,
+    persist: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -546,6 +548,7 @@ impl PersistentMachineAdmin {
             pool,
             users: None,
             wire_registry: None,
+            persist: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -629,6 +632,7 @@ impl PersistentMachineAdmin {
         validate_requested_tags: bool,
         wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -1060,6 +1064,7 @@ impl PersistentPostgresMachineAdmin {
             pool,
             users: None,
             wire_registry: None,
+            persist: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1143,6 +1148,7 @@ impl PersistentPostgresMachineAdmin {
         validate_requested_tags: bool,
         wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -1936,6 +1942,14 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
         record: MachineRecord,
         _policy: &PolicyStore,
     ) -> Result<PersistedMachineRegistration, String> {
+        let _persist = self.persist.lock().await;
+        let record = if let Some(registry) = &self.wire_registry {
+            registry
+                .get(&record.node_key_hex)
+                .ok_or_else(|| "node no longer exists".to_string())?
+        } else {
+            record
+        };
         let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
         let row = headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key)
             .await
@@ -1946,15 +1960,25 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             .map_err(|err| err.to_string())?;
         let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
         params.ipv6 = row.ipv6.clone();
-        let row = headscale_db::headscale_nodes::update_from_auth_path(&self.pool, row.id, params)
+        let row = headscale_db::headscale_nodes::update_from_runtime(&self.pool, row.id, params)
             .await
             .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
             .row_to_wire_record(row)
             .await
             .map_err(|err| err.to_string())?;
+        let mut current = if let Some(registry) = &self.wire_registry {
+            registry
+                .get(&record.node_key_hex)
+                .ok_or_else(|| "node no longer exists".to_string())?
+        } else {
+            record.clone()
+        };
+        current.node_id = record.node_id;
+        current.auth_key_id = record.auth_key_id;
+        current.expiry = record.expiry;
         Ok(PersistedMachineRegistration {
-            record,
+            record: current,
             replaced_node_key_hex: None,
         })
     }
@@ -2003,6 +2027,14 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
         record: MachineRecord,
         _policy: &PolicyStore,
     ) -> Result<PersistedMachineRegistration, String> {
+        let _persist = self.persist.lock().await;
+        let record = if let Some(registry) = &self.wire_registry {
+            registry
+                .get(&record.node_key_hex)
+                .ok_or_else(|| "node no longer exists".to_string())?
+        } else {
+            record
+        };
         let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
         let row = headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
             .await
@@ -2013,17 +2045,26 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
             .map_err(|err| err.to_string())?;
         let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
         params.ipv6 = row.ipv6.clone();
-        let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
-            &self.pool, row.id, params,
-        )
-        .await
-        .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let row =
+            headscale_db::headscale_nodes::update_postgres_from_runtime(&self.pool, row.id, params)
+                .await
+                .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
             .row_to_wire_record(row)
             .await
             .map_err(|err| err.to_string())?;
+        let mut current = if let Some(registry) = &self.wire_registry {
+            registry
+                .get(&record.node_key_hex)
+                .ok_or_else(|| "node no longer exists".to_string())?
+        } else {
+            record.clone()
+        };
+        current.node_id = record.node_id;
+        current.auth_key_id = record.auth_key_id;
+        current.expiry = record.expiry;
         Ok(PersistedMachineRegistration {
-            record,
+            record: current,
             replaced_node_key_hex: None,
         })
     }
@@ -2139,6 +2180,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         &self,
         record: MachineAdminRecord,
     ) -> Result<MachineAdminRecord, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -2187,6 +2229,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
         let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
@@ -2196,6 +2239,7 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, None)
             .await
@@ -2204,6 +2248,7 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::logout(&self.pool, row.id)
             .await
@@ -2212,9 +2257,19 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if hostname.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "hostname must not be empty".into(),
+            ));
+        }
+        if self
+            .wire_registry
+            .as_ref()
+            .is_some_and(|registry| !registry.valid_fqdn(hostname))
+        {
+            return Err(MachineAdminError::BadRequest(
+                "resulting FQDN exceeds maximum hostname length".into(),
             ));
         }
         let row = self.row_by_slug(id).await?;
@@ -2225,6 +2280,7 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if tags.is_empty() {
             return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
         }
@@ -2240,6 +2296,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_approved_routes(&self.pool, row.id, routes)
             .await
@@ -2248,6 +2305,7 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row =
             headscale_db::headscale_nodes::set_host_info_routable_ips(&self.pool, row.id, routes)
@@ -2260,6 +2318,7 @@ impl MachineAdmin for PersistentMachineAdmin {
         &self,
         ip_allocator: Option<&dyn IpAllocator>,
     ) -> Result<Vec<String>, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let Some(ip_allocator) = ip_allocator else {
             return Ok(Vec::new());
         };
@@ -2343,6 +2402,7 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         headscale_db::headscale_nodes::destroy(&self.pool, row.id)
@@ -2467,6 +2527,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         &self,
         record: MachineAdminRecord,
     ) -> Result<MachineAdminRecord, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -2515,6 +2576,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
         let row =
@@ -2525,6 +2587,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_postgres_expiry(&self.pool, row.id, None)
             .await
@@ -2533,6 +2596,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::logout_postgres(&self.pool, row.id)
             .await
@@ -2541,9 +2605,19 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if hostname.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "hostname must not be empty".into(),
+            ));
+        }
+        if self
+            .wire_registry
+            .as_ref()
+            .is_some_and(|registry| !registry.valid_fqdn(hostname))
+        {
+            return Err(MachineAdminError::BadRequest(
+                "resulting FQDN exceeds maximum hostname length".into(),
             ));
         }
         let row = self.row_by_slug(id).await?;
@@ -2554,6 +2628,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         if tags.is_empty() {
             return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
         }
@@ -2569,6 +2644,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row =
             headscale_db::headscale_nodes::set_postgres_approved_routes(&self.pool, row.id, routes)
@@ -2578,6 +2654,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let row = headscale_db::headscale_nodes::set_postgres_host_info_routable_ips(
             &self.pool, row.id, routes,
@@ -2591,6 +2668,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         &self,
         ip_allocator: Option<&dyn IpAllocator>,
     ) -> Result<Vec<String>, MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let Some(ip_allocator) = ip_allocator else {
             return Ok(Vec::new());
         };
@@ -2674,6 +2752,7 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
+        let _persist = self.persist.lock().await;
         let row = self.row_by_slug(id).await?;
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         headscale_db::headscale_nodes::destroy_postgres(&self.pool, row.id)

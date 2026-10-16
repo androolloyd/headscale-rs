@@ -906,6 +906,7 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
 ) -> Result<PersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let wire_registry = Arc::new(MachineRegistry::new());
+    wire_registry.set_dns_store(dns.clone());
     let stores = PersistentRuntimeStores::sqlite(pool, wire_registry.clone());
     let registration_cache = Arc::new(registration_cache_from_runtime_config(
         runtime_config.as_ref(),
@@ -991,6 +992,7 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
 ) -> Result<PersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let wire_registry = Arc::new(MachineRegistry::new());
+    wire_registry.set_dns_store(dns.clone());
     let stores = PersistentRuntimeStores::postgres(pool, wire_registry.clone());
     let registration_cache = Arc::new(registration_cache_from_runtime_config(
         runtime_config.as_ref(),
@@ -2712,16 +2714,23 @@ impl IpFamilyAllocator {
             return Err(AllocError::Exhausted);
         }
 
-        for _ in 0..1024 {
-            let candidate = random_between(self.network, self.end);
+        let start = random_between(self.network, self.end);
+        let mut candidate = start;
+        loop {
             if !self.used.contains(&candidate) && !reserved(candidate) {
                 self.used.insert(candidate);
                 self.prev = candidate;
                 return Ok(candidate);
             }
+            candidate = if candidate == self.end {
+                self.network
+            } else {
+                candidate + 1
+            };
+            if candidate == start {
+                return Err(AllocError::Exhausted);
+            }
         }
-
-        self.allocate_sequential(reserved)
     }
 }
 

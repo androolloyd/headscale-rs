@@ -2334,12 +2334,17 @@ install_or_build_headscale() {
   case "${target}" in
     rust)
       echo "::group::build headscale-rs CLI"
-      if [[ "${database_backend}" == "postgres" ]]; then
-        cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+      if [[ -n "${HEADSCALE_RS_BIN:-}" ]]; then
+        [[ -x "${HEADSCALE_RS_BIN}" ]] || { echo "HEADSCALE_RS_BIN must name an executable" >&2; exit 2; }
+        headscale_bin="${HEADSCALE_RS_BIN}"
       else
-        cargo build --quiet -p headscale-cli --bin headscale
+        if [[ "${database_backend}" == "postgres" ]]; then
+          cargo build --quiet -p headscale-cli --features postgres-sqlx --bin headscale
+        else
+          cargo build --quiet -p headscale-cli --bin headscale
+        fi
+        headscale_bin="${repo_root}/target/debug/headscale"
       fi
-      headscale_bin="${repo_root}/target/debug/headscale"
       echo "::endgroup::"
       ;;
     headscale-go)

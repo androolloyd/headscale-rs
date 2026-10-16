@@ -199,7 +199,12 @@ fn test_ssh_no_ssh_configured() {
           "ssh": []
         }"#);
 
-    assert!(compile_ssh_policy(&doc, &base_nodes(), 1).is_none());
+    assert!(
+        compile_ssh_policy(&doc, &base_nodes(), 1)
+            .unwrap()
+            .rules
+            .is_empty()
+    );
 }
 
 #[test]

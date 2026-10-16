@@ -156,9 +156,26 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         )
         .await
         .unwrap();
-    assert_eq!(callback_response.status(), StatusCode::OK);
+    assert_eq!(callback_response.status(), StatusCode::SEE_OTHER);
+    let location = callback_response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let confirm_cookie_header = single_set_cookie_header(callback_response.headers());
-    let callback_body = body_string(callback_response).await;
+    let confirmation = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(location)
+                .header(header::COOKIE, confirm_cookie_header.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirmation.status(), StatusCode::OK);
+    assert_eq!(confirmation.headers()[header::CACHE_CONTROL], "no-store");
+    let callback_body = body_string(confirmation).await;
     assert!(callback_body.contains("Confirm node registration"));
     assert!(callback_body.contains("User Info Name"));
     assert!(callback_body.contains("oidc-client"));
@@ -538,6 +555,12 @@ fn single_set_cookie_header(headers: &HeaderMap) -> String {
     let cookies = headers
         .get_all(header::SET_COOKIE)
         .iter()
+        .filter(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .starts_with("headscale_register_confirm=")
+        })
         .map(|value| {
             value
                 .to_str()
@@ -757,3 +780,28 @@ B7ur2garaZVSBJcYOXPGv+lrKYXrMlg/KZ4nQCvncqxHg9PvlxmpPmzIAthVYhki\n\
 YFK5FWw3FdAIuCrN0K9IXMOWXByuJtgCHOttx4fu24fuyQ2t5N4q5CfQHUyJAgtQ\n\
 Tg59Qj49HbnFm11JVyqd490zKQ==\n\
 -----END PRIVATE KEY-----\n";
+
+#[test]
+fn release_0295_oidc_issuer_activates_configuration_validation() {
+    use headscale_core::config::{ConfigError, OidcConfig, PkceConfig};
+    let inactive = OidcConfig {
+        enabled: true,
+        pkce: PkceConfig {
+            method: "S384".into(),
+            ..PkceConfig::default()
+        },
+        ..OidcConfig::default()
+    };
+    inactive.validate().expect("an empty issuer disables OIDC");
+    let active = OidcConfig {
+        enabled: false,
+        issuer: "https://issuer.example".into(),
+        client_id: "test-client".into(),
+        client_secret: "test-secret".into(),
+        ..inactive
+    };
+    assert!(matches!(
+        active.validate(),
+        Err(ConfigError::InvalidPkceMethod)
+    ));
+}

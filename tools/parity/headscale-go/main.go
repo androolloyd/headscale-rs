@@ -746,7 +746,7 @@ func runPeerMapChecks(checks []peerMapCheck, pm policy.PolicyManager, nodes type
 		peers := peerMap[types.NodeID(check.NodeID)]
 		ids := make([]uint64, 0, len(peers))
 		for _, peer := range peers {
-			ids = append(ids, peer.ID().Uint64())
+			ids = append(ids, peer.Uint64())
 		}
 		sort.Slice(ids, func(i, j int) bool {
 			return ids[i] < ids[j]

@@ -9,7 +9,7 @@
 //!      underlying `/key` handler (200 + JSON).
 //!
 //!   2. **Probe-resistance**: 100 randomized incorrect knock attempts
-//!      against `/key?v=39` (the cheapest probe surface) all receive the
+//!      against `/key?v=113` (the cheapest probe surface) all receive the
 //!      SAME response body, byte for byte.
 //!
 //! See `tailscale_wire::knock` for the per-window HMAC math and the
@@ -97,13 +97,13 @@ fn stable_knock_config(psk: [u8; 32]) -> KnockConfig {
 
 #[tokio::test]
 async fn ts2021_knock_disabled_passes_through() {
-    // KnockConfig disabled (default) — `/key?v=39` should serve as before.
+    // KnockConfig disabled (default) — `/key?v=113` should serve as before.
     let (state, _dir) = fixture(KnockConfig::disabled());
     let app = tailscale_wire::router(state);
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -120,7 +120,7 @@ async fn ts2021_knock_enabled_rejects_no_knock() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -142,7 +142,7 @@ async fn ts2021_knock_enabled_accepts_valid_header() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .header(KNOCK_HEADER, computed)
                 .body(Body::empty())
                 .unwrap(),
@@ -162,7 +162,7 @@ async fn ts2021_knock_enabled_accepts_path_prefix() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/k/{knock}/key?v=39"))
+                .uri(format!("/k/{knock}/key?v=113"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -180,7 +180,7 @@ async fn ts2021_knock_bad_header_returns_canonical_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .header(KNOCK_HEADER, "deadbeefdeadbeef") // wrong knock
                 .body(Body::empty())
                 .unwrap(),
@@ -218,7 +218,7 @@ async fn ts2021_knock_probe_resistance_100_randomized_attempts() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=113")
                     .header(KNOCK_HEADER, &bogus)
                     .body(Body::empty())
                     .unwrap(),
@@ -239,7 +239,7 @@ async fn ts2021_knock_probe_resistance_100_randomized_attempts() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/k/{bogus}/key?v=39"))
+                    .uri(format!("/k/{bogus}/key?v=113"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -277,7 +277,7 @@ async fn empty_knock_header_rejected() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .header(KNOCK_HEADER, "")
                 .body(Body::empty())
                 .unwrap(),
@@ -303,7 +303,7 @@ async fn knock_header_with_leading_whitespace_rejected() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .header(KNOCK_HEADER, padded)
                 .body(Body::empty())
                 .unwrap(),
@@ -328,7 +328,7 @@ async fn knock_header_with_trailing_newline_rejected() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/key?v=39")
+                .uri("/key?v=113")
                 .header(KNOCK_HEADER, padded)
                 .body(Body::empty())
                 .unwrap(),
@@ -338,7 +338,7 @@ async fn knock_header_with_trailing_newline_rejected() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// 100 random path-prefix knock URLs against `/key?v=39`: only those minted
+/// 100 random path-prefix knock URLs against `/key?v=113`: only those minted
 /// from the real PSK pass; everything else gets the canonical 404.
 #[tokio::test]
 async fn ts2021_knock_path_prefix_100_random_invalid() {
@@ -361,7 +361,7 @@ async fn ts2021_knock_path_prefix_100_random_invalid() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/k/{bogus}/key?v=39"))
+                    .uri(format!("/k/{bogus}/key?v=113"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -375,7 +375,7 @@ async fn ts2021_knock_path_prefix_100_random_invalid() {
     }
 }
 
-/// 100 random header knocks against `/key?v=39`: every one must be rejected.
+/// 100 random header knocks against `/key?v=113`: every one must be rejected.
 #[tokio::test]
 async fn ts2021_knock_header_100_random_invalid() {
     let psk = fixed_psk();
@@ -396,7 +396,7 @@ async fn ts2021_knock_header_100_random_invalid() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=113")
                     .header(KNOCK_HEADER, &bogus)
                     .body(Body::empty())
                     .unwrap(),
@@ -449,7 +449,7 @@ async fn knock_50_concurrent_valid_requests_all_pass() {
             let resp = app
                 .oneshot(
                     Request::builder()
-                        .uri("/key?v=39")
+                        .uri("/key?v=113")
                         .header(KNOCK_HEADER, knock)
                         .body(Body::empty())
                         .unwrap(),
@@ -477,14 +477,14 @@ async fn knock_path_prefix_routes_to_inner_handler() {
     let (state, _dir) = fixture(cfg);
     let app = tailscale_wire::router(state);
 
-    // Use the `/key?v=39` handler (which we know returns 200) under the
+    // Use the `/key?v=113` handler (which we know returns 200) under the
     // knock prefix — the previous test does this. Here we additionally
     // verify the 200 response body is NOT the canonical 404 body,
     // i.e. the inner handler actually fired.
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/k/{knock}/key?v=39"))
+                .uri(format!("/k/{knock}/key?v=113"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -507,7 +507,7 @@ async fn disabled_knock_does_not_match_path_prefix() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/k/abcdef0123456789/key?v=39")
+                .uri("/k/abcdef0123456789/key?v=113")
                 .body(Body::empty())
                 .unwrap(),
         )

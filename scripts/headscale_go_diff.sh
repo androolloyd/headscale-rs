@@ -6,8 +6,8 @@ cd "${repo_root}"
 
 # tools/parity/headscale-go/go.mod pins github.com/juanfont/headscale to
 # this upstream tag, which currently resolves to commit
-# 171fd7a3c54156965753a63639cdcafcd50c8d67.
-go_baseline_version="v0.29.0-beta.2"
+# 0f7d1e536bed9f01dd7161f7637af19bb0908335.
+go_baseline_version="v0.29.5"
 default_golden_path="tools/parity/golden/headscale-go-${go_baseline_version}.json"
 
 out_dir="${OUT_DIR:-target/parity}"

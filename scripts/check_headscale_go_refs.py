@@ -93,18 +93,18 @@ def check(remote: bool) -> None:
 
     if not re.fullmatch(r"[0-9a-f]{40}", current):
         raise CheckError(
-            f"{relative(CURRENT_SH)} must pin a full 40-character upstream main SHA"
+            f"{relative(CURRENT_SH)} must pin a full 40-character upstream release SHA"
         )
 
     if remote:
-        upstream = upstream_main_sha()
+        upstream = upstream_tag_sha(baseline)
         if current != upstream:
             raise CheckError(
-                "checked-in current-head headscale-go pin is stale: "
-                f"{relative(CURRENT_SH)} has {current}, upstream main is {upstream}"
+                "checked-in headscale-go release pin does not match its tag: "
+                f"{relative(CURRENT_SH)} has {current}, release tag is {upstream}"
             )
         tag_sha = upstream_tag_sha(baseline)
-        print(f"checked upstream headscale-go main pin: {current}")
+        print(f"checked upstream headscale-go release pin: {current}")
         print(f"checked upstream headscale-go baseline tag: {baseline} -> {tag_sha}")
 
     print(f"checked headscale-go baseline pin: {baseline}")
@@ -115,7 +115,7 @@ def main() -> int:
     parser.add_argument(
         "--remote",
         action="store_true",
-        help="also compare HEADSCALE_GO_CURRENT_VERSION with upstream main",
+        help="also verify the full release commit against its official tag",
     )
     args = parser.parse_args()
 

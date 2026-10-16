@@ -25,8 +25,7 @@ use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
     DerpMap, HistogramMetric, MachineRecord, NODESTORE_BATCH_SIZE_BUCKETS,
-    PROMETHEUS_DEFAULT_BUCKETS, WireState,
-    wire::{SshPolicy, stable_id_from_key},
+    PROMETHEUS_DEFAULT_BUCKETS, WireState, wire::SshPolicy,
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
@@ -1684,7 +1683,7 @@ fn metrics_text(state: &WireState) -> String {
         if rec.is_expired_at(now) {
             nodes_expired += 1;
         } else if online_states
-            .get(&stable_id_from_key(node_key))
+            .get(&rec.stable_node_id_for_key(node_key))
             .copied()
             .unwrap_or(false)
         {
@@ -2142,7 +2141,7 @@ fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNod
     snapshot
         .iter()
         .map(|(node_key, rec)| {
-            let id = stable_id_from_key(node_key);
+            let id = rec.stable_node_id_for_key(node_key);
             (
                 id.to_string(),
                 DebugNodeStoreNode {
@@ -2211,7 +2210,7 @@ fn debug_nodestore_string(state: &WireState) -> String {
     let peer_map = debug_peer_map_for_snapshot(&state.policy, &snapshot);
     let mut total_peers = 0usize;
     for (node_key, rec) in sorted_snapshot_nodes(&snapshot) {
-        let node_id = stable_id_from_key(node_key);
+        let node_id = rec.stable_node_id_for_key(node_key);
         let peer_count = peer_map
             .get(&node_id)
             .map_or(snapshot.len().saturating_sub(1), BTreeSet::len);
@@ -2302,7 +2301,7 @@ fn debug_policy_manager_string(state: &WireState) -> String {
     for (node_key, rec) in sorted_snapshot_nodes(&state.machines.snapshot()) {
         out.push_str(&format!(
             "id:{} hostname:{} user:{} addr:{}\n",
-            stable_id_from_key(node_key),
+            rec.stable_node_id_for_key(node_key),
             rec.hostname,
             rec.user,
             rec.primary_addr_string().unwrap_or_default()
@@ -2343,7 +2342,7 @@ fn debug_peer_map_for_snapshot(
     let nodes = snapshot
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             addr: rec.primary_addr_string().unwrap_or_default(),
             addrs: rec.address_strings(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
@@ -2360,13 +2359,13 @@ fn debug_peer_map_for_snapshot(
     }
 
     let all_ids = snapshot
-        .keys()
-        .map(|node_key| stable_id_from_key(node_key))
+        .iter()
+        .map(|(node_key, rec)| rec.stable_node_id_for_key(node_key))
         .collect::<BTreeSet<_>>();
     snapshot
-        .keys()
-        .map(|node_key| {
-            let node_id = stable_id_from_key(node_key);
+        .iter()
+        .map(|(node_key, rec)| {
+            let node_id = rec.stable_node_id_for_key(node_key);
             let peers = all_ids
                 .iter()
                 .copied()
@@ -2391,7 +2390,7 @@ fn stateful_primary_routes_for_debug(
             routes_by_prefix
                 .entry(route.clone())
                 .or_default()
-                .push((node_key, stable_id_from_key(node_key)));
+                .push((node_key, rec.stable_node_id_for_key(node_key)));
         }
     }
 
@@ -2409,7 +2408,7 @@ fn sorted_snapshot_nodes(
     snapshot: &HashMap<String, MachineRecord>,
 ) -> Vec<(&String, &MachineRecord)> {
     let mut nodes = snapshot.iter().collect::<Vec<_>>();
-    nodes.sort_by_key(|(node_key, _)| stable_id_from_key(node_key));
+    nodes.sort_by_key(|(node_key, rec)| rec.stable_node_id_for_key(node_key));
     nodes
 }
 
@@ -2428,7 +2427,7 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
         if expired {
             nodes.expired += 1;
         } else if online_states
-            .get(&stable_id_from_key(node_key))
+            .get(&rec.stable_node_id_for_key(node_key))
             .copied()
             .unwrap_or(false)
         {
@@ -2803,7 +2802,7 @@ fn debug_ssh_policies(state: &WireState) -> BTreeMap<String, Option<SshPolicy>> 
     snapshot
         .iter()
         .map(|(node_key, rec)| {
-            let id = stable_id_from_key(node_key);
+            let id = rec.stable_node_id_for_key(node_key);
             let policy = state.policy.ssh_policy_for(
                 &nodes,
                 id,
@@ -2826,7 +2825,7 @@ fn ssh_policy_nodes_from_snapshot(
     snapshot
         .iter()
         .map(|(node_key, rec)| SshPolicyNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             user_id: rec.user_id,
             user: if rec.user.is_empty() {
                 None
@@ -2896,6 +2895,14 @@ fn apple_html(url: &str) -> String {
 </ul>
 <pre><code>curl {url}/apple/macos-app-store</code></pre>
 <pre><code>curl {url}/apple/macos-standalone</code></pre>
+<h2>tvOS</h2><ol>
+<li>Install the official Tailscale tvOS client from the App Store.</li>
+<li>Open <strong>Tailscale</strong>.</li>
+<li>Select <strong>Install VPN configuration</strong>.</li>
+<li>Select <strong>Allow</strong>, but don't sign in yet.</li>
+<li>Open <strong>Settings</strong>, then <strong>Apps</strong>, then <strong>Tailscale</strong>, and configure the alternate coordination server as <code>{url}</code>.</li>
+<li>Return to the tvOS <strong>Home</strong> screen and open <strong>Tailscale</strong>.</li>
+<li>Scan the QR code and follow the login procedure.</li></ol>
 </body>
 </html>"#
     )

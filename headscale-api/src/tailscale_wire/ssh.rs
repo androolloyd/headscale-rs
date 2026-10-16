@@ -51,22 +51,30 @@ pub(crate) async fn handle_ssh_action(
         );
     }
 
+    if query.local_user.as_deref().is_none_or(str::is_empty) {
+        return ssh_action_json(ssh_deny_action());
+    }
     let binding = SshCheckBinding {
         src_node_id,
         dst_node_id,
         local_user: query.local_user.unwrap_or_default(),
     };
     let ssh_nodes = ssh_policy_nodes_from_snapshot(&snapshot);
-    let check_period = state
-        .policy
-        .ssh_check_period_for(&ssh_nodes, src_node_id, dst_node_id);
+    let check_period = state.policy.ssh_check_period_for_user(
+        &ssh_nodes,
+        src_node_id,
+        dst_node_id,
+        &binding.local_user,
+    );
+    if check_period.is_none() {
+        return ssh_action_json(ssh_deny_action());
+    }
 
     if let Some(auth_id) = query.auth_id.as_deref() {
         return ssh_action_followup(
             state,
             auth_id,
             binding.clone(),
-            check_period.is_some(),
             cancellation.map(|Extension(cancellation)| cancellation),
         )
         .await;
@@ -76,13 +84,18 @@ pub(crate) async fn handle_ssh_action(
         && !period.is_zero()
         && state
             .registration_cache
-            .last_ssh_auth(&binding, state.policy.updated_at())
+            .last_ssh_auth(&binding, Some(state.policy.auth_revision()))
             .and_then(|last| Instant::now().checked_duration_since(last))
             .is_some_and(|elapsed| elapsed < period)
     {
         return ssh_action_json(ssh_accept_action());
     }
 
+    ssh_action_hold(&state, binding)
+}
+
+fn ssh_action_hold(state: &WireState, binding: SshCheckBinding) -> Response {
+    let local_user = binding.local_user.clone();
     let raw_auth_id = new_auth_id();
     state
         .registration_cache
@@ -90,7 +103,11 @@ pub(crate) async fn handle_ssh_action(
     let auth_id = format!("{AUTH_ID_PREFIX}{raw_auth_id}");
     let base_url = state.public_control_url.as_deref().unwrap_or("");
     ssh_action_json(SshAction {
-        hold_and_delegate: crate::policy::ssh::ssh_check_hold_url_with_auth(base_url, &auth_id),
+        hold_and_delegate: crate::policy::ssh::ssh_check_hold_url_with_auth(
+            base_url,
+            &auth_id,
+            &local_user,
+        ),
         message: format!(
             "# Headscale SSH requires an additional check.\n\
              # To authenticate, visit: {}\n\
@@ -105,7 +122,6 @@ async fn ssh_action_followup(
     state: WireState,
     auth_id: &str,
     binding: SshCheckBinding,
-    check_found: bool,
     cancellation: Option<NoiseRequestCancellation>,
 ) -> Response {
     let Some(raw_auth_id) = auth_id_cache_key(auth_id) else {
@@ -116,7 +132,7 @@ async fn ssh_action_followup(
         Some(AuthRequestKind::Registration) => {
             return ssh_error(StatusCode::BAD_REQUEST, "auth session is not for SSH check");
         }
-        None => return ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id"),
+        None => return ssh_action_hold(&state, binding),
     };
     if !cached_binding.matches_pair(&binding) {
         return ssh_error(
@@ -139,20 +155,43 @@ async fn ssh_action_followup(
 
     match outcome {
         AuthWaitOutcome::Accepted => {
-            if check_found {
-                state.registration_cache.record_ssh_auth(
-                    &binding,
-                    Instant::now(),
-                    state.policy.updated_at(),
-                );
+            let snapshot = state.machines.snapshot();
+            if state
+                .policy
+                .ssh_check_period_for_user(
+                    &ssh_policy_nodes_from_snapshot(&snapshot),
+                    binding.src_node_id,
+                    binding.dst_node_id,
+                    &binding.local_user,
+                )
+                .is_none()
+            {
+                return ssh_action_json(ssh_deny_action());
             }
+            state.registration_cache.record_ssh_auth(
+                &binding,
+                Instant::now(),
+                Some(state.policy.auth_revision()),
+            );
             ssh_action_json(ssh_accept_action())
         }
         AuthWaitOutcome::Rejected(_) | AuthWaitOutcome::Expired => ssh_action_json(SshAction {
             reject: true,
             ..SshAction::default()
         }),
-        AuthWaitOutcome::Missing => ssh_error(StatusCode::BAD_REQUEST, "Invalid auth_id"),
+        AuthWaitOutcome::Missing => ssh_action_hold(&state, binding),
+    }
+}
+
+fn ssh_deny_action() -> SshAction {
+    SshAction {
+        reject: true,
+        message: "# Headscale SSH: no check rule in the tailnet policy covers this connection.\n"
+            .into(),
+        allow_agent_forwarding: true,
+        allow_local_port_forwarding: true,
+        allow_remote_port_forwarding: true,
+        ..SshAction::default()
     }
 }
 
@@ -467,7 +506,7 @@ mod tests {
         assert!(
             state
                 .registration_cache
-                .last_ssh_auth(&binding, state.policy.updated_at())
+                .last_ssh_auth(&binding, Some(state.policy.auth_revision()))
                 .is_none(),
             "rejected auth must not seed check-period auto approval"
         );
@@ -584,7 +623,7 @@ mod tests {
         let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
         let resp = inner_router(state)
             .oneshot(request(
-                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=not-prefixed"),
+                format!("/machine/ssh/action/{src}/to/{dst}?local_user=root&auth_id=not-prefixed"),
                 DST_MACHINE_KEY,
             ))
             .await
@@ -594,19 +633,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_action_rejects_unknown_auth_id() {
+    async fn ssh_action_redelegates_unknown_auth_id() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
         let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
         let resp = inner_router(state)
             .oneshot(request(
-                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-abcdefghijklmnopqrstuvwx"),
+                format!("/machine/ssh/action/{src}/to/{dst}?local_user=root&auth_id=hskey-authreq-abcdefghijklmnopqrstuvwx"),
                 DST_MACHINE_KEY,
             ))
             .await
             .unwrap();
 
-        assert_text_response(resp, StatusCode::BAD_REQUEST, b"Invalid auth_id\n").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let action: SshAction =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert!(!action.accept && !action.reject);
+        assert!(action.hold_and_delegate.contains("auth_id=hskey-authreq-"));
     }
 
     #[tokio::test]
@@ -630,7 +673,7 @@ mod tests {
 
         let resp = inner_router(state)
             .oneshot(request(
-                format!("/machine/ssh/action/{src}/to/{dst}?auth_id=hskey-authreq-{raw_auth_id}"),
+                format!("/machine/ssh/action/{src}/to/{dst}?local_user=root&auth_id=hskey-authreq-{raw_auth_id}"),
                 DST_MACHINE_KEY,
             ))
             .await
@@ -673,7 +716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_action_followup_accepts_changed_local_user_for_same_pair_like_headscale_go() {
+    async fn ssh_action_followup_rejects_changed_local_user_not_allowed_by_current_policy() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
         let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
@@ -699,8 +742,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let action: SshAction = serde_json::from_slice(&body).unwrap();
-        assert!(action.accept);
-        assert!(!action.reject);
+        assert!(!action.accept);
+        assert!(action.reject);
     }
 
     #[tokio::test]
@@ -716,7 +759,7 @@ mod tests {
         state.registration_cache.record_ssh_auth(
             &binding,
             Instant::now(),
-            state.policy.updated_at(),
+            Some(state.policy.auth_revision()),
         );
 
         let resp = inner_router(state.clone())
@@ -742,7 +785,7 @@ mod tests {
         state.policy.set_at(
             crate::policy::parse_hujson_policy(raw_policy).unwrap(),
             raw_policy.into(),
-            state.policy.updated_at().unwrap_or_default() + 1,
+            state.policy.auth_revision() + 1,
         );
 
         let resp = inner_router(state)
@@ -785,7 +828,7 @@ mod tests {
         state.registration_cache.record_ssh_auth(
             &binding,
             Instant::now(),
-            state.policy.updated_at(),
+            Some(state.policy.auth_revision()),
         );
 
         let resp = inner_router(state)

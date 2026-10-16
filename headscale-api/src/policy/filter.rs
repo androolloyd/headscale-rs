@@ -41,7 +41,10 @@
 //! this layer and enforced only by the on-host
 //! `headscale-api-acl` evaluator.
 
-use std::{collections::BTreeMap, net::IpAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+};
 
 use ipnet::IpNet;
 
@@ -316,6 +319,36 @@ pub fn acl_to_filter_rules_for_node(
         append_via_grant_rules_for_node(&mut out, doc, &doc.grants, nodes, self_node);
     }
 
+    if self_node.routes.iter().any(|route| is_exit_route(route)) {
+        let mut seen = BTreeSet::new();
+        for user_node in nodes.iter().filter(|node| node.tags.is_empty()) {
+            let identity = (user_node.user_id, user_node.user.clone());
+            if !seen.insert(identity)
+                || (self_node.tags.is_empty()
+                    && same_user_untagged_nodes(nodes, self_node)
+                        .iter()
+                        .any(|node| node.id == user_node.id))
+            {
+                continue;
+            }
+            let same_user = same_user_untagged_nodes(nodes, user_node);
+            for rule in &doc.rules {
+                if rule.action != PolicyAction::Accept
+                    || !rule.dst.iter().any(|dst| dst == "autogroup:self")
+                {
+                    continue;
+                }
+                let source =
+                    resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
+                let src = nodes_matching_prefixes(&same_user, &source);
+                let dst = same_user
+                    .iter()
+                    .flat_map(|node| node_addr_prefixes(node))
+                    .collect::<Vec<_>>();
+                append_filter_rules(&mut out, &src, &dst, &rule.ports);
+            }
+        }
+    }
     coalesce_filter_rules(reduce_filter_rules_for_node(out, self_node))
 }
 

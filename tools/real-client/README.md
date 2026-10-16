@@ -58,7 +58,7 @@ Use the upstream headscale-go v0.28 integration tests as the scenario inventory:
 
 Each scenario should run the same stock `tailscaled` image against:
 
-1. headscale-go v0.29.0-beta.2, pinned by `tools/parity/headscale-go/go.mod`
+1. headscale-go v0.29.5, pinned by `tools/parity/headscale-go/go.mod`
 2. this headscale-rs harness
 
 Keep scenario assertions outside Octra-specific code. Octra can adapt by wiring
@@ -71,7 +71,7 @@ Use `tools/real-client/smoke-matrix.sh --list` as the executable source of
 truth for the checked-in real-client matrix. Except for evidence-only audit
 rows, each row has a Rust harness script and a matching headscale-go script so
 parity work can compare behavior with the same stock `tailscaled` image. Most
-headscale-go rows use the pinned v0.29.0-beta.2 baseline; current-head-specific
+headscale-go rows use the pinned v0.29.5 baseline; current-head-specific
 rows keep using the audited upstream commit from `headscale-go-current.sh`.
 
 Validate smoke IDs, target names, and script paths without Docker:
@@ -386,7 +386,7 @@ Useful knobs:
   must fail auth-key login; use it with `REAL_CLIENT_EXPECT_MACHINE_COUNT` for
   negative lifecycle rows.
 
-The matching headscale-go v0.29.0-beta.2 smoke is:
+The matching headscale-go v0.29.5 smoke is:
 
 ```sh
 tools/real-client/authkey-headscale-go-smoke.sh
@@ -422,6 +422,7 @@ Additional knobs:
 
 - `HEADSCALE_GO_VERSION` defaults to the release in
   `tools/real-client/headscale-go-baseline.sh`.
+- `HEADSCALE_RS_BIN` can point at a separately built Rust `headscale` executable; otherwise the harness builds the selected backend.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 - `REAL_CLIENT_PREAUTH_EXPIRATION` controls the upstream CLI `--expiration`
   duration when creating the key.
@@ -549,6 +550,7 @@ Useful knobs:
   viewer hostname, and OIDC peer hostname for policy-churn runs.
 - `HEADSCALE_GO_VERSION` defaults to the release in
   `tools/real-client/headscale-go-baseline.sh`.
+- `HEADSCALE_RS_BIN` can point at a separately built Rust `headscale` executable; otherwise the harness builds the selected backend.
 - `HEADSCALE_GO_BIN` can point at an existing `headscale` binary.
 - `REAL_CLIENT_OIDC_EMAIL`, `REAL_CLIENT_OIDC_USERNAME`,
   `REAL_CLIENT_OIDC_SUBJECT`, and `REAL_CLIENT_OIDC_GROUPS` control the mock
@@ -1208,7 +1210,7 @@ tools/real-client/route-via-multiprefix-reload-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited
-current-head commit, which currently matches the pinned v0.29.0-beta.2
+current-head commit, which currently matches the pinned v0.29.5
 baseline while keeping upgrade-track route behavior explicit.
 
 The route-health scenario enables HA route probes, pauses the current primary

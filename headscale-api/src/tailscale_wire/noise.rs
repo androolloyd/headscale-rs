@@ -424,6 +424,14 @@ fn build_early_noise_frame() -> Result<Vec<u8>, WireError> {
 /// See `docs/tailscale-interop-blocker.md` 2026-05-19 continuation
 /// section for what we observed in practice.
 pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) -> Response<Body> {
+    if req
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+    {
+        return handle_ts2021_websocket(state, req).await;
+    }
     // Verify the upgrade header before we commit to the hijack path.
     let wants_upgrade = req
         .headers()
@@ -483,6 +491,72 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
         .header(header::UPGRADE, HeaderValue::from_static(UPGRADE_PROTOCOL))
         .body(Body::empty())
         .unwrap()
+}
+
+// Browser clients send the exact deferred Noise initiation as a query parameter,
+// then carry binary Noise records over the control WebSocket subprotocol.
+async fn handle_ts2021_websocket(state: WireState, req: Request) -> Response<Body> {
+    use axum::extract::{FromRequestParts, WebSocketUpgrade, ws::Message};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let initial = form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
+        .find_map(|(key, value)| (key == "X-Tailscale-Handshake").then(|| value.into_owned()))
+        .and_then(|value| STANDARD.decode(value).ok())
+        .filter(|bytes| parse_initiation_frame(bytes).is_ok());
+    let (mut parts, _) = req.into_parts();
+    let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(upgrade) => upgrade,
+        Err(error) => return error.into_response(),
+    };
+    upgrade.protocols([UPGRADE_PROTOCOL]).on_upgrade(move |mut socket| async move {
+        let Some(initial) = initial else {
+            let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008, reason: "invalid tailscale handshake parameter".into(),
+            }))).await;
+            return;
+        };
+        if socket.protocol().is_none() {
+            let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008, reason: "client must speak the control subprotocol".into(),
+            }))).await;
+            return;
+        }
+        let (mut sender, mut receiver) = socket.split();
+        let (transport, bridge) = tokio::io::duplex(64 * 1024);
+        let (mut read, mut write) = tokio::io::split(bridge);
+        let incoming = async {
+            while let Some(message) = receiver.next().await {
+                match message.map_err(std::io::Error::other)? {
+                    Message::Binary(bytes) => write.write_all(&bytes).await?,
+                    Message::Close(_) => break,
+                    Message::Ping(_) | Message::Pong(_) => {},
+                    Message::Text(_) => return Err(std::io::Error::other("control WebSocket requires binary messages")),
+                }
+            }
+            write.shutdown().await
+        };
+        let outgoing = async {
+            let mut bytes = [0; 16 * 1024];
+            loop {
+                let count = read.read(&mut bytes).await?;
+                if count == 0 { break; }
+                sender.send(Message::Binary(bytes[..count].to_vec())).await.map_err(std::io::Error::other)?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let bridge = async { tokio::try_join!(incoming, outgoing).map(|_| ()) };
+        // Native controlhttpserver does not send the optional early payload on
+        // WebSockets. Both pumps belong to this connection and cancel together.
+        tokio::select! {
+            result = drive_ts2021_be_with_options(state, transport, Some(initial), false) => {
+                if let Err(error) = result { tracing::debug!(%error, "control WebSocket ended"); }
+            }
+            result = bridge => {
+                if let Err(error) = result { tracing::debug!(%error, "control WebSocket transport ended"); }
+            }
+        }
+    })
 }
 
 /// The actual handshake + h2 dispatch driver. Pulled out of the axum
@@ -915,6 +989,18 @@ pub async fn drive_ts2021_be_with_init<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    drive_ts2021_be_with_options(state, io, initial_frame, true).await
+}
+
+async fn drive_ts2021_be_with_options<T>(
+    state: WireState,
+    io: T,
+    initial_frame: Option<Vec<u8>>,
+    early_noise: bool,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut framed = Framed::new(io);
 
     // Step 1: source the Initiation (header-fast-start or pipelined).
@@ -997,16 +1083,18 @@ where
     // `MarshalText` plumbing (the unmarshaler in the client expects a
     // bare string, not an object — we shipped an object first and
     // the client logged a json-unmarshal error on the EarlyNoise read).
-    let early = build_early_noise_frame()?;
-    use tokio::io::AsyncWriteExt;
-    noise_stream
-        .write_all(&early)
-        .await
-        .map_err(|e| WireError::Noise(format!("write early-noise (be): {e}")))?;
-    noise_stream
-        .flush()
-        .await
-        .map_err(|e| WireError::Noise(format!("flush early-noise (be): {e}")))?;
+    if early_noise {
+        let early = build_early_noise_frame()?;
+        use tokio::io::AsyncWriteExt;
+        noise_stream
+            .write_all(&early)
+            .await
+            .map_err(|e| WireError::Noise(format!("write early-noise (be): {e}")))?;
+        noise_stream
+            .flush()
+            .await
+            .map_err(|e| WireError::Noise(format!("flush early-noise (be): {e}")))?;
+    }
 
     // Step 6: h2 over BE-nonce noise stream + per-request dispatch.
     let mut h2_conn = h2::server::handshake(noise_stream)

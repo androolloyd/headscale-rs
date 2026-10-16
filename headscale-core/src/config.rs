@@ -184,13 +184,13 @@ impl EmbeddedDerpConfig {
     }
 }
 
-/// OpenID Connect configuration, matching the headscale-go v0.28 server config
+/// OpenID Connect configuration, matching the headscale-go v0.29.5 server config
 /// keys.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OidcConfig {
-    /// Config-only validation guard used by headscale-go for OIDC-specific
-    /// validation. Runtime OIDC enablement is still derived from `issuer`.
+    /// Legacy compatibility field. Both validation and runtime OIDC enablement
+    /// are derived from a nonempty `issuer`, as in headscale-go v0.29.5.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
     /// Block startup until the OIDC provider is reachable.
@@ -349,7 +349,7 @@ impl OidcConfig {
     /// Validate the OIDC config values that headscale-go validates at config
     /// load time.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.enabled {
+        if !self.issuer.is_empty() {
             validate_pkce_method(&self.pkce.method)?;
         }
 
@@ -822,9 +822,11 @@ mod tests {
     }
 
     #[test]
-    fn oidc_rejects_invalid_pkce_method_when_enabled() {
+    fn oidc_rejects_invalid_pkce_method_when_issuer_configured() {
         let oidc = OidcConfig {
-            enabled: true,
+            issuer: "https://issuer.example".to_string(),
+            client_id: "test-client".to_string(),
+            client_secret: "test-secret".to_string(),
             pkce: PkceConfig {
                 method: "S384".to_string(),
                 ..PkceConfig::default()

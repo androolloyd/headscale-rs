@@ -321,6 +321,7 @@ async fn register_inner(
                 tokio::pin!(wait);
                 if let Some(cancellation) = cancellation {
                     tokio::select! {
+                        biased;
                         outcome = &mut wait => outcome,
                         () = cancellation.cancelled() => {
                             return register_error_response("registration timed out");
@@ -333,6 +334,13 @@ async fn register_inner(
 
             match outcome {
                 RegistrationWaitOutcome::Registered(record) => {
+                    if let Err(response) = validate_existing_machine_key(
+                        &machine_key_hex,
+                        &record,
+                        REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH,
+                    ) {
+                        return response;
+                    }
                     return Json(register_response_for_record(&record)).into_response();
                 }
                 RegistrationWaitOutcome::ApprovedWithoutNode
@@ -346,22 +354,33 @@ async fn register_inner(
         return register_interactive(state, node_key_hex, machine_key_hex, body).await;
     }
 
+    let _registration = state.machines.lock_registration(&machine_key_hex).await;
     let redeemed = match state.preauth.redeem(authkey).await {
         Ok(ok) => ok,
         Err(err) => {
             let Some(ok) = state.preauth.lookup(authkey).await else {
                 return preauth_error_response(err);
             };
-            let Some((existing_node_key, existing)) = state
-                .machines
-                .get_by_machine_key_for_user(&machine_key_hex, &ok.user)
-            else {
+            let existing = match state.machines.registration_node(
+                &machine_key_hex,
+                &ok.user,
+                !ok.tags.is_empty(),
+            ) {
+                Ok(existing) => existing,
+                Err(error) => return register_error_response(error),
+            };
+            let Some((existing_node_key, existing)) = existing else {
                 return preauth_error_response(err);
             };
-            if existing_node_key != node_key_hex {
+            if existing_node_key != node_key_hex
+                || (existing.forced_tags.is_empty() && existing.is_expired_at(now))
+                || (!ok.tags.is_empty() && existing.forced_tags.is_empty())
+            {
                 return preauth_error_response(err);
             }
-            if !failed_authkey_belongs_to_existing_node(&existing, ok.auth_key_id) {
+            if !ok.tags.is_empty()
+                && !failed_authkey_belongs_to_existing_node(&existing, ok.auth_key_id)
+            {
                 return preauth_error_response(err);
             }
             ok
@@ -385,14 +404,32 @@ async fn register_inner(
         Err(resp) => return resp,
     };
 
-    let existing_machine = state
-        .machines
-        .get_by_machine_key_for_user(&machine_key_hex, &user);
+    let existing_machine =
+        match state
+            .machines
+            .registration_node(&machine_key_hex, &user, !redeemed.tags.is_empty())
+        {
+            Ok(existing) => existing,
+            Err(error) => return register_error_response(error),
+        };
     if state.registration_store.is_none()
         && let Some((old_node_key_hex, _)) = existing_machine.as_ref()
         && old_node_key_hex != &node_key_hex
         && let Some(existing_target) = state.machines.get(&node_key_hex)
         && (existing_target.machine_key_hex != machine_key_hex || existing_target.user != user)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "node key already exists".into(),
+            }),
+        )
+            .into_response();
+    }
+    if state
+        .machines
+        .get(&node_key_hex)
+        .is_some_and(|existing| existing.machine_key_hex != machine_key_hex)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -411,9 +448,21 @@ async fn register_inner(
         }
     };
     let addr = policy_addr(ipv4, ipv6);
+    // A new tagged credential replaces its predecessor's tags. Reusing the
+    // same credential keeps operator-assigned tags, as native re-registration does.
     let forced_tags = existing_machine.as_ref().map_or_else(
         || redeemed.tags.clone(),
-        |(_, existing)| existing.forced_tags.clone(),
+        |(_, existing)| {
+            if !redeemed.tags.is_empty()
+                && (existing.forced_tags.is_empty()
+                    || existing.auth_key_id.is_none()
+                    || existing.auth_key_id != redeemed.auth_key_id)
+            {
+                redeemed.tags.clone()
+            } else {
+                existing.forced_tags.clone()
+            }
+        },
     );
     let approved_routes = match auto_approved_routes_for_node(
         &state.policy,
@@ -520,7 +569,11 @@ async fn register_inner(
     let expiry = if forced_tags.is_empty() {
         effective_register_expiry(body.expiry, default_expiry, now)
     } else {
-        None
+        existing_machine
+            .as_ref()
+            .filter(|(_, existing)| !existing.forced_tags.is_empty())
+            .and_then(|(_, existing)| existing.expiry)
+            .filter(|expiry| *expiry > now)
     };
     let given_name = if let Some((_, existing)) = existing_machine.as_ref()
         && !is_auto_derived_given_name(&existing.hostname, &existing.host_info_for_node().hostname)
@@ -840,6 +893,11 @@ fn logout_existing_node(
         return Json(node_key_expired_response(false)).into_response();
     }
 
+    if !record.forced_tags.is_empty() {
+        return Json(register_response_for_record(record)).into_response();
+    }
+    // Native logout clamps the client's ancient sentinel to the current time.
+    let expiry = expiry.max(chrono::Utc::now());
     state.machines.set_expiry(node_key_hex, Some(expiry));
     let updated = state.machines.get(node_key_hex).unwrap_or_else(|| {
         let mut updated = record.clone();
@@ -2751,7 +2809,8 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
 
-        assert_eq!(state.machines.len(), 2);
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.machines.get(&first_node_key).is_none());
         let tagged = state.machines.get(&tagged_node_key).unwrap();
         assert_eq!(tagged.user, "bob");
         assert_eq!(tagged.forced_tags, vec!["tag:server"]);
@@ -2991,7 +3050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authkey_used_key_reregister_requires_original_auth_key_id_when_known() {
+    async fn authkey_used_key_reregister_allows_untagged_same_owner_refresh_like_release() {
         let (state, redeemer, _dir) = fixture();
         let first_authkey = "hskey-auth-used-original-id";
         let second_authkey = "hskey-auth-used-other-id";
@@ -3033,10 +3092,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "preauth key already used");
+        assert!(rr.error.is_empty());
+        assert!(rr.machine_authorized);
         let unchanged = state.machines.get(&node_key_hex).unwrap();
-        assert_eq!(unchanged.auth_key_id, Some(101));
-        assert_ne!(unchanged.hostname, "wrong-used-key");
+        assert_eq!(unchanged.auth_key_id, Some(202));
+        assert_eq!(unchanged.host_info_for_node().hostname, "wrong-used-key");
 
         let mut original_key_body = req_body(&node_key_hex, first_authkey);
         original_key_body["Hostinfo"]["Hostname"] = serde_json::json!("original-used-key");

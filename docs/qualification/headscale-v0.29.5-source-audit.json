@@ -1,0 +1,284 @@
+{
+  "baseline": "e1d719104fc77edb0001932e28c859f81ec7dc78",
+  "native_release": "v0.29.5",
+  "native_commit": "0f7d1e536bed9f01dd7161f7637af19bb0908335",
+  "non_merge_commits": 171,
+  "changed_production_paths": [
+    {
+      "native_path": "cmd/headscale/cli/users.go",
+      "implementation_or_equivalence": "CLI user rename by resolved identity",
+      "rust_boundary": "headscale-cli/src/admin/users.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/app.go",
+      "implementation_or_equivalence": "Rust task/drop lifecycle already provides cancellation; metrics OPTIONS correction and runtime startup integration",
+      "rust_boundary": "headscale-api/src/tailscale_wire/mod.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/auth.go",
+      "implementation_or_equivalence": "Authenticated follow-up machine binding; ready outcome priority; tagged logout and spent-key expiry guards",
+      "rust_boundary": "headscale-api/src/tailscale_wire/register.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/capver/capver.go",
+      "implementation_or_equivalence": "Existing native capability floor reused by /key",
+      "rust_boundary": "headscale-api/src/tailscale_wire/key_handler.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/db/api_key.go",
+      "implementation_or_equivalence": "Append-only owner/expiry repairs, guarded null-tags import and runtime-vs-auth persistence; finite allocation",
+      "rust_boundary": "headscale-db; headscale-api/src/admin/machines.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/db/db.go",
+      "implementation_or_equivalence": "Append-only owner/expiry repairs, guarded null-tags import and runtime-vs-auth persistence; finite allocation",
+      "rust_boundary": "headscale-db; headscale-api/src/admin/machines.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/db/ip.go",
+      "implementation_or_equivalence": "Append-only owner/expiry repairs, guarded null-tags import and runtime-vs-auth persistence; finite allocation",
+      "rust_boundary": "headscale-db; headscale-api/src/admin/machines.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/db/node.go",
+      "implementation_or_equivalence": "Append-only owner/expiry repairs, guarded null-tags import and runtime-vs-auth persistence; finite allocation",
+      "rust_boundary": "headscale-db; headscale-api/src/admin/machines.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/db/preauth_keys.go",
+      "implementation_or_equivalence": "Append-only owner/expiry repairs, guarded null-tags import and runtime-vs-auth persistence; finite allocation",
+      "rust_boundary": "headscale-db; headscale-api/src/admin/machines.rs; headscale-cli/src/server.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/derp/derp.go",
+      "implementation_or_equivalence": "Owned DERP snapshot merge",
+      "rust_boundary": "headscale-api/src/tailscale_wire/derp_config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/dns/extrarecords.go",
+      "implementation_or_equivalence": "Lowercase records; existing owned watcher cancellation and publication outside locks",
+      "rust_boundary": "headscale-api/src/dns.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/grpcv1.go",
+      "implementation_or_equivalence": "Existing shared policy auto-approval and lifecycle adapters",
+      "rust_boundary": "headscale-api/src/grpc.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/handlers.go",
+      "implementation_or_equivalence": "Supported key capability and OPTIONS metrics",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{key_handler,mod}.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/mapper/batcher.go",
+      "implementation_or_equivalence": "Split removal frames, reconnect peer retention, logtail instructions, default exit suggestion, map visibility and key patches; serial Rust stream plus owned snapshots replace Go queue/refcount mechanisms",
+      "rust_boundary": "headscale-api/src/tailscale_wire/map.rs; headscale-api/src/tailscale_wire/mod.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/mapper/builder.go",
+      "implementation_or_equivalence": "Split removal frames, reconnect peer retention, logtail instructions, default exit suggestion, map visibility and key patches; serial Rust stream plus owned snapshots replace Go queue/refcount mechanisms",
+      "rust_boundary": "headscale-api/src/tailscale_wire/map.rs; headscale-api/src/tailscale_wire/mod.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/mapper/mapper.go",
+      "implementation_or_equivalence": "Split removal frames, reconnect peer retention, logtail instructions, default exit suggestion, map visibility and key patches; serial Rust stream plus owned snapshots replace Go queue/refcount mechanisms",
+      "rust_boundary": "headscale-api/src/tailscale_wire/map.rs; headscale-api/src/tailscale_wire/mod.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/mapper/node_conn.go",
+      "implementation_or_equivalence": "Split removal frames, reconnect peer retention, logtail instructions, default exit suggestion, map visibility and key patches; serial Rust stream plus owned snapshots replace Go queue/refcount mechanisms",
+      "rust_boundary": "headscale-api/src/tailscale_wire/map.rs; headscale-api/src/tailscale_wire/mod.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/noise.go",
+      "implementation_or_equivalence": "GET websocket mounting and one-use SSH/current-policy checks",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{mod,ssh}.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/oidc.go",
+      "implementation_or_equivalence": "One-use OAuth state, reloadable cookie-bound confirmation, secure callback cookies and discovery timeout",
+      "rust_boundary": "headscale-api/src/oidc.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/platform_config.go",
+      "implementation_or_equivalence": "Existing path extraction uses framework path parameters",
+      "rust_boundary": "headscale-api/src/tailscale_wire/basic_handlers.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/matcher/matcher.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/pm.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/policy.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/policyutil/reduce.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/compiled.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/filter.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/policy.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/sshtest.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/tailnet_state_caps.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/test.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/policy/v2/types.go",
+      "implementation_or_equivalence": "Metadata parsing, explicit SSH revocation, local-user/current-policy check, via-route matching and self filter projection; immutable Rust views already avoid Go aliasing and stale caches",
+      "rust_boundary": "headscale-api-acl/src/lib.rs; headscale-api/src/policy",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/poll.go",
+      "implementation_or_equivalence": "Owned serial stream and connection guards; unknown/deleted node expiry and early HTTP failures",
+      "rust_boundary": "headscale-api/src/tailscale_wire/map.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/state/maprequest.go",
+      "implementation_or_equivalence": "Registration machine-key serialization, deterministic ownership and key-binding refusal; live-session expiry, payload notification classification and fresh runtime DB reads",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{mod,register,map}.rs; headscale-api/src/admin/machines.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/state/node_health.go",
+      "implementation_or_equivalence": "Registration machine-key serialization, deterministic ownership and key-binding refusal; live-session expiry, payload notification classification and fresh runtime DB reads",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{mod,register,map}.rs; headscale-api/src/admin/machines.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/state/node_store.go",
+      "implementation_or_equivalence": "Registration machine-key serialization, deterministic ownership and key-binding refusal; live-session expiry, payload notification classification and fresh runtime DB reads",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{mod,register,map}.rs; headscale-api/src/admin/machines.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/state/state.go",
+      "implementation_or_equivalence": "Registration machine-key serialization, deterministic ownership and key-binding refusal; live-session expiry, payload notification classification and fresh runtime DB reads",
+      "rust_boundary": "headscale-api/src/tailscale_wire/{mod,register,map}.rs; headscale-api/src/admin/machines.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/templates/apple.go",
+      "implementation_or_equivalence": "tvOS setup order",
+      "rust_boundary": "headscale-api/src/tailscale_wire/basic_handlers.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/change/change.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/config.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/node.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/types_clone.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/types_view.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/types/users.go",
+      "implementation_or_equivalence": "Owned Rust cloned views and per-stream refcounts; runtime DNS snapshots and validation; OIDC config issuer validation",
+      "rust_boundary": "headscale-api/src/tailscale_wire; headscale-core/src/config.rs; headscale-cli/src/config.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/util/dns.go",
+      "implementation_or_equivalence": "Existing fallible OS randomness, length-safe cookie slices and CIDR iterator; no Go slice/map alias hazards",
+      "rust_boundary": "headscale-api/src/oidc.rs; headscale-api/src/dns.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    },
+    {
+      "native_path": "hscontrol/util/string.go",
+      "implementation_or_equivalence": "Existing fallible OS randomness, length-safe cookie slices and CIDR iterator; no Go slice/map alias hazards",
+      "rust_boundary": "headscale-api/src/oidc.rs; headscale-api/src/dns.rs",
+      "qualification": "source audit mapped to implementation/equivalence; bounded executed gates and exclusions are recorded in headscale-v0.29.5.json, not a claim of full per-path integration replay"
+    }
+  ],
+  "not_claimed_closed": [
+    "Postgres full production mutation/restart backlog",
+    "remaining policy-v2 fixture backlog",
+    "remaining CLI residuals",
+    "live DNS resolver backlog"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "release-0295-empty-ssh",
+  "policy": {},
+  "users": [
+    {
+      "id": 1,
+      "name": "alice"
+    }
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "ipv4": "100.64.0.1"
+    }
+  ],
+  "ssh_checks": [
+    {
+      "name": "explicit-revocation",
+      "node_id": 1
+    }
+  ]
+}

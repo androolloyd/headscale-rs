@@ -1528,6 +1528,24 @@ impl CliConfig {
     /// binding listeners or opening long-running services.
     pub(crate) fn validate_for_configtest(&self) -> Result<()> {
         self.oidc.validate().context("invalid OIDC configuration")?;
+        if !self.oidc.issuer.is_empty() {
+            let issuer = url::Url::parse(&self.oidc.issuer).ok();
+            anyhow::ensure!(
+                issuer.as_ref().is_some_and(
+                    |url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                ),
+                "oidc.issuer must be a valid http(s) URL: got {:?}",
+                self.oidc.issuer
+            );
+            anyhow::ensure!(
+                !self.oidc.client_id.is_empty(),
+                "oidc.client_id is required when oidc.issuer is set"
+            );
+            anyhow::ensure!(
+                !self.oidc.client_secret.is_empty() || self.oidc.client_secret_path.is_some(),
+                "oidc.client_secret or oidc.client_secret_path is required when oidc.issuer is set"
+            );
+        }
         self.validate_trusted_proxies()?;
         self.validate_policy_config()?;
 
@@ -5530,6 +5548,7 @@ type = "sqlite"
 
 [oidc]
 enabled = true
+issuer = "https://issuer.example.com"
 
 [oidc.pkce]
 method = "S384"

@@ -40,7 +40,7 @@ use axum::{
     Extension, Json,
     body::{Body, Bytes},
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 
@@ -121,6 +121,23 @@ fn clear_preferred_derp_for_compare(hostinfo: &mut HostInfo) {
             hostinfo.net_info = None;
         }
     }
+}
+
+pub(super) fn peer_hostinfo_equal(previous: &HostInfo, current: &HostInfo) -> bool {
+    let fields = [
+        "Hostname",
+        "OS",
+        "Services",
+        "SSH_HostKeys",
+        "Location",
+        "AppConnector",
+        "RoutableIPs",
+    ];
+    let previous = serde_json::to_value(previous).unwrap_or_default();
+    let current = serde_json::to_value(current).unwrap_or_default();
+    fields
+        .iter()
+        .all(|field| previous.get(field) == current.get(field))
 }
 
 fn hostinfo_change_is_only_preferred_derp(previous: &HostInfo, current: &HostInfo) -> bool {
@@ -486,6 +503,17 @@ fn select_routes_for_viewer(
     (selected_primary, allowed_routes)
 }
 
+fn valid_map_fqdn(record: &MachineRecord, domain: &str) -> bool {
+    !record.hostname.is_empty()
+        && record.hostname.len()
+            + if domain.is_empty() {
+                0
+            } else {
+                domain.len() + 2
+            }
+            <= 255
+}
+
 fn peer_state_from_nodes(peers: &[MapNode]) -> BTreeMap<u64, MapNode> {
     peers.iter().map(|peer| (peer.id, peer.clone())).collect()
 }
@@ -525,6 +553,9 @@ fn self_map_node_from_snapshot(
     auto_update_enabled: bool,
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
+    if !valid_map_fqdn(own, tailnet_domain) {
+        return None;
+    }
     let mut own_node = record_to_map_node(own, tailnet_domain);
     apply_transient_lifecycle(&mut own_node, own, online_states);
     own_node.cap = cap_version;
@@ -654,7 +685,15 @@ fn peer_patch_if_only_patchable_fields_changed(
     let derp_changed = previous.home_derp != current.home_derp;
     let online_changed = previous.online != current.online;
     let key_expiry_changed = previous.key_expiry != current.key_expiry;
-    if !endpoints_changed && !derp_changed && !online_changed && !key_expiry_changed {
+    let key_changed = previous.key != current.key;
+    let disco_changed = previous.disco_key != current.disco_key;
+    if !endpoints_changed
+        && !derp_changed
+        && !online_changed
+        && !key_expiry_changed
+        && !key_changed
+        && !disco_changed
+    {
         return None;
     }
     // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
@@ -683,6 +722,8 @@ fn peer_patch_if_only_patchable_fields_changed(
     current_normalized.last_seen = previous.last_seen;
     current_normalized.online = previous.online;
     current_normalized.key_expiry = previous.key_expiry;
+    current_normalized.key.clone_from(&previous.key);
+    current_normalized.disco_key.clone_from(&previous.disco_key);
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
         return None;
@@ -690,6 +731,8 @@ fn peer_patch_if_only_patchable_fields_changed(
 
     Some(PeerChange {
         node_id: current.id,
+        key: key_changed.then(|| current.key.clone()),
+        disco_key: disco_changed.then(|| current.disco_key.clone()).flatten(),
         endpoints: if endpoints_changed {
             current.endpoints.clone()
         } else {
@@ -723,6 +766,7 @@ fn visible_peer_map_nodes(
         .iter()
         .filter(|(node_key, _)| node_key.as_str() != self_node_key)
         .filter(|(node_key, rec)| peer_allowed(allowed_ids, node_key, rec))
+        .filter(|(_, rec)| valid_map_fqdn(rec, tailnet_domain))
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, tailnet_domain);
             apply_transient_lifecycle(&mut node, rec, online_states);
@@ -849,10 +893,8 @@ fn apply_peer_cap_map_to_map_node(
         return;
     }
 
-    if has_node_attr(&attrs, NODE_ATTR_SUGGEST_EXIT_NODE) {
-        node.cap_map
-            .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
-    }
+    node.cap_map
+        .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
 }
 
 fn apply_runtime_caps_to_map_node(
@@ -1053,6 +1095,32 @@ async fn map_inner(
     // The caller must already have registered. If not, 404 — they need
     // to go through `/machine/{node_key}/register` first.
     let Some(mut own) = state.machines.get(&node_key_hex) else {
+        if req.stream {
+            let expired = MapResponse {
+                node: Some(MapNode {
+                    key: canonical_map_node_key(&node_key_hex),
+                    key_expiry: Some(
+                        chrono::DateTime::from_timestamp(1, 0).expect("native ancient expiry"),
+                    ),
+                    expired: true,
+                    ..MapNode::default()
+                }),
+                debug: (!state.runtime_config.log_tail.enabled).then(|| DebugConfig {
+                    disable_log_tail: true,
+                    ..DebugConfig::default()
+                }),
+                ..MapResponse::default()
+            };
+            let bytes =
+                build_framed_chunk(&expired, MapFrameCompression::from_request(&req.compress))
+                    .unwrap_or_default();
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                bytes,
+            )
+                .into_response();
+        }
         return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
     if let Err(resp) = validate_map_machine_key(&machine_key_hex, &own) {
@@ -1085,17 +1153,23 @@ async fn map_inner(
     // peer's streaming `/map` so they pick up the new disco/endpoint
     // values on the next chunk.
     let mut record_changed = false;
+    let mut broadcast_change = false;
     let mut record_change_reason = MapChangeReason::NodeUpdated;
     if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty())
         && own.disco_key.as_deref() != Some(dk.as_str())
     {
         own.disco_key = Some(dk.clone());
         record_changed = true;
+        broadcast_change = true;
         record_change_reason = MapChangeReason::EndpointDerpUpdate;
     }
-    if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty())
+    if let Some(eps) = req.endpoints.as_ref()
         && &own.endpoints != eps
     {
+        broadcast_change |= own.endpoints.is_empty() && !eps.is_empty()
+            || eps.iter().enumerate().any(|(index, endpoint)| {
+                !own.endpoints.contains(endpoint) && req.endpoint_types.get(index) != Some(&2)
+            });
         own.endpoints = eps.clone();
         record_changed = true;
         record_change_reason = MapChangeReason::EndpointDerpUpdate;
@@ -1142,6 +1216,9 @@ async fn map_inner(
         if previous_hostinfo != hostinfo {
             let only_preferred_derp_changed =
                 hostinfo_change_is_only_preferred_derp(&previous_hostinfo, &hostinfo);
+            broadcast_change |= hostinfo_preferred_derp(&previous_hostinfo)
+                != hostinfo_preferred_derp(&hostinfo)
+                || !peer_hostinfo_equal(&previous_hostinfo, &hostinfo);
             let raw_hostname = hostinfo.hostname.clone();
             own.replace_host_info(hostinfo);
             if auto_derived_name && !raw_hostname.is_empty() {
@@ -1161,6 +1238,7 @@ async fn map_inner(
         if own.approved_routes != approved_routes {
             own.approved_routes = approved_routes;
             record_changed = true;
+            broadcast_change = true;
             record_change_reason = MapChangeReason::PolicyChange;
         }
     }
@@ -1172,11 +1250,13 @@ async fn map_inner(
     let mut deferred_stream_change = None;
     if record_changed {
         let node_id = own.stable_node_id_for_key(&node_key_hex);
-        if req.stream {
+        if req.stream || !broadcast_change {
             state
                 .machines
                 .upsert_quiet(node_key_hex.clone(), own.clone());
-            deferred_stream_change = Some((record_change_reason, node_id));
+            if broadcast_change {
+                deferred_stream_change = Some((record_change_reason, node_id));
+            }
         } else {
             state.machines.upsert_with_reason(
                 node_key_hex.clone(),
@@ -1214,7 +1294,7 @@ async fn map_inner(
                 .record
                 .stable_node_id_for_key(&saved.record.node_key_hex);
             if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
-                if req.stream {
+                if req.stream || !broadcast_change {
                     state.machines.replace_node_key_quiet(
                         old_node_key_hex,
                         saved.record.node_key_hex.clone(),
@@ -1228,7 +1308,7 @@ async fn map_inner(
                     );
                 }
             } else {
-                if req.stream {
+                if req.stream || !broadcast_change {
                     state
                         .machines
                         .upsert_quiet(saved.record.node_key_hex.clone(), saved.record);
@@ -1238,7 +1318,7 @@ async fn map_inner(
                         .upsert(saved.record.node_key_hex.clone(), saved.record);
                 }
             }
-            if req.stream {
+            if req.stream && broadcast_change {
                 deferred_stream_change = Some((record_change_reason, saved_node_id));
             }
         }
@@ -1362,8 +1442,8 @@ async fn map_inner(
             state.public_control_url.as_deref().unwrap_or(""),
         ),
         control_time: Some(chrono::Utc::now()),
-        debug: Some(DebugConfig {
-            disable_log_tail: !state.runtime_config.log_tail.enabled,
+        debug: (!state.runtime_config.log_tail.enabled).then(|| DebugConfig {
+            disable_log_tail: true,
             ..DebugConfig::default()
         }),
         // FULL MapResponse — NOT a keepalive. Upstream
@@ -1485,7 +1565,27 @@ async fn map_inner(
                 compression,
                 public_control_url,
             )| async move {
-                if let Some(initial) = first_opt {
+                if let Some(mut initial) = first_opt {
+                    let node_id = machines.stable_node_id_for_key(&self_node_key);
+                    let current = last_peer_state.keys().copied().collect::<BTreeSet<_>>();
+                    let removed = machines
+                        .delivered_peers(node_id)
+                        .difference(&current)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if !removed.is_empty() {
+                        initial.extend(
+                            encode_map_frame(
+                                &MapResponse {
+                                    peers_removed: removed,
+                                    ..MapResponse::default()
+                                },
+                                compression,
+                            )
+                            .unwrap_or_default(),
+                        );
+                    }
+                    machines.record_delivered_peers(node_id, current);
                     return Some((
                         Ok::<_, std::io::Error>(initial),
                         (
@@ -1675,6 +1775,7 @@ async fn map_inner(
                                     public_control_url.as_deref().unwrap_or(""),
                                     PeerDeltaOptions::registry_change(),
                                     &BTreeSet::new(),
+                                    &BTreeSet::new(),
                                     None,
                                 )
                             })
@@ -1727,6 +1828,7 @@ async fn map_inner(
                                 &mapresponse_debug,
                                 public_control_url.as_deref().unwrap_or(""),
                                 PeerDeltaOptions::policy_change(),
+                                &BTreeSet::new(),
                                 &BTreeSet::new(),
                                 None,
                             )
@@ -1828,6 +1930,10 @@ async fn map_inner(
                         break chunk;
                     }
                 };
+                machines.record_delivered_peers(
+                    self_node_id,
+                    next_peer_state.keys().copied().collect(),
+                );
                 Some((
                     Ok(chunk),
                     (
@@ -2080,8 +2186,28 @@ fn rebuild_map_batch_chunk(
         public_control_url,
         map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
         &map_batch_forced_full_peer_ids(changes),
+        &map_batch_forced_online_peer_ids(changes),
         peer_filter_ids.as_ref(),
     )
+}
+
+fn map_batch_forced_online_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
+    changes
+        .iter()
+        .filter(|change| {
+            change.reasons.iter().any(|reason| {
+                matches!(
+                    reason,
+                    MapChangeReason::NodeOnline | MapChangeReason::NodeOffline
+                )
+            })
+        })
+        .filter_map(|change| {
+            change
+                .origin_node_id
+                .filter(|id| change.content.peer_patches.contains(id))
+        })
+        .collect()
 }
 
 fn map_batch_forced_full_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
@@ -2130,6 +2256,7 @@ fn rebuild_peer_delta_chunk(
     public_control_url: &str,
     options: PeerDeltaOptions,
     force_full_peer_ids: &BTreeSet<u64>,
+    force_online_peer_ids: &BTreeSet<u64>,
     filter_peer_ids: Option<&BTreeSet<u64>>,
 ) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
@@ -2229,10 +2356,23 @@ fn rebuild_peer_delta_chunk(
                 next_peer_state.insert(peer.id, peer.clone());
                 full_peers_changed.push(peer);
             }
-            Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
+            Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {
+                if force_online_peer_ids.contains(&peer.id) {
+                    peer_patches.push(PeerChange {
+                        node_id: peer.id,
+                        online: peer.online,
+                        ..PeerChange::default()
+                    });
+                }
+            }
             Some(previous) => {
                 next_peer_state.insert(peer.id, peer.clone());
-                if let Some(patch) = peer_patch_if_only_patchable_fields_changed(previous, &peer) {
+                if let Some(mut patch) =
+                    peer_patch_if_only_patchable_fields_changed(previous, &peer)
+                {
+                    if force_online_peer_ids.contains(&peer.id) {
+                        patch.online = peer.online;
+                    }
                     peer_patches.push(patch);
                 } else {
                     full_peers_changed.push(peer);
@@ -2435,13 +2575,16 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
     );
-    let peers_removed = if peers.is_empty() {
-        previous_peer_state
-            .map(|state| state.keys().copied().collect())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let visible_ids = peers.iter().map(|peer| peer.id).collect::<BTreeSet<_>>();
+    let peers_removed = previous_peer_state
+        .map(|state| {
+            state
+                .keys()
+                .copied()
+                .filter(|id| !visible_ids.contains(id))
+                .collect()
+        })
+        .unwrap_or_default();
     let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
     let user_profiles =
         user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
@@ -2457,8 +2600,8 @@ fn rebuild_map_chunk(
         packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
         ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
         control_time: Some(chrono::Utc::now()),
-        debug: Some(DebugConfig {
-            disable_log_tail,
+        debug: disable_log_tail.then(|| DebugConfig {
+            disable_log_tail: true,
             ..DebugConfig::default()
         }),
         keep_alive: false,
@@ -2473,6 +2616,24 @@ fn rebuild_map_chunk(
 /// is plaintext JSON unless `MapRequest.Compress == "zstd"`, matching
 /// headscale-go's `poll.go::writeMap`.
 pub(crate) fn build_framed_chunk(
+    mr: &MapResponse,
+    compression: MapFrameCompression,
+) -> Result<Vec<u8>, std::io::Error> {
+    if !mr.peers_removed.is_empty() {
+        let removed = MapResponse {
+            peers_removed: mr.peers_removed.clone(),
+            ..MapResponse::default()
+        };
+        let mut remaining = mr.clone();
+        remaining.peers_removed.clear();
+        let mut bytes = encode_map_frame(&removed, compression)?;
+        bytes.extend(encode_map_frame(&remaining, compression)?);
+        return Ok(bytes);
+    }
+    encode_map_frame(mr, compression)
+}
+
+fn encode_map_frame(
     mr: &MapResponse,
     compression: MapFrameCompression,
 ) -> Result<Vec<u8>, std::io::Error> {
@@ -4207,7 +4368,7 @@ mod tests {
         let first = next_zstd_map_response(&mut body).await;
         assert_eq!(
             first.debug.as_ref().map(|debug| debug.disable_log_tail),
-            Some(false)
+            None
         );
         assert_default_auto_update(first.node.as_ref().expect("own node present"), true);
         assert!(first.derp_map.as_ref().unwrap().regions.is_empty());
@@ -4247,7 +4408,7 @@ mod tests {
         let updated = next_zstd_map_response(&mut body).await;
         assert_eq!(
             updated.debug.as_ref().map(|debug| debug.disable_log_tail),
-            Some(false)
+            None
         );
         assert_default_auto_update(updated.node.as_ref().expect("own node present"), true);
         let derp_map = updated.derp_map.unwrap();
@@ -5723,6 +5884,49 @@ mod tests {
         zstd::bulk::decompress(framed_body(bytes), 16 * 1024 * 1024).expect("valid zstd frame")
     }
 
+    // A client reads protocol frames, not HTTP chunks. Retain every unread
+    // byte when an HTTP chunk contains multiple length-prefixed messages.
+    fn framed_stream_body(body: axum::body::Body) -> axum::body::Body {
+        axum::body::Body::from_stream(futures_util::stream::unfold(
+            (body, Vec::<u8>::new()),
+            |(mut body, mut pending)| async move {
+                loop {
+                    if pending.len() >= 4 {
+                        let size = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
+                        assert!(size <= 16 * 1024 * 1024, "oversized test map frame");
+                        if pending.len() >= size + 4 {
+                            let frame = pending.drain(..size + 4).collect::<Vec<_>>();
+                            return Some((Ok::<_, std::io::Error>(frame), (body, pending)));
+                        }
+                    }
+                    match http_body_util::BodyExt::frame(&mut body).await {
+                        Some(Ok(frame)) => {
+                            if let Ok(data) = frame.into_data() {
+                                pending.extend_from_slice(&data);
+                            }
+                        }
+                        Some(Err(error)) => {
+                            return Some((Err(std::io::Error::other(error)), (body, pending)));
+                        }
+                        None => {
+                            assert!(pending.is_empty(), "truncated terminal test map frame");
+                            return None;
+                        }
+                    }
+                }
+            },
+        ))
+    }
+
+    fn assert_removal_only(message: &MapResponse) {
+        let value = serde_json::to_value(message).unwrap();
+        let fields = value.as_object().unwrap();
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["PeersRemoved"]
+        );
+    }
+
     async fn open_zstd_stream(app: axum::Router, node_key_hex: &str) -> axum::body::Body {
         let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
@@ -5739,7 +5943,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        resp.into_body()
+        framed_stream_body(resp.into_body())
     }
 
     async fn next_zstd_map_response(body: &mut axum::body::Body) -> MapResponse {
@@ -5790,7 +5994,7 @@ mod tests {
 
         // First chunk: a single-peer MapResponse (no peers yet),
         // length-prefixed + zstd-compressed.
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6030,7 +6234,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6193,7 +6397,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6236,7 +6440,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Consume the initial chunk.
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6449,6 +6653,15 @@ mod tests {
         assert!(untagged.peers_changed.is_empty());
         assert!(untagged.peers_changed_patch.is_empty());
         assert_eq!(untagged.peers_removed, vec![stable_id_from_key(&server)]);
+        assert_removal_only(&untagged);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
+
         assert!(
             untagged
                 .user_profiles
@@ -6488,7 +6701,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6557,7 +6770,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -6579,6 +6792,14 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6613,6 +6834,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6666,6 +6895,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![peer_id]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6720,6 +6957,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![peer_id]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6794,6 +7039,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![peer_id]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -6898,8 +7151,17 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![42, 99]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
         assert!(
-            mr.dns_config.is_none(),
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
+
+        assert!(
+            following.dns_config.is_none(),
             "stale auth-completion policy reason should not turn the peer removal into a policy chunk"
         );
     }
@@ -7065,6 +7327,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -7092,7 +7362,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -7124,12 +7394,22 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
         assert!(
-            mr.dns_config.is_some(),
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
+
+        assert!(
+            following.dns_config.is_some(),
             "policy deltas should carry policy-derived DNSConfig updates"
         );
         assert!(
-            mr.packet_filters
+            following
+                .packet_filters
                 .get("base")
                 .and_then(|rules| rules.as_ref())
                 .is_some_and(Vec::is_empty),
@@ -7257,11 +7537,20 @@ mod tests {
         assert!(delta.peers_changed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert_eq!(delta.peers_removed, vec![stable_id_from_key(&carol)]);
+        assert_removal_only(&delta);
+        let following = next_zstd_map_response(&mut alice_body).await;
         assert!(
-            delta.dns_config.is_some(),
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
+
+        assert!(
+            following.dns_config.is_some(),
             "policy reload deltas should carry policy-derived DNS updates"
         );
-        let profile_names = delta
+        let profile_names = following
             .user_profiles
             .iter()
             .map(|profile| profile.login_name.as_str())
@@ -7440,7 +7729,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -7616,7 +7905,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -7822,7 +8111,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -8312,7 +8601,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"], vec!["policy change"]]
+            vec![vec!["node online"], vec!["policy change"]]
         );
         let pending = state.machines.pending_map_changes();
         let observer_changes = pending
@@ -8323,7 +8612,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"], vec!["policy change"]]
+            vec![vec!["node online"], vec!["policy change"]]
         );
 
         tokio::task::yield_now().await;
@@ -8465,6 +8754,14 @@ mod tests {
         assert!(delta.peers_changed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert_eq!(delta.peers_removed, vec![router_id]);
+        assert_removal_only(&delta);
+        let following = next_zstd_map_response(&mut observer_body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -8529,7 +8826,7 @@ mod tests {
             .unwrap();
         assert_eq!(router_resp.status(), StatusCode::OK);
 
-        let mut router_body = router_resp.into_body();
+        let mut router_body = framed_stream_body(router_resp.into_body());
         let router_first = next_zstd_map_response(&mut router_body).await;
         let self_node = router_first.node.as_ref().expect("router self node");
         assert!(
@@ -8554,9 +8851,13 @@ mod tests {
             "initial stream route auto-approval should record lifecycle plus deferred policy changes"
         );
         let online_change = &new_changes[0];
-        assert_eq!(online_change.reason_labels(), vec!["subnet router online"]);
-        assert_eq!(online_change.change_type(), "full");
-        assert!(online_change.is_full());
+        assert_eq!(
+            online_change.reason_labels(),
+            vec!["node online", "policy change"]
+        );
+        assert_eq!(online_change.change_type(), "policy");
+        assert!(!online_change.is_full());
+        assert!(online_change.content.requires_runtime_peer_computation);
         assert_eq!(online_change.origin_node_id, Some(router_id));
         let policy_change = &new_changes[1];
         assert_eq!(policy_change.reason_labels(), vec!["policy change"]);
@@ -8575,7 +8876,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["subnet router online"], vec!["policy change"]]
+            vec![vec!["node online", "policy change"], vec!["policy change"]]
         );
 
         publish_test_map_batch().await;
@@ -8586,14 +8887,14 @@ mod tests {
         .await
         .expect("observer route-aware peer delta");
         assert!(
-            alice_delta.node.is_some(),
+            alice_delta.node.is_none(),
             "subnet-router online lifecycle emits a full map update"
         );
-        assert!(alice_delta.peers_changed.is_empty());
+        assert!(alice_delta.peers.is_empty());
         assert!(alice_delta.peers_removed.is_empty());
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
-            .peers
+            .peers_changed
             .iter()
             .find(|peer| peer.id == stable_id_from_key(&router_key))
             .expect("router peer in full subnet-router online update");
@@ -8714,14 +9015,14 @@ mod tests {
         .await
         .expect("observer route-aware peer delta");
         assert!(
-            alice_delta.node.is_some(),
+            alice_delta.node.is_none(),
             "subnet-router online lifecycle emits a full map update after persistence"
         );
-        assert!(alice_delta.peers_changed.is_empty());
+        assert!(alice_delta.peers.is_empty());
         assert!(alice_delta.peers_removed.is_empty());
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
-            .peers
+            .peers_changed
             .iter()
             .find(|peer| peer.id == stable_id_from_key(&router_key))
             .expect("router peer present after connect");
@@ -9038,7 +9339,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"]]
+            vec![vec!["node online"]]
         );
         let b_changes = pending
             .get(&b_id)
@@ -9048,7 +9349,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"]]
+            vec![vec!["node online"]]
         );
 
         publish_test_map_batch().await;
@@ -9063,13 +9364,13 @@ mod tests {
         assert_eq!(b_delta.peers_changed_patch[0].node_id, a_id);
         assert_eq!(b_delta.peers_changed_patch[0].online, Some(true));
         assert!(
-            b_delta.dns_config.is_some(),
-            "observer lifecycle companion should retain policy-delta shape"
+            b_delta.dns_config.is_none(),
+            "ordinary lifecycle patches do not carry a policy or DNS refresh"
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_subnet_router_lifecycle_emits_full_map_response_like_headscale_go() {
+    async fn stream_true_subnet_router_lifecycle_emits_native_policy_peer_delta() {
         let (state, _dir) = fixture();
         let observer = "a5".repeat(32);
         let router_key = "b5".repeat(32);
@@ -9105,7 +9406,11 @@ mod tests {
         let observer_changes = pending_online
             .get(&observer_id)
             .expect("subnet-router online change fans out to observer");
-        assert!(observer_changes.iter().any(MapChange::is_full));
+        assert!(
+            observer_changes
+                .iter()
+                .any(|change| change.content.requires_runtime_peer_computation)
+        );
         let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
         assert!(
             immediate.is_none(),
@@ -9117,11 +9422,11 @@ mod tests {
             .expect("subnet-router online batch published");
 
         let online = next_zstd_map_response(&mut observer_body).await;
-        assert!(online.node.is_some(), "full map includes self Node");
-        assert!(online.peers_changed.is_empty());
+        assert!(online.node.is_none(), "full map includes self Node");
+        assert!(online.peers.is_empty());
         assert!(online.peers_changed_patch.is_empty());
         assert!(online.peers_removed.is_empty());
-        let online_router = peer_named(&online, "router").expect("full map includes router peer");
+        let online_router = changed_peer(&online, "router").expect("full map includes router peer");
         assert_eq!(online_router.online, Some(true));
         assert!(
             online_router.allowed_ips.iter().any(|ip| ip == route),
@@ -9137,7 +9442,11 @@ mod tests {
         let observer_changes = pending_offline
             .get(&observer_id)
             .expect("subnet-router offline change fans out to observer");
-        assert!(observer_changes.iter().any(MapChange::is_full));
+        assert!(
+            observer_changes
+                .iter()
+                .any(|change| change.content.requires_runtime_peer_computation)
+        );
         let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
         assert!(
             immediate.is_none(),
@@ -9150,13 +9459,14 @@ mod tests {
 
         let offline = next_zstd_map_response(&mut observer_body).await;
         assert!(
-            offline.node.is_some(),
+            offline.node.is_none(),
             "offline full map includes self Node"
         );
-        assert!(offline.peers_changed.is_empty());
+        assert!(offline.peers.is_empty());
         assert!(offline.peers_changed_patch.is_empty());
         assert!(offline.peers_removed.is_empty());
-        let offline_router = peer_named(&offline, "router").expect("full map includes router peer");
+        let offline_router =
+            changed_peer(&offline, "router").expect("full map includes router peer");
         assert_eq!(offline_router.online, Some(false));
         assert!(
             !offline_router.allowed_ips.iter().any(|ip| ip == route),
@@ -9200,7 +9510,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_second_connection_does_not_emit_duplicate_online_patch() {
+    async fn stream_true_second_connection_emits_native_connect_online_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -9218,7 +9528,9 @@ mod tests {
         assert_eq!(online_delta.peers_changed_patch[0].online, Some(true));
 
         let _a_body_2 = open_zstd_stream(app, &a).await;
-        assert_no_stream_frame(&mut b_body, Duration::from_secs(1)).await;
+        let reconnect = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(reconnect.peers_changed_patch.len(), 1);
+        assert_eq!(reconnect.peers_changed_patch[0].online, Some(true));
 
         drop(a_body_1);
         assert_no_stream_frame(&mut b_body, Duration::from_secs(9)).await;
@@ -9289,7 +9601,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -9357,7 +9669,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_disco_key_update_uses_full_peer_delta() {
+    async fn stream_true_disco_key_update_uses_key_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -9394,7 +9706,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -9445,11 +9757,11 @@ mod tests {
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_removed.is_empty());
-        assert_eq!(mr.peers_changed.len(), 1);
-        let peer = &mr.peers_changed[0];
-        assert_eq!(peer.id, stable_id_from_key(&a));
+        assert_eq!(mr.peers_changed_patch.len(), 1);
+        let peer = &mr.peers_changed_patch[0];
+        assert_eq!(peer.node_id, stable_id_from_key(&a));
         assert_eq!(peer.disco_key.as_deref(), Some(new_disco.as_str()));
     }
 
@@ -9489,7 +9801,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -9817,6 +10129,14 @@ mod tests {
             "stale patches for removed peers must be suppressed"
         );
         assert_eq!(delta.peers_removed, vec![peer_id]);
+        assert_removal_only(&delta);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -9957,7 +10277,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -10021,7 +10341,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -10084,7 +10404,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let first = next_zstd_map_response(&mut body).await;
         assert_eq!(first.map_session_handle, "");
         assert_eq!(first.seq, 0);
@@ -10355,14 +10675,14 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let mut body = resp.into_body();
+        let mut body = framed_stream_body(resp.into_body());
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
             .unwrap();
         let first = decode_framed(&frame.into_data().unwrap());
         let first_mr: MapResponse = serde_json::from_slice(&first).unwrap();
-        assert!(first_mr.ssh_policy.is_none());
+        assert!(first_mr.ssh_policy.unwrap().rules.is_empty());
 
         let raw_policy = r#"{
             "groups": {"group:admins": ["bob@"]},
@@ -10396,7 +10716,11 @@ mod tests {
         policy_update.await.expect("policy update task");
         let decoded = decode_framed(&frame.into_data().unwrap());
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
-        let ssh = mr
+        assert!(!mr.peers_removed.is_empty());
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(following.peers_removed.is_empty());
+        let ssh = following
             .ssh_policy
             .expect("SSH policy present after policy update");
         assert_eq!(

@@ -515,6 +515,12 @@ struct Inner {
     notify: Notify,
 }
 
+fn lowercase_record_names(records: &mut [DnsRecord]) {
+    for record in records {
+        record.name.make_ascii_lowercase();
+    }
+}
+
 impl DnsStore {
     /// Construct an empty store. The default spec disables MagicDNS
     /// (matches the pre-MagicDNS wire shape) — embedders that want
@@ -548,7 +554,8 @@ impl DnsStore {
     /// `set_extra_records` synchronously or
     /// `spawn_extra_records_watcher` to start the mtime poller for an
     /// external records file.
-    pub fn from_spec(spec: DnsConfigSpec) -> Self {
+    pub fn from_spec(mut spec: DnsConfigSpec) -> Self {
+        lowercase_record_names(&mut spec.extra_records);
         let extra_records = Arc::new(spec.extra_records.clone());
         Self {
             inner: Arc::new(Inner {
@@ -574,7 +581,8 @@ impl DnsStore {
 
     /// Replace the spec at runtime (e.g. on a `SIGHUP`-driven config
     /// reload). Wakes every parked `/map` long-poller.
-    pub fn set_spec(&self, spec: DnsConfigSpec) {
+    pub fn set_spec(&self, mut spec: DnsConfigSpec) {
+        lowercase_record_names(&mut spec.extra_records);
         let extra_records = Arc::new(spec.extra_records.clone());
         *self.inner.spec.write() = Arc::new(spec);
         *self.inner.extra_records.write() = extra_records;
@@ -622,7 +630,8 @@ impl DnsStore {
     /// Replace the extra-records list. Wakes every parked `/map`
     /// long-poller (so the next chunk carries the new entries). Used
     /// by both the synchronous test path and the file-watcher.
-    pub fn set_extra_records(&self, records: Vec<DnsRecord>) {
+    pub fn set_extra_records(&self, mut records: Vec<DnsRecord>) {
+        lowercase_record_names(&mut records);
         *self.inner.extra_records.write() = Arc::new(records);
         self.inner.notify.notify_waiters();
     }

@@ -123,6 +123,7 @@ pub enum MapChangeReason {
     FullUpdate,
     NodeAdded,
     NodeUpdated,
+    NodeKeyRotated,
     TagUpdate,
     PeersRemoved,
     NodeOnline,
@@ -149,6 +150,7 @@ impl MapChangeReason {
             Self::FullUpdate => "full update",
             Self::NodeAdded => "node added",
             Self::NodeUpdated => "node updated",
+            Self::NodeKeyRotated => "node key rotated",
             Self::TagUpdate => "tag update",
             Self::PeersRemoved => "peers removed",
             Self::NodeOnline => "node online",
@@ -227,7 +229,8 @@ impl MapChangeContent {
                     content.send_all_peers = true;
                 }
             }
-            MapChangeReason::NodeOnline
+            MapChangeReason::NodeKeyRotated
+            | MapChangeReason::NodeOnline
             | MapChangeReason::NodeOffline
             | MapChangeReason::EndpointDerpUpdate
             | MapChangeReason::KeyExpiry => {
@@ -479,13 +482,13 @@ impl PendingMapChange {
     }
 
     fn subnet_router_lifecycle(reason: MapChangeReason, node_id: u64) -> Self {
-        debug_assert!(matches!(
-            reason,
-            MapChangeReason::SubnetRouterOnline | MapChangeReason::SubnetRouterOffline
-        ));
-        let mut change = Self::global(reason);
-        change.origin_node_id = Some(node_id);
-        change
+        let reason = match reason {
+            MapChangeReason::SubnetRouterOnline => MapChangeReason::NodeOnline,
+            MapChangeReason::SubnetRouterOffline => MapChangeReason::NodeOffline,
+            MapChangeReason::NodeAdded => MapChangeReason::NodeAdded,
+            _ => unreachable!("subnet lifecycle reason"),
+        };
+        Self::origin(reason, node_id).with_companion_reason(MapChangeReason::PolicyChange)
     }
 
     fn lifecycle_peer(reason: MapChangeReason, node_id: u64) -> Self {
@@ -494,7 +497,6 @@ impl PendingMapChange {
             MapChangeReason::NodeOnline | MapChangeReason::NodeOffline
         ));
         Self::with_content_node(reason, None, Some(node_id), Some(node_id))
-            .with_companion_reason(MapChangeReason::PolicyChange)
     }
 
     fn peer_patches(reason: MapChangeReason, node_ids: Vec<u64>) -> Self {
@@ -1514,6 +1516,7 @@ struct RegistrationEntry {
     expires_at: Instant,
     last_used: AtomicU64,
     outcome: Mutex<Option<RegistrationOutcome>>,
+    ssh_verdict_consumed: AtomicBool,
     notify: Notify,
 }
 
@@ -1793,7 +1796,11 @@ impl RegistrationCache {
             let notified = entry.notify.notified();
             tokio::pin!(notified);
 
-            match entry.outcome() {
+            let outcome = entry.outcome();
+            if outcome.is_some() && entry.ssh_verdict_consumed.swap(true, Ordering::AcqRel) {
+                return AuthWaitOutcome::Missing;
+            }
+            match outcome {
                 Some(
                     RegistrationOutcome::Registered(_) | RegistrationOutcome::ApprovedWithoutNode,
                 ) => {
@@ -1982,6 +1989,7 @@ impl RegistrationEntry {
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
+            ssh_verdict_consumed: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
@@ -1994,6 +2002,7 @@ impl RegistrationEntry {
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
+            ssh_verdict_consumed: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
@@ -2081,6 +2090,7 @@ pub struct MachineRegistry {
     /// Read paths take a read lock just long enough to bump the Arc's
     /// strong count.
     inner: RwLock<Arc<HashMap<String, MachineRecord>>>,
+    registration_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     /// Legacy wake channel — `Notify::notify_waiters()` fires on every
     /// upsert / lifecycle change.
     ///
@@ -2112,6 +2122,8 @@ pub struct MachineRegistry {
     /// zero-count entries are retained after disconnect to match
     /// headscale-go's `/debug/batcher` rapid-reconnect state.
     active_connections: RwLock<BTreeMap<u64, usize>>,
+    delivered_peers: RwLock<BTreeMap<u64, BTreeSet<u64>>>,
+    dns: RwLock<Option<Arc<crate::dns::DnsStore>>>,
     /// Volatile headscale-go `Node.IsOnline` equivalent. This is kept
     /// separate from persisted machine records: startup/default state
     /// is offline until a streaming map session marks the node online.
@@ -2235,10 +2247,13 @@ impl Default for MachineRegistry {
         let (map_batch_event_tx, _map_batch_event_rx) = broadcast::channel(MAP_BATCH_EVENT_BUFFER);
         Self {
             inner: RwLock::default(),
+            registration_locks: Mutex::new(HashMap::new()),
             notify: Arc::new(Notify::new()),
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
             active_connections: RwLock::new(BTreeMap::new()),
+            delivered_peers: RwLock::new(BTreeMap::new()),
+            dns: RwLock::new(None),
             online_states: RwLock::new(BTreeMap::new()),
             connection_generations: RwLock::new(BTreeMap::new()),
             stream_cancel_flags: RwLock::new(BTreeMap::new()),
@@ -2507,6 +2522,24 @@ fn run_nodestore_write_worker(
 }
 
 impl MachineRegistry {
+    pub(crate) async fn lock_registration(
+        &self,
+        machine: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.registration_locks.lock();
+            locks.retain(|_, lock| lock.strong_count() != 0);
+            if let Some(lock) = locks.get(machine).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(machine.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -2862,6 +2895,12 @@ impl MachineRegistry {
             .is_some_and(|existing| Self::policy_identity_without_routes_changed(existing, rec))
         {
             MapChangeReason::PolicyChange
+        } else if existing.is_some_and(|before| {
+            let now = Utc::now();
+            before.is_expired_at(now) == rec.is_expired_at(now)
+                && map::peer_hostinfo_equal(&before.host_info_for_node(), &rec.host_info_for_node())
+        }) {
+            MapChangeReason::NodeKeyRotated
         } else {
             MapChangeReason::NodeAdded
         }
@@ -3754,14 +3793,23 @@ impl MachineRegistry {
                 .wrapping_add(1);
             generations.insert(node_id, generation);
         }
-        let online_changed = {
-            let mut online = machines.online_states.write();
-            let was_online = online.get(&node_id).copied().unwrap_or(false);
-            online.insert(node_id, true);
-            !was_online
-        };
-        if online_changed {
-            let change = if machines.node_is_subnet_router(node_id) {
+        let should_be_online = machines.snapshot().iter().any(|(key, record)| {
+            record.stable_node_id_for_key(key) == node_id && !record.is_expired_at(Utc::now())
+        });
+        machines
+            .online_states
+            .write()
+            .insert(node_id, should_be_online);
+        let known_node = machines
+            .snapshot()
+            .iter()
+            .any(|(key, node)| node.stable_node_id_for_key(key) == node_id);
+        if known_node {
+            let change = if !should_be_online && machines.node_is_subnet_router(node_id) {
+                PendingMapChange::subnet_router_lifecycle(MapChangeReason::NodeAdded, node_id)
+            } else if !should_be_online {
+                PendingMapChange::origin(MapChangeReason::NodeAdded, node_id)
+            } else if machines.node_is_subnet_router(node_id) {
                 PendingMapChange::subnet_router_lifecycle(
                     MapChangeReason::SubnetRouterOnline,
                     node_id,
@@ -3785,6 +3833,18 @@ impl MachineRegistry {
             offline_grace,
             cancelled,
         }
+    }
+
+    pub(crate) fn delivered_peers(&self, node_id: u64) -> BTreeSet<u64> {
+        self.delivered_peers
+            .read()
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn record_delivered_peers(&self, node_id: u64, peers: BTreeSet<u64>) {
+        self.delivered_peers.write().insert(node_id, peers);
     }
 
     pub fn connection_generation(&self, node_id: u64) -> Option<u64> {
@@ -3893,6 +3953,7 @@ impl MachineRegistry {
             }
 
             active.remove(&node_id);
+            self.delivered_peers.write().remove(&node_id);
             disconnected_at.remove(&node_id);
             online.remove(&node_id);
             generations.remove(&node_id);
@@ -3944,16 +4005,7 @@ impl MachineRegistry {
             return;
         }
 
-        let online_changed = {
-            let mut online = self.online_states.write();
-            let was_online = online.get(&node_id).copied().unwrap_or(false);
-            online.insert(node_id, false);
-            was_online
-        };
-        if !online_changed {
-            return;
-        }
-
+        self.online_states.write().insert(node_id, false);
         let now = Utc::now();
         self.primary_routes.write().clear_unhealthy(node_id);
         self.apply_nodestore_bool_update(
@@ -4185,10 +4237,52 @@ impl MachineRegistry {
             .inner
             .read()
             .iter()
-            .find(|(_, rec)| rec.machine_key_hex == machine_key_hex && rec.user == user)
+            .filter(|(_, rec)| rec.machine_key_hex == machine_key_hex && rec.user == user)
+            .min_by_key(|(key, rec)| rec.stable_node_id_for_key(key))
             .map(|(node_key, rec)| (node_key.clone(), rec.clone()));
         self.record_nodestore_operation("get_by_machine_key", start.elapsed());
         result
+    }
+
+    pub(crate) fn registration_node(
+        &self,
+        machine: &str,
+        user: &str,
+        tagged_key: bool,
+    ) -> Result<Option<(String, MachineRecord)>, &'static str> {
+        let snapshot = self.snapshot();
+        let mut matches = snapshot
+            .iter()
+            .filter(|(_, node)| node.machine_key_hex == machine)
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|(key, node)| node.stable_node_id_for_key(key));
+        let tagged = matches
+            .iter()
+            .find(|(_, node)| !node.forced_tags.is_empty())
+            .copied();
+        let selected = if tagged_key {
+            if tagged.is_some() {
+                tagged
+            } else {
+                let mut users = BTreeMap::new();
+                for &(key, node) in &matches {
+                    users
+                        .entry((node.user_id, node.user.as_str()))
+                        .or_insert((key, node));
+                }
+                if users.len() > 1 {
+                    return Err("ambiguous node ownership");
+                }
+                users.into_values().next()
+            }
+        } else {
+            matches
+                .iter()
+                .find(|(_, node)| node.forced_tags.is_empty() && node.user == user)
+                .copied()
+                .or(tagged)
+        };
+        Ok(selected.map(|(key, node)| (key.clone(), node.clone())))
     }
 
     fn resolve_auto_given_name_from_snapshot(
@@ -4532,7 +4626,24 @@ impl MachineRegistry {
     /// Rename a machine. Upstream's `db.NodeRenameNode` validates
     /// against `dnsname.ValidLabel` and rejects duplicate GivenNames
     /// without auto-suffixing.
+    /// Share the live DNS configuration with mutation validation.
+    pub fn set_dns_store(&self, dns: Arc<crate::dns::DnsStore>) {
+        *self.dns.write() = Some(dns);
+    }
+
+    pub(crate) fn valid_fqdn(&self, label: &str) -> bool {
+        let domain_len = self
+            .dns
+            .read()
+            .as_ref()
+            .map_or(0, |dns| dns.spec().base_domain.len());
+        label.len() + usize::from(domain_len != 0) + domain_len <= 255
+    }
+
     pub fn rename(&self, node_key_hex: &str, new_hostname: String) -> bool {
+        if !self.valid_fqdn(&new_hostname) {
+            return false;
+        }
         let node_key_hex = node_key_hex.to_string();
         self.apply_nodestore_bool_update(
             "set_name",
@@ -4872,7 +4983,9 @@ impl MachineRegistry {
         let mut generations = self.connection_generations.write();
         let mut disconnected_at = self.disconnected_at.write();
         let mut route_health_sessions = self.route_health_stable_sessions.write();
+        let mut delivered = self.delivered_peers.write();
         for node_id in &removed_ids {
+            delivered.remove(node_id);
             active.remove(node_id);
             online.remove(node_id);
             generations.remove(node_id);
@@ -4883,6 +4996,7 @@ impl MachineRegistry {
     }
 
     fn forget_batcher_connection_state(&self, node_id: u64) {
+        self.delivered_peers.write().remove(&node_id);
         self.active_connections.write().remove(&node_id);
         self.online_states.write().remove(&node_id);
         self.connection_generations.write().remove(&node_id);
@@ -5583,7 +5697,7 @@ mod registry_tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=113")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -7717,6 +7831,11 @@ mod registry_tests {
             node_id,
             Duration::ZERO,
         );
+        assert_eq!(
+            reg.online_states().get(&node_id),
+            Some(&false),
+            "expired connected node stays offline"
+        );
         drop(guard);
         assert!(reg.delete("nk-a"));
 
@@ -7731,9 +7850,9 @@ mod registry_tests {
                 "node added",
                 "route update",
                 "node added",
-                "node online",
+                "node added",
                 "node offline",
-                "peers removed",
+                "peers removed"
             ]
         );
         let types = changes
@@ -7742,7 +7861,7 @@ mod registry_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             types,
-            vec!["peers", "peers", "peers", "policy", "policy", "peers"]
+            vec!["peers", "peers", "peers", "peers", "patch", "peers"]
         );
         assert!(
             changes
@@ -7760,21 +7879,15 @@ mod registry_tests {
         assert_eq!(changes[2].target_node_id, None);
         assert_eq!(changes[2].content.peers_changed, vec![node_id]);
         assert_eq!(changes[3].target_node_id, None);
-        assert_eq!(
-            changes[3].reason_labels(),
-            vec!["node online", "policy change"]
-        );
-        assert!(changes[3].content.include_policy);
-        assert!(changes[3].content.requires_runtime_peer_computation);
+        assert_eq!(changes[3].reason_labels(), vec!["node added"]);
+        assert!(!changes[3].content.include_policy);
+        assert!(!changes[3].content.requires_runtime_peer_computation);
         assert_eq!(changes[3].origin_node_id, Some(node_id));
-        assert_eq!(changes[3].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[3].content.peers_changed, vec![node_id]);
         assert_eq!(changes[4].target_node_id, None);
-        assert_eq!(
-            changes[4].reason_labels(),
-            vec!["node offline", "policy change"]
-        );
-        assert!(changes[4].content.include_policy);
-        assert!(changes[4].content.requires_runtime_peer_computation);
+        assert_eq!(changes[4].reason_labels(), vec!["node offline"]);
+        assert!(!changes[4].content.include_policy);
+        assert!(!changes[4].content.requires_runtime_peer_computation);
         assert_eq!(changes[4].origin_node_id, Some(node_id));
         assert_eq!(changes[4].content.peer_patches, vec![node_id]);
         assert_eq!(changes[5].target_node_id, None);
@@ -7948,7 +8061,7 @@ mod registry_tests {
     }
 
     #[tokio::test]
-    async fn subnet_router_stream_lifecycle_queues_full_updates() {
+    async fn subnet_router_stream_lifecycle_queues_native_patch_and_policy_updates() {
         let reg = Arc::new(MachineRegistry::new());
         let observer_key = "subnet-observer";
         let router_key = "subnet-router";
@@ -7974,17 +8087,18 @@ mod registry_tests {
             .map_change_history()
             .pop()
             .expect("router online records a map change");
-        assert_eq!(online.reason_labels(), vec!["subnet router online"]);
-        assert_eq!(online.change_type(), "full");
+        assert_eq!(online.reason_labels(), vec!["node online", "policy change"]);
+        assert_eq!(online.change_type(), "policy");
         assert_eq!(online.origin_node_id, Some(router_id));
-        assert!(online.is_full());
+        assert!(!online.is_full());
+        assert!(online.content.requires_runtime_peer_computation);
         let pending = reg.pending_map_changes();
         assert!(
             pending
                 .get(&observer_id)
                 .expect("observer receives subnet-router online change")
                 .iter()
-                .any(MapChange::is_full)
+                .any(|change| change.content.requires_runtime_peer_computation)
         );
         let _ = reg.drain_pending_map_changes();
 
@@ -7994,17 +8108,21 @@ mod registry_tests {
             .map_change_history()
             .pop()
             .expect("router offline records a map change");
-        assert_eq!(offline.reason_labels(), vec!["subnet router offline"]);
-        assert_eq!(offline.change_type(), "full");
+        assert_eq!(
+            offline.reason_labels(),
+            vec!["node offline", "policy change"]
+        );
+        assert_eq!(offline.change_type(), "policy");
         assert_eq!(offline.origin_node_id, Some(router_id));
-        assert!(offline.is_full());
+        assert!(!offline.is_full());
+        assert!(offline.content.requires_runtime_peer_computation);
         let pending = reg.pending_map_changes();
         assert!(
             pending
                 .get(&observer_id)
                 .expect("observer receives subnet-router offline change")
                 .iter()
-                .any(MapChange::is_full)
+                .any(|change| change.content.requires_runtime_peer_computation)
         );
     }
 
@@ -8401,8 +8519,8 @@ mod registry_tests {
         assert_eq!(reg.online_states().get(&node_id), Some(&true));
         assert_eq!(
             reg.map_change_history().len(),
-            history_len,
-            "headscale-go AddNode of another channel does not emit a duplicate online change"
+            history_len + 1,
+            "native Connect emits an online event for each acquired session; only the final release emits offline"
         );
 
         drop(second);
@@ -8411,7 +8529,7 @@ mod registry_tests {
         assert!(!reg.disconnected_at.read().contains_key(&node_id));
         assert_eq!(
             reg.map_change_history().len(),
-            history_len,
+            history_len + 1,
             "headscale-go RemoveNode reports still connected while another channel remains"
         );
 
@@ -9191,7 +9309,7 @@ mod registry_tests {
         reg.update_with(|map| {
             map.get_mut(node_key).unwrap().last_seen = Utc::now() - chrono::Duration::seconds(120);
         });
-        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
         assert_eq!(removed, vec![node_key.to_string()]);
         assert!(reg.get(node_key).is_none());
         assert!(reg.primary_routes_for_snapshot(&reg.snapshot()).is_empty());
@@ -9378,7 +9496,7 @@ mod registry_tests {
         let changes = reg.map_change_history();
         let new_changes = &changes[history_len..];
         assert_eq!(new_changes.len(), 2);
-        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
+        assert_eq!(new_changes[0].reason_labels(), vec!["node key rotated"]);
         assert_eq!(new_changes[0].origin_node_id, Some(node_id));
         assert_eq!(new_changes[1].reason_labels(), vec!["policy change"]);
         assert_eq!(new_changes[1].origin_node_id, Some(node_id));
@@ -9407,7 +9525,7 @@ mod registry_tests {
         c.last_seen = Utc::now() - chrono::Duration::days(7); // ancient but not ephemeral
         reg.upsert("nk-c".to_string(), c);
 
-        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
         assert_eq!(removed, vec!["nk-a".to_string()]);
         assert!(reg.get("nk-a").is_none());
         assert!(reg.get("nk-b").is_some(), "fresh ephemeral survives");
@@ -9430,7 +9548,7 @@ mod registry_tests {
             map.get_mut("nk-a").unwrap().last_seen = Utc::now() - chrono::Duration::seconds(120);
         });
 
-        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
         assert_eq!(removed, vec!["nk-a".to_string()]);
         assert!(!reg.active_connections().contains_key(&node_id));
     }
@@ -9443,7 +9561,7 @@ mod registry_tests {
         a.ephemeral = true;
         a.last_seen = Utc::now();
         reg.upsert("nk-a".to_string(), a);
-        let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
+        let removed = reg.gc_ephemeral(std::time::Duration::from_secs(60));
         assert!(removed.is_empty());
         assert_eq!(reg.len(), 1);
     }
@@ -9514,6 +9632,72 @@ mod registry_tests {
         //   legacy all() emu : 1 Vec + 256 String clones + 256 record
         //                      clones (each itself ~5 strings + 1 Vec)
         // i.e. ~1538 heap allocs per call vs 0 on the new path.
+    }
+    #[tokio::test]
+    async fn release_0295_ssh_verdict_is_consumed_for_accept_and_reject() {
+        for accepted in [false, true] {
+            let cache = RegistrationCache::default();
+            let id = "v".repeat(24);
+            cache.insert_ssh_check(
+                id.clone(),
+                SshCheckBinding {
+                    src_node_id: 1,
+                    dst_node_id: 2,
+                    local_user: "root".into(),
+                },
+            );
+            if accepted {
+                assert!(cache.approve_without_node(&id));
+            } else {
+                assert!(cache.reject(&id, "denied"));
+            }
+            assert_eq!(
+                cache.wait_for_auth(&id).await,
+                if accepted {
+                    AuthWaitOutcome::Accepted
+                } else {
+                    AuthWaitOutcome::Rejected("denied".into())
+                }
+            );
+            assert_eq!(cache.wait_for_auth(&id).await, AuthWaitOutcome::Missing);
+        }
+    }
+
+    #[test]
+    fn release_0295_ambiguous_machine_ownership_cannot_select_hashmap_first() {
+        let registry = MachineRegistry::new();
+        for id in [1, 2] {
+            let mut record = mk_record(id);
+            record.machine_key_hex = "shared-machine".into();
+            record.user_id = Some(u64::from(id));
+            record.user = format!("owner-{id}");
+            registry.upsert(record.node_key_hex.clone(), record);
+        }
+        assert!(
+            registry
+                .registration_node("shared-machine", "", true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn release_0295_rename_cannot_create_an_unmappable_fqdn() {
+        let registry = MachineRegistry::new();
+        let record = mk_record(1);
+        let key = record.node_key_hex.clone();
+        registry.upsert(key.clone(), record.clone());
+        let dns = Arc::new(crate::dns::DnsStore::from_spec(crate::dns::DnsConfigSpec {
+            base_domain: "x".repeat(250),
+            ..crate::dns::DnsConfigSpec::default()
+        }));
+        registry.set_dns_store(dns.clone());
+        assert!(!registry.rename(&key, "valid-label".into()));
+        assert_eq!(registry.get(&key).unwrap().hostname, record.hostname);
+        dns.set_spec(crate::dns::DnsConfigSpec {
+            base_domain: "tail.test".into(),
+            ..crate::dns::DnsConfigSpec::default()
+        });
+        assert!(registry.rename(&key, "valid-label".into()));
     }
 }
 
@@ -9630,6 +9814,11 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
             .registration_cache
             .get(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
+        let _registration = self
+            .state
+            .machines
+            .lock_registration(&pending.machine_key_hex)
+            .await;
         pending.set_user_identity(
             Some(user.id),
             user_name.clone(),
@@ -9803,6 +9992,7 @@ fn control_router_with_optional_oidc_inner(
     wrap_knock: bool,
     options: ControlRouterOptions,
 ) -> Router {
+    state.machines.set_dns_store(state.dns.clone());
     let knock_cfg = state.knock.clone();
     let metrics_registry = Arc::clone(&state.machines);
     let mut inner = Router::new()
@@ -9852,6 +10042,7 @@ fn control_router_with_optional_oidc_inner(
         let register_oidc = oidc.clone();
         let auth_oidc = oidc.clone();
         let callback_oidc = oidc.clone();
+        let confirm_get_oidc = oidc.clone();
         let confirm_oidc = oidc;
         inner
             .route(
@@ -9889,7 +10080,10 @@ fn control_router_with_optional_oidc_inner(
             )
             .route(
                 "/register/confirm/:auth_id",
-                post(
+                get(move |axum::extract::Path(auth_id): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
+                    let oidc = confirm_get_oidc.clone();
+                    async move { crate::oidc::handle_register_confirm_get(oidc, auth_id, headers).await }
+                }).post(
                     move |axum::extract::Path(auth_id): axum::extract::Path<String>,
                           headers: axum::http::HeaderMap,
                           tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>,
@@ -9918,7 +10112,10 @@ fn control_router_with_optional_oidc_inner(
     };
 
     let inner = inner
-        .route("/ts2021", post(noise::handle_ts2021_post))
+        .route(
+            "/ts2021",
+            get(noise::handle_ts2021_post).post(noise::handle_ts2021_post),
+        )
         .fallback(basic_handlers::handle_fallback)
         .with_state(state)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
@@ -10187,6 +10384,9 @@ async fn record_http_metrics(
     req: Request,
     next: Next,
 ) -> AxumResponse {
+    if req.method() == axum::http::Method::OPTIONS {
+        return next.run(req).await;
+    }
     let method = req.method().as_str().to_string();
     let metric_path = prometheus_http_path(req.uri().path()).map(str::to_string);
 

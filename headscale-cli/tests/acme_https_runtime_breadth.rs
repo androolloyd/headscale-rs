@@ -109,9 +109,7 @@ fn assert_acme_cache_unwritten(cache_dir: &Path, hostname: &str) {
         !cache_dir.join(hostname).exists(),
         "ACME certificate cache should not be written before startup bind failure"
     );
-    let entry_count = fs::read_dir(cache_dir)
-        .map(|entries| entries.count())
-        .unwrap_or(0);
+    let entry_count = fs::read_dir(cache_dir).map_or(0, Iterator::count);
     assert_eq!(
         entry_count, 0,
         "ACME cache directory should stay empty before startup bind failure"

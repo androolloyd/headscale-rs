@@ -3482,6 +3482,20 @@ impl MachineRegistry {
         self.inner.read().clone()
     }
 
+    /// Inspect the current registry while holding its read lock for the entire
+    /// synchronous callback. Concurrent registry writers cannot revoke or
+    /// replace membership until the callback returns. Unlike `snapshot`, this
+    /// does not release the guard after cloning an Arc.
+    ///
+    /// The callback must be short, nonblocking and nonreentrant: do not call
+    /// registry methods, await, or perform blocking I/O from it. Cross-component
+    /// admission follows the lock order canonical → registry → meter → I/O;
+    /// acquire canonical authority first and never reacquire it in this callback.
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&HashMap<String, MachineRecord>) -> R) -> R {
+        let current = self.inner.read();
+        f(&current)
+    }
+
     /// Compute primary subnet routes for a registry snapshot while
     /// preserving existing primary ownership where still valid.
     pub fn primary_routes_for_snapshot(
@@ -5405,6 +5419,50 @@ mod registry_tests {
         rec.available_routes = vec![route.to_string()];
         rec.approved_routes = vec![route.to_string()];
         rec
+    }
+
+    #[test]
+    fn with_snapshot_holds_membership_until_callback_returns_then_reads_new_state() {
+        use std::sync::mpsc;
+
+        let registry = Arc::new(MachineRegistry::new());
+        let original = mk_record(1);
+        let key = original.node_key_hex.clone();
+        registry.upsert(key.clone(), original);
+        let (start, started) = mpsc::channel();
+        let (blocked, observed_block) = mpsc::channel();
+        let (written, observed_write) = mpsc::channel();
+        let writer_registry = registry.clone();
+        let writer_key = key.clone();
+        let writer = std::thread::spawn(move || {
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            // This is an actual write-lock attempt while the callback runs,
+            // rather than timing an unscheduled thread or relying on a sleep.
+            assert!(writer_registry.inner.try_write().is_none());
+            blocked.send(()).unwrap();
+            writer_registry.update_with(|machines| {
+                machines.get_mut(&writer_key).unwrap().hostname = "updated".into();
+            });
+            written.send(()).unwrap();
+        });
+        let hostname = registry.with_snapshot(|machines| {
+            assert_eq!(machines[&key].hostname, "host-1");
+            start.send(()).unwrap();
+            observed_block.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                observed_write.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(machines[&key].hostname, "host-1");
+            machines[&key].hostname.clone()
+        });
+        assert_eq!(hostname, "host-1");
+        observed_write.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.join().unwrap();
+        assert_eq!(
+            registry.with_snapshot(|machines| machines[&key].hostname.clone()),
+            "updated"
+        );
     }
 
     fn stable_sorted_keys(keys: &[&str]) -> Vec<String> {

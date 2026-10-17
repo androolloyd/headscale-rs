@@ -1,5 +1,16 @@
 # Changes
 
+## 2026-10-17 — durable embedded mesh control
+
+- Share SQLite/PostgreSQL policy persistence between HTTP admin and gRPC;
+  commit HTTP policy writes before publishing them and hydrate policy explicitly
+  before an embedder opens its listeners. Serialize database writes and cache
+  publication, preserve HuJSON and timestamps, and reject HTTP replacement of
+  externally managed policy.
+- Return bound HTTP/HTTPS addresses to embedding hosts. Supervise raw TLS
+  connection tasks with the listener so cancelling it closes pending clients.
+
+
 ## 2026-10-16 — headscale-go v0.29.5 compatibility update
 
 - Pin the official v0.29.5 release and refresh its Go/Rust differential golden

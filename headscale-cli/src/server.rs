@@ -3220,6 +3220,8 @@ mod tests {
 
         let local_grpc = tokio::spawn(async { std::future::pending::<Result<()>>().await });
         let handle = serve::ServeHandle {
+            http_addr: None,
+            https_addr: None,
             http: None,
             https: None,
             metrics: None,

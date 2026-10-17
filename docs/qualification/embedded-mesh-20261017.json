@@ -1,0 +1,52 @@
+{
+  "scope": "Optional durable HTTP policy support for embedded mesh hosts; shared existing gRPC storage adapters; supervised raw TLS connection lifetime",
+  "base_commit": "7b6b71b245ceff25f27a400588d78dd28e6e340f",
+  "checked_at_utc": "2026-10-17T01:29:20.237948+00:00",
+  "source_sha256": {
+    "CHANGES.md": "a2b4ad4deb364d6b7db5aa5f9b9b2a99826bb4f704472c41388692799339a033",
+    "headscale-api/src/admin/mod.rs": "c3415e2fe4c40c24bc9c05aa7e6203031845c8cdf61d6f8218710fb969873bbe",
+    "headscale-api/src/admin/tests.rs": "499c2a4847acbfbefc4d2d2b11888f7288c56811bd3adfdc70e3e2e5019e9875",
+    "headscale-api/src/grpc.rs": "c3f5177b85111031f3be4607dfcb3e3fd735923a8485b78ac7e2a300e8e61d7b",
+    "headscale-api/src/policy/mod.rs": "3d08e6dc37160e8b4a124e3d3b3a6ec3fdb9b3e493393232cbccba9b71559798",
+    "headscale-api/src/tailscale_wire/raw_tls.rs": "53cad4c2eebc12cedff3b070b9520e8ab004ec9ae7b6341baa402192dade2fab",
+    "headscale-api/src/tailscale_wire/serve.rs": "348baa7f80eb9bf3004720065dcb93df9851b71a1bccab9bb85c4a0e98ec0502",
+    "headscale-cli/src/server.rs": "532cee06e7e62fde7adcb458b5d449cac61307548695ead6b66fcfb63b02b5ff",
+    "headscale-api/src/admin/persistence_tests.rs": "36759b93a18ec25306234120b1ff4eb8cc6df47261165e4b78b1cfce488f12f9",
+    "headscale-api/src/policy/persistence.rs": "67593977d5c893aaa25a1ec6f7f12c176eb5719616d93e12cc7d3372f2a63d5c"
+  },
+  "gates": [
+    {
+      "command": "cargo +1.96.0 test -p headscale-api --no-default-features --features admin --lib admin::persistence_tests",
+      "passed": 5,
+      "failed": 0
+    },
+    {
+      "command": "cargo +1.96.0 test -p headscale-api --features admin --lib",
+      "passed": 923,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "command": "cargo +1.96.0 clippy -p headscale-api -p headscale-cli --all-targets --features headscale-api/postgres-sqlx -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo +1.96.0 test -p headscale-cli --bin headscale serve_shutdown_signal_announces_native_derp_lifecycle_to_raw_session",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "verified": [
+    "HTTP ACL survives SQLite reopen with exact HuJSON and timestamp",
+    "Failed writes preserve the live policy and emit no change notification",
+    "Invalid persisted policy propagates a startup load error",
+    "Concurrent HTTP writes leave the cache at the last committed row",
+    "Externally managed policies refuse HTTP replacement",
+    "Existing API suite and native DERP shutdown test pass"
+  ],
+  "limits": [
+    "PostgreSQL policy adapters compile but were not run against a PostgreSQL server in this gate",
+    "The full headscale-go replacement-parity backlog remains open",
+    "This does not qualify an external deployed control endpoint or stock-client enrollment"
+  ]
+}

@@ -138,6 +138,8 @@ impl ServeConfig {
 /// Handles to the spawned listener tasks. Drop or abort the handles to
 /// stop the listeners.
 pub struct ServeHandle {
+    pub http_addr: Option<SocketAddr>,
+    pub https_addr: Option<SocketAddr>,
     pub http: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub https: Option<JoinHandle<Result<(), std::io::Error>>>,
     pub metrics: Option<JoinHandle<Result<(), std::io::Error>>>,
@@ -287,6 +289,11 @@ pub async fn serve(
         None
     };
 
+    let http_addr = http_listener
+        .as_ref()
+        .map(tokio::net::TcpListener::local_addr)
+        .transpose()?;
+    let https_addr = https_listener.as_ref().map(|(_, addr)| *addr);
     let tls_material = if https_listener.is_some() {
         Some(cfg.tls_source.load()?)
     } else {
@@ -381,6 +388,8 @@ pub async fn serve(
     };
 
     Ok(ServeHandle {
+        http_addr,
+        https_addr,
         http,
         https,
         metrics,

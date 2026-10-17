@@ -133,8 +133,18 @@ pub async fn serve_bound_raw_tls(
         "raw rustls listener bound"
     );
 
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (tcp, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            result = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::debug!(%error, "TLS connection task stopped");
+                }
+                continue;
+            },
+            result = listener.accept() => result,
+        };
+        let (tcp, peer) = match accepted {
             Ok(pair) => pair,
             Err(e) => {
                 // EMFILE etc. — log and keep going.
@@ -149,7 +159,7 @@ pub async fn serve_bound_raw_tls(
         let acceptor = TlsAcceptor::from(tls.current());
         let router = router.clone();
         let wire_state = wire_state.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             if let Err(e) = handle_one(acceptor, tcp, peer, router, wire_state).await {
                 tracing::debug!(
                     target = "tailscale_wire::raw_tls",

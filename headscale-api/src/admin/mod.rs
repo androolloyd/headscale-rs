@@ -75,6 +75,8 @@ pub mod users;
 mod views;
 
 #[cfg(test)]
+mod persistence_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -137,9 +139,28 @@ pub struct AdminState {
     /// [`crate::tailscale_wire::WireState::policy`]. Admin PUT mutates
     /// it; the store's `Notify` wakes parked `/map` long-pollers.
     pub policy: crate::policy::PolicyStore,
+    /// Optional database source. Writes commit before the live policy changes.
+    pub policy_persistence: Option<Arc<dyn crate::policy::persistence::PolicyPersistence>>,
+    pub policy_read_only: bool,
 }
 
 impl AdminState {
+    /// Hydrate the live policy before opening a listener. Database/read/parse
+    /// failures propagate so an embedder cannot silently start with allow-all.
+    pub async fn load_policy_from_persistence(&self) -> Result<bool, String> {
+        let Some(storage) = &self.policy_persistence else {
+            return Ok(false);
+        };
+        let _update = self.policy.lock_update().await;
+        let Some(saved) = storage.get_latest_policy().await? else {
+            return Ok(false);
+        };
+        let doc = crate::policy::parse_hujson_policy(&saved.policy).map_err(|e| e.to_string())?;
+        self.policy
+            .set_at_quiet(doc, saved.policy, saved.updated_at);
+        Ok(true)
+    }
+
     /// Returns a fresh builder.
     pub fn builder() -> AdminStateBuilder {
         AdminStateBuilder::default()
@@ -155,6 +176,8 @@ pub struct AdminStateBuilder {
     api_keys: Option<Arc<dyn ApiKeyAdmin>>,
     derp_regions: usize,
     policy: Option<crate::policy::PolicyStore>,
+    policy_persistence: Option<Arc<dyn crate::policy::persistence::PolicyPersistence>>,
+    policy_read_only: bool,
 }
 
 impl AdminStateBuilder {
@@ -198,6 +221,20 @@ impl AdminStateBuilder {
         self.policy = Some(p);
         self
     }
+    /// Attach the same database policy source used by gRPC. Call
+    /// `load_policy_from_persistence` before serving requests.
+    pub fn policy_persistence(
+        mut self,
+        persistence: Arc<dyn crate::policy::persistence::PolicyPersistence>,
+    ) -> Self {
+        self.policy_persistence = Some(persistence);
+        self
+    }
+    /// Disable HTTP policy replacement when an external authority owns it.
+    pub fn policy_read_only(mut self, read_only: bool) -> Self {
+        self.policy_read_only = read_only;
+        self
+    }
     pub fn build(self) -> AdminState {
         AdminState {
             auth: AdminAuth::new(self.bearer_token.unwrap_or_default()),
@@ -215,6 +252,8 @@ impl AdminStateBuilder {
                 .unwrap_or_else(|| Arc::new(NoopApiKeyAdmin) as Arc<dyn ApiKeyAdmin>),
             derp_regions: self.derp_regions,
             policy: self.policy.unwrap_or_default(),
+            policy_persistence: self.policy_persistence,
+            policy_read_only: self.policy_read_only,
         }
     }
 }
@@ -1358,6 +1397,13 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
     if let Err(r) = guard_api(&s, req.headers().clone()).await {
         return r;
     }
+    if s.policy_read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "policy is managed externally"})),
+        )
+            .into_response();
+    }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1378,7 +1424,23 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
     match crate::policy::parse_hujson_policy(&raw) {
         Ok(doc) => {
             let n_rules = doc.rules.len();
-            s.policy.set_quiet(doc, raw);
+            let _update = s.policy.lock_update().await;
+            if let Some(storage) = &s.policy_persistence {
+                let saved = match storage.set_policy(&raw).await {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        tracing::warn!(%error, "policy persistence failed");
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": "policy persistence unavailable"})),
+                        )
+                            .into_response();
+                    }
+                };
+                s.policy.set_at_quiet(doc, saved.policy, saved.updated_at);
+            } else {
+                s.policy.set_quiet(doc, raw);
+            }
             let auto_approval_result =
                 machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await;
             s.policy.notify_change();

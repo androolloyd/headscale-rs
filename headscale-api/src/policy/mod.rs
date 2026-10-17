@@ -26,6 +26,8 @@ pub mod check;
 pub mod doc;
 pub mod filter;
 pub mod hujson;
+#[cfg(feature = "admin")]
+pub mod persistence;
 pub mod ssh;
 
 use std::{
@@ -74,6 +76,9 @@ struct Inner {
     /// the wake fans out to every parked task in one shot.
     notify: Notify,
     auth_revision: AtomicU64,
+    /// Serialize asynchronous database writes with publication to the live cache.
+    #[cfg(feature = "admin")]
+    update: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -92,6 +97,11 @@ impl PolicyStore {
     /// `/map` will emit non-default `PacketFilter` rules.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) async fn lock_update(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.update.lock().await
     }
 
     /// Atomically replace the policy. The raw hujson is preserved so

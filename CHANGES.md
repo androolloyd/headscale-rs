@@ -1,5 +1,18 @@
 # Changes
 
+## 2026-10-17 — dynamic native DERP authorization
+
+- Add a directional peer-verification hook. Raw and WebSocket sessions reread
+  configured client authorization for each frame and both packet endpoints,
+  including queued delivery; peer policy is checked before forwarding and
+  before writing received packets.
+- Refuse mesh-only and server-only frames from ordinary client connections.
+  A client login does not authorize forwarded-source spoofing or peer teardown.
+- Unconfigured verification retains the library's compatibility defaults.
+  Embedders must supply current membership and peer policy. These checks see
+  endpoint keys and opaque packets, not IP destinations, ports or payment.
+  Revocation applies on the next frame/keepalive; completed IO is not recalled.
+
 ## 2026-10-17 — durable embedded mesh control
 
 - Share SQLite/PostgreSQL policy persistence between HTTP admin and gRPC;

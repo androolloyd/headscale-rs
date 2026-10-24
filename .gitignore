@@ -1,6 +1,5 @@
 /target
 **/target
-/Cargo.lock
 /headscale-core/Cargo.lock
 /headscale-identity/Cargo.lock
 /headscale-resources/Cargo.lock

@@ -1,0 +1,24 @@
+Headscale compatibility implementation
+
+Copyright (c) 2020, Juan Font
+All rights reserved.
+
+NodeCanHaveTag, UserCanHaveTag, and resolved tag-owner IP membership in src/lib.rs.
+Behavior/source reference: github.com/juanfont/headscale v0.29.5,
+commit 0f7d1e536bed9f01dd7161f7637af19bb0908335.
+The original BSD 3-Clause terms are retained in LICENSE-HEADSCALE-GO.
+
+src/go_dnsname.rs follows hscontrol/types/node.go GetFQDN and ValidateGivenName
+at the same Headscale v0.29.5 pin.
+
+src/go_tailcfg_json.rs map_hostinfo_equal and peer_hostinfo_equal follow
+state/maprequest.go hostinfoEqual and peerHostinfoEqual at the same pin.
+
+src/go_policy_shape.rs and GrantRule capability decoding in src/lib.rs follow
+hscontrol/policy/v2/types.go Grant.App validation and compiled.go
+compileOtherDests at the same v0.29.5 pin. The private raw-shape metadata
+retains App map nilness and nil capability values for the serving adapter.
+
+src/go_policy_json.rs and policy normalization in src/lib.rs follow the pinned
+types.go policyJSONOpts, stripMetadataMembers and unmarshalPolicy boundaries.
+Metadata exempts only the exact app key before strict JSON v2 decoding.

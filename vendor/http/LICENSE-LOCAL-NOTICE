@@ -1,0 +1,7 @@
+Local adaptation notice
+
+This is the crates.io http 1.5.0 source with a default-off native header-map
+capacity feature. Local changes are documented in UPSTREAM.md and LOCAL.patch.
+The original MIT OR Apache-2.0 license choice and copyright notices are
+preserved in LICENSE-MIT and LICENSE-APACHE. No Go implementation source is
+copied into this adaptation.

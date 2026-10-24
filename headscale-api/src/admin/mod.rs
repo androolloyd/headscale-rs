@@ -99,20 +99,24 @@ pub use api_keys::{
 };
 pub use auth::{AdminAuth, AuthOutcome, SESSION_COOKIE, SESSION_TTL_SECS};
 pub use machines::{
-    MachineAdmin, MachineAdminError, MachineAdminRecord, PersistentMachineAdmin,
-    PersistentOidcRegistrationHandler, WireMachineAdmin,
+    MachineAdmin, MachineAdminError, MachineAdminMutation, MachineAdminRecord, MachineAdminView,
+    PersistentMachineAdmin, PersistentOidcRegistrationHandler, WireMachineAdmin,
 };
 #[cfg(feature = "postgres-sqlx")]
 pub use machines::{PersistentPostgresMachineAdmin, PersistentPostgresOidcRegistrationHandler};
 pub use preauth::{
-    InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthMintRequest,
+    InMemoryPreauthAdmin, PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthAdminKeyView,
+    PreauthMintRequest,
 };
 #[cfg(feature = "postgres-sqlx")]
 pub use preauth_persistent::PersistentPostgresPreauthAdmin;
 pub use preauth_persistent::PersistentPreauthAdmin;
 #[cfg(feature = "postgres-sqlx")]
 pub use users::PersistentPostgresUserAdmin;
-pub use users::{PersistentUserAdmin, UserAdmin, UserRecord, UserRegistry, UserRegistryError};
+pub use users::{
+    PersistentUserAdmin, PolicyOidcUserStore, UserAdmin, UserRecord, UserRegistrationSnapshot,
+    UserRegistry, UserRegistryError,
+};
 
 use views::Section;
 
@@ -380,9 +384,27 @@ fn guard_html(state: &AdminState, req: &Request) -> Result<AuthOutcome, Response
 /// JSON auth gate. Returns a 401 JSON body on anonymous access. See
 /// [`guard_html`] for the rationale on the `allow(result_large_err)`.
 #[allow(clippy::result_large_err)]
-async fn guard_api(state: &AdminState, headers: HeaderMap) -> Result<AuthOutcome, Response> {
+async fn guard_api(
+    state: &AdminState,
+    headers: HeaderMap,
+    method: axum::http::Method,
+) -> Result<AuthOutcome, Response> {
     let outcome = auth::evaluate_headers(&headers, &state.auth);
     if outcome.is_authenticated() {
+        if !method.is_safe()
+            && let AuthOutcome::Session { payload } = &outcome
+        {
+            let csrf = headers
+                .get("x-csrf-token")
+                .and_then(|value| value.to_str().ok());
+            if !csrf.is_some_and(|token| state.auth.csrf_valid(payload, token)) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "invalid csrf token"})),
+                )
+                    .into_response());
+            }
+        }
         Ok(outcome)
     } else if let Some(token) = auth::bearer_token(&headers).map(str::to_owned)
         && state.api_keys.validate(&token).await
@@ -442,7 +464,12 @@ async fn page_dashboard(State(s): State<AdminState>, req: Request) -> Response {
     };
     let machines = s.machines.list().await;
     let online = machines.iter().filter(|m| m.online).count();
-    let preauth = s.preauth.list().await;
+    let preauth = match s.preauth.list_checked().await {
+        Ok(keys) => keys,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
     let live = preauth
         .iter()
         .filter(|k| k.expires_at > auth::now_unix())
@@ -606,11 +633,8 @@ async fn post_users_create(State(s): State<AdminState>, req: Request) -> Respons
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    match s.users.create(form.name.trim()).await {
-        Ok(_) => {
-            s.policy.refresh();
-            Redirect::to("/admin/users").into_response()
-        }
+    match create_user_and_refresh(s, form.name.trim().to_owned()).await {
+        Ok(_) => Redirect::to("/admin/users").into_response(),
         Err(e) => {
             Redirect::to(&format!("/admin/users?err={}", urlencode(&e.to_string()))).into_response()
         }
@@ -633,9 +657,7 @@ async fn post_users_delete(
     if !check_csrf(&s, &outcome, form.csrf.as_deref()) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    if s.users.delete(&name).await.is_ok() && !s.machines.notify_user_removed_full_update() {
-        s.policy.refresh();
-    }
+    let _ = delete_user_and_refresh(s, name).await;
     Redirect::to("/admin/users").into_response()
 }
 
@@ -648,7 +670,12 @@ async fn page_preauth(
         Ok(o) => o,
         Err(r) => return r,
     };
-    let keys = s.preauth.list().await;
+    let keys = match s.preauth.list_checked().await {
+        Ok(keys) => keys,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
     let mut err: Option<String> = None;
     let mut just_minted: Option<PreauthAdminKey> = None;
     if let Some(qs) = q.as_deref() {
@@ -829,7 +856,7 @@ async fn get_logout(State(_s): State<AdminState>) -> Response {
 // ---------------------------------------------------------------------------
 
 async fn api_users_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.users.all().await {
@@ -844,18 +871,15 @@ struct ApiUserCreate {
 }
 
 async fn api_users_create(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiUserCreate = match read_json(req).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match s.users.create(body.name.trim()).await {
-        Ok(rec) => {
-            s.policy.refresh();
-            (StatusCode::CREATED, Json(rec)).into_response()
-        }
+    match create_user_and_refresh(s, body.name.trim().to_owned()).await {
+        Ok(rec) => (StatusCode::CREATED, Json(rec)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -869,22 +893,59 @@ async fn api_users_delete(
     Path(name): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
-    match s.users.delete(&name).await {
-        Ok(()) => {
-            if !s.machines.notify_user_removed_full_update() {
-                s.policy.refresh();
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
+    match delete_user_and_refresh(s, name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
+async fn create_user_and_refresh(
+    state: AdminState,
+    name: String,
+) -> Result<users::UserRecord, users::UserRegistryError> {
+    let guard = state.policy.lock_mutation().await;
+    crate::tailscale_wire::complete_state_mutation(async move {
+        let _guard = guard;
+        let user = state.users.create(&name).await?;
+        let identities = state.users.policy_users().await?;
+        state
+            .policy
+            .set_users_quiet(identities)
+            .map_err(users::UserRegistryError::Store)?;
+        state.policy.refresh();
+        Ok(user)
+    })
+    .await
+    .map_err(|error| users::UserRegistryError::Store(format!("finishing user creation: {error}")))?
+}
+
+async fn delete_user_and_refresh(
+    state: AdminState,
+    name: String,
+) -> Result<(), users::UserRegistryError> {
+    let guard = state.policy.lock_mutation().await;
+    crate::tailscale_wire::complete_state_mutation(async move {
+        let _guard = guard;
+        state.users.delete(&name).await?;
+        let identities = state.users.policy_users().await?;
+        let change = state
+            .policy
+            .set_users_with_change_quiet(identities)
+            .map_err(users::UserRegistryError::Store)?;
+        if change.policy_changed || !state.machines.notify_user_removed_full_update() {
+            state.policy.refresh();
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| users::UserRegistryError::Store(format!("finishing user deletion: {error}")))?
+}
+
 async fn api_machines_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     Json(s.machines.list().await).into_response()
@@ -895,7 +956,7 @@ async fn api_machines_get(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.machines.get(&id).await {
@@ -916,7 +977,7 @@ async fn api_machines_expire(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     // Body is optional — empty body ⇒ expire immediately.
@@ -952,6 +1013,11 @@ async fn api_machines_expire(
     };
     match s.machines.expire_at(&id, parsed_expiry).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -961,11 +1027,16 @@ async fn api_machines_logout(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.machines.logout(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -980,7 +1051,7 @@ async fn api_machines_rename(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiRenameBody = match read_json(req).await {
@@ -989,6 +1060,11 @@ async fn api_machines_rename(
     };
     match s.machines.rename(&id, &body.hostname).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(MachineAdminError::BadRequest(msg)) => {
             (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
         }
@@ -1020,7 +1096,7 @@ async fn api_machines_tags(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiTagsBody = match read_json(req).await {
@@ -1057,6 +1133,11 @@ async fn api_machines_tags(
     }
     match s.machines.set_tags(&id, body.tags).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(MachineAdminError::BadRequest(msg)) => {
             (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
         }
@@ -1075,7 +1156,7 @@ async fn api_machines_routes(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiRoutesBody = match read_json(req).await {
@@ -1101,6 +1182,11 @@ async fn api_machines_routes(
             )
                 .into_response(),
         },
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(MachineAdminError::BadRequest(msg)) => {
             (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
         }
@@ -1113,20 +1199,32 @@ async fn api_machines_delete(
     Path(id): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.machines.delete(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": msg})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
 async fn api_preauth_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
-    Json(s.preauth.list().await).into_response()
+    match s.preauth.list_checked().await {
+        Ok(keys) => Json(keys).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1146,7 +1244,7 @@ fn default_ttl_secs() -> u64 {
 }
 
 async fn api_preauth_mint(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiPreauthCreate = match read_json(req).await {
@@ -1162,6 +1260,11 @@ async fn api_preauth_mint(State(s): State<AdminState>, req: Request) -> Response
     };
     match s.preauth.mint(mint).await {
         Ok(k) => (StatusCode::CREATED, Json(k)).into_response(),
+        Err(PreauthAdminError::Store(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": message})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1175,17 +1278,22 @@ async fn api_preauth_expire(
     Path(prefix): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.preauth.expire_by_prefix(&prefix).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(PreauthAdminError::Store(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": message})),
+        )
+            .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
 async fn api_keys_list(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     Json(json!({ "api_keys": s.api_keys.list().await })).into_response()
@@ -1216,7 +1324,7 @@ impl ApiKeyExpiration {
 }
 
 async fn api_keys_mint(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiKeyCreateBody = match read_json(req).await {
@@ -1249,7 +1357,7 @@ struct ApiKeyIdentifyBody {
 }
 
 async fn api_keys_expire(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiKeyIdentifyBody = match read_json(req).await {
@@ -1281,7 +1389,7 @@ async fn api_keys_delete(
     Path(prefix): Path<String>,
     req: Request,
 ) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     match s.api_keys.delete_by_prefix(&prefix).await {
@@ -1291,7 +1399,7 @@ async fn api_keys_delete(
 }
 
 async fn api_keys_delete_body(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let body: ApiKeyIdentifyBody = match read_json(req).await {
@@ -1332,7 +1440,7 @@ async fn api_keys_delete_body(State(s): State<AdminState>, req: Request) -> Resp
 /// included) so the CLI can fetch + re-push without a re-serialise
 /// round-trip.
 async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let doc = s.policy.doc();
@@ -1355,7 +1463,7 @@ async fn api_policy_get(State(s): State<AdminState>, req: Request) -> Response {
 /// atomically and every parked `/map` long-poller wakes within
 /// ~1 ms.
 async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
@@ -1376,47 +1484,109 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
         }
     };
     match crate::policy::parse_hujson_policy(&raw) {
-        Ok(doc) => {
-            let n_rules = doc.rules.len();
-            s.policy.set_quiet(doc, raw);
-            let auto_approval_result =
-                machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await;
-            s.policy.notify_change();
-            let auto_approved_nodes = match auto_approval_result {
-                Ok(count) => count,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": e.to_string()})),
-                    )
+        Ok(mut doc) => {
+            let guard = s.policy.lock_mutation().await;
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                if let Err(error) = validate_policy_candidate(&s, &mut doc, &raw, false).await {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
                         .into_response();
                 }
-            };
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "applied": true,
-                    "rules": n_rules,
-                    "autoApprovedNodes": auto_approved_nodes,
-                })),
-            )
-                .into_response()
+                let n_rules = doc.rules.len();
+                if let Err(error) = s.policy.try_set_quiet(doc, raw) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
+                        .into_response();
+                }
+                let auto_approval_result =
+                    machines::apply_policy_auto_approvals(&s.policy, s.machines.as_ref()).await;
+                let auto_approved_nodes = match auto_approval_result {
+                    Ok(count) => {
+                        s.policy.notify_change();
+                        count
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                };
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "applied": true,
+                        "rules": n_rules,
+                        "autoApprovedNodes": auto_approved_nodes,
+                    })),
+                )
+                    .into_response()
+            })
+            .await
+            .unwrap_or_else(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("finishing policy update: {error}")})),
+                )
+                    .into_response()
+            })
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": e.to_string()})),
+            Json(json!({"error": native_policy_parse_error(e)})),
         )
             .into_response(),
     }
 }
 
+async fn validate_policy_candidate(
+    state: &AdminState,
+    doc: &mut crate::policy::PolicyDoc,
+    raw: &str,
+    constructor: bool,
+) -> Result<(), String> {
+    let identities = if constructor {
+        state
+            .users
+            .policy_users()
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        state.policy.users_snapshot()
+    };
+    crate::policy::validate_policy_user_references_for_source(doc, raw, &identities)
+        .map_err(|error| format!("validating policy user references: {error}"))?;
+    doc.users = Some(identities);
+    let nodes = state
+        .machines
+        .policy_nodes_for_check()
+        .await
+        .map_err(|error| error.to_string())?;
+    if constructor {
+        // Validation mirrors CheckPolicy's isolated-manager constructor.
+        // Application keeps SetPolicy's tests-before-install ordering.
+        crate::policy::compile_policy_for_snapshot(doc, raw, &nodes)?;
+        crate::policy::warn_policy_tests_at_boot_for_snapshot(doc, raw, &nodes);
+    }
+    crate::policy::check_policy_semantics_for_snapshot(doc, raw, &nodes)
+}
+
+fn native_policy_parse_error(error: crate::policy::PolicyParseError) -> String {
+    let message = match error {
+        crate::policy::PolicyParseError::Json(message)
+        | crate::policy::PolicyParseError::Schema(message) => message,
+    };
+    format!("parsing policy: {message}")
+}
+
 /// `POST /api/v1/policy/validate` — parse the body as hujson + check
-/// the schema without mutating the store. Returns `200 OK` with
+/// the schema, live user references, constructor compilation and policy/SSH
+/// tests without mutating the store. Returns `200 OK` with
 /// `{"valid": true, "rules": <count>}` on success, `400` with
 /// `{"error": "..."}` on failure. Operators wire this into pre-commit
 /// hooks to catch typos before pushing.
 async fn api_policy_validate(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
@@ -1437,21 +1607,29 @@ async fn api_policy_validate(State(s): State<AdminState>, req: Request) -> Respo
         }
     };
     match crate::policy::parse_hujson_policy(raw) {
-        Ok(doc) => (
-            StatusCode::OK,
-            Json(json!({"valid": true, "rules": doc.rules.len()})),
-        )
-            .into_response(),
+        Ok(mut doc) => {
+            let _guard = s.policy.lock_mutation().await;
+            match validate_policy_candidate(&s, &mut doc, raw, true).await {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(json!({"valid": true, "rules": doc.rules.len()})),
+                )
+                    .into_response(),
+                Err(error) => {
+                    (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response()
+                }
+            }
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": e.to_string()})),
+            Json(json!({"error": native_policy_parse_error(e)})),
         )
             .into_response(),
     }
 }
 
 async fn api_tailnet(State(s): State<AdminState>, req: Request) -> Response {
-    if let Err(r) = guard_api(&s, req.headers().clone()).await {
+    if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
     Json(json!({

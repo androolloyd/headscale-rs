@@ -9,9 +9,9 @@ use anyhow::{Context, Result, bail};
 use headscale_api::{
     dns::{DnsConfigSpec, DnsRequester, DnsStore, MachineDnsRecord},
     policy::{
-        GrantRule, NodeView, PeerMapNode, PolicyAction, PolicyDoc, SshPolicyNode,
-        ViaRouteCandidate,
-        build_peer_map_for_doc, compile_ssh_policy_with_base_url, parse_hujson_policy,
+        GrantRule, NodeView, PeerMapNode, PolicyAction, PolicyCheckNode, PolicyDoc, SshPolicyNode,
+        ViaRouteCandidate, check_policy_semantics, compile_ssh_policy_with_base_url,
+        parse_hujson_policy,
     },
     tailscale_wire::wire::{
         DerpMap, DnsConfig, HostInfo, MapNode, MapRequest, MapResponse, RegisterRequest,
@@ -47,6 +47,8 @@ struct Scenario {
     #[serde(default)]
     expect_policy_error: Option<String>,
     #[serde(default)]
+    audit_test_verdicts: bool,
+    #[serde(default)]
     wire: Option<WireScenario>,
 }
 
@@ -56,6 +58,8 @@ struct ScenarioUser {
     name: String,
     #[serde(default)]
     email: String,
+    #[serde(default)]
+    provider_identifier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +174,10 @@ struct ScenarioOutput {
     policy_tests: Vec<PolicyTestOut>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ssh_tests: Vec<SshPolicyTestOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_tests_passed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_tests_passed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wire: Option<WireOutput>,
 }
@@ -709,13 +717,24 @@ struct HostInfoSummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct FilterRuleOut {
-    #[serde(rename = "SrcIPs")]
+    #[serde(rename = "SrcIPs", serialize_with = "serialize_filter_src_ips")]
     src_ips: Vec<String>,
     dst_ports: Vec<NetPortRangeOut>,
     #[serde(rename = "IPProto", skip_serializing_if = "Vec::is_empty")]
     ip_proto: Vec<i32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     cap_grant: Vec<CapGrantOut>,
+}
+
+fn serialize_filter_src_ips<S>(src_ips: &[String], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if src_ips.is_empty() {
+        serializer.serialize_none()
+    } else {
+        serializer.serialize_some(src_ips)
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -754,7 +773,22 @@ fn main() -> Result<()> {
         let scenario: Scenario = serde_json::from_str(&raw)
             .with_context(|| format!("parsing scenario {}", path.display()))?;
         let policy = serde_json::to_string(&scenario.policy)?;
-        let parsed = parse_hujson_policy(&policy);
+        let parsed = parse_hujson_policy(&policy).and_then(|mut doc| {
+            let users = scenario
+                .users
+                .iter()
+                .map(|user| headscale_api::policy::PolicyUser {
+                    id: user.id,
+                    name: user.name.clone(),
+                    email: user.email.clone(),
+                    provider_identifier: user.provider_identifier.clone(),
+                })
+                .collect::<Vec<_>>();
+            headscale_api::policy::validate_policy_user_references(&doc, &users)
+                .map_err(headscale_api::policy::PolicyParseError::Schema)?;
+            doc.users = Some(users);
+            Ok(doc)
+        });
         if let Some(expect) = scenario.expect_policy_error.as_deref() {
             match parsed {
                 Ok(_) => bail!(
@@ -786,6 +820,8 @@ fn main() -> Result<()> {
                         ssh_policies: Vec::new(),
                         policy_tests: Vec::new(),
                         ssh_tests: Vec::new(),
+                        policy_tests_passed: None,
+                        ssh_tests_passed: None,
                         wire: None,
                     });
                     continue;
@@ -795,6 +831,8 @@ fn main() -> Result<()> {
         let doc =
             parsed.with_context(|| format!("headscale-rs parsing policy for {}", scenario.name))?;
         let filter_nodes = build_filter_nodes(&scenario)?;
+        let (policy_tests_passed, ssh_tests_passed) =
+            run_test_verdicts(&scenario, &doc, &filter_nodes);
         let packet_filter_default_allow = policy_omits_packet_filter_rules(&scenario.policy);
         out.push(ScenarioOutput {
             engine: "headscale-rs",
@@ -819,6 +857,8 @@ fn main() -> Result<()> {
             ssh_policies: run_ssh_checks(&scenario, &doc, &filter_nodes)?,
             policy_tests: normalize_policy_tests(&doc),
             ssh_tests: normalize_ssh_policy_tests(&doc),
+            policy_tests_passed,
+            ssh_tests_passed,
             wire: normalize_wire(scenario.wire, &scenario.nodes, &filter_nodes, &doc)?,
         });
     }
@@ -944,6 +984,47 @@ fn run_filter_node_checks(
     Ok(out)
 }
 
+fn run_test_verdicts(
+    scenario: &Scenario,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+) -> (Option<bool>, Option<bool>) {
+    if !scenario.audit_test_verdicts {
+        return (None, None);
+    }
+    let check_nodes = nodes
+        .iter()
+        .map(|node| PolicyCheckNode {
+            id: node.id,
+            user_id: (node.user_id != 0).then_some(node.user_id),
+            name: scenario
+                .nodes
+                .iter()
+                .find(|source| source.id == node.id)
+                .map(|source| source.hostname.clone())
+                .unwrap_or_else(|| node.id.to_string()),
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+        })
+        .collect::<Vec<_>>();
+    let policy_tests_passed = if doc.tests.is_empty() {
+        None
+    } else {
+        let mut test_doc = doc.clone();
+        test_doc.ssh_tests.clear();
+        Some(check_policy_semantics(&test_doc, &check_nodes).is_ok())
+    };
+    let ssh_tests_passed = if doc.ssh_tests.is_empty() {
+        None
+    } else {
+        let mut test_doc = doc.clone();
+        test_doc.tests.clear();
+        Some(check_policy_semantics(&test_doc, &check_nodes).is_ok())
+    };
+    (policy_tests_passed, ssh_tests_passed)
+}
+
 fn run_peer_map_checks(
     scenario: &Scenario,
     doc: &PolicyDoc,
@@ -964,7 +1045,13 @@ fn run_peer_map_checks(
             routes: node.routes.clone(),
         })
         .collect::<Vec<_>>();
-    let peer_map = build_peer_map_for_doc(doc, &peer_nodes);
+    let owners = nodes
+        .iter()
+        .filter(|node| node.user_id != 0)
+        .map(|node| (node.id, node.user_id))
+        .collect();
+    let peer_map =
+        headscale_api::policy::build_peer_map_for_doc_with_user_ids(doc, &peer_nodes, &owners);
 
     let mut out = Vec::with_capacity(scenario.peer_map_checks.len());
     for check in &scenario.peer_map_checks {
@@ -991,6 +1078,16 @@ fn run_tag_checks(
     doc: &PolicyDoc,
     nodes: &[FilterNode],
 ) -> Result<Vec<TagCheckOut>> {
+    let node_views = nodes
+        .iter()
+        .map(|node| NodeView {
+            user_id: (node.user_id != 0).then_some(node.user_id),
+            addr: node.addrs.first().map(String::as_str),
+            addrs: &node.addrs,
+            user: node.user.as_deref(),
+            tags: &node.tags,
+        })
+        .collect::<Vec<_>>();
     let mut out = Vec::with_capacity(scenario.tag_checks.len());
     for check in &scenario.tag_checks {
         let node = nodes
@@ -1003,6 +1100,7 @@ fn run_tag_checks(
                 )
             })?;
         let view = NodeView {
+            user_id: (node.user_id != 0).then_some(node.user_id),
             addr: node.addrs.first().map(String::as_str),
             addrs: &node.addrs,
             user: node.user.as_deref(),
@@ -1010,7 +1108,7 @@ fn run_tag_checks(
         };
         out.push(TagCheckOut {
             name: check.name.clone(),
-            allowed: doc.node_can_have_tag(&view, &check.tag),
+            allowed: doc.node_can_have_tag_with_nodes(&view, &check.tag, &node_views),
         });
     }
     Ok(out)
@@ -1033,6 +1131,7 @@ fn run_node_attr_checks(
                 )
             })?;
         let view = NodeView {
+            user_id: (node.user_id != 0).then_some(node.user_id),
             addr: node.addrs.first().map(String::as_str),
             addrs: &node.addrs,
             user: node.user.as_deref(),
@@ -1151,15 +1250,7 @@ fn compile_filter_rules(
     let self_node = node_id.and_then(|id| nodes.iter().find(|node| node.id == id));
     let mut out = Vec::new();
     let projected_grant_indices = projected_network_grant_indices(&doc.grants);
-    let via_insert_index = projected_grant_indices.len();
     append_leading_app_only_grant_rules(&mut out, doc, &projected_grant_indices, nodes, self_node);
-    let mut via_appended = false;
-    if via_insert_index == 0 {
-        if let Some(node) = self_node {
-            append_via_grant_rules_for_node(&mut out, doc, nodes, node);
-            via_appended = true;
-        }
-    }
 
     for (rule_index, rule) in doc.rules.iter().enumerate() {
         if !matches!(rule.action, PolicyAction::Accept) {
@@ -1171,12 +1262,6 @@ fn compile_filter_rules(
                 nodes,
                 self_node,
             );
-            if !via_appended && rule_index + 1 == via_insert_index {
-                if let Some(node) = self_node {
-                    append_via_grant_rules_for_node(&mut out, doc, nodes, node);
-                    via_appended = true;
-                }
-            }
             continue;
         }
 
@@ -1190,12 +1275,6 @@ fn compile_filter_rules(
                 nodes,
                 self_node,
             );
-            if !via_appended && rule_index + 1 == via_insert_index {
-                if let Some(node) = self_node {
-                    append_via_grant_rules_for_node(&mut out, doc, nodes, node);
-                    via_appended = true;
-                }
-            }
             continue;
         }
 
@@ -1210,16 +1289,6 @@ fn compile_filter_rules(
                 }
             }
 
-            if !self_dsts.is_empty() && node.tags.is_empty() {
-                let same_user = same_user_untagged_nodes(nodes, node);
-                let self_src = nodes_matching_prefixes(&same_user, &src_ips);
-                let self_dst = same_user
-                    .iter()
-                    .flat_map(|node| node.addrs.clone())
-                    .collect::<Vec<_>>();
-                append_filter_rules(&mut out, &self_src, &self_dst, &rule.ports);
-            }
-
             if !other_dsts.is_empty() {
                 let dst_ips = resolve_principals(
                     doc,
@@ -1229,6 +1298,16 @@ fn compile_filter_rules(
                     PrincipalPosition::Destination,
                 );
                 append_filter_rules(&mut out, &src_ips, &dst_ips, &rule.ports);
+            }
+
+            if !self_dsts.is_empty() && node.tags.is_empty() {
+                let same_user = same_user_untagged_nodes(nodes, node);
+                let self_src = nodes_matching_prefixes(&same_user, &src_ips);
+                let self_dst = same_user
+                    .iter()
+                    .flat_map(|node| node.addrs.clone())
+                    .collect::<Vec<_>>();
+                append_filter_rules(&mut out, &self_src, &self_dst, &rule.ports);
             }
         } else {
             let dst_ips =
@@ -1244,24 +1323,54 @@ fn compile_filter_rules(
             nodes,
             self_node,
         );
-        if !via_appended && rule_index + 1 == via_insert_index {
-            if let Some(node) = self_node {
-                append_via_grant_rules_for_node(&mut out, doc, nodes, node);
-                via_appended = true;
-            }
-        }
     }
 
-    if !via_appended {
-        if let Some(node) = self_node {
-            append_via_grant_rules_for_node(&mut out, doc, nodes, node);
-        }
+    if let Some(node) = self_node {
+        append_exit_node_self_rules(&mut out, doc, nodes, node);
     }
 
     if let Some(node) = self_node {
         coalesce_filter_rules(reduce_filter_rules_for_node(out, node))
     } else {
         coalesce_filter_rules(out)
+    }
+}
+
+fn append_exit_node_self_rules(
+    out: &mut Vec<FilterRuleOut>,
+    doc: &PolicyDoc,
+    nodes: &[FilterNode],
+    self_node: &FilterNode,
+) {
+    if !self_node.routes.iter().any(|route| is_exit_route(route)) {
+        return;
+    }
+
+    let mut by_user: BTreeMap<u64, Vec<&FilterNode>> = BTreeMap::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node.tags.is_empty() && node.user_id != 0)
+    {
+        by_user.entry(node.user_id).or_default().push(node);
+    }
+    for rule in &doc.rules {
+        if !matches!(rule.action, PolicyAction::Accept)
+            || !rule.dst.iter().any(|dst| dst == "autogroup:self")
+        {
+            continue;
+        }
+        let src_ips = resolve_principals(doc, &rule.src, nodes, None, PrincipalPosition::Source);
+        for (user_id, user_nodes) in &by_user {
+            if self_node.tags.is_empty() && self_node.user_id == *user_id {
+                continue;
+            }
+            let user_src = nodes_matching_prefixes(user_nodes, &src_ips);
+            let user_dst = user_nodes
+                .iter()
+                .flat_map(|node| node_addr_prefixes(node))
+                .collect::<Vec<_>>();
+            append_filter_rules(out, &user_src, &user_dst, &rule.ports);
+        }
     }
 }
 
@@ -1300,8 +1409,7 @@ fn append_projected_grant_app_rules_after_rule(
     let Some(&grant_index) = projected_grant_indices.get(rule_index) else {
         return;
     };
-    let Some(grant) = doc.grants.get(grant_index)
-    else {
+    let Some(grant) = doc.grants.get(grant_index) else {
         return;
     };
     append_app_grant_rule(out, doc, grant, nodes, self_node);
@@ -1326,10 +1434,13 @@ fn append_app_only_grant_rules_in_range(
         .skip(start)
         .take(end.saturating_sub(start))
     {
-        if !grant.ip.is_empty() {
-            continue;
+        if !grant.via.is_empty() {
+            if let Some(node) = self_node {
+                append_via_grant_rules_for_node(out, doc, std::slice::from_ref(grant), nodes, node);
+            }
+        } else if grant.ip.is_empty() {
+            append_app_grant_rule(out, doc, grant, nodes, self_node);
         }
-        append_app_grant_rule(out, doc, grant, nodes, self_node);
     }
 }
 
@@ -1356,7 +1467,17 @@ fn append_app_grant_rule(
     }
 
     if !other_dsts.is_empty() {
-        append_cap_grant_rules(out, doc, nodes, &src_ips, &other_dsts, &grant.app);
+        let companion_src = resolve_companion_sources(doc, &grant.src, nodes);
+        append_cap_grant_rules(
+            out,
+            doc,
+            nodes,
+            &src_ips,
+            &companion_src,
+            &other_dsts,
+            &grant.app,
+            false,
+        );
     }
 
     let Some(node) = self_node else {
@@ -1375,7 +1496,26 @@ fn append_app_grant_rule(
         .iter()
         .flat_map(|node| node_addr_prefixes(node))
         .collect::<Vec<_>>();
-    append_cap_grant_rules(out, doc, nodes, &self_src, &self_dst, &grant.app);
+    append_cap_grant_rules(
+        out, doc, nodes, &self_src, &self_src, &self_dst, &grant.app, true,
+    );
+}
+
+fn resolve_companion_sources(
+    doc: &PolicyDoc,
+    tokens: &[String],
+    nodes: &[FilterNode],
+) -> Vec<String> {
+    if tokens.iter().any(|token| token == "autogroup:danger-all") {
+        return vec!["*".to_string()];
+    }
+    let mut out = Vec::new();
+    for token in tokens {
+        for source in resolve_principal(doc, token, nodes, None, PrincipalPosition::Source) {
+            push_unique_string(&mut out, source);
+        }
+    }
+    aggregate_prefixes(out)
 }
 
 fn append_cap_grant_rules(
@@ -1383,26 +1523,49 @@ fn append_cap_grant_rules(
     doc: &PolicyDoc,
     nodes: &[FilterNode],
     src_ips: &[String],
+    companion_src: &[String],
     dsts: &[String],
     app: &BTreeMap<String, Vec<Value>>,
+    group_dsts: bool,
 ) {
-    let mut cap_grants = Vec::new();
+    let mut cap_grants: Vec<CapGrantOut> = Vec::new();
     let mut dst_ip_strings = Vec::new();
     for dst in dsts {
         let dst_prefixes = resolve_cap_grant_dst(doc, dst, nodes);
         if dst_prefixes.is_empty() {
             continue;
         }
-        for prefix in &dst_prefixes {
-            if let Some(net) = parse_ip_net(prefix) {
-                push_unique_string(&mut dst_ip_strings, net.addr().to_string());
+        if dst == "*" {
+            dst_ip_strings.extend(tailnet_filter_srcs());
+        } else {
+            for prefix in &dst_prefixes {
+                if let Some(net) = parse_ip_net(prefix) {
+                    let value = if net.prefix_len() == if net.addr().is_ipv4() { 32 } else { 128 } {
+                        net.addr().to_string()
+                    } else {
+                        net.to_string()
+                    };
+                    dst_ip_strings.push(value);
+                }
             }
         }
-        cap_grants.push(CapGrantOut {
-            dsts: dst_prefixes,
-            caps: Vec::new(),
-            cap_map: wire_cap_map(app),
-        });
+        if group_dsts {
+            if let Some(grant) = cap_grants.first_mut() {
+                grant.dsts.extend(dst_prefixes);
+            } else {
+                cap_grants.push(CapGrantOut {
+                    dsts: dst_prefixes,
+                    caps: Vec::new(),
+                    cap_map: wire_cap_map(app),
+                });
+            }
+        } else {
+            cap_grants.push(CapGrantOut {
+                dsts: dst_prefixes,
+                caps: Vec::new(),
+                cap_map: wire_cap_map(app),
+            });
+        }
     }
     if cap_grants.is_empty() {
         return;
@@ -1417,7 +1580,10 @@ fn append_cap_grant_rules(
     normalize_filter_rule(&mut rule);
     append_coalesced_filter_rule(out, rule);
 
-    append_companion_cap_grant_rules(out, &dst_ip_strings, src_ips, app);
+    if dsts.iter().any(|dst| dst == "*") {
+        dst_ip_strings.extend(approved_subnet_routes(nodes));
+    }
+    append_companion_cap_grant_rules(out, &dst_ip_strings, companion_src, app);
 }
 
 fn wire_cap_map(app: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, Option<Vec<Value>>> {
@@ -1506,10 +1672,11 @@ fn resolve_cap_grant_dst(doc: &PolicyDoc, token: &str, nodes: &[FilterNode]) -> 
 fn append_via_grant_rules_for_node(
     out: &mut Vec<FilterRuleOut>,
     doc: &PolicyDoc,
+    grants: &[GrantRule],
     nodes: &[FilterNode],
     self_node: &FilterNode,
 ) {
-    for grant in &doc.grants {
+    for grant in grants {
         if grant.via.is_empty() || grant.ip.is_empty() {
             continue;
         }
@@ -1573,6 +1740,11 @@ fn resolve_principals(
     self_node: Option<&FilterNode>,
     position: PrincipalPosition,
 ) -> Vec<String> {
+    if position == PrincipalPosition::Source
+        && tokens.iter().any(|token| token == "autogroup:danger-all")
+    {
+        return vec!["*".to_string()];
+    }
     let mut out = Vec::new();
     for token in tokens {
         let resolved = resolve_principal(doc, token, nodes, self_node, position);
@@ -1581,19 +1753,26 @@ fn resolve_principals(
             PrincipalPosition::Destination => aggregate_prefixes_as_cidrs(resolved),
         };
         for value in normalized {
-            push_unique_string(&mut out, value);
-        }
-    }
-    if position == PrincipalPosition::Source && tokens.iter().any(|token| token == "*") {
-        for route in approved_subnet_routes(nodes) {
-            push_unique_string(&mut out, route);
+            if position == PrincipalPosition::Destination {
+                out.push(value);
+            } else {
+                push_unique_string(&mut out, value);
+            }
         }
     }
     match position {
-        PrincipalPosition::Source => aggregate_prefixes(out),
+        PrincipalPosition::Source => {
+            let mut normalized = aggregate_prefixes(out);
+            if tokens.iter().any(|token| token == "*") {
+                for route in approved_subnet_routes(nodes) {
+                    push_unique_string(&mut normalized, route);
+                }
+                normalized.sort();
+            }
+            normalized
+        }
         PrincipalPosition::Destination => {
             out.sort();
-            out.dedup();
             out
         }
     }
@@ -1623,9 +1802,11 @@ fn resolve_principal(
             .iter()
             .filter(|node| node.tags.is_empty())
             .filter(|node| {
-                node.user
-                    .as_deref()
-                    .is_some_and(|user| user_matches(token, user))
+                doc.user_matches(
+                    token,
+                    (node.user_id != 0).then_some(node.user_id),
+                    node.user.as_deref(),
+                )
             })
             .flat_map(node_addr_prefixes)
             .collect();
@@ -2056,10 +2237,6 @@ fn is_single_ip(net: &IpNet) -> bool {
     }
 }
 
-fn user_matches(entry: &str, user: &str) -> bool {
-    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
-}
-
 fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
     node_tag == policy_tag_without_prefix
         || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
@@ -2129,6 +2306,14 @@ fn aggregate_prefixes(values: Vec<String>) -> Vec<String> {
             push_unique_string(&mut passthrough, value);
             continue;
         };
+        let host_prefix = match net {
+            IpNet::V4(_) => 32,
+            IpNet::V6(_) => 128,
+        };
+        if net.prefix_len() != host_prefix {
+            push_unique_string(&mut passthrough, net.to_string());
+            continue;
+        }
         match ipnet_interval(&net) {
             (32, start, end) => v4.push((start, end)),
             (128, start, end) => v6.push((start, end)),
@@ -2475,6 +2660,7 @@ fn run_route_checks(
                 )
             })?;
         let view = NodeView {
+            user_id: (node.user_id != 0).then_some(node.user_id),
             addr: node.addrs.first().map(String::as_str),
             addrs: &node.addrs,
             user: node.user.as_deref(),
@@ -2552,12 +2738,14 @@ fn run_via_route_checks(
                 )
             })?;
         let viewer_view = NodeView {
+            user_id: (viewer.user_id != 0).then_some(viewer.user_id),
             addr: viewer.addrs.first().map(String::as_str),
             addrs: &viewer.addrs,
             user: viewer.user.as_deref(),
             tags: &viewer.tags,
         };
         let peer_view = NodeView {
+            user_id: (peer.user_id != 0).then_some(peer.user_id),
             addr: peer.addrs.first().map(String::as_str),
             addrs: &peer.addrs,
             user: peer.user.as_deref(),
@@ -2642,6 +2830,7 @@ fn run_runtime_dns_requester_checks(
                 )
             })?;
         let view = NodeView {
+            user_id: (filter_node.user_id != 0).then_some(filter_node.user_id),
             addr: filter_node.addrs.first().map(String::as_str),
             addrs: &filter_node.addrs,
             user: filter_node.user.as_deref(),
@@ -2732,12 +2921,23 @@ fn normalize_wire(
     Ok(Some(out))
 }
 
+/// The wire layer decodes an absent key as the all-zero key, as Go's key types
+/// do. Go's harness reports a key only when `!IsZero()`, so mirror that.
+fn omit_zero_key(key: String) -> String {
+    let hex = key.rsplit_once(':').map_or(key.as_str(), |(_, hex)| hex);
+    if hex.chars().all(|c| c == '0') {
+        String::new()
+    } else {
+        key
+    }
+}
+
 fn summarize_register_request(req: RegisterRequest) -> RegisterRequestSummary {
     RegisterRequestSummary {
         version: req.version,
         node_key: req.node_key,
-        old_node_key: req.old_node_key,
-        nl_key: req.nl_key,
+        old_node_key: omit_zero_key(req.old_node_key),
+        nl_key: omit_zero_key(req.nl_key),
         auth_key: req.auth.map(|auth| auth.auth_key).unwrap_or_default(),
         hostinfo: req.hostinfo.map(summarize_hostinfo),
         followup: req.followup.unwrap_or_default(),

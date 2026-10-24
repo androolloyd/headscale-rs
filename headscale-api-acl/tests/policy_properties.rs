@@ -391,7 +391,7 @@ fn hujson_nested_member_names_match_go_case_insensitive_json() {
           "GRANTS": [{
             "SRC": ["tag:server"],
             "DST": ["10.0.0.0/8"],
-            "IP": ["TCP:443"]
+            "IP": ["tcp:443"]
           }]
         }"#,
     )
@@ -406,25 +406,18 @@ fn hujson_nested_member_names_match_go_case_insensitive_json() {
 #[test]
 fn hujson_rejects_non_go_nested_policy_fields() {
     for (name, raw, want) in [
-        (
-            "autoapprovers-snake-exit-node",
-            r#"{"autoApprovers":{"exit_node":["alice@"]}}"#,
-            "unknown field \"exit_node\"",
-        ),
-        (
-            "nodeattrs-snake-ip-pool",
-            r#"{"nodeAttrs":[{"target":["*"],"ip_pool":[]}]}"#,
-            "unknown field \"ip_pool\"",
-        ),
+        // Not listed: Go's json v2 matches member names ignoring case and
+        // `_`/`-`, so `exit_node` is the same member as `exitNode` there.
+        // `ip_pool` is likewise `ipPool` to Go, which has that member.
         (
             "nodeattrs-app",
             r#"{"nodeAttrs":[{"target":["*"],"app":{"example.com/cap/use":[]}}]}"#,
-            "unknown field \"app\"",
+            "unknown field: \"app\"",
         ),
         (
             "top-level-postures",
             r#"{"postures":{"corp":["node:os == 'linux'"]}}"#,
-            "unknown field \"postures\"",
+            "unknown field: \"postures\"",
         ),
     ] {
         let err = parse_hujson_policy(raw).expect_err(name).to_string();
@@ -456,7 +449,7 @@ fn hujson_validates_hosts_tag_owners_and_auto_approvers_eagerly() {
         (
             "invalid-autoapprover-route-prefix",
             r#"{"autoApprovers":{"routes":{"not-a-prefix":["alice@"]}}}"#,
-            "invalid prefix",
+            "netip.ParsePrefix(\"not-a-prefix\")",
         ),
         (
             "invalid-autoapprover-principal",
@@ -508,6 +501,8 @@ fn hujson_accepts_go_numeric_tcp_udp_sctp_protocols_with_specific_ports() {
 
     assert_eq!(
         sorted_flat_rule_ports(&doc),
-        vec!["sctp/9899", "tcp/443", "tcp/8443", "udp/53"]
+        // Both spellings compile to the same IPProto/ports as Go; grants keep
+        // the numeric protocol as written.
+        vec!["6/8443", "sctp/9899", "tcp/443", "udp/53"]
     );
 }

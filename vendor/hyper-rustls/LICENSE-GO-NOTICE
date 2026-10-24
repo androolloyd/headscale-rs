@@ -1,0 +1,7 @@
+Native TLS record-boundary EOF handshake adapter
+Copyright 2009 The Go Authors. All rights reserved.
+The explicitly selected native handshake EOF mapping follows Go1.26.9
+crypto/tls/conn.go readRecordOrCCS, readHandshakeBytes and handshakeContext.
+Original HyperRustls license files are preserved. Go BSD terms are retained in
+LICENSE-GO. UPSTREAM.md records exact pins, feature selection and unqualified
+error identity, broader TLS alert/decoder and runtime boundaries.

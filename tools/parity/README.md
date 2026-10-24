@@ -71,6 +71,23 @@ Headscale-go does not expose public `ipsets`; keep only negative rejection
 coverage for that field, and do not add positive `ipset:` alias scenarios unless
 a future upstream baseline adds the same surface.
 
+The pinned v0.29.5 Tailscale compatibility captures can be converted into
+temporary scenarios and compared with both engines using
+`./scripts/headscale_go_capture_diff.sh`. The converter writes a manifest with
+each upstream capture's SHA-256, API response code, and generated scenario.
+`CAPTURE_PATTERN='capture-acl-c05.json'` narrows a run to one generated case.
+`CAPTURE_AUDIT=1` checks each converted case independently and writes a JSON
+report under `target/parity/capture-audit.json`, classifying output mismatches
+and Go or Rust policy rejections without stopping at the first case. The audit
+exits nonzero on output mismatches or one-sided rejections.
+Generated files stay under `target/parity/captures-v0.29.5`; promote confirmed
+cases into `tools/parity/scenarios` only after reviewing their semantic output.
+All 875 pinned captures, including upstream API 400/500 cases, are converted.
+The audit checks policy load, differential output, and pass/fail verdicts for
+policy and SSH tests against the pinned Go policy manager. Upstream SaaS API
+verdicts and exact rejection text are recorded as context, not asserted as
+equivalent to headscale-go.
+
 The default differential run also checks
 `tools/parity/golden/headscale-go-v0.29.5.json`
 after confirming the Rust and Go outputs match. Refresh it with

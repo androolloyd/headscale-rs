@@ -19,20 +19,24 @@
 //!   terminated naturally — the client expects keepalive frames
 //!   carrying `{"KeepAlive":true}` in the same compression mode every
 //!   <120 s (`watchdogTimeout`).
-//!   Our `Stream=false` test path emits a single plaintext JSON
-//!   `MapResponse` for the non-noise direct-router tests; the prod
-//!   `Stream=true` path emits the upstream framed stream.
+//!   Native `/machine/map` requests with `Stream=false` return empty
+//!   HTTP 200 after their state update. The keyed embedding extension
+//!   retains its single plaintext JSON `MapResponse` compatibility path.
 //! - **Long-poll wake via `tokio::sync::Notify` on the registry.**
 //!   Cheaper than a watch channel for the 2-peer test and the
 //!   correctness story is simpler — every register notifies, every
 //!   waiter wakes and recomputes the snapshot.
-//! - **Keepalive interval = 30s.** Upstream watchdog is 120s, so this
-//!   leaves 4x headroom for slow links. Keepalive bytes are
+//! - **Keepalive period = 50s plus per-session 0..8999ms jitter.**
+//!   Successful frame writes restart the wait; wakes without a frame do not.
+//!   Keepalive bytes are
 //!   a framed `{"KeepAlive":true}` payload, NOT a bare newline.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -43,6 +47,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use rand_core::RngCore;
 
 use super::noise::NoisePeerMachineKey;
 
@@ -50,29 +55,34 @@ use super::noise::NoisePeerMachineKey;
 /// `Content-Type: application/json`. Stock `tailscale up` (via
 /// controlhttp over the noise tunnel) posts without the header set;
 /// the `axum::Json` extractor 415s those requests.
-fn parse_map_body(raw: &[u8]) -> Result<MapRequest, Response> {
-    serde_json::from_slice::<MapRequest>(raw).map_err(|e| {
-        tracing::error!(target = "tailscale_wire::map", error = %e, "invalid MapRequest JSON");
+fn parse_map_body(raw: &[u8]) -> Result<(MapRequest, Option<serde_json::Value>), Response> {
+    let invalid = |error: &dyn std::fmt::Display| {
+        tracing::error!(target = "tailscale_wire::map", error = %error, "invalid MapRequest JSON");
         plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
-    })
+    };
+    super::request_json::map(raw).map_err(|error| invalid(&error))
 }
+
+#[cfg(test)]
+use super::wire::NetInfo;
 use serde::Serialize;
 
 use super::register::{
     CAPABILITY_DEFAULT_AUTO_UPDATE, CAPABILITY_FILE_SHARING, record_to_map_node,
 };
 use super::routes::{
-    active_exit_routes, auto_approved_routes_for_node, normalize_advertised_routes,
+    active_exit_routes, auto_approval_changed, auto_approved_routes_for_node,
+    auto_approved_routes_with_snapshot,
 };
 use super::wire::{
-    DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetInfo,
-    NetPortRange, PeerChange, PingRequest, PortRange, UserProfile, ZERO_NODE_KEY_HEX,
-    is_auto_derived_given_name, is_supported_capability_version, stable_id_from_key,
-    strip_key_prefix, unsupported_client_error,
+    DebugConfig, DnsConfig, FilterRule, HostInfo, MapNode, MapRequest, MapResponse, NetPortRange,
+    PeerChange, PingRequest, PortRange, UserProfile, ZERO_DISCO_KEY, ZERO_NODE_KEY_HEX,
+    is_supported_capability_version, stable_id_from_key, strip_key_prefix,
+    unsupported_client_error, valid_given_name_label,
 };
 use super::{
-    MachineRecord, MapChange, MapChangeReason, MapResponseDebugStore, MapResponseDebugType,
-    WireState,
+    MachineRecord, MachineSnapshot, MapChange, MapChangeReason, MapResponseDebugStore,
+    MapResponseDebugType, WireState,
 };
 
 use crate::dns::{DnsRequester, DnsStore, MachineDnsRecord};
@@ -84,57 +94,90 @@ const MAP_NODE_KEY_MISMATCH_ERROR: &str =
 const NODE_ATTR_DISABLE_IPV4: &str = "disable-ipv4";
 const NODE_ATTR_SUGGEST_EXIT_NODE: &str = "suggest-exit-node";
 
-fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
-    let mut merged = serde_json::to_value(current).unwrap_or_default();
-    let mut update = serde_json::to_value(requested).unwrap_or_default();
-    if let Some(fields) = update.as_object_mut() {
-        for key in ["Hostname", "OS", "OSVersion"] {
-            if fields
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(str::is_empty)
-            {
-                fields.remove(key);
+/// The Noise sender must observe deletion even while a DATA write is waiting
+/// for HTTP/2 capacity and cannot poll the response body. The flag belongs to
+/// this exact stream, so rekeying or reinserting a node cannot erase deletion.
+#[derive(Clone)]
+pub(super) struct MapStreamDeletion {
+    cancelled: Arc<AtomicBool>,
+    generation: tokio::sync::watch::Receiver<u64>,
+}
+
+impl MapStreamDeletion {
+    pub(super) async fn deleted(mut self) {
+        loop {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            // Subscribe before handing off the body, then check the sticky
+            // flag before every wait. Removal publication wakes this watch.
+            if self.generation.changed().await.is_err() {
+                // Registry shutdown alone is not a node-deletion signal.
+                std::future::pending::<()>().await;
             }
         }
-        fields.remove("RoutableIPs");
     }
-    if let (Some(merged), Some(update)) = (merged.as_object_mut(), update.as_object()) {
-        for (key, value) in update {
-            merged.insert(key.clone(), value.clone());
-        }
+}
+
+fn current_stream_node_key(
+    machines: &super::MachineRegistry,
+    connection: &super::StreamConnectionGuard,
+) -> Result<String, std::io::Error> {
+    if connection.cancelled.load(Ordering::SeqCst) {
+        return Err(std::io::Error::other("map session node deleted"));
     }
-    serde_json::from_value(merged).unwrap_or_else(|_| requested.clone())
+    // Go map sessions belong to a stable NodeID, not its current NodeKey.
+    // Reauthentication can move that key while this session remains open.
+    machines
+        .node_key_by_id(connection.node_id)
+        .ok_or_else(|| std::io::Error::other("map session node deleted"))
+}
+
+fn host_info_for_map_update(current: &HostInfo, requested: &HostInfo) -> HostInfo {
+    // Hostinfo is a replacement snapshot. Only omitted NetInfo carries over:
+    // clients send it only when network conditions change.
+    let mut next = requested.clone();
+    if next.net_info.is_none() {
+        next.net_info.clone_from(&current.net_info);
+    }
+    next
 }
 
 fn hostinfo_preferred_derp(hostinfo: &HostInfo) -> i32 {
     hostinfo
         .net_info
         .as_ref()
-        .map_or(0, |net_info| net_info.preferred_derp)
+        .map_or(0, |info| info.preferred_derp)
 }
 
-fn clear_preferred_derp_for_compare(hostinfo: &mut HostInfo) {
-    if let Some(net_info) = hostinfo.net_info.as_mut() {
-        net_info.preferred_derp = 0;
-        if *net_info == NetInfo::default() {
-            hostinfo.net_info = None;
-        }
-    }
+pub(super) fn peer_hostinfo_equal(previous: &HostInfo, current: &HostInfo) -> bool {
+    previous.hostname == current.hostname
+        && previous.os == current.os
+        && previous.services == current.services
+        && previous.ssh_host_keys == current.ssh_host_keys
+        && previous.location == current.location
+        && previous.app_connector == current.app_connector
+        && previous.routable_ips == current.routable_ips
 }
 
-fn hostinfo_change_is_only_preferred_derp(previous: &HostInfo, current: &HostInfo) -> bool {
-    let previous_derp = hostinfo_preferred_derp(previous);
-    let current_derp = hostinfo_preferred_derp(current);
-    if current_derp == 0 || previous_derp == current_derp {
+fn endpoints_equal(previous: &[String], current: &[String]) -> bool {
+    if previous.len() != current.len() {
         return false;
     }
-
-    let mut previous = previous.clone();
-    let mut current = current.clone();
-    clear_preferred_derp_for_compare(&mut previous);
-    clear_preferred_derp_for_compare(&mut current);
+    let mut previous = previous.iter().collect::<Vec<_>>();
+    let mut current = current.iter().collect::<Vec<_>>();
+    previous.sort_unstable();
+    current.sort_unstable();
     previous == current
+}
+
+fn endpoint_broadcast_worthy(previous: &[String], current: &[String], types: &[i32]) -> bool {
+    if previous.is_empty() {
+        return !current.is_empty();
+    }
+    current.iter().enumerate().any(|(index, endpoint)| {
+        !previous.contains(endpoint) && !matches!(types.get(index).copied().unwrap_or(0), 2 | 4)
+    })
 }
 
 const MAP_COMPRESSION_ZSTD: &str = "zstd";
@@ -169,7 +212,14 @@ fn record_mapresponse_debug(
     debug_type: MapResponseDebugType,
     response: &MapResponse,
 ) {
-    if let Err(err) = store.record(node_id, debug_type, response) {
+    if !store.enabled() {
+        return;
+    }
+    let result = serde_json::to_value(response)
+        .map_err(std::io::Error::other)
+        .and_then(|value| super::map_json::encode(&value, None))
+        .and_then(|body| store.record_json(node_id, debug_type, &body));
+    if let Err(err) = result {
         tracing::error!(
             target: "tailscale_wire::map",
             error = %err,
@@ -177,6 +227,65 @@ fn record_mapresponse_debug(
             debug_type = debug_type.as_str(),
             "writing MapResponse debug dump"
         );
+    }
+}
+
+fn record_mapresponse_snapshot_debug(
+    store: &MapResponseDebugStore,
+    node_id: u64,
+    debug_type: MapResponseDebugType,
+    response: &MapResponse,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+) {
+    if !store.enabled() {
+        return;
+    }
+    let result = snapshot_json(response, machines, snapshot, None)
+        .and_then(|body| store.record_json(node_id, debug_type, &body));
+    if let Err(err) = result {
+        tracing::error!(
+            target: "tailscale_wire::map",
+            error = %err,
+            node_id,
+            debug_type = debug_type.as_str(),
+            "writing MapResponse debug dump"
+        );
+    }
+}
+
+fn record_mapresponse_filter_snapshot_debug(
+    store: &MapResponseDebugStore,
+    node_id: u64,
+    debug_type: MapResponseDebugType,
+    response: &MapResponse,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+) {
+    record_mapresponse_filter_snapshot_debug_with_derp(
+        store, node_id, debug_type, response, machines, snapshot, filter, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_mapresponse_filter_snapshot_debug_with_derp(
+    store: &MapResponseDebugStore,
+    node_id: u64,
+    debug_type: MapResponseDebugType,
+    response: &MapResponse,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+    native_derp: Option<&super::native_derp::NativeDerpMap>,
+) {
+    if !store.enabled() {
+        return;
+    }
+    let result = snapshot_json_with_derp(response, machines, snapshot, filter, native_derp)
+        .and_then(|body| store.record_json(node_id, debug_type, &body));
+    if let Err(error) = result {
+        tracing::error!(%error, node_id, debug_type = debug_type.as_str(), "writing MapResponse debug dump");
     }
 }
 
@@ -189,7 +298,7 @@ fn record_mapresponse_debug(
 fn build_dns_for_snapshot(
     dns: &DnsStore,
     policy: &PolicyStore,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
 ) -> DnsConfig {
     let machines: Vec<MachineDnsRecord> = snapshot
@@ -201,30 +310,26 @@ fn build_dns_for_snapshot(
             node_id: rec.stable_node_id_for_key(node_hex),
         })
         .collect();
+    let mut has_hostinfo = true;
     let requester = snapshot.get(self_node_key).map(|rec| {
         let primary_ip = rec.primary_addr_string();
-        let addrs = rec.address_strings();
-        let view = NodeView {
-            addr: primary_ip.as_deref(),
-            addrs: &addrs,
-            user: Some(&rec.user),
-            tags: &rec.forced_tags,
-        };
-        let node_attrs = policy.node_attrs_for(&view);
+        let node_attrs = node_attrs_for_record(rec, policy, snapshot);
         let host_info = rec.host_info_for_node();
+        has_hostinfo = snapshot
+            .hostinfo
+            .get(&rec.stable_node_id())
+            .is_none_or(|saved| !saved.value.is_null() || saved.projection != host_info);
         DnsRequester {
-            hostname: rec.hostname.clone(),
+            hostname: rec.raw_hostname.clone(),
             os: host_info.os,
             primary_ip,
             node_attrs,
         }
     });
-    dns.build_for_requester(&machines, requester.as_ref())
+    dns.build_for_requester_with_hostinfo(&machines, requester.as_ref(), has_hostinfo)
 }
 
-fn exit_routes_for_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
-) -> HashMap<String, Vec<String>> {
+fn exit_routes_for_snapshot(snapshot: &MachineSnapshot) -> HashMap<String, Vec<String>> {
     snapshot
         .iter()
         .filter_map(|(node_key, rec)| {
@@ -238,20 +343,12 @@ fn exit_routes_for_snapshot(
         .collect()
 }
 
-fn served_routes_for_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
-) -> HashMap<String, Vec<String>> {
+fn served_routes_for_snapshot(snapshot: &MachineSnapshot) -> HashMap<String, Vec<String>> {
     snapshot
         .iter()
         .filter_map(|(node_key, rec)| {
-            let mut routes =
+            let routes =
                 super::routes::active_approved_routes(&rec.available_routes, &rec.approved_routes);
-            routes.extend(active_exit_routes(
-                &rec.available_routes,
-                &rec.approved_routes,
-            ));
-            routes.sort();
-            routes.dedup();
             if routes.is_empty() {
                 None
             } else {
@@ -262,43 +359,56 @@ fn served_routes_for_snapshot(
 }
 
 fn policy_auto_approval_updates_for_snapshot(
+    _machines: &super::MachineRegistry,
     policy: &PolicyStore,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
 ) -> Result<Vec<(String, Vec<String>)>, String> {
+    let approvers = policy.route_approval_snapshot();
     let mut updates = Vec::new();
     for (node_key, rec) in snapshot {
-        let addr = rec.primary_addr_string().unwrap_or_default();
-        let user = (!rec.user.is_empty()).then_some(rec.user.as_str());
-        let approved = auto_approved_routes_for_node(
-            policy,
-            &addr,
-            user,
+        let (user_id, user) = snapshot.policy_identity(rec);
+        let approved = auto_approved_routes_with_snapshot(
+            &approvers,
+            &snapshot.policy_addresses(rec),
+            user.as_deref(),
+            user_id,
             &rec.forced_tags,
             &rec.approved_routes,
             &rec.available_routes,
         )?;
-        if approved != rec.approved_routes {
+        if auto_approval_changed(&rec.approved_routes, &approved)? {
             updates.push((node_key.clone(), approved));
         }
     }
     Ok(updates)
 }
 
-fn apply_policy_auto_approvals_for_registry(
+pub(crate) fn apply_policy_auto_approvals_for_registry(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
     policy: &PolicyStore,
 ) -> Result<usize, String> {
-    let updates = policy_auto_approval_updates_for_snapshot(policy, &machines.snapshot())?;
+    if machines.policy_routes_require_persistence() {
+        // Native policy writers own the awaitable SQL fan-out. A map watcher
+        // must never invent a second cache-only approval after that save.
+        return Ok(0);
+    }
+    let snapshot = machines.snapshot_with_metadata();
+    let updates = policy_auto_approval_updates_for_snapshot(machines, policy, &snapshot)?;
     if updates.is_empty() {
         return Ok(0);
     }
 
-    let (changed, missing) = machines.set_approved_routes_many(updates);
-    if let Some(node_key) = missing.into_iter().next() {
-        return Err(format!(
-            "node {node_key} disappeared while applying policy auto-approvals"
-        ));
-    }
+    let updates = updates
+        .into_iter()
+        .filter_map(|(key, routes)| {
+            snapshot
+                .get(&key)
+                .map(|node| (node.stable_node_id_for_key(&key), routes))
+        })
+        .collect();
+    drop(snapshot);
+    let changed = machines.apply_policy_route_approvals(updates).len();
+    machines.try_refresh_policy_node_inputs()?;
     Ok(changed)
 }
 
@@ -307,16 +417,21 @@ fn route_is_exit_default(route: &str) -> bool {
 }
 
 fn peer_map_nodes_from_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
     served_routes: &HashMap<String, Vec<String>>,
 ) -> Vec<PeerMapNode> {
     snapshot
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
             id: rec.stable_node_id_for_key(node_key),
-            addr: rec.primary_addr_string().unwrap_or_default(),
-            addrs: rec.address_strings(),
-            user: (!rec.user.is_empty()).then(|| rec.user.clone()),
+            addr: snapshot
+                .policy_addresses(rec)
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+            addrs: snapshot.policy_addresses(rec),
+            user: snapshot.policy_identity(rec).1,
             tags: rec.forced_tags.clone(),
             routes: served_routes.get(node_key).cloned().unwrap_or_default(),
         })
@@ -324,23 +439,39 @@ fn peer_map_nodes_from_snapshot(
 }
 
 fn packet_filter_nodes_from_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
     served_routes: &HashMap<String, Vec<String>>,
 ) -> Vec<PacketFilterNode> {
     snapshot
         .iter()
         .map(|(node_key, rec)| PacketFilterNode {
             id: rec.stable_node_id_for_key(node_key),
-            user_id: rec.user_id,
-            user: (!rec.user.is_empty()).then(|| rec.user.clone()),
-            addrs: rec.address_strings(),
+            user_id: snapshot.policy_identity(rec).0,
+            user: snapshot.policy_identity(rec).1,
+            addrs: snapshot.policy_addresses(rec),
             tags: rec.forced_tags.clone(),
             routes: served_routes.get(node_key).cloned().unwrap_or_default(),
         })
         .collect()
 }
 
-fn node_id_for_key(snapshot: &HashMap<String, MachineRecord>, node_key: &str) -> u64 {
+fn policy_owner_ids(
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+) -> BTreeMap<u64, u64> {
+    snapshot
+        .iter()
+        .filter_map(|(key, record)| {
+            snapshot
+                .policy_identity(record)
+                .0
+                .map(|owner| (record.stable_node_id_for_key(key), owner))
+        })
+        .collect()
+}
+
+fn node_id_for_key(snapshot: &MachineSnapshot, node_key: &str) -> u64 {
     snapshot.get(node_key).map_or_else(
         || stable_id_from_key(node_key),
         |rec| rec.stable_node_id_for_key(node_key),
@@ -348,13 +479,15 @@ fn node_id_for_key(snapshot: &HashMap<String, MachineRecord>, node_key: &str) ->
 }
 
 fn allowed_peer_ids_for_snapshot(
+    machines: &super::MachineRegistry,
     policy: &PolicyStore,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     served_routes: &HashMap<String, Vec<String>>,
 ) -> Option<BTreeSet<u64>> {
-    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
-    let peer_map = policy.build_peer_map(&nodes)?;
+    let nodes = peer_map_nodes_from_snapshot(machines, snapshot, served_routes);
+    let peer_map =
+        policy.build_peer_map_with_user_ids(&nodes, &policy_owner_ids(machines, snapshot))?;
     let self_id = node_id_for_key(snapshot, self_node_key);
     Some(
         peer_map
@@ -375,7 +508,7 @@ fn peer_allowed(allowed_ids: Option<&BTreeSet<u64>>, node_key: &str, rec: &Machi
 
 fn add_co_router_primary_peer_ids(
     allowed_ids: &mut Option<BTreeSet<u64>>,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     primary_routes: &HashMap<String, Vec<String>>,
     served_routes: &HashMap<String, Vec<String>>,
@@ -411,43 +544,39 @@ fn add_co_router_primary_peer_ids(
 }
 
 fn select_routes_for_viewer(
+    machines: &super::MachineRegistry,
     policy: &PolicyStore,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     peer_node_key: &str,
     primary_routes: &HashMap<String, Vec<String>>,
     exit_routes: &HashMap<String, Vec<String>>,
     served_routes: &HashMap<String, Vec<String>>,
 ) -> (Vec<String>, Vec<String>) {
-    let mut selected_primary = primary_routes
+    let global_primary = primary_routes
         .get(peer_node_key)
         .cloned()
         .unwrap_or_default();
-    let global_primary = selected_primary.clone();
-    let mut allowed_routes = selected_primary.clone();
+    let mut allowed_routes = global_primary.clone();
     allowed_routes.extend(exit_routes.get(peer_node_key).cloned().unwrap_or_default());
 
-    let nodes = peer_map_nodes_from_snapshot(snapshot, served_routes);
+    let nodes = peer_map_nodes_from_snapshot(machines, snapshot, served_routes);
+    let owners = policy_owner_ids(machines, snapshot);
     let viewer_id = node_id_for_key(snapshot, self_node_key);
     let peer_id = node_id_for_key(snapshot, peer_node_key);
 
     let route_allowed_by_policy = |route: &String| {
-        route_is_exit_default(route)
-            || policy
-                .can_access_route_for_peer(&nodes, viewer_id, peer_id, route)
-                .unwrap_or(true)
+        policy
+            .can_access_route_for_peer_with_user_ids(&nodes, viewer_id, peer_id, route, &owners)
+            .unwrap_or(true)
     };
-    selected_primary.retain(route_allowed_by_policy);
     allowed_routes.retain(route_allowed_by_policy);
 
-    if let Some(via) = policy.via_routes_for_peer(&nodes, viewer_id, peer_id) {
-        selected_primary.retain(|route| !via.exclude.contains(route));
+    if let Some(via) = policy.via_routes_for_peer_with_user_ids(&nodes, viewer_id, peer_id, &owners)
+    {
         allowed_routes.retain(|route| !via.exclude.contains(route));
         for route in via.include {
             let is_global_primary = global_primary.contains(&route);
-            if is_global_primary && !selected_primary.contains(&route) {
-                selected_primary.push(route.clone());
-            }
             if !allowed_routes.contains(&route) {
                 let use_primary = via.use_primary.contains(&route);
                 if is_global_primary || !use_primary {
@@ -469,9 +598,6 @@ fn select_routes_for_viewer(
                 .flatten()
                 .filter(|route| viewer_subnet_routes.contains(route))
             {
-                if !selected_primary.contains(route) {
-                    selected_primary.push(route.clone());
-                }
                 if !allowed_routes.contains(route) {
                     allowed_routes.push(route.clone());
                 }
@@ -479,21 +605,62 @@ fn select_routes_for_viewer(
         }
     }
 
-    selected_primary.sort();
-    selected_primary.dedup();
-    allowed_routes.sort();
-    allowed_routes.dedup();
+    // TailNode derives PrimaryRoutes from all returned non-exit routes,
+    // including per-viewer via routes; it does not re-test global ownership.
+    let selected_primary = allowed_routes
+        .iter()
+        .filter(|route| !route_is_exit_default(route))
+        .cloned()
+        .collect();
     (selected_primary, allowed_routes)
 }
 
-fn peer_state_from_nodes(peers: &[MapNode]) -> BTreeMap<u64, MapNode> {
-    peers.iter().map(|peer| (peer.id, peer.clone())).collect()
+#[derive(Clone)]
+struct MapStateNode {
+    node: MapNode,
+    hostinfo: serde_json::Value,
+    slices: Option<super::machine_snapshot::MapNodeSlices>,
 }
 
-fn peer_ids_from_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
-    self_node_key: &str,
-) -> BTreeSet<u64> {
+fn map_state_node(
+    node: &MapNode,
+    record: Option<&MachineRecord>,
+    snapshot: &MachineSnapshot,
+) -> MapStateNode {
+    let hostinfo = record
+        .map_or_else(
+            || serde_json::to_value(&node.hostinfo),
+            |record| snapshot.map_hostinfo_value(record),
+        )
+        .expect("Hostinfo contains validated JSON primitives");
+    MapStateNode {
+        node: node.clone(),
+        hostinfo,
+        slices: record.map(|record| snapshot.map_node_slices(record, node)),
+    }
+}
+
+fn peer_state_from_nodes(
+    peers: &[MapNode],
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+) -> BTreeMap<u64, MapStateNode> {
+    let records = snapshot
+        .iter()
+        .map(|(key, record)| (record.stable_node_id_for_key(key), record))
+        .collect::<HashMap<_, _>>();
+    peers
+        .iter()
+        .map(|node| {
+            (
+                node.id,
+                map_state_node(node, records.get(&node.id).copied(), snapshot),
+            )
+        })
+        .collect()
+}
+
+fn peer_ids_from_snapshot(snapshot: &MachineSnapshot, self_node_key: &str) -> BTreeSet<u64> {
     snapshot
         .iter()
         .filter(|(node_key, _rec)| node_key.as_str() != self_node_key)
@@ -504,16 +671,22 @@ fn peer_ids_from_snapshot(
 fn apply_transient_lifecycle(
     node: &mut MapNode,
     rec: &MachineRecord,
+    snapshot: &MachineSnapshot,
     online_states: &BTreeMap<u64, bool>,
 ) {
     let online = !rec.is_expired_at(chrono::Utc::now())
         && online_states.get(&node.id).copied().unwrap_or(false);
     node.online = Some(online);
-    node.last_seen = if online { None } else { Some(rec.last_seen) };
+    node.last_seen = if online {
+        None
+    } else {
+        snapshot.map_last_seen(rec)
+    };
 }
 
 fn self_map_node_from_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     tailnet_domain: &str,
     primary_routes: &HashMap<String, Vec<String>>,
@@ -526,96 +699,51 @@ fn self_map_node_from_snapshot(
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
     let mut own_node = record_to_map_node(own, tailnet_domain);
-    apply_transient_lifecycle(&mut own_node, own, online_states);
+    own_node.addresses = snapshot.map_address_prefixes(own);
+    if !own.is_tagged() && snapshot.native_user_association_id(own).is_some() {
+        own_node.user = own.user_id.unwrap_or(0);
+    }
+    apply_transient_lifecycle(&mut own_node, own, snapshot, online_states);
     own_node.cap = cap_version;
-    apply_routes_to_map_node(
-        &mut own_node,
+    apply_runtime_caps_to_map_node(&mut own_node, taildrop_enabled, auto_update_enabled);
+    apply_policy_attrs_to_map_node(&mut own_node, own, policy, snapshot);
+    let own_routes =
+        super::routes::active_primary_routes(&own.available_routes, &own.approved_routes);
+    let identity = snapshot.policy_identity(own);
+    let policy_node = PacketFilterNode {
+        id: own_node.id,
+        user_id: identity.0,
+        user: identity.1,
+        addrs: snapshot.policy_addresses(own),
+        tags: own.forced_tags.clone(),
+        routes: own_routes,
+    };
+    let selected_primary = policy.reduce_self_routes(
+        &policy_node,
         primary_routes
             .get(self_node_key)
             .map(Vec::as_slice)
             .unwrap_or_default(),
+    );
+    apply_routes_to_map_node(
+        &mut own_node,
+        &selected_primary,
         exit_routes
             .get(self_node_key)
             .map(Vec::as_slice)
             .unwrap_or_default(),
     );
-    apply_policy_attrs_to_map_node(&mut own_node, own, policy);
-    apply_runtime_caps_to_map_node(&mut own_node, taildrop_enabled, auto_update_enabled);
     Some(own_node)
 }
 
-fn self_map_node_for_registry(
-    machines: &crate::tailscale_wire::MachineRegistry,
-    policy: &PolicyStore,
-    dns: &DnsStore,
-    self_node_key: &str,
-    cap_version: u32,
-    taildrop_enabled: bool,
-    auto_update_enabled: bool,
-) -> Option<MapNode> {
-    let snapshot = machines.snapshot();
-    let tailnet_domain = tailnet_domain(dns);
-    let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
-    let exit_routes = exit_routes_for_snapshot(&snapshot);
-    let online_states = machines.online_states();
-    self_map_node_from_snapshot(
-        &snapshot,
-        self_node_key,
-        &tailnet_domain,
-        &primary_routes,
-        &exit_routes,
-        &online_states,
-        policy,
-        cap_version,
-        taildrop_enabled,
-        auto_update_enabled,
-    )
-}
-
-fn visible_peer_state_for_registry(
-    machines: &crate::tailscale_wire::MachineRegistry,
-    policy: &PolicyStore,
-    dns: &DnsStore,
-    self_node_key: &str,
-    cap_version: u32,
-) -> BTreeMap<u64, MapNode> {
-    let snapshot = machines.snapshot();
-    let tailnet_domain = tailnet_domain(dns);
-    let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
-    let exit_routes = exit_routes_for_snapshot(&snapshot);
-    let online_states = machines.online_states();
-    let served_routes = served_routes_for_snapshot(&snapshot);
-    let mut allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
-    add_co_router_primary_peer_ids(
-        &mut allowed_peer_ids,
-        &snapshot,
-        self_node_key,
-        &primary_routes,
-        &served_routes,
-    );
-    let peers = visible_peer_map_nodes(
-        &snapshot,
-        self_node_key,
-        allowed_peer_ids.as_ref(),
-        &tailnet_domain,
-        &primary_routes,
-        &exit_routes,
-        &served_routes,
-        &online_states,
-        policy,
-        cap_version,
-    );
-    peer_state_from_nodes(&peers)
-}
-
 fn incremental_allowed_peer_ids_for_snapshot(
+    machines: &super::MachineRegistry,
     policy: &PolicyStore,
-    snapshot: &HashMap<String, MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     served_routes: &HashMap<String, Vec<String>>,
     initial_peer_ids: &BTreeSet<u64>,
-    last_peer_state: &BTreeMap<u64, MapNode>,
+    last_peer_state: &BTreeMap<u64, MapStateNode>,
 ) -> Option<BTreeSet<u64>> {
     if policy.acl_rule_count() == Some(0) {
         let current_peer_ids = peer_ids_from_snapshot(snapshot, self_node_key);
@@ -627,11 +755,79 @@ fn incremental_allowed_peer_ids_for_snapshot(
         surfaced_peer_ids.extend(current_peer_ids.difference(initial_peer_ids).copied());
         return Some(surfaced_peer_ids);
     }
-    allowed_peer_ids_for_snapshot(policy, snapshot, self_node_key, served_routes)
+    allowed_peer_ids_for_snapshot(machines, policy, snapshot, self_node_key, served_routes)
 }
 
 fn map_node_json_value(node: &MapNode) -> Option<serde_json::Value> {
     serde_json::to_value(node).ok()
+}
+
+fn self_node_value(node: &MapNode) -> Option<serde_json::Value> {
+    use headscale_api_acl::go_key::PublicKeyKind;
+    let mut value = map_node_json_value(node)?;
+    let fields = value.as_object_mut()?;
+    // Hostinfo is compared from the retained typed source. Pinned Node.Equal
+    // intentionally does not compare ExitNodeDNSResolvers.
+    fields.remove("Hostinfo");
+    fields.remove("ExitNodeDNSResolvers");
+    fields.remove("DataPlaneAuditLogID");
+    for (name, time) in [("Created", node.created), ("KeyExpiry", node.key_expiry)] {
+        if time.is_none_or(|time| {
+            time.timestamp() == -62_135_596_800 && time.timestamp_subsec_nanos() == 0
+        }) {
+            fields.remove(name);
+        }
+    }
+    for (name, kind) in [
+        ("Key", PublicKeyKind::Node),
+        ("Machine", PublicKeyKind::Machine),
+        ("DiscoKey", PublicKeyKind::Disco),
+    ] {
+        let key = fields
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|key| kind.parse_text(key).ok());
+        if let Some(key) = key {
+            if name != "Key" && key == kind.zero_text() {
+                fields.remove(name);
+            } else {
+                fields.insert(name.into(), serde_json::Value::String(key));
+            }
+        }
+    }
+    Some(value)
+}
+
+fn self_nodes_equal(previous: &MapStateNode, current: &MapStateNode) -> bool {
+    previous.slices == current.slices
+        && matches!((self_node_value(&previous.node), self_node_value(&current.node)),
+        (Some(previous), Some(current)) if previous == current)
+        && headscale_api_acl::go_tailcfg_json::node_hostinfo_equal(
+            &previous.hostinfo,
+            &current.hostinfo,
+        )
+}
+
+/// Preview per-connection self state in frame order. The caller publishes
+/// this state only after the whole encoded batch succeeds.
+fn self_node_delta(
+    response: &mut MapResponse,
+    current: Option<&MapStateNode>,
+    last: &mut Option<MapStateNode>,
+) {
+    if response.node.is_none() {
+        return;
+    }
+    if let Some(current) = current {
+        if last
+            .as_ref()
+            .is_some_and(|last| self_nodes_equal(last, current))
+        {
+            response.node = None;
+        } else {
+            *last = Some(current.clone());
+        }
+    }
 }
 
 fn map_nodes_equal_ignoring_last_seen(previous: &MapNode, current: &MapNode) -> bool {
@@ -654,12 +850,24 @@ fn peer_patch_if_only_patchable_fields_changed(
     let derp_changed = previous.home_derp != current.home_derp;
     let online_changed = previous.online != current.online;
     let key_expiry_changed = previous.key_expiry != current.key_expiry;
-    if !endpoints_changed && !derp_changed && !online_changed && !key_expiry_changed {
+    let keys_changed = previous.key != current.key || previous.disco_key != current.disco_key;
+    if !endpoints_changed
+        && !derp_changed
+        && !online_changed
+        && !key_expiry_changed
+        && !keys_changed
+    {
         return None;
     }
     // `tailcfg.PeerChange.DERPRegion` omits zero, and headscale-go falls
     // back to a full node update for clears instead of an empty patch.
     if derp_changed && current.home_derp == 0 {
+        return None;
+    }
+    // Non-key updates use a whole node to clear an omitted expiry. Key
+    // patches retain Go's zero-time value in the object; omitzero suppresses
+    // that value during native wire encoding.
+    if key_expiry_changed && current.key_expiry.is_none() && !keys_changed {
         return None;
     }
     // headscale-go sends full updates for subnet-router online/offline
@@ -683,6 +891,11 @@ fn peer_patch_if_only_patchable_fields_changed(
     current_normalized.last_seen = previous.last_seen;
     current_normalized.online = previous.online;
     current_normalized.key_expiry = previous.key_expiry;
+    current_normalized.key.clone_from(&previous.key);
+    current_normalized.disco_key.clone_from(&previous.disco_key);
+    if peer_hostinfo_equal(&previous.hostinfo, &current.hostinfo) {
+        current_normalized.hostinfo.clone_from(&previous.hostinfo);
+    }
 
     if map_node_json_value(&previous_normalized) != map_node_json_value(&current_normalized) {
         return None;
@@ -690,7 +903,7 @@ fn peer_patch_if_only_patchable_fields_changed(
 
     Some(PeerChange {
         node_id: current.id,
-        endpoints: if endpoints_changed {
+        endpoints: if endpoints_changed || keys_changed {
             current.endpoints.clone()
         } else {
             Vec::new()
@@ -698,7 +911,22 @@ fn peer_patch_if_only_patchable_fields_changed(
         derp_region: if derp_changed { current.home_derp } else { 0 },
         online: if online_changed { current.online } else { None },
         last_seen: None,
-        key_expiry: if key_expiry_changed {
+        key: keys_changed.then(|| current.key.clone()),
+        disco_key: keys_changed.then(|| {
+            current
+                .disco_key
+                .clone()
+                .unwrap_or_else(|| ZERO_DISCO_KEY.to_owned())
+        }),
+        key_expiry: if keys_changed {
+            Some(current.key_expiry.unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+                    .expect("valid Go zero date")
+                    .and_hms_opt(0, 0, 0)
+                    .expect("valid Go zero time")
+                    .and_utc()
+            }))
+        } else if key_expiry_changed {
             current.key_expiry
         } else {
             None
@@ -707,8 +935,44 @@ fn peer_patch_if_only_patchable_fields_changed(
     })
 }
 
+fn map_name_is_valid(rec: &MachineRecord, tailnet_domain: &str) -> bool {
+    headscale_api_acl::go_dnsname::validate_fqdn(&rec.hostname, tailnet_domain).is_ok()
+}
+
+/// Report stored names that need an operator rename before they can be used as
+/// DNS labels or rendered in a map. The startup scan does not alter node data.
+pub fn log_invalid_persisted_names(
+    registry: &super::MachineRegistry,
+    tailnet_domain: &str,
+) -> usize {
+    let snapshot = registry.snapshot_with_metadata();
+    let mut findings = 0;
+    for rec in snapshot.values() {
+        let label_valid = valid_given_name_label(&rec.hostname);
+        if label_valid && map_name_is_valid(rec, tailnet_domain) {
+            continue;
+        }
+        findings += 1;
+        let problem = if label_valid {
+            "stored given name exceeds the FQDN length limit"
+        } else {
+            "stored given name is not a valid DNS label"
+        };
+        tracing::warn!(
+            node_id = rec.stable_node_id(),
+            hostname = %rec.host_info_for_node().hostname,
+            check = "given-name-maps-to-valid-fqdn",
+            problem,
+            fix = %format!("headscale nodes rename {} <name>", rec.stable_node_id()),
+            "node has invalid data that breaks map generation; rename it to restore connectivity"
+        );
+    }
+    findings
+}
+
 fn visible_peer_map_nodes(
-    snapshot: &HashMap<String, MachineRecord>,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     allowed_ids: Option<&BTreeSet<u64>>,
     tailnet_domain: &str,
@@ -723,11 +987,28 @@ fn visible_peer_map_nodes(
         .iter()
         .filter(|(node_key, _)| node_key.as_str() != self_node_key)
         .filter(|(node_key, rec)| peer_allowed(allowed_ids, node_key, rec))
+        .filter(|(_node_key, rec)| {
+            let valid = map_name_is_valid(rec, tailnet_domain);
+            if !valid {
+                tracing::warn!(
+                    node_id = rec.stable_node_id(),
+                    hostname = %rec.hostname,
+                    viewer = %self_node_key,
+                    "dropping peer with invalid FQDN from map; rename the node"
+                );
+            }
+            valid
+        })
         .map(|(node_key, rec)| {
             let mut node = record_to_map_node(rec, tailnet_domain);
-            apply_transient_lifecycle(&mut node, rec, online_states);
+            node.addresses = snapshot.map_address_prefixes(rec);
+            if !rec.is_tagged() && snapshot.native_user_association_id(rec).is_some() {
+                node.user = rec.user_id.unwrap_or(0);
+            }
+            apply_transient_lifecycle(&mut node, rec, snapshot, online_states);
             node.cap = cap_version;
             let (selected_primary, selected_allowed) = select_routes_for_viewer(
+                machines,
                 policy,
                 snapshot,
                 self_node_key,
@@ -736,32 +1017,79 @@ fn visible_peer_map_nodes(
                 exit_routes,
                 served_routes,
             );
-            apply_selected_routes_to_map_node(&mut node, &selected_primary, &selected_allowed);
             apply_peer_cap_map_to_map_node(
                 &mut node,
                 rec,
                 policy,
+                snapshot,
                 exit_routes
                     .get(node_key)
                     .is_some_and(|routes| !routes.is_empty()),
             );
+            apply_selected_routes_to_map_node(&mut node, &selected_primary, &selected_allowed);
             node
         })
         .collect();
-    peers.sort_by_key(|node| node.id);
+    peers.sort_by_key(|node| node.id as i64);
     peers
 }
 
 fn user_profiles_for_snapshot(
-    snapshot: &HashMap<String, MachineRecord>,
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     allowed_ids: Option<&BTreeSet<u64>>,
 ) -> Vec<UserProfile> {
+    if snapshot.get(self_node_key).is_some_and(|record| {
+        !record.is_tagged() && snapshot.native_user_association_id(record) == Some(None)
+    }) {
+        return Vec::new();
+    }
     let mut profiles = BTreeMap::new();
-    for (node_key, rec) in snapshot {
+    // Go starts with self and replaces a user's profile with each peer's
+    // cached association in ascending node-ID order.
+    let mut nodes = snapshot.iter().collect::<Vec<_>>();
+    nodes.sort_by_key(|(key, record)| {
+        (
+            key.as_str() != self_node_key,
+            record.stable_node_id_for_key(key),
+        )
+    });
+    for (node_key, rec) in nodes {
         if node_key == self_node_key || peer_allowed(allowed_ids, node_key, rec) {
             let profile = rec.tailscale_user_profile();
-            profiles.entry(profile.id).or_insert(profile);
+            #[cfg(feature = "admin")]
+            let profile = if rec.is_tagged() {
+                profile
+            } else {
+                match snapshot.cached_native_user(rec) {
+                    Some(None) => continue,
+                    Some(Some(user)) => {
+                        let login_name = if !user.email.is_empty() {
+                            user.email.clone()
+                        } else if !user.name.is_empty() {
+                            user.name.clone()
+                        } else if !user.provider_id.is_empty() {
+                            user.provider_id.clone()
+                        } else {
+                            user.id.to_string()
+                        };
+                        UserProfile {
+                            id: user.id,
+                            display_name: if user.display_name.is_empty() {
+                                login_name.clone()
+                            } else {
+                                user.display_name
+                            },
+                            login_name,
+                            profile_pic_url: user.profile_pic_url,
+                            groups: Vec::new(),
+                        }
+                    }
+                    None => profile,
+                }
+            };
+            profiles.insert(profile.id, profile);
         }
     }
     profiles.into_values().collect()
@@ -772,8 +1100,10 @@ fn apply_routes_to_map_node(node: &mut MapNode, primary_routes: &[String], exit_
     node.allowed_ips = node.addresses.clone();
     node.allowed_ips.extend(primary_routes.iter().cloned());
     node.allowed_ips.extend(exit_routes.iter().cloned());
-    node.allowed_ips.sort();
-    node.allowed_ips.dedup();
+    node.allowed_ips.sort_by(|left, right| {
+        headscale_api_acl::go_netip::prefix_compare(left, right)
+            .expect("map prefixes passed typed decoding")
+    });
 }
 
 fn apply_selected_routes_to_map_node(
@@ -784,30 +1114,41 @@ fn apply_selected_routes_to_map_node(
     node.primary_routes = primary_routes.to_vec();
     node.allowed_ips = node.addresses.clone();
     node.allowed_ips.extend(allowed_routes.iter().cloned());
-    node.allowed_ips.sort();
-    node.allowed_ips.dedup();
+    node.allowed_ips.sort_by(|left, right| {
+        headscale_api_acl::go_netip::prefix_compare(left, right)
+            .expect("map prefixes passed typed decoding")
+    });
 }
 
 fn apply_policy_attrs_to_map_node(
     node: &mut MapNode,
     rec: &super::MachineRecord,
     policy: &PolicyStore,
+    snapshot: &MachineSnapshot,
 ) {
-    let attrs = node_attrs_for_record(rec, policy);
-    apply_address_shape_attrs_to_map_node(node, rec, &attrs);
+    let attrs = node_attrs_for_record(rec, policy, snapshot);
+    apply_address_shape_attrs_to_map_node(node, &attrs);
     apply_self_cap_map_attrs_to_map_node(node, &attrs);
 }
 
-fn node_attrs_for_record(rec: &super::MachineRecord, policy: &PolicyStore) -> Vec<String> {
-    let addr = rec.primary_addr_string();
-    let addrs = rec.address_strings();
+fn node_attrs_for_record(
+    rec: &super::MachineRecord,
+    policy: &PolicyStore,
+    snapshot: &MachineSnapshot,
+) -> Vec<String> {
+    if let Some(attrs) = snapshot.policy_node_attrs(rec.stable_node_id()) {
+        return attrs.to_vec();
+    }
+    let (user_id, user) = snapshot.policy_identity(rec);
+    let addrs = snapshot.policy_addresses(rec);
     let view = NodeView {
-        addr: addr.as_deref(),
+        user_id,
+        addr: addrs.first().map(String::as_str),
         addrs: &addrs,
-        user: Some(&rec.user),
+        user: user.as_deref(),
         tags: &rec.forced_tags,
     };
-    policy.node_attrs_for(&view)
+    policy.node_attrs_for_id(rec.stable_node_id(), &view)
 }
 
 fn has_node_attr(attrs: &[String], attr: &str) -> bool {
@@ -816,43 +1157,42 @@ fn has_node_attr(attrs: &[String], attr: &str) -> bool {
 
 fn apply_self_cap_map_attrs_to_map_node(node: &mut MapNode, attrs: &[String]) {
     for attr in attrs {
-        node.cap_map.entry(attr.clone()).or_default();
+        // Go maps.Copy overlays policy nil slices on the complete baseline,
+        // including default-auto-update's previously populated bool slice.
+        node.cap_map.insert(attr.clone(), Vec::new());
     }
 }
 
-fn apply_address_shape_attrs_to_map_node(
-    node: &mut MapNode,
-    rec: &super::MachineRecord,
-    attrs: &[String],
-) {
+fn apply_address_shape_attrs_to_map_node(node: &mut MapNode, attrs: &[String]) {
     if !has_node_attr(attrs, NODE_ATTR_DISABLE_IPV4) {
         return;
     }
-    let Some(ipv4) = rec.ipv4 else {
-        return;
-    };
-    let own_ipv4_prefix = format!("{ipv4}/32");
-    node.addresses.retain(|addr| addr != &own_ipv4_prefix);
-    node.allowed_ips.retain(|addr| addr != &own_ipv4_prefix);
+    // Native IP columns can carry any typed address family. Only identity
+    // prefixes are filtered; routes are concatenated afterward.
+    node.addresses.retain(|prefix| {
+        !headscale_api_acl::go_netip::parse_prefix(prefix)
+            .is_ok_and(|(address, _)| address.is_ipv4())
+    });
 }
 
 fn apply_peer_cap_map_to_map_node(
     node: &mut MapNode,
     rec: &super::MachineRecord,
     policy: &PolicyStore,
+    snapshot: &MachineSnapshot,
     is_exit_node: bool,
 ) {
-    let attrs = node_attrs_for_record(rec, policy);
-    apply_address_shape_attrs_to_map_node(node, rec, &attrs);
+    let attrs = node_attrs_for_record(rec, policy, snapshot);
+    apply_address_shape_attrs_to_map_node(node, &attrs);
     node.cap_map.clear();
     if !is_exit_node {
         return;
     }
 
-    if has_node_attr(&attrs, NODE_ATTR_SUGGEST_EXIT_NODE) {
-        node.cap_map
-            .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
-    }
+    // Pinned PeerCapMap advertises every approved exit node. An absent
+    // policy attribute supplies a nil argument slice, not an absent cap.
+    node.cap_map
+        .insert(NODE_ATTR_SUGGEST_EXIT_NODE.to_string(), Vec::new());
 }
 
 fn apply_runtime_caps_to_map_node(
@@ -873,11 +1213,25 @@ fn apply_runtime_caps_to_map_node(
 /// empty-peers `MapResponse`.
 pub const MAP_LONGPOLL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Interval between newline keepalives when the client requested
-/// `Stream: true`. Stock `tailscale` daemon accepts a keepalive of any
-/// length as long as it arrives within its idle timeout (60s upstream);
-/// 30s leaves headroom for slow links.
-pub const MAP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Base idle period for framed keepalives on `Stream: true`. Headscale
+/// v0.29.5 adds one session's uniformly chosen 0..8999ms jitter and resets
+/// the wait after each successful map or keepalive frame write.
+pub const MAP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(50);
+const MAP_KEEPALIVE_JITTER_UPPER_BOUND: Duration = Duration::from_millis(9_000);
+
+fn map_keepalive_period() -> Duration {
+    const CHOICES: u32 = MAP_KEEPALIVE_JITTER_UPPER_BOUND.as_millis() as u32;
+    // Rejection sampling keeps every millisecond equiprobable, without a
+    // new dependency or modulo bias. The choice is retained for the session.
+    let ceiling = u32::MAX - u32::MAX % CHOICES;
+    let mut rng = rand_core::OsRng;
+    loop {
+        let sample = rng.next_u32();
+        if sample < ceiling {
+            return MAP_KEEPALIVE_INTERVAL + Duration::from_millis(u64::from(sample % CHOICES));
+        }
+    }
+}
 
 fn tailnet_domain(dns: &DnsStore) -> String {
     dns.spec().base_domain.clone()
@@ -939,40 +1293,48 @@ fn packet_filters_for_node(
     policy: &crate::policy::PolicyStore,
     nodes: &[PacketFilterNode],
     self_node_id: u64,
-) -> BTreeMap<String, Option<Vec<FilterRule>>> {
-    let base = policy
-        .filter_rules_for_node(nodes, self_node_id)
-        .unwrap_or_else(allow_all_packet_filter);
-    BTreeMap::from([("base".to_string(), Some(base))])
+) -> (
+    BTreeMap<String, Option<Vec<FilterRule>>>,
+    crate::policy::FilterSnapshot,
+) {
+    let filter = policy
+        .filter_snapshot_for_node(nodes, self_node_id)
+        .unwrap_or_else(crate::policy::FilterSnapshot::allow_all);
+    (
+        BTreeMap::from([("base".to_string(), Some(filter.rules.clone()))]),
+        filter,
+    )
 }
 
 fn ssh_policy_nodes_from_snapshot(
-    snapshot: &std::collections::HashMap<String, super::MachineRecord>,
+    _machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
 ) -> Vec<SshPolicyNode> {
     snapshot
         .iter()
         .map(|(node_hex, rec)| SshPolicyNode {
             id: rec.stable_node_id_for_key(node_hex),
-            user_id: rec.user_id,
-            user: if rec.user.is_empty() {
-                None
-            } else {
-                Some(rec.user.clone())
-            },
-            addrs: rec.address_strings(),
+            user_id: snapshot.policy_identity(rec).0,
+            user: snapshot.policy_identity(rec).1,
+            addrs: snapshot.policy_addresses(rec),
             tags: rec.forced_tags.clone(),
         })
         .collect()
 }
 
 fn ssh_policy_for_snapshot(
+    machines: &super::MachineRegistry,
     policy: &crate::policy::PolicyStore,
-    snapshot: &std::collections::HashMap<String, super::MachineRecord>,
+    snapshot: &MachineSnapshot,
     self_node_key: &str,
     base_url: &str,
-) -> Option<super::wire::SshPolicy> {
-    let nodes = ssh_policy_nodes_from_snapshot(snapshot);
-    policy.ssh_policy_for(&nodes, node_id_for_key(snapshot, self_node_key), base_url)
+) -> crate::policy::NativeSshPolicy {
+    let nodes = ssh_policy_nodes_from_snapshot(machines, snapshot);
+    // Omission retains prior rules. Keep an explicit empty revocation policy
+    // and its native comparison metadata from the same policy cache read.
+    policy
+        .ssh_policy_snapshot_for(&nodes, node_id_for_key(snapshot, self_node_key), base_url)
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -981,7 +1343,52 @@ struct ErrorBody {
 }
 
 fn plain_map_error(status: StatusCode, message: &str) -> Response {
-    (status, format!("{message}\n")).into_response()
+    (
+        status,
+        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        format!("{message}\n"),
+    )
+        .into_response()
+}
+
+fn expired_missing_node_stream_response(
+    state: &WireState,
+    node_key_hex: &str,
+    req: &MapRequest,
+) -> Response {
+    let node_key = if req.node_key.is_empty() {
+        format!("nodekey:{node_key_hex}")
+    } else {
+        req.node_key.clone()
+    };
+    let mut response = serde_json::json!({
+        "Node": {
+            "ID": 0,
+            "StableID": "",
+            "Name": "",
+            "User": 0,
+            "Key": node_key,
+            "KeyExpiry": "1970-01-01T00:00:01Z",
+            "Addresses": null,
+            "Expired": true
+        }
+    });
+    if !state.runtime_config.log_tail.enabled {
+        response["Debug"] = serde_json::json!({"DisableLogTail": true});
+    }
+    let json =
+        super::map_json::encode(&response, None).expect("static expired map response serializes");
+    let body = MapFrameCompression::from_request(&req.compress)
+        .encode(&json)
+        .expect("expired map response compression succeeds");
+    let mut framed = Vec::with_capacity(4 + body.len());
+    framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    framed.extend_from_slice(&body);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(framed))
+        .expect("expired map response is valid")
 }
 
 fn canonical_map_node_key(node_key: &str) -> String {
@@ -1008,7 +1415,7 @@ pub async fn handle_map(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let req = match parse_map_body(&raw) {
+    let (req, hostinfo) = match parse_map_body(&raw) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -1017,7 +1424,15 @@ pub async fn handle_map(
     }
     let node_key_hex =
         map_request_node_key(&req).unwrap_or_else(|| canonical_map_node_key(&node_key_path));
-    map_inner(state, node_key_hex, machine_key, req).await
+    map_inner(
+        state,
+        node_key_hex,
+        machine_key,
+        req,
+        hostinfo,
+        MapRouteMode::KeyedCompat,
+    )
+    .await
 }
 
 /// `POST /machine/map` (v1.78+ flat path).
@@ -1033,7 +1448,7 @@ pub async fn handle_map_flat(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let req = match parse_map_body(&raw) {
+    let (req, hostinfo) = match parse_map_body(&raw) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -1041,7 +1456,21 @@ pub async fn handle_map_flat(
         return resp;
     }
     let node_key_hex = canonical_map_node_key(&req.node_key);
-    map_inner(state, node_key_hex, machine_key, req).await
+    map_inner(
+        state,
+        node_key_hex,
+        machine_key,
+        req,
+        hostinfo,
+        MapRouteMode::NativeFlat,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapRouteMode {
+    NativeFlat,
+    KeyedCompat,
 }
 
 async fn map_inner(
@@ -1049,10 +1478,27 @@ async fn map_inner(
     node_key_hex: String,
     machine_key_hex: String,
     req: MapRequest,
+    requested_hostinfo: Option<serde_json::Value>,
+    route_mode: MapRouteMode,
 ) -> Response {
-    // The caller must already have registered. If not, 404 — they need
-    // to go through `/machine/{node_key}/register` first.
+    let machines = &state.machines;
+    let native_request = if route_mode == MapRouteMode::NativeFlat {
+        let Some(work) = machines.begin_native_work() else {
+            return plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+        };
+        Some(work)
+    } else {
+        None
+    };
+    let policy_rx = state.policy.subscribe_changes();
+    let mutation = state.machines.lock_registration(&machine_key_hex).await;
+    // A missing self node on a streaming request gets Go's one-frame
+    // expiry signal so the client enters NeedsLogin instead of retrying
+    // a 404 forever.
     let Some(mut own) = state.machines.get(&node_key_hex) else {
+        if req.stream {
+            return expired_missing_node_stream_response(&state, &node_key_hex, &req);
+        }
         return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
     };
     if let Err(resp) = validate_map_machine_key(&machine_key_hex, &own) {
@@ -1069,39 +1515,53 @@ async fn map_inner(
         own.last_seen = touched.last_seen;
     }
 
-    // Wall 7/P1: persist client-provided DiscoKey, Endpoints, and
-    // the full Hostinfo snapshot from `MapRequest` into the
-    // `MachineRecord` so subsequent map calls for OTHER peers see them
-    // on this peer's `MapNode`. Stock `tailscale` v1.78+ sends the
-    // disco/endpoint values on every map call (initial + refresh); we
-    // treat any non-empty value as a fresh overwrite, and `None` /
-    // empty as "keep what was there." This means a client that omits
-    // the fields on one call doesn't accidentally clear what previous
-    // calls established. If Hostinfo is present but omits NetInfo,
-    // preserve the prior NetInfo like headscale-go's
-    // `netInfoFromMapRequest`.
-    //
-    // `upsert` on the registry notifies waiters, which wakes any
-    // peer's streaming `/map` so they pick up the new disco/endpoint
-    // values on the next chunk.
+    let before_update = own.clone();
+    let previous_primary_routes = state.machines.primary_route_assignments();
+
+    // Store changed client fields, and independently decide whether the
+    // change warrants a peer notification. Endpoint shrinks and STUN-only
+    // churn still persist without waking every peer.
     let mut record_changed = false;
-    let mut record_change_reason = MapChangeReason::NodeUpdated;
-    if let Some(dk) = req.disco_key.as_ref().filter(|s| !s.is_empty())
-        && own.disco_key.as_deref() != Some(dk.as_str())
-    {
-        own.disco_key = Some(dk.clone());
+    let mut record_change_reason = None;
+    let mut dns_metadata_changed = false;
+    let mut refresh_policy_inputs = false;
+    let mut hostinfo_replacement = None;
+    let requested_disco = req
+        .disco_key
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .unwrap_or(ZERO_DISCO_KEY);
+    if own.disco_key.as_deref().unwrap_or(ZERO_DISCO_KEY) != requested_disco {
+        own.disco_key = Some(requested_disco.to_owned());
         record_changed = true;
-        record_change_reason = MapChangeReason::EndpointDerpUpdate;
+        record_change_reason = Some(MapChangeReason::NodeKeyRotated);
     }
-    if let Some(eps) = req.endpoints.as_ref().filter(|v| !v.is_empty())
-        && &own.endpoints != eps
+    if let Some(endpoints) = req.endpoints.as_ref()
+        && !endpoints_equal(&own.endpoints, endpoints)
     {
-        own.endpoints = eps.clone();
+        if endpoint_broadcast_worthy(&own.endpoints, endpoints, &req.endpoint_types)
+            && record_change_reason.is_none()
+        {
+            record_change_reason = Some(MapChangeReason::EndpointDerpUpdate);
+        }
+        own.endpoints.clone_from(endpoints);
         record_changed = true;
-        record_change_reason = MapChangeReason::EndpointDerpUpdate;
     }
     if let Some(hostinfo) = req.hostinfo.as_ref() {
-        let announced_routes = match normalize_advertised_routes(&hostinfo.routable_ips) {
+        // netip.Prefix slices are typed on ingress. Canonicalize each item
+        // without sorting, compacting or rejecting the typed zero prefix.
+        let announced_routes = match hostinfo
+            .routable_ips
+            .iter()
+            .map(|route| {
+                if route.is_empty() {
+                    Ok(String::new())
+                } else {
+                    headscale_api_acl::go_netip::parse_prefix_text(route)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
             Ok(routes) => routes,
             Err(e) => {
                 return (
@@ -1114,143 +1574,292 @@ async fn map_inner(
             }
         };
         let previous_hostinfo = own.host_info_for_node();
-        let previous_raw_hostname = previous_hostinfo.hostname.clone();
-        let auto_derived_name = is_auto_derived_given_name(&own.hostname, &previous_raw_hostname);
+        let previous_native = match state.machines.map_hostinfo_value(&own) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(%error, "cannot encode stored Hostinfo");
+                return plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+            }
+        };
+        // The decoder supplies a Go-typed value before the public projection
+        // collapses nil slices and explicit-unset opt.Bool. Only nil NetInfo
+        // carries over; every other request field replaces the previous value.
+        let Some(mut next_native) = requested_hostinfo else {
+            return plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+        };
+        if next_native.get("NetInfo").is_none()
+            && let Some(netinfo) = previous_native.get("NetInfo")
+            && let Some(next) = next_native.as_object_mut()
+        {
+            next.insert("NetInfo".into(), netinfo.clone());
+        }
         let mut hostinfo = host_info_for_map_update(&previous_hostinfo, hostinfo);
         hostinfo.routable_ips.clone_from(&announced_routes);
-        let addr = own.primary_addr_string().unwrap_or_default();
-        let user = (!own.user.is_empty()).then_some(own.user.as_str());
-        let approved_routes = match auto_approved_routes_for_node(
-            &state.policy,
-            &addr,
-            user,
-            &own.forced_tags,
-            &own.approved_routes,
-            &announced_routes,
-        ) {
-            Ok(routes) => routes,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorBody {
-                        error: format!("invalid approved routes: {e}"),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-        if previous_hostinfo != hostinfo {
-            let only_preferred_derp_changed =
-                hostinfo_change_is_only_preferred_derp(&previous_hostinfo, &hostinfo);
-            let raw_hostname = hostinfo.hostname.clone();
-            own.replace_host_info(hostinfo);
-            if auto_derived_name && !raw_hostname.is_empty() {
-                own.hostname =
-                    state
-                        .machines
-                        .resolve_auto_given_name(&node_key_hex, &raw_hostname, None);
-            }
-            record_changed = true;
-            record_change_reason = if only_preferred_derp_changed {
-                MapChangeReason::EndpointDerpUpdate
-            } else {
-                // Full peer-node delta, not a full/config map refresh.
-                MapChangeReason::NodeUpdated
+        let hostinfo_changed =
+            !headscale_api_acl::go_tailcfg_json::map_hostinfo_equal(&previous_native, &next_native);
+        let previous_derp = hostinfo_preferred_derp(&previous_hostinfo);
+        let requested_derp = hostinfo_preferred_derp(&hostinfo);
+        let derp_changed = previous_derp != requested_derp;
+        let routes_changed = !endpoints_equal(&own.available_routes, &announced_routes);
+        let peer_hostinfo_changed = !headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
+            &previous_native,
+            &next_native,
+        );
+        refresh_policy_inputs = peer_hostinfo_changed || routes_changed;
+        let needs_route_approval = hostinfo_changed
+            && !announced_routes.is_empty()
+            && (routes_changed || own.approved_routes.is_empty());
+        if needs_route_approval {
+            let user = (!own.user.is_empty()).then_some(own.user.as_str());
+            let approved_routes = match auto_approved_routes_for_node(
+                &state.policy,
+                &own.address_strings(),
+                user,
+                own.user_id,
+                &own.forced_tags,
+                &own.approved_routes,
+                &announced_routes,
+            ) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorBody {
+                            error: format!("invalid approved routes: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
             };
-        }
-        if own.approved_routes != approved_routes {
-            own.approved_routes = approved_routes;
-            record_changed = true;
-            record_change_reason = MapChangeReason::PolicyChange;
-        }
-    }
-    // headscale-go updates node state before Connect, but dispatches
-    // map changes only after the stream is connected. With a durable
-    // registration store there is an await between those steps, so
-    // Stream:true updates must not wake peers with an offline route
-    // snapshot while persistence is still in flight.
-    let mut deferred_stream_change = None;
-    if record_changed {
-        let node_id = own.stable_node_id_for_key(&node_key_hex);
-        if req.stream {
-            state
-                .machines
-                .upsert_quiet(node_key_hex.clone(), own.clone());
-            deferred_stream_change = Some((record_change_reason, node_id));
-        } else {
-            state.machines.upsert_with_reason(
-                node_key_hex.clone(),
-                own.clone(),
-                Some(record_change_reason),
-            );
-        }
-    }
-    if let Some(store) = &state.registration_store {
-        let current = if record_changed {
-            own.clone()
-        } else {
-            state
-                .machines
-                .get(&node_key_hex)
-                .unwrap_or_else(|| own.clone())
-        };
-        let saved = match store
-            .sync_runtime_machine_state(current, state.policy.as_ref())
-            .await
-        {
-            Ok(saved) => saved,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorBody {
-                        error: format!("persisting map node update failed: {error}"),
-                    }),
-                )
-                    .into_response();
+            if own.approved_routes != approved_routes {
+                own.approved_routes = approved_routes;
+                record_changed = true;
+                record_change_reason = Some(MapChangeReason::PolicyChange);
+                refresh_policy_inputs = true;
             }
+        }
+        if hostinfo_changed || derp_changed {
+            dns_metadata_changed = previous_native.is_null()
+                || previous_hostinfo.hostname != hostinfo.hostname
+                || previous_hostinfo.os != hostinfo.os;
+            hostinfo_replacement = Some(next_native);
+            own.replace_host_info(hostinfo);
+            // The NodeStore writer reserves any new automatic GivenName.
+            record_changed = true;
+            if record_change_reason != Some(MapChangeReason::PolicyChange) {
+                if peer_hostinfo_changed || (derp_changed && requested_derp == 0) {
+                    record_change_reason = Some(MapChangeReason::NodeUpdated);
+                } else if derp_changed
+                    && record_change_reason != Some(MapChangeReason::NodeKeyRotated)
+                {
+                    record_change_reason = Some(MapChangeReason::EndpointDerpUpdate);
+                }
+            }
+        }
+    }
+    // Update live state quietly first. No request, streaming or otherwise,
+    // dispatches a successful map change before persistence completes. Streams
+    // also wait until Connect so peers see the current online route state.
+    let mut deferred_change = None;
+    if record_changed {
+        let Some(updated) = state.machines.apply_map_runtime_update(
+            &before_update,
+            own,
+            None,
+            hostinfo_replacement,
+        ) else {
+            if req.stream {
+                return expired_missing_node_stream_response(&state, &node_key_hex, &req);
+            }
+            return plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR);
         };
-        if record_changed {
-            let saved_node_id = saved
-                .record
-                .stable_node_id_for_key(&saved.record.node_key_hex);
-            if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
-                if req.stream {
-                    state.machines.replace_node_key_quiet(
-                        old_node_key_hex,
-                        saved.record.node_key_hex.clone(),
-                        saved.record,
-                    );
-                } else {
-                    state.machines.replace_node_key(
-                        old_node_key_hex,
-                        saved.record.node_key_hex.clone(),
-                        saved.record,
-                    );
+        own = updated;
+        deferred_change =
+            record_change_reason.map(|reason| (reason, own.stable_node_id_for_key(&node_key_hex)));
+    }
+    if dns_metadata_changed {
+        state
+            .machines
+            .queue_self_refresh(own.stable_node_id_for_key(&node_key_hex));
+    }
+    if state.machines.primary_route_assignments() != previous_primary_routes {
+        // Announcement changes can move a primary without changing approvals.
+        // Like Go, classify that as a policy update before the durable save.
+        deferred_change = Some((
+            MapChangeReason::PolicyChange,
+            own.stable_node_id_for_key(&node_key_hex),
+        ));
+    }
+    // Own the persistence/publication/connection step so a request reset
+    // cannot strand committed client state or an attached map session.
+    let update_state = state.clone();
+    let update_key = node_key_hex.clone();
+    let stream = req.stream;
+    let missing_node_request = MapRequest {
+        node_key: req.node_key.clone(),
+        compress: req.compress.clone(),
+        stream,
+        ..MapRequest::default()
+    };
+    let (mut stream_connection_guard, initial_request_change, initial_connection_change) =
+        match super::complete_state_mutation(async move {
+            // A reset can detach this owned mutation from the request. Keep
+            // shutdown waiting until its persistence/publication actually ends.
+            let _native_request = native_request;
+            let mutation = mutation;
+            let state = update_state;
+            let node_key_hex = update_key;
+            // LastSeen-only/no-op requests stay in memory. Go persists them on
+            // the next substantive update or disconnect instead of every poll.
+            if record_changed && let Some(store) = &state.registration_store {
+                let saved = store
+                    .sync_runtime_machine_state(own.clone(), state.policy.as_ref())
+                    .await
+                    .map_err(|error| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorBody {
+                                error: format!("persisting map node update failed: {error}"),
+                            }),
+                        )
+                            .into_response()
+                    })?;
+                if let Some(old_node_key) = saved.replaced_node_key_hex.as_deref() {
+                    // Preserve the explicit canonicalization hook for embedders.
+                    // Production map persistence never rotates registration keys.
+                    if stream {
+                        state.machines.replace_node_key_quiet(
+                            old_node_key,
+                            saved.record.node_key_hex.clone(),
+                            saved.record,
+                        );
+                    } else {
+                        deferred_change = None;
+                        state.machines.replace_node_key(
+                            old_node_key,
+                            saved.record.node_key_hex.clone(),
+                            saved.record,
+                        );
+                    }
+                } else if !store.runtime_sync_returns_live_snapshot()
+                    && state
+                        .machines
+                        .apply_runtime_update(&own, saved.record, None)
+                        .is_none()
+                {
+                    return Err(if stream {
+                        expired_missing_node_stream_response(
+                            &state,
+                            &node_key_hex,
+                            &missing_node_request,
+                        )
+                    } else {
+                        plain_map_error(StatusCode::NOT_FOUND, MAP_NODE_NOT_FOUND_ERROR)
+                    });
+                }
+                if stream && let Some((reason, _)) = deferred_change {
+                    deferred_change =
+                        Some((reason, state.machines.stable_node_id_for_key(&node_key_hex)));
+                }
+            }
+            if record_changed && refresh_policy_inputs {
+                let changed = state
+                    .machines
+                    .try_refresh_policy_node_inputs()
+                    .map_err(|error| plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, &error))?;
+                if changed == Some(true) {
+                    deferred_change = Some((MapChangeReason::PolicyChange, own.stable_node_id()));
+                }
+            }
+            // Native poll acquires its session and cancels GC before initial map
+            // generation. Publish neither request nor connection changes when
+            // that generation fails; dropping the guard still releases the session.
+            let (mut connection, connection_change) = if stream {
+                let domain = tailnet_domain(&state.dns);
+                let Some(record) = state.machines.get(&node_key_hex) else {
+                    return Err(expired_missing_node_stream_response(
+                        &state,
+                        &node_key_hex,
+                        &missing_node_request,
+                    ));
+                };
+                let native_connection = (route_mode == MapRouteMode::NativeFlat).then(|| {
+                    super::MachineRegistry::track_stream_connection_quiet(
+                        state.machines.clone(),
+                        record.stable_node_id_for_key(&node_key_hex),
+                    )
+                });
+                if native_connection
+                    .as_ref()
+                    .is_some_and(|(connection, _)| !connection.acquired)
+                {
+                    return Err(plain_map_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal server error",
+                    ));
+                }
+                if !map_name_is_valid(&record, &domain) {
+                    tracing::error!(node_id = record.stable_node_id(), hostname = %record.hostname,
+                    "cannot build self map node with invalid FQDN; rename the node");
+                    return Err(plain_map_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal server error",
+                    ));
+                }
+                match native_connection {
+                    Some((connection, change)) => (Some(connection), change),
+                    None => (
+                        Some(super::MachineRegistry::track_stream_connection(
+                            state.machines.clone(),
+                            record.stable_node_id_for_key(&node_key_hex),
+                        )),
+                        None,
+                    ),
                 }
             } else {
-                if req.stream {
+                (None, None)
+            };
+            // Never retain the mutation guard across a long poll or a map body.
+            drop(mutation);
+            if stream && route_mode == MapRouteMode::NativeFlat {
+                // AddNode in Go constructs FullSelf before publishing either
+                // change. Keep both until the complete initial map is built below.
+                Ok::<_, Response>((connection, deferred_change, connection_change))
+            } else {
+                state.machines.dispatch_map_change(deferred_change);
+                if let Some(connection) = &mut connection {
                     state
                         .machines
-                        .upsert_quiet(saved.record.node_key_hex.clone(), saved.record);
-                } else {
-                    state
-                        .machines
-                        .upsert(saved.record.node_key_hex.clone(), saved.record);
+                        .dispatch_stream_connection_change(connection, connection_change);
+                    connection.record_ended = true;
                 }
+                Ok((connection, None, None))
             }
-            if req.stream {
-                deferred_stream_change = Some((record_change_reason, saved_node_id));
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(response)) => return response,
+            Err(error) => {
+                tracing::error!(%error, "map mutation task failed");
+                return plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
             }
+        };
+
+    if !req.stream {
+        if req.omit_peers {
+            state.machines.record_mapresponse_endpoint_update("ok");
+        }
+        // Pinned Go's non-streaming serve path only accepts the state
+        // update; it never constructs or sends a MapResponse. Keep legacy
+        // keyed embedding requests explicit rather than affecting native IO.
+        if req.omit_peers || route_mode == MapRouteMode::NativeFlat {
+            return StatusCode::OK.into_response();
         }
     }
 
-    if req.omit_peers && !req.stream {
-        state.machines.record_mapresponse_endpoint_update("ok");
-        return StatusCode::OK.into_response();
-    }
-
-    // Long-poll for a second peer ONLY when this is a non-streaming,
-    // non-OmitPeers map call AND we're alone in the tailnet. In every
+    // Keyed compatibility calls long-poll for a second peer ONLY when this
+    // is a non-streaming, non-OmitPeers call and we're alone. In every
     // other case the client expects a response IMMEDIATELY — stock
     // `tailscale up` v1.78+ sends Stream=true + OmitPeers=true on
     // its initial noise-channel pre-pump, and waits for both to land
@@ -1279,23 +1888,43 @@ async fn map_inner(
     }
 
     let self_node_id = state.machines.stable_node_id_for_key(&node_key_hex);
-    let stream_connection_guard = req.stream.then(|| {
-        super::MachineRegistry::track_stream_connection(state.machines.clone(), self_node_id)
-    });
-    if let Some((reason, node_id)) = deferred_stream_change {
-        state.machines.wake_node_change(reason, node_id);
-    }
+
+    // Subscribe before capturing the initial view. A batch published while
+    // that view is built must remain queued behind the initial full frame.
+    let gen_rx = state.machines.subscribe_gen();
+    let last_seen_generation = *gen_rx.borrow();
+    let map_batch_rx = state.machines.subscribe_map_batch_events();
+    let derp_rx = state.derp_map.subscribe();
+    let dns_rx = state.dns.subscribe_changes();
 
     // Build the response.
-    let snapshot = state.machines.snapshot();
+    let snapshot = state
+        .machines
+        .snapshot_with_metadata()
+        .with_policy_attrs(&state.policy);
     let tailnet_domain = tailnet_domain(&state.dns);
+    if let Some(own) = snapshot.get(&node_key_hex)
+        && !map_name_is_valid(own, &tailnet_domain)
+    {
+        tracing::error!(
+            node_id = own.stable_node_id(),
+            hostname = %own.hostname,
+            "cannot build self map node with invalid FQDN; rename the node"
+        );
+        return plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+    }
     let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = state.machines.online_states();
     let taildrop_enabled = state.runtime_config.taildrop.enabled;
     let served_routes = served_routes_for_snapshot(&snapshot);
-    let mut allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &node_key_hex, &served_routes);
+    let mut allowed_peer_ids = allowed_peer_ids_for_snapshot(
+        machines,
+        &state.policy,
+        &snapshot,
+        &node_key_hex,
+        &served_routes,
+    );
     add_co_router_primary_peer_ids(
         &mut allowed_peer_ids,
         &snapshot,
@@ -1303,8 +1932,10 @@ async fn map_inner(
         &primary_routes,
         &served_routes,
     );
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
+    let packet_filter_nodes =
+        packet_filter_nodes_from_snapshot(machines, &snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
+        machines,
         &snapshot,
         &node_key_hex,
         &tailnet_domain,
@@ -1323,6 +1954,7 @@ async fn map_inner(
     // records. `record_to_map_node` takes `&MachineRecord` so the
     // borrowed iter feeds it directly.
     let peers = visible_peer_map_nodes(
+        machines,
         &snapshot,
         &node_key_hex,
         allowed_peer_ids.as_ref(),
@@ -1336,8 +1968,22 @@ async fn map_inner(
     );
 
     let dns_config = build_dns_for_snapshot(&state.dns, &state.policy, &snapshot, &node_key_hex);
-    let user_profiles =
-        user_profiles_for_snapshot(&snapshot, &node_key_hex, allowed_peer_ids.as_ref());
+    let user_profiles = user_profiles_for_snapshot(
+        machines,
+        &snapshot,
+        &node_key_hex,
+        allowed_peer_ids.as_ref(),
+    );
+    let (packet_filters, filter_snapshot) =
+        packet_filters_for_node(&state.policy, &packet_filter_nodes, self_node_id);
+    let initial_ssh_policy = ssh_policy_for_snapshot(
+        machines,
+        &state.policy,
+        &snapshot,
+        &node_key_hex,
+        state.public_control_url.as_deref().unwrap_or(""),
+    );
+    let derp_snapshot = state.derp_map.paired_snapshot();
     let resp = MapResponse {
         ping_request: state.pings.pop_next_for_node(self_node_id),
         node: Some(own_node),
@@ -1348,22 +1994,17 @@ async fn map_inner(
         // startup. Empty for non-interop deployments; the interop test
         // populates a one-region fixture pointing at the `derp-1`
         // sidecar (see `derp_config::load_derp_map`).
-        derp_map: Some(state.derp_map.snapshot()),
+        derp_map: Some(derp_snapshot.projection),
         domain: tailnet_domain,
         collect_services: Some(false),
         // Headscale-go v0.28 sends the full per-node filter through
         // PacketFilters["base"], already reduced for this map
         // recipient.
-        packet_filters: packet_filters_for_node(&state.policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(
-            &state.policy,
-            &snapshot,
-            &node_key_hex,
-            state.public_control_url.as_deref().unwrap_or(""),
-        ),
+        packet_filters,
+        ssh_policy: Some(initial_ssh_policy.policy.clone()),
         control_time: Some(chrono::Utc::now()),
-        debug: Some(DebugConfig {
-            disable_log_tail: !state.runtime_config.log_tail.enabled,
+        debug: (!state.runtime_config.log_tail.enabled).then_some(DebugConfig {
+            disable_log_tail: true,
             ..DebugConfig::default()
         }),
         // FULL MapResponse — NOT a keepalive. Upstream
@@ -1377,11 +2018,26 @@ async fn map_inner(
         keep_alive: false,
         ..MapResponse::default()
     };
-    record_mapresponse_debug(
+    if route_mode == MapRouteMode::NativeFlat
+        && req.stream
+        && let Some(connection) = &mut stream_connection_guard
+    {
+        state.machines.dispatch_initial_stream_changes(
+            connection,
+            initial_request_change,
+            initial_connection_change,
+        );
+        connection.record_ended = true;
+    }
+    record_mapresponse_filter_snapshot_debug_with_derp(
         &state.mapresponse_debug,
         self_node_id,
         MapResponseDebugType::Full,
         &resp,
+        &state.machines,
+        &snapshot,
+        Some(&filter_snapshot),
+        derp_snapshot.native.as_deref(),
     );
     if req.stream {
         // Stream:true — emit length-prefixed MapResponse JSON chunks,
@@ -1395,11 +2051,22 @@ async fn map_inner(
         // Per `docs/tailscale-interop-blocker.md` "Wall 5":
         // the body must NOT terminate naturally — the client expects
         // to long-poll until it closes the connection itself.
-        let initial_self_node = resp.node.clone();
-        let initial_peer_state = peer_state_from_nodes(&resp.peers);
+        let initial_self_node = resp
+            .node
+            .as_ref()
+            .map(|node| map_state_node(node, snapshot.get(&node_key_hex), &snapshot));
+        let initial_peer_state = peer_state_from_nodes(&resp.peers, &state.machines, &snapshot);
         let initial_peer_ids = peer_ids_from_snapshot(&snapshot, &node_key_hex);
+        let last_ssh_policy = Arc::new(parking_lot::Mutex::new(Some(initial_ssh_policy)));
         let compression = MapFrameCompression::from_request(&req.compress);
-        let first = match build_framed_chunk(&resp, compression) {
+        let first = match build_framed_filter_snapshot_chunk_with_derp(
+            &resp,
+            compression,
+            &state.machines,
+            &snapshot,
+            Some(&filter_snapshot),
+            derp_snapshot.native.as_deref(),
+        ) {
             Ok(v) => v,
             Err(e) => {
                 return (
@@ -1421,9 +2088,6 @@ async fn map_inner(
         // and as a compatibility fallback for embedders that have not
         // started the batch task.
         let machines = state.machines.clone();
-        let gen_rx = state.machines.subscribe_gen();
-        let last_seen_generation = *gen_rx.borrow();
-        let map_batch_rx = state.machines.subscribe_map_batch_events();
         let policy = state.policy.clone();
         let self_node_key = node_key_hex.clone();
         let cap_version = req.version;
@@ -1431,28 +2095,35 @@ async fn map_inner(
         let auto_update_enabled = state.runtime_config.auto_update.enabled;
         let disable_log_tail = !state.runtime_config.log_tail.enabled;
         let derp_map_for_stream = state.derp_map.clone();
-        let derp_rx = state.derp_map.subscribe();
         let dns_for_stream = state.dns.clone();
         let pings = state.pings.clone();
         let ping_rx = state.pings.subscribe();
         let mapresponse_debug = state.mapresponse_debug.clone();
         let public_control_url = state.public_control_url.clone();
         let connection_guard = stream_connection_guard.expect("stream guard created above");
-        let stream = futures_util::stream::unfold(
+        let deletion = MapStreamDeletion {
+            cancelled: Arc::clone(&connection_guard.cancelled),
+            generation: gen_rx.clone(),
+        };
+        let keepalive_period = map_keepalive_period();
+        let stream = futures_util::stream::try_unfold(
             (
                 Some(first),
                 machines,
                 gen_rx,
+                policy_rx,
                 last_seen_generation,
                 map_batch_rx,
                 policy,
                 self_node_key,
                 derp_map_for_stream,
                 derp_rx,
+                dns_rx,
                 dns_for_stream,
                 pings,
                 ping_rx,
                 mapresponse_debug,
+                last_ssh_policy,
                 initial_self_node,
                 initial_peer_state,
                 initial_peer_ids,
@@ -1466,16 +2137,19 @@ async fn map_inner(
                 first_opt,
                 machines,
                 mut gen_rx,
+                mut policy_rx,
                 mut last_seen_generation,
                 mut map_batch_rx,
                 policy,
-                self_node_key,
+                mut self_node_key,
                 machines_derp_map,
                 mut derp_rx,
+                mut dns_rx,
                 dns,
                 pings,
                 mut ping_rx,
                 mapresponse_debug,
+                last_ssh_policy,
                 last_self_node,
                 last_peer_state,
                 initial_peer_ids,
@@ -1486,22 +2160,25 @@ async fn map_inner(
                 public_control_url,
             )| async move {
                 if let Some(initial) = first_opt {
-                    return Some((
-                        Ok::<_, std::io::Error>(initial),
+                    return Ok(Some((
+                        initial,
                         (
                             None,
                             machines,
                             gen_rx,
+                            policy_rx,
                             last_seen_generation,
                             map_batch_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
                             derp_rx,
+                            dns_rx,
                             dns,
                             pings,
                             ping_rx,
                             mapresponse_debug,
+                            last_ssh_policy,
                             last_self_node,
                             last_peer_state,
                             initial_peer_ids,
@@ -1511,32 +2188,49 @@ async fn map_inner(
                             compression,
                             public_control_url,
                         ),
-                    ));
+                    )));
                 }
-                let self_node_id = machines.stable_node_id_for_key(&self_node_key);
-                if let Some(request) = pings.pop_next_for_node(self_node_id) {
-                    return Some((
-                        Ok::<_, std::io::Error>(build_ping_request_chunk(
+                // Native Noise pulls again only after forwarding the previous
+                // complete frame under HTTP/2 flow control. This anchors the
+                // reset after that write. Outer Hyper consumers have their own
+                // body-poll boundary rather than a write-completion callback.
+                let keepalive_deadline = tokio::time::Instant::now() + keepalive_period;
+                let self_node_id = connection_guard.node_id;
+                self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                let full_batch_pending = machines.map_batcher_enabled()
+                    && machines.has_pending_full_map_change_for_node(self_node_id);
+                // Go emits a queued full update before its target's ping-only
+                // frame. A ready batch also takes precedence over the direct
+                // ping watch; otherwise the eager pop reverses that order.
+                if !full_batch_pending
+                    && map_batch_rx.is_empty()
+                    && let Some(request) = pings.pop_next_for_node(self_node_id)
+                {
+                    return Ok(Some((
+                        build_ping_request_chunk(
                             &machines,
                             request,
                             compression,
                             &mapresponse_debug,
                             self_node_id,
-                        )),
+                        )?,
                         (
                             None,
                             machines,
                             gen_rx,
+                            policy_rx,
                             last_seen_generation,
                             map_batch_rx,
                             policy,
                             self_node_key,
                             machines_derp_map,
                             derp_rx,
+                            dns_rx,
                             dns,
                             pings,
                             ping_rx,
                             mapresponse_debug,
+                            last_ssh_policy,
                             last_self_node,
                             last_peer_state,
                             initial_peer_ids,
@@ -1546,7 +2240,7 @@ async fn map_inner(
                             compression,
                             public_control_url,
                         ),
-                    ));
+                    )));
                 }
                 // Wait for either a registry change, a policy change,
                 // a DERP map refresh, a DNS extra-records edit, or a keepalive tick,
@@ -1559,22 +2253,16 @@ async fn map_inner(
                 // load-bearing property that closes the audit-2 C-1
                 // race — see the registry's `wake_waiters` doc.
                 let (chunk, next_peer_state, next_self_node) = loop {
-                    let policy_for_wait = policy.clone();
-                    let policy_changed = policy_for_wait.wait_for_change();
-                    let dns_for_wait = dns.clone();
-                    let dns_changed = dns_for_wait.wait_for_change();
-                    tokio::pin!(policy_changed);
-                    tokio::pin!(dns_changed);
                     let maybe_chunk = tokio::select! {
-                    biased;
-                    res = map_batch_rx.recv() => {
-                        match res {
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                Some((
-                                    rebuild_map_chunk(
+                        biased;
+                        res = map_batch_rx.recv() => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            match res {
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    Some(Ok((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone())))
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    Some(rebuild_map_chunk(
                                         &machines,
                                         &policy,
                                         &self_node_key,
@@ -1586,79 +2274,134 @@ async fn map_inner(
                                         disable_log_tail,
                                         compression,
                                         Some(&last_peer_state),
+                                        last_self_node.as_ref(),
                                         "full",
                                         &mapresponse_debug,
                                         MapResponseDebugType::Change,
                                         public_control_url.as_deref().unwrap_or(""),
-                                    ),
-                                    visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                                    self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
-                                ))
-                            }
-                            Ok(batch) => {
-                            let changes = batch.get(&self_node_id).cloned().unwrap_or_default();
-                            rebuild_map_batch_chunk(
-                                &machines,
-                                &policy,
-                                &self_node_key,
-                                &machines_derp_map,
-                                &dns,
-                                cap_version,
-                                taildrop_enabled,
-                                auto_update_enabled,
-                                disable_log_tail,
-                                compression,
-                                last_self_node.as_ref(),
-                                &last_peer_state,
-                                &initial_peer_ids,
-                                &mapresponse_debug,
-                                public_control_url.as_deref().unwrap_or(""),
-                                &changes,
-                            )
+                                        &last_ssh_policy,
+                                    ))
+                                }
+                                Ok(batch) => {
+                                let changes = batch.get(&self_node_id).cloned().unwrap_or_default();
+                                rebuild_map_batch_chunk(
+                                    &machines,
+                                    &policy,
+                                    &self_node_key,
+                                    &machines_derp_map,
+                                    &dns,
+                                    cap_version,
+                                    taildrop_enabled,
+                                    auto_update_enabled,
+                                    disable_log_tail,
+                                    compression,
+                                    last_self_node.as_ref(),
+                                    &last_peer_state,
+                                    &initial_peer_ids,
+                                    &mapresponse_debug,
+                                    public_control_url.as_deref().unwrap_or(""),
+                                    &last_ssh_policy,
+                                    &changes,
+                                )
+                                }
                             }
                         }
-                    }
-                    res = gen_rx.changed() => {
-                        // `Err` only happens if every sender has been
-                        // dropped — would mean the entire registry's
-                        // gone, in which case we degrade to a
-                        // keepalive frame and let the next iteration
-                        // (or stream end) handle teardown.
-                        if res.is_err() {
-                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                        } else if machines.get(&self_node_key).is_none() {
-                            return None;
-                        } else if machines.map_batcher_enabled() {
-                            last_seen_generation = *gen_rx.borrow();
-                            None
-                        } else {
-                            let current_generation = *gen_rx.borrow();
-                            let changes = map_changes_for_generation_range(
-                                &machines,
-                                last_seen_generation,
-                                current_generation,
-                                self_node_id,
-                            );
-                            last_seen_generation = current_generation;
-                            rebuild_map_batch_chunk(
-                                &machines,
-                                &policy,
-                                &self_node_key,
-                                &machines_derp_map,
-                                &dns,
-                                cap_version,
-                                taildrop_enabled,
-                                auto_update_enabled,
-                                disable_log_tail,
-                                compression,
-                                last_self_node.as_ref(),
-                                &last_peer_state,
-                                &initial_peer_ids,
-                                &mapresponse_debug,
-                                public_control_url.as_deref().unwrap_or(""),
-                                &changes,
-                            )
-                            .or_else(|| {
+                        res = gen_rx.changed() => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            // `Err` only happens if every sender has been
+                            // dropped — would mean the entire registry's
+                            // gone, in which case we degrade to a
+                            // keepalive frame and let the next iteration
+                            // (or stream end) handle teardown.
+                            if res.is_err() {
+                                Some(Ok((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone())))
+                            } else if machines.map_batcher_enabled() {
+                                last_seen_generation = *gen_rx.borrow();
+                                None
+                            } else {
+                                let current_generation = *gen_rx.borrow();
+                                let changes = map_changes_for_generation_range(
+                                    &machines,
+                                    last_seen_generation,
+                                    current_generation,
+                                    self_node_id,
+                                );
+                                last_seen_generation = current_generation;
+                                rebuild_map_batch_chunk(
+                                    &machines,
+                                    &policy,
+                                    &self_node_key,
+                                    &machines_derp_map,
+                                    &dns,
+                                    cap_version,
+                                    taildrop_enabled,
+                                    auto_update_enabled,
+                                    disable_log_tail,
+                                    compression,
+                                    last_self_node.as_ref(),
+                                    &last_peer_state,
+                                    &initial_peer_ids,
+                                    &mapresponse_debug,
+                                    public_control_url.as_deref().unwrap_or(""),
+                                    &last_ssh_policy,
+                                    &changes,
+                                )
+                                .or_else(|| {
+                                    rebuild_peer_delta_chunk(
+                                        &machines,
+                                        &policy,
+                                        &self_node_key,
+                                        &dns,
+                                        cap_version,
+                                        taildrop_enabled,
+                                        auto_update_enabled,
+                                        compression,
+                                        last_self_node.as_ref(),
+                                        &last_peer_state,
+                                        &initial_peer_ids,
+                                        &mapresponse_debug,
+                                        public_control_url.as_deref().unwrap_or(""),
+                                    &last_ssh_policy,
+                                        PeerDeltaOptions::registry_change(),
+                                        &BTreeSet::new(),
+                                        None,
+                                    )
+                                })
+                            }
+                        }
+                        _ = policy_rx.changed() => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            // Policy edits can remove every visible peer.
+                            // Emit an incremental delta with PeersRemoved
+                            // rather than a full map whose empty Peers list
+                            // would serialize away and leave clients with
+                            // stale peers/routes.
+                            match apply_policy_auto_approvals_for_registry(&machines, &policy) {
+                                Ok(changed) if changed > 0 => {
+                                    last_seen_generation = *gen_rx.borrow();
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    tracing::error!(
+                                        target = "tailscale_wire::map",
+                                        error = %error,
+                                        "applying policy route auto-approvals"
+                                    );
+                                }
+                            }
+                            if machines.map_batcher_enabled() {
+                                machines.record_observed_map_change(
+                                    MapChangeReason::PolicyChange,
+                                    Some(self_node_id),
+                                    None,
+                                );
+                                None
+                            } else {
+                                machines.record_unbatched_map_change(
+                                    MapChangeReason::PolicyChange,
+                                    Some(self_node_id),
+                                    None,
+                                );
                                 rebuild_peer_delta_chunk(
                                     &machines,
                                     &policy,
@@ -1673,177 +2416,136 @@ async fn map_inner(
                                     &initial_peer_ids,
                                     &mapresponse_debug,
                                     public_control_url.as_deref().unwrap_or(""),
-                                    PeerDeltaOptions::registry_change(),
+                                    &last_ssh_policy,
+                                    PeerDeltaOptions::policy_change(),
                                     &BTreeSet::new(),
                                     None,
                                 )
-                            })
-                        }
-                    }
-                    () = &mut policy_changed => {
-                        // Policy edits can remove every visible peer.
-                        // Emit an incremental delta with PeersRemoved
-                        // rather than a full map whose empty Peers list
-                        // would serialize away and leave clients with
-                        // stale peers/routes.
-                        match apply_policy_auto_approvals_for_registry(&machines, &policy) {
-                            Ok(changed) if changed > 0 => {
-                                last_seen_generation = *gen_rx.borrow();
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                tracing::error!(
-                                    target = "tailscale_wire::map",
-                                    error = %error,
-                                    "applying policy route auto-approvals"
-                                );
                             }
                         }
-                        if machines.map_batcher_enabled() {
-                            machines.record_observed_map_change(
-                                MapChangeReason::PolicyChange,
-                                Some(self_node_id),
-                                None,
-                            );
-                            None
-                        } else {
+                        res = dns_rx.changed() => {
+                            if res.is_err() {
+                                return Ok(None);
+                            }
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            // Extra-records file edited (or DnsStore.set_spec
+                            // called) — wake every parked poller so the
+                            // next chunk carries the refreshed `DNSConfig`.
                             machines.record_unbatched_map_change(
-                                MapChangeReason::PolicyChange,
+                                MapChangeReason::DnsConfigUpdate,
                                 Some(self_node_id),
                                 None,
                             );
-                            rebuild_peer_delta_chunk(
+                            Some(rebuild_map_chunk(
                                 &machines,
                                 &policy,
                                 &self_node_key,
+                                &machines_derp_map,
                                 &dns,
                                 cap_version,
                                 taildrop_enabled,
                                 auto_update_enabled,
+                                disable_log_tail,
                                 compression,
+                                Some(&last_peer_state),
                                 last_self_node.as_ref(),
-                                &last_peer_state,
-                                &initial_peer_ids,
-                                &mapresponse_debug,
-                                public_control_url.as_deref().unwrap_or(""),
-                                PeerDeltaOptions::policy_change(),
-                                &BTreeSet::new(),
-                                None,
-                            )
-                        }
-                    }
-                    () = &mut dns_changed => {
-                        // Extra-records file edited (or DnsStore.set_spec
-                        // called) — wake every parked poller so the
-                        // next chunk carries the refreshed `DNSConfig`.
-                        machines.record_unbatched_map_change(
-                            MapChangeReason::DnsConfigUpdate,
-                            Some(self_node_id),
-                            None,
-                        );
-                        Some((
-                            rebuild_map_chunk(
-                                &machines,
-                                &policy,
-                                &self_node_key,
-                                &machines_derp_map,
-                                &dns,
-                                cap_version,
-                                taildrop_enabled,
-                                auto_update_enabled,
-                                disable_log_tail,
-                                compression,
-                                Some(&last_peer_state),
                                 "config",
                                 &mapresponse_debug,
                                 MapResponseDebugType::Change,
                                 public_control_url.as_deref().unwrap_or(""),
-                            ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
-                        ))
-                    }
-                    res = derp_rx.changed() => {
-                        // DERP URL/path refresh — wake every parked
-                        // poller so the next chunk carries the new
-                        // `DERPMap`.
-                        if res.is_err() {
-                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                        } else {
-                            machines.record_unbatched_map_change(
-                                MapChangeReason::DerpMapUpdate,
-                                Some(self_node_id),
-                                None,
-                            );
-                            Some((
-                            rebuild_map_chunk(
-                                &machines,
-                                &policy,
-                                &self_node_key,
-                                &machines_derp_map,
-                                &dns,
-                                cap_version,
-                                taildrop_enabled,
-                                auto_update_enabled,
-                                disable_log_tail,
-                                compression,
-                                Some(&last_peer_state),
-                                "config",
-                                &mapresponse_debug,
-                                MapResponseDebugType::Change,
-                                public_control_url.as_deref().unwrap_or(""),
-                            ),
-                            visible_peer_state_for_registry(&machines, &policy, &dns, &self_node_key, cap_version),
-                            self_map_node_for_registry(&machines, &policy, &dns, &self_node_key, cap_version, taildrop_enabled, auto_update_enabled),
-                        ))
+                                &last_ssh_policy,
+                            ))
                         }
-                    }
-                    res = ping_rx.changed() => {
-                        if res.is_err() {
-                            Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                        } else {
-                            pings.pop_next_for_node(self_node_id).map(|request| (
-                                build_ping_request_chunk(
+                        res = derp_rx.changed() => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            // DERP URL/path refresh — wake every parked
+                            // poller so the next chunk carries the new
+                            // `DERPMap`.
+                            if res.is_err() {
+                                Some(Ok((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone())))
+                            } else {
+                                machines.record_unbatched_map_change(
+                                    MapChangeReason::DerpMapUpdate,
+                                    Some(self_node_id),
+                                    None,
+                                );
+                                Some(build_derp_map_chunk(
                                     &machines,
-                                    request,
+                                    &self_node_key,
+                                    &machines_derp_map,
                                     compression,
                                     &mapresponse_debug,
                                     self_node_id,
-                                ),
-                                last_peer_state.clone(),
-                                last_self_node.clone(),
-                            ))
+                                ).map(|chunk| (chunk, last_peer_state.clone(), last_self_node.clone())))
+                            }
                         }
+                        res = ping_rx.changed(), if !full_batch_pending => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            if res.is_err() {
+                                Some(Ok((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone())))
+                            } else {
+                                pings.pop_next_for_node(self_node_id).map(|request| Ok((
+                                    build_ping_request_chunk(
+                                        &machines,
+                                        request,
+                                        compression,
+                                        &mapresponse_debug,
+                                        self_node_id,
+                                    )?,
+                                    last_peer_state.clone(),
+                                    last_self_node.clone(),
+                                )))
+                            }
+                        }
+                        () = tokio::time::sleep_until(keepalive_deadline) => {
+                            self_node_key = current_stream_node_key(&machines, &connection_guard)?;
+                            machines.record_mapresponse_sent_for_node(
+                                "ok",
+                                "keepalive",
+                                machines.stable_node_id_for_key(&self_node_key),
+                            );
+                            Some(Ok((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone())))
+                        }
+                    };
+                    if let Some(chunk) = maybe_chunk {
+                        break chunk?;
                     }
-                    () = tokio::time::sleep(MAP_KEEPALIVE_INTERVAL) => {
+                    // The select intentionally prefers full updates before
+                    // pings. A flood of ready, irrelevant wakes must neither
+                    // restart the wait nor starve an already-expired timer.
+                    if tokio::time::Instant::now() >= keepalive_deadline {
+                        self_node_key = current_stream_node_key(&machines, &connection_guard)?;
                         machines.record_mapresponse_sent_for_node(
                             "ok",
                             "keepalive",
                             machines.stable_node_id_for_key(&self_node_key),
                         );
-                        Some((build_keepalive_chunk(compression), last_peer_state.clone(), last_self_node.clone()))
-                    }
-                    };
-                    if let Some(chunk) = maybe_chunk {
-                        break chunk;
+                        break (
+                            build_keepalive_chunk(compression),
+                            last_peer_state.clone(),
+                            last_self_node.clone(),
+                        );
                     }
                 };
-                Some((
-                    Ok(chunk),
+                Ok::<_, std::io::Error>(Some((
+                    chunk,
                     (
                         None,
                         machines,
                         gen_rx,
+                        policy_rx,
                         last_seen_generation,
                         map_batch_rx,
                         policy,
                         self_node_key,
                         machines_derp_map,
                         derp_rx,
+                        dns_rx,
                         dns,
                         pings,
                         ping_rx,
                         mapresponse_debug,
+                        last_ssh_policy,
                         next_self_node,
                         next_peer_state,
                         initial_peer_ids,
@@ -1853,7 +2555,7 @@ async fn map_inner(
                         compression,
                         public_control_url,
                     ),
-                ))
+                )))
             },
         );
 
@@ -1861,13 +2563,27 @@ async fn map_inner(
         // but newer clients accept any content-type — the framing rules
         // are positional, not header-driven. `application/octet-stream`
         // is the safest neutral choice.
-        Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/octet-stream")
             .body(Body::from_stream(stream))
-            .unwrap()
+            .unwrap();
+        response.extensions_mut().insert(deletion);
+        response
     } else {
-        Json(resp).into_response()
+        match snapshot_json_with_derp(
+            &resp,
+            &state.machines,
+            &snapshot,
+            Some(&filter_snapshot),
+            derp_snapshot.native.as_deref(),
+        ) {
+            Ok(response) => ([("content-type", "application/json")], response).into_response(),
+            Err(error) => {
+                tracing::error!(%error, "cannot encode map Hostinfo");
+                plain_map_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            }
+        }
     }
 }
 
@@ -1925,7 +2641,22 @@ fn reject_unsupported_capability(version: u32) -> Result<(), Response> {
 /// snapshot, then uses `PeersChanged`/`PeersRemoved` for later node
 /// add/remove/update events instead of replacing the full peer list on
 /// every wake.
-type PeerDeltaChunk = (Vec<u8>, BTreeMap<u64, MapNode>, Option<MapNode>);
+type PeerDeltaChunk =
+    Result<(Vec<u8>, BTreeMap<u64, MapStateNode>, Option<MapStateNode>), std::io::Error>;
+type SshPolicyState = Arc<parking_lot::Mutex<Option<crate::policy::NativeSshPolicy>>>;
+
+fn ssh_policy_delta(
+    current: Option<&crate::policy::NativeSshPolicy>,
+    last: &SshPolicyState,
+) -> Option<super::wire::SshPolicy> {
+    let current = current?;
+    let previous = last.lock();
+    if previous.as_ref() == Some(current) {
+        None
+    } else {
+        Some(current.policy.clone())
+    }
+}
 
 fn map_changes_for_generation_range(
     machines: &Arc<crate::tailscale_wire::MachineRegistry>,
@@ -1949,54 +2680,48 @@ fn map_batch_requires_full_response(changes: &[MapChange]) -> bool {
         change.is_full()
             || change.content.include_derp_map
             || change.content.include_domain
-            || (change.content.include_dns && !change.content.requires_runtime_peer_computation)
+            || (change.content.include_dns
+                && !change.content.requires_runtime_peer_computation
+                && !(change.target_node_id.is_some() && change.content.include_self))
     })
 }
 
 fn map_batch_peer_delta_options(changes: &[MapChange], self_node_id: u64) -> PeerDeltaOptions {
     let requires_policy = changes.iter().any(|change| {
-        (change.content.include_policy || change.content.requires_runtime_peer_computation)
-            && !is_self_lifecycle_policy_companion(change, self_node_id)
+        change.content.include_policy || change.content.requires_runtime_peer_computation
     });
-    if requires_policy {
+    let mut options = if requires_policy {
         PeerDeltaOptions::policy_change()
     } else {
         PeerDeltaOptions::registry_change()
-    }
-}
-
-fn is_self_lifecycle_policy_companion(change: &MapChange, self_node_id: u64) -> bool {
-    let is_lifecycle_policy = change.reasons.len() == 2
-        && matches!(
-            change.reasons.first(),
-            Some(MapChangeReason::NodeOnline | MapChangeReason::NodeOffline)
-        )
-        && change.reasons.get(1) == Some(&MapChangeReason::PolicyChange);
-
-    change.origin_node_id == Some(self_node_id)
-        && change.target_node_id.is_none()
-        && is_lifecycle_policy
-        && change.content.include_policy
-        && change.content.requires_runtime_peer_computation
-        && !change.content.include_self
-        && !change.content.include_derp_map
-        && !change.content.include_dns
-        && !change.content.include_domain
-        && !change.content.send_all_peers
-        && change.content.peers_changed.is_empty()
-        && change.content.peers_removed.is_empty()
-        && change.content.peer_patches == [self_node_id]
+    };
+    options.include_dns_config = changes.iter().any(|change| {
+        change.target_node_id == Some(self_node_id)
+            && change.content.include_self
+            && change.content.include_dns
+    });
+    options.include_self_node = changes
+        .iter()
+        .any(|change| change.target_node_id == Some(self_node_id) && change.content.include_self);
+    options.split_peer_removals = changes
+        .iter()
+        .any(|change| change.content.requires_runtime_peer_computation);
+    options.resend_visible_peers = options.split_peer_removals;
+    options
 }
 
 fn map_batch_response_type(changes: &[MapChange]) -> &'static str {
     if changes.iter().any(MapChange::is_full) {
         return "full";
     }
-    if changes.iter().any(|change| {
-        change.content.include_derp_map
-            || change.content.include_dns
-            || change.content.include_domain
-    }) {
+    if changes
+        .iter()
+        .any(|change| change.content.include_derp_map || change.content.include_domain)
+        || changes.iter().any(|change| {
+            change.content.include_dns
+                && !(change.target_node_id.is_some() && change.content.include_self)
+        })
+    {
         return "config";
     }
     if changes.iter().any(|change| change.target_node_id.is_some()) {
@@ -2017,11 +2742,12 @@ fn rebuild_map_batch_chunk(
     auto_update_enabled: bool,
     disable_log_tail: bool,
     compression: MapFrameCompression,
-    last_self_node: Option<&MapNode>,
-    last_peer_state: &BTreeMap<u64, MapNode>,
+    last_self_node: Option<&MapStateNode>,
+    last_peer_state: &BTreeMap<u64, MapStateNode>,
     initial_peer_ids: &BTreeSet<u64>,
     mapresponse_debug: &MapResponseDebugStore,
     public_control_url: &str,
+    last_ssh_policy: &SshPolicyState,
     changes: &[MapChange],
 ) -> Option<PeerDeltaChunk> {
     if changes.is_empty() {
@@ -2032,34 +2758,24 @@ fn rebuild_map_batch_chunk(
     }
 
     if map_batch_requires_full_response(changes) {
-        return Some((
-            rebuild_map_chunk(
-                machines,
-                policy,
-                self_node_key,
-                derp_map,
-                dns,
-                cap_version,
-                taildrop_enabled,
-                auto_update_enabled,
-                disable_log_tail,
-                compression,
-                Some(last_peer_state),
-                map_batch_response_type(changes),
-                mapresponse_debug,
-                MapResponseDebugType::Change,
-                public_control_url,
-            ),
-            visible_peer_state_for_registry(machines, policy, dns, self_node_key, cap_version),
-            self_map_node_for_registry(
-                machines,
-                policy,
-                dns,
-                self_node_key,
-                cap_version,
-                taildrop_enabled,
-                auto_update_enabled,
-            ),
+        return Some(rebuild_map_chunk(
+            machines,
+            policy,
+            self_node_key,
+            derp_map,
+            dns,
+            cap_version,
+            taildrop_enabled,
+            auto_update_enabled,
+            disable_log_tail,
+            compression,
+            Some(last_peer_state),
+            last_self_node,
+            map_batch_response_type(changes),
+            mapresponse_debug,
+            MapResponseDebugType::Change,
+            public_control_url,
+            last_ssh_policy,
         ));
     }
 
@@ -2078,6 +2794,7 @@ fn rebuild_map_batch_chunk(
         initial_peer_ids,
         mapresponse_debug,
         public_control_url,
+        last_ssh_policy,
         map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
         &map_batch_forced_full_peer_ids(changes),
         peer_filter_ids.as_ref(),
@@ -2123,23 +2840,24 @@ fn rebuild_peer_delta_chunk(
     taildrop_enabled: bool,
     auto_update_enabled: bool,
     compression: MapFrameCompression,
-    last_self_node: Option<&MapNode>,
-    last_peer_state: &BTreeMap<u64, MapNode>,
+    last_self_node: Option<&MapStateNode>,
+    last_peer_state: &BTreeMap<u64, MapStateNode>,
     initial_peer_ids: &BTreeSet<u64>,
     mapresponse_debug: &MapResponseDebugStore,
     public_control_url: &str,
+    last_ssh_policy: &SshPolicyState,
     options: PeerDeltaOptions,
     force_full_peer_ids: &BTreeSet<u64>,
     filter_peer_ids: Option<&BTreeSet<u64>>,
 ) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
-        return Some((
+        return Some(Ok((
             build_keepalive_chunk(compression),
             last_peer_state.clone(),
             last_self_node.cloned(),
-        ));
+        )));
     }
-    let snapshot = machines.snapshot();
+    let snapshot = machines.snapshot_with_metadata().with_policy_attrs(policy);
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
@@ -2147,6 +2865,7 @@ fn rebuild_peer_delta_chunk(
     let served_routes = served_routes_for_snapshot(&snapshot);
     let mut allowed_peer_ids = if options.use_incremental_empty_acl_semantics {
         incremental_allowed_peer_ids_for_snapshot(
+            machines,
             policy,
             &snapshot,
             self_node_key,
@@ -2155,7 +2874,7 @@ fn rebuild_peer_delta_chunk(
             last_peer_state,
         )
     } else {
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes)
+        allowed_peer_ids_for_snapshot(machines, policy, &snapshot, self_node_key, &served_routes)
     };
     add_co_router_primary_peer_ids(
         &mut allowed_peer_ids,
@@ -2165,8 +2884,10 @@ fn rebuild_peer_delta_chunk(
         &served_routes,
     );
     let self_node_id = node_id_for_key(&snapshot, self_node_key);
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
+    let packet_filter_nodes =
+        packet_filter_nodes_from_snapshot(machines, &snapshot, &served_routes);
     let current_self_node = self_map_node_from_snapshot(
+        machines,
         &snapshot,
         self_node_key,
         &tailnet_domain,
@@ -2177,15 +2898,15 @@ fn rebuild_peer_delta_chunk(
         cap_version,
         taildrop_enabled,
         auto_update_enabled,
-    );
+    )
+    .map(|node| map_state_node(&node, snapshot.get(self_node_key), &snapshot));
     let self_node_changed = match (&current_self_node, last_self_node) {
-        (Some(current), Some(previous)) => {
-            map_node_json_value(current) != map_node_json_value(previous)
-        }
+        (Some(current), Some(previous)) => !self_nodes_equal(previous, current),
         (Some(_), None) | (None, Some(_)) => true,
         (None, None) => false,
     };
     let peers_changed = visible_peer_map_nodes(
+        machines,
         &snapshot,
         self_node_key,
         allowed_peer_ids.as_ref(),
@@ -2197,7 +2918,7 @@ fn rebuild_peer_delta_chunk(
         policy,
         cap_version,
     );
-    let current_peer_state = peer_state_from_nodes(&peers_changed);
+    let current_peer_state = peer_state_from_nodes(&peers_changed, machines, &snapshot);
     let current_peer_ids = current_peer_state.keys().copied().collect::<BTreeSet<_>>();
     let previous_peer_ids = last_peer_state.keys().copied().collect::<BTreeSet<_>>();
     let peer_in_scope = |peer_id: u64| filter_peer_ids.is_none_or(|ids| ids.contains(&peer_id));
@@ -2219,32 +2940,64 @@ fn rebuild_peer_delta_chunk(
         if !peer_in_scope(peer.id) {
             continue;
         }
-        if force_full_peer_ids.contains(&peer.id) {
-            next_peer_state.insert(peer.id, peer.clone());
+        let current = current_peer_state
+            .get(&peer.id)
+            .expect("peer state built from these nodes");
+        if options.resend_visible_peers || force_full_peer_ids.contains(&peer.id) {
+            next_peer_state.insert(peer.id, current.clone());
             full_peers_changed.push(peer);
             continue;
         }
         match last_peer_state.get(&peer.id) {
             None => {
-                next_peer_state.insert(peer.id, peer.clone());
+                next_peer_state.insert(peer.id, current.clone());
                 full_peers_changed.push(peer);
             }
-            Some(previous) if map_nodes_equal_ignoring_last_seen(previous, &peer) => {}
-            Some(previous) => match peer_patch_if_only_patchable_fields_changed(previous, &peer) {
-                Some(patch) => {
-                    next_peer_state.insert(peer.id, peer.clone());
+            Some(previous)
+                if previous.slices == current.slices
+                    && map_nodes_equal_ignoring_last_seen(&previous.node, &peer)
+                    && headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
+                        &previous.hostinfo,
+                        &current.hostinfo,
+                    ) => {}
+            Some(previous) => {
+                next_peer_state.insert(peer.id, current.clone());
+                // A peer-visible raw change can be hidden by Option<bool> or
+                // a nil root in the public projection. It requires a whole
+                // node even when another changed field could use a patch.
+                if previous.slices == current.slices
+                    && headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
+                        &previous.hostinfo,
+                        &current.hostinfo,
+                    )
+                    && let Some(patch) =
+                        peer_patch_if_only_patchable_fields_changed(&previous.node, &peer)
+                {
                     peer_patches.push(patch);
-                }
-                None => {
-                    next_peer_state.insert(peer.id, peer.clone());
+                } else {
                     full_peers_changed.push(peer);
                 }
-            },
+            }
         }
     }
 
-    if !options.include_dns_config
-        && !self_node_changed
+    let dns_inputs_changed = match (&current_self_node, last_self_node) {
+        (Some(current), Some(previous)) => {
+            current.node.cap_map != previous.node.cap_map
+                || current.node.hostinfo.hostname != previous.node.hostinfo.hostname
+                || current.node.hostinfo.os != previous.node.hostinfo.os
+                || current.node.addresses != previous.node.addresses
+                || current.node.name != previous.node.name
+        }
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => false,
+    };
+    let include_dns_config = options.include_dns_config || dns_inputs_changed;
+    let include_self_node = options.include_self_node || self_node_changed;
+
+    if options.response_type != "policy"
+        && !include_dns_config
+        && !include_self_node
         && full_peers_changed.is_empty()
         && peers_removed.is_empty()
         && peer_patches.is_empty()
@@ -2252,58 +3005,148 @@ fn rebuild_peer_delta_chunk(
         return None;
     }
 
-    let pure_self_update = self_node_changed
-        && !options.include_dns_config
+    let pure_self_update = include_self_node
+        && options.response_type != "policy"
         && full_peers_changed.is_empty()
         && peers_removed.is_empty()
         && peer_patches.is_empty();
-    let mr = MapResponse {
-        node: if self_node_changed {
-            current_self_node.clone()
+    // Upstream sends a changed self/DNS frame before the policy frame when
+    // nodeAttrs affect DNS. Keeping DNS in the policy frame is accepted by
+    // clients, but changes the stream shape and resends policy data with DNS.
+    let dns_change =
+        (options.response_type == "policy" && include_dns_config).then(|| MapResponse {
+            node: current_self_node.as_ref().map(|state| state.node.clone()),
+            dns_config: Some(build_dns_for_snapshot(
+                dns,
+                policy,
+                &snapshot,
+                self_node_key,
+            )),
+            control_time: Some(chrono::Utc::now()),
+            ..MapResponse::default()
+        });
+    let (packet_filters, filter_snapshot) = if pure_self_update {
+        (BTreeMap::new(), None)
+    } else {
+        let (rules, snapshot) = packet_filters_for_node(policy, &packet_filter_nodes, self_node_id);
+        (rules, Some(snapshot))
+    };
+    let current_ssh_policy = (!pure_self_update).then(|| {
+        ssh_policy_for_snapshot(
+            machines,
+            policy,
+            &snapshot,
+            self_node_key,
+            public_control_url,
+        )
+    });
+    let mut mr = MapResponse {
+        node: if include_self_node {
+            current_self_node.as_ref().map(|state| state.node.clone())
         } else {
             None
         },
         peers_changed: full_peers_changed,
         peers_removed,
         peers_changed_patch: peer_patches,
-        dns_config: options
-            .include_dns_config
+        dns_config: (include_dns_config && dns_change.is_none())
             .then(|| build_dns_for_snapshot(dns, policy, &snapshot, self_node_key)),
-        user_profiles: if pure_self_update {
+        // Go adds policy-frame profiles only alongside remaining peers.
+        // Other update kinds retain their existing profile refresh behavior.
+        user_profiles: if pure_self_update
+            || (options.response_type == "policy" && current_peer_state.is_empty())
+        {
             Vec::new()
         } else {
-            user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref())
+            user_profiles_for_snapshot(
+                machines,
+                &snapshot,
+                self_node_key,
+                allowed_peer_ids.as_ref(),
+            )
         },
-        packet_filters: if pure_self_update {
-            BTreeMap::new()
-        } else {
-            packet_filters_for_node(policy, &packet_filter_nodes, self_node_id)
-        },
-        ssh_policy: if pure_self_update {
-            None
-        } else {
-            ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url)
-        },
+        packet_filters,
+        ssh_policy: current_ssh_policy
+            .as_ref()
+            .map(|snapshot| snapshot.policy.clone()),
         control_time: Some(chrono::Utc::now()),
         keep_alive: false,
         ..MapResponse::default()
     };
-    machines
-        .record_mapresponse_generated(classify_incremental_mapresponse(options.response_type, &mr));
-    record_mapresponse_debug(mapresponse_debug, self_node_id, options.debug_type, &mr);
-    Some((
-        build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression)),
-        next_peer_state,
-        current_self_node,
-    ))
+    let removals = if options.split_peer_removals {
+        std::mem::take(&mut mr.peers_removed)
+    } else {
+        Vec::new()
+    };
+    let mut next_self_node = last_self_node.cloned();
+    let encoded = (|| -> Result<Vec<u8>, std::io::Error> {
+        let mut framed = Vec::new();
+        if let Some(change) = dns_change.as_ref() {
+            machines.record_mapresponse_generated("self");
+            record_mapresponse_snapshot_debug(
+                mapresponse_debug,
+                self_node_id,
+                MapResponseDebugType::Change,
+                change,
+                machines,
+                &snapshot,
+            );
+            let mut change = change.clone();
+            self_node_delta(&mut change, current_self_node.as_ref(), &mut next_self_node);
+            framed.extend(build_framed_snapshot_chunk(
+                &change,
+                compression,
+                machines,
+                &snapshot,
+            )?);
+        }
+        framed.extend(build_peer_removal_chunk(&removals, compression)?);
+        machines.record_mapresponse_generated(classify_incremental_mapresponse(
+            options.response_type,
+            &mr,
+        ));
+        record_mapresponse_filter_snapshot_debug(
+            mapresponse_debug,
+            self_node_id,
+            options.debug_type,
+            &mr,
+            machines,
+            &snapshot,
+            filter_snapshot.as_ref(),
+        );
+        self_node_delta(&mut mr, current_self_node.as_ref(), &mut next_self_node);
+        mr.ssh_policy = ssh_policy_delta(current_ssh_policy.as_ref(), last_ssh_policy);
+        framed.extend(build_framed_filter_snapshot_chunk(
+            &mr,
+            compression,
+            machines,
+            &snapshot,
+            filter_snapshot.as_ref(),
+        )?);
+        Ok(framed)
+    })();
+    let framed = match encoded {
+        Ok(framed) => framed,
+        Err(error) => {
+            tracing::error!(%error, "encoding incremental map batch");
+            return Some(Err(error));
+        }
+    };
+    if mr.ssh_policy.is_some() {
+        *last_ssh_policy.lock() = current_ssh_policy;
+    }
+    Some(Ok((framed, next_peer_state, next_self_node)))
 }
 
 #[derive(Clone, Copy)]
 struct PeerDeltaOptions {
     response_type: &'static str,
     debug_type: MapResponseDebugType,
+    include_self_node: bool,
     include_dns_config: bool,
     use_incremental_empty_acl_semantics: bool,
+    split_peer_removals: bool,
+    resend_visible_peers: bool,
 }
 
 impl PeerDeltaOptions {
@@ -2311,8 +3154,11 @@ impl PeerDeltaOptions {
         Self {
             response_type: "peers",
             debug_type: MapResponseDebugType::Change,
+            include_self_node: false,
             include_dns_config: false,
             use_incremental_empty_acl_semantics: true,
+            split_peer_removals: false,
+            resend_visible_peers: false,
         }
     }
 
@@ -2320,8 +3166,11 @@ impl PeerDeltaOptions {
         Self {
             response_type: "policy",
             debug_type: MapResponseDebugType::Policy,
-            include_dns_config: true,
+            include_self_node: false,
+            include_dns_config: false,
             use_incremental_empty_acl_semantics: false,
+            split_peer_removals: true,
+            resend_visible_peers: true,
         }
     }
 }
@@ -2345,13 +3194,56 @@ fn classify_incremental_mapresponse(
     default_response_type
 }
 
+/// Go's `change.DERPMap()` sets only `IncludeDERPMap`, so `buildFromChange`
+/// answers with the DERP map and ControlTime and nothing else: no self node,
+/// peers, DNS, packet filters or SSH policy, and no Debug (full maps only).
+fn build_derp_map_chunk(
+    machines: &Arc<crate::tailscale_wire::MachineRegistry>,
+    self_node_key: &str,
+    derp_map: &Arc<crate::tailscale_wire::DerpMapStore>,
+    compression: MapFrameCompression,
+    mapresponse_debug: &MapResponseDebugStore,
+    node_id: u64,
+) -> Result<Vec<u8>, std::io::Error> {
+    if machines.get(self_node_key).is_none() {
+        return Ok(build_keepalive_chunk(compression));
+    }
+    machines.record_mapresponse_generated("config");
+    let snapshot = machines.snapshot_with_metadata();
+    let derp_snapshot = derp_map.paired_snapshot();
+    let mr = MapResponse {
+        derp_map: Some(derp_snapshot.projection),
+        control_time: Some(chrono::Utc::now()),
+        keep_alive: false,
+        ..MapResponse::default()
+    };
+    record_mapresponse_filter_snapshot_debug_with_derp(
+        mapresponse_debug,
+        node_id,
+        MapResponseDebugType::Change,
+        &mr,
+        machines,
+        &snapshot,
+        None,
+        derp_snapshot.native.as_deref(),
+    );
+    build_framed_filter_snapshot_chunk_with_derp(
+        &mr,
+        compression,
+        machines,
+        &snapshot,
+        None,
+        derp_snapshot.native.as_deref(),
+    )
+}
+
 fn build_ping_request_chunk(
     machines: &crate::tailscale_wire::MachineRegistry,
     request: PingRequest,
     compression: MapFrameCompression,
     mapresponse_debug: &MapResponseDebugStore,
     node_id: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, std::io::Error> {
     machines.record_mapresponse_generated("ping");
     let mr = MapResponse {
         ping_request: Some(request),
@@ -2364,7 +3256,7 @@ fn build_ping_request_chunk(
         MapResponseDebugType::Change,
         &mr,
     );
-    build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
+    build_framed_chunk(&mr, compression)
 }
 
 /// Rebuild a full `MapResponse` chunk for an in-flight `Stream:true`
@@ -2384,24 +3276,33 @@ fn rebuild_map_chunk(
     auto_update_enabled: bool,
     disable_log_tail: bool,
     compression: MapFrameCompression,
-    previous_peer_state: Option<&BTreeMap<u64, MapNode>>,
+    previous_peer_state: Option<&BTreeMap<u64, MapStateNode>>,
+    previous_self_node: Option<&MapStateNode>,
     response_type: &str,
     mapresponse_debug: &MapResponseDebugStore,
     debug_type: MapResponseDebugType,
     public_control_url: &str,
-) -> Vec<u8> {
+    last_ssh_policy: &SshPolicyState,
+) -> PeerDeltaChunk {
+    let unchanged = || {
+        Ok((
+            build_keepalive_chunk(compression),
+            previous_peer_state.cloned().unwrap_or_default(),
+            previous_self_node.cloned(),
+        ))
+    };
     if machines.get(self_node_key).is_none() {
-        return build_keepalive_chunk(compression);
+        return unchanged();
     }
     machines.record_mapresponse_generated(response_type);
-    let snapshot = machines.snapshot();
+    let snapshot = machines.snapshot_with_metadata().with_policy_attrs(policy);
     let tailnet_domain = tailnet_domain(dns);
     let primary_routes = machines.primary_routes_for_snapshot(&snapshot);
     let exit_routes = exit_routes_for_snapshot(&snapshot);
     let online_states = machines.online_states();
     let served_routes = served_routes_for_snapshot(&snapshot);
     let mut allowed_peer_ids =
-        allowed_peer_ids_for_snapshot(policy, &snapshot, self_node_key, &served_routes);
+        allowed_peer_ids_for_snapshot(machines, policy, &snapshot, self_node_key, &served_routes);
     add_co_router_primary_peer_ids(
         &mut allowed_peer_ids,
         &snapshot,
@@ -2410,8 +3311,10 @@ fn rebuild_map_chunk(
         &served_routes,
     );
     let self_node_id = node_id_for_key(&snapshot, self_node_key);
-    let packet_filter_nodes = packet_filter_nodes_from_snapshot(&snapshot, &served_routes);
+    let packet_filter_nodes =
+        packet_filter_nodes_from_snapshot(machines, &snapshot, &served_routes);
     let Some(own_node) = self_map_node_from_snapshot(
+        machines,
         &snapshot,
         self_node_key,
         &tailnet_domain,
@@ -2423,9 +3326,10 @@ fn rebuild_map_chunk(
         taildrop_enabled,
         auto_update_enabled,
     ) else {
-        return build_keepalive_chunk(compression);
+        return unchanged();
     };
     let peers = visible_peer_map_nodes(
+        machines,
         &snapshot,
         self_node_key,
         allowed_peer_ids.as_ref(),
@@ -2437,37 +3341,204 @@ fn rebuild_map_chunk(
         policy,
         cap_version,
     );
-    let peers_removed = if peers.is_empty() {
-        previous_peer_state
-            .map(|state| state.keys().copied().collect())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let current_peer_state = peer_state_from_nodes(&peers, machines, &snapshot);
+    let peers_removed = previous_peer_state
+        .map(|previous| {
+            previous
+                .keys()
+                .filter(|id| !current_peer_state.contains_key(*id))
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let current_self_node = Some(map_state_node(
+        &own_node,
+        snapshot.get(self_node_key),
+        &snapshot,
+    ));
     let dns_config = build_dns_for_snapshot(dns, policy, &snapshot, self_node_key);
-    let user_profiles =
-        user_profiles_for_snapshot(&snapshot, self_node_key, allowed_peer_ids.as_ref());
-    let mr = MapResponse {
+    let user_profiles = user_profiles_for_snapshot(
+        machines,
+        &snapshot,
+        self_node_key,
+        allowed_peer_ids.as_ref(),
+    );
+    let ssh_policy = ssh_policy_for_snapshot(
+        machines,
+        policy,
+        &snapshot,
+        self_node_key,
+        public_control_url,
+    );
+    let (packet_filters, filter_snapshot) =
+        packet_filters_for_node(policy, &packet_filter_nodes, self_node_id);
+    let derp_snapshot = derp_map.paired_snapshot();
+    let mut mr = MapResponse {
         node: Some(own_node),
         peers,
-        peers_removed,
         user_profiles,
         dns_config: Some(dns_config),
-        derp_map: Some(derp_map.snapshot()),
+        derp_map: Some(derp_snapshot.projection),
         domain: tailnet_domain,
         collect_services: Some(false),
-        packet_filters: packet_filters_for_node(policy, &packet_filter_nodes, self_node_id),
-        ssh_policy: ssh_policy_for_snapshot(policy, &snapshot, self_node_key, public_control_url),
+        packet_filters,
+        ssh_policy: Some(ssh_policy.policy.clone()),
         control_time: Some(chrono::Utc::now()),
-        debug: Some(DebugConfig {
-            disable_log_tail,
+        debug: disable_log_tail.then_some(DebugConfig {
+            disable_log_tail: true,
             ..DebugConfig::default()
         }),
         keep_alive: false,
         ..MapResponse::default()
     };
-    record_mapresponse_debug(mapresponse_debug, self_node_id, debug_type, &mr);
-    build_framed_chunk(&mr, compression).unwrap_or_else(|_| build_keepalive_chunk(compression))
+    record_mapresponse_filter_snapshot_debug_with_derp(
+        mapresponse_debug,
+        self_node_id,
+        debug_type,
+        &mr,
+        machines,
+        &snapshot,
+        Some(&filter_snapshot),
+        derp_snapshot.native.as_deref(),
+    );
+    let mut next_self_node = previous_self_node.cloned();
+    self_node_delta(&mut mr, current_self_node.as_ref(), &mut next_self_node);
+    mr.ssh_policy = ssh_policy_delta(Some(&ssh_policy), last_ssh_policy);
+    let encoded = build_framed_filter_snapshot_chunk_with_derp(
+        &mr,
+        compression,
+        machines,
+        &snapshot,
+        Some(&filter_snapshot),
+        derp_snapshot.native.as_deref(),
+    )
+    .and_then(|body| {
+        let mut framed = build_peer_removal_chunk(&peers_removed, compression)?;
+        framed.extend(body);
+        Ok(framed)
+    });
+    match encoded {
+        Ok(framed) => {
+            if mr.ssh_policy.is_some() {
+                *last_ssh_policy.lock() = Some(ssh_policy);
+            }
+            Ok((framed, current_peer_state, next_self_node))
+        }
+        Err(error) => {
+            tracing::error!(%error, "encoding full map batch");
+            Err(error)
+        }
+    }
+}
+
+/// Runtime/full peer-view removals must reach delta-only watchers before any
+/// Node/DNS/SSH/full-peer response forces a client netmap rebuild. Go creates
+/// this response after mapper debug dumping, without ControlTime or policy.
+fn build_peer_removal_chunk(
+    removed: &[u64],
+    compression: MapFrameCompression,
+) -> Result<Vec<u8>, std::io::Error> {
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
+    build_framed_chunk(
+        &MapResponse {
+            peers_removed: removed.to_vec(),
+            ..MapResponse::default()
+        },
+        compression,
+    )
+}
+
+fn build_framed_snapshot_chunk(
+    response: &MapResponse,
+    compression: MapFrameCompression,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+) -> Result<Vec<u8>, std::io::Error> {
+    build_framed_filter_snapshot_chunk(response, compression, machines, snapshot, None)
+}
+
+fn snapshot_json(
+    response: &MapResponse,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+) -> Result<Vec<u8>, std::io::Error> {
+    snapshot_json_with_derp(response, machines, snapshot, filter, None)
+}
+
+fn snapshot_json_with_derp(
+    response: &MapResponse,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+    native_derp: Option<&super::native_derp::NativeDerpMap>,
+) -> Result<Vec<u8>, std::io::Error> {
+    let value = super::hostinfo::response_value(response, machines, snapshot)?;
+    let filter = filter.filter(|filter| {
+        response
+            .packet_filters
+            .get("base")
+            .and_then(Option::as_ref)
+            .is_some_and(|rules| rules.as_slice() == filter.rules.as_slice())
+    });
+    let packet_filters = if let Some(filter) = filter {
+        let mut body = vec![b'{'];
+        for (index, (name, rules)) in response.packet_filters.iter().enumerate() {
+            if index != 0 {
+                body.push(b',');
+            }
+            body.extend(serde_json::to_vec(name).map_err(std::io::Error::other)?);
+            body.push(b':');
+            if name == "base" {
+                body.extend(filter.base_json()?);
+            } else {
+                let value = serde_json::to_value(rules).map_err(std::io::Error::other)?;
+                body.extend(super::map_json::filters(&value)?);
+            }
+        }
+        body.push(b'}');
+        Some(body)
+    } else {
+        None
+    };
+    let native_derp = native_derp
+        .map(super::native_derp::NativeDerpMap::json_value)
+        .transpose()
+        .map_err(std::io::Error::other)?;
+    super::map_json::encode_with_derp(&value, packet_filters.as_deref(), native_derp.as_ref())
+}
+
+fn build_framed_filter_snapshot_chunk(
+    response: &MapResponse,
+    compression: MapFrameCompression,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+) -> Result<Vec<u8>, std::io::Error> {
+    build_framed_filter_snapshot_chunk_with_derp(
+        response,
+        compression,
+        machines,
+        snapshot,
+        filter,
+        None,
+    )
+}
+
+fn build_framed_filter_snapshot_chunk_with_derp(
+    response: &MapResponse,
+    compression: MapFrameCompression,
+    machines: &super::MachineRegistry,
+    snapshot: &MachineSnapshot,
+    filter: Option<&crate::policy::FilterSnapshot>,
+    native_derp: Option<&super::native_derp::NativeDerpMap>,
+) -> Result<Vec<u8>, std::io::Error> {
+    framed_bytes(
+        &snapshot_json_with_derp(response, machines, snapshot, filter, native_derp)?,
+        compression,
+    )
 }
 
 /// Encode a MapResponse into the wire framing the streaming
@@ -2478,9 +3549,17 @@ pub(crate) fn build_framed_chunk(
     mr: &MapResponse,
     compression: MapFrameCompression,
 ) -> Result<Vec<u8>, std::io::Error> {
-    let json_bytes =
-        serde_json::to_vec(mr).map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
-    let body = compression.encode(&json_bytes)?;
+    let value =
+        serde_json::to_value(mr).map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
+    let json_bytes = super::map_json::encode(&value, None)?;
+    framed_bytes(&json_bytes, compression)
+}
+
+fn framed_bytes(
+    json_bytes: &[u8],
+    compression: MapFrameCompression,
+) -> Result<Vec<u8>, std::io::Error> {
+    let body = compression.encode(json_bytes)?;
     let mut out = Vec::with_capacity(4 + body.len());
     let len = body.len() as u32;
     out.extend_from_slice(&len.to_le_bytes());
@@ -2765,6 +3844,65 @@ mod tests {
         // skips the netmap-update handler and the daemon stays in
         // `NeedsLogin` forever.
         assert!(!mr.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn map_drops_invalid_fqdn_peers_without_hiding_valid_peers() {
+        let (state, _dir) = fixture();
+        let viewer = "a1".repeat(32);
+        let valid = "b1".repeat(32);
+        let empty_name = "c1".repeat(32);
+        let overlong_name = "d1".repeat(32);
+        insert_peer(&state, &viewer, "viewer", 10);
+        insert_peer(&state, &valid, "valid-peer", 11);
+        insert_peer(&state, &empty_name, "", 12);
+        insert_peer(&state, &overlong_name, &"x".repeat(256), 13);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{viewer}/map"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+        let map: MapResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            map.node.as_ref().map(|node| node.name.as_str()),
+            Some("viewer")
+        );
+        assert_eq!(map.peers.len(), 1, "invalid peers must not blank the map");
+        assert_eq!(map.peers[0].name, "valid-peer");
+        assert_eq!(map.peers[0].key, format!("nodekey:{valid}"));
+    }
+
+    #[tokio::test]
+    async fn map_returns_explicit_error_for_self_with_invalid_fqdn() {
+        for hostname in [String::new(), "x".repeat(256)] {
+            let (state, _dir) = fixture();
+            let viewer = "a1".repeat(32);
+            insert_peer(&state, &viewer, &hostname, 10);
+            insert_peer(&state, &"b1".repeat(32), "valid-peer", 11);
+            let resp = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/machine/nodekey:{viewer}/map"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert_eq!(raw.as_ref(), b"internal server error\n");
+        }
     }
 
     #[tokio::test]
@@ -3224,9 +4362,9 @@ mod tests {
         let node = "ac".repeat(32);
         let mut record = policy_record(&node, "alice-node", 10, "alice-renamed", Vec::new());
         record.user_id = Some(42);
-        let snapshot = HashMap::from([(node.clone(), record)]);
+        let snapshot = MachineSnapshot::from_records(HashMap::from([(node.clone(), record)]));
 
-        let nodes = ssh_policy_nodes_from_snapshot(&snapshot);
+        let nodes = ssh_policy_nodes_from_snapshot(&MachineRegistry::new(), &snapshot);
 
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, stable_id_from_key(&node));
@@ -3517,9 +4655,12 @@ mod tests {
         );
 
         let rec = state.machines.get(&alice).expect("alice still registered");
+        // Go stores Hostinfo.RoutableIPs verbatim (types/node.go
+        // AnnouncedRoutes), so available routes keep the client's order;
+        // only the approved set is sorted by ApproveRoutesWithPolicy.
         assert_eq!(
             rec.available_routes,
-            vec!["0.0.0.0/0", "10.20.1.0/24", "10.99.0.0/24"]
+            vec!["10.20.1.0/24", "10.99.0.0/24", "0.0.0.0/0"]
         );
         assert_eq!(rec.approved_routes, vec!["0.0.0.0/0", "10.20.1.0/24"]);
 
@@ -3676,6 +4817,11 @@ mod tests {
             Ipv4Addr::new(100, 64, 0, 14),
             false,
         );
+        // Go keeps the raw registration hostname in Node.Hostname
+        // (`raw_hostname` here); "!!!" sanitizes to "" so the stored
+        // GivenName is the "node" fallback, which isAutoDerivedGivenName
+        // does not treat as derived from "!!!".
+        record.raw_hostname = "!!!".into();
         record.host_info.hostname = "!!!".into();
         state.machines.upsert(node_key.clone(), record);
 
@@ -3881,7 +5027,14 @@ mod tests {
         assert_eq!(wire.hostname, "persisted-host");
         assert_eq!(wire.os, "linux");
         assert_eq!(wire.os_version, "6.9");
-        assert_eq!(wire.disco_key.as_deref(), Some(disco_key.as_str()));
+        // The second MapRequest omitted DiscoKey. Go's
+        // PeerChangeFromMapRequest compares against the request's zero
+        // DiscoKey and ApplyPeerChange stores it, so the persisted key is
+        // zeroed (endpoints survive because a nil Endpoints is not applied).
+        assert_eq!(
+            wire.disco_key.as_deref(),
+            Some(format!("discokey:{}", "0".repeat(64)).as_str())
+        );
         assert_eq!(wire.endpoints, endpoints);
         assert_eq!(wire.home_derp, 901);
         assert_eq!(wire.available_routes, vec!["10.70.0.0/24"]);
@@ -4195,6 +5348,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_policy_change_only_resends_dns_for_own_node_attrs() {
+        let (state, _dir) = fixture();
+        state.dns.set_spec(crate::dns::DnsConfigSpec {
+            magic_dns: false,
+            override_local_dns: true,
+            nameservers: vec!["https://dns.nextdns.io/base".into()],
+            ..crate::dns::DnsConfigSpec::default()
+        });
+        let viewer = "2e".repeat(32);
+        state.machines.upsert(
+            viewer.clone(),
+            policy_record(
+                &viewer,
+                "viewer",
+                24,
+                "alice@example.com",
+                vec!["tag:client".into()],
+            ),
+        );
+        let mut body = open_zstd_stream(router(state.clone()), &viewer).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert!(
+            first.dns_config.unwrap().resolvers[0]
+                .addr
+                .starts_with("https://dns.nextdns.io/base?")
+        );
+
+        let unrelated_policy = r#"
+            version = 1
+            [tag_owners]
+            "tag:client" = ["alice@example.com"]
+            "tag:other" = ["alice@example.com"]
+            [[node_attrs]]
+            target = ["tag:other"]
+            attr = ["nextdns:other"]
+        "#;
+        tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::PolicyDoc::from_toml(unrelated_policy).unwrap(),
+                    unrelated_policy.into(),
+                );
+            }
+        });
+        let unrelated = next_zstd_map_response(&mut body).await;
+        assert!(unrelated.dns_config.is_none());
+
+        let own_policy = unrelated_policy.replace("tag:other\"]", "tag:client\"]");
+        tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::PolicyDoc::from_toml(&own_policy).unwrap(),
+                    own_policy,
+                );
+            }
+        });
+        let frame = http_body_util::BodyExt::frame(&mut body)
+            .await
+            .unwrap()
+            .unwrap();
+        let chunk = frame.into_data().unwrap();
+        let mut split_frames = decode_framed_sequence(&chunk);
+        assert_eq!(split_frames.len(), 2);
+        // Go's Batcher.addToBatch appends targeted changes (the drained
+        // SelfUpdate) before broadcast ones (PolicyChange), so the self/DNS
+        // frame goes first and carries the changed CapMap self node; the
+        // policy frame's identical self node is then dropped by
+        // connectionEntry.withSelfDelta. Verified against v0.29.5's batcher.
+        let own = split_frames.remove(0);
+        assert_eq!(
+            own.dns_config.unwrap().resolvers[0].addr,
+            "https://dns.nextdns.io/other?device_ip=100.64.0.24&device_model=&device_name=viewer"
+        );
+        assert!(own.packet_filters.is_empty());
+        assert!(own.node.is_some());
+        let policy = split_frames.remove(0);
+        assert!(policy.dns_config.is_none());
+        assert!(policy.node.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_targeted_self_refresh_keeps_self_and_dns_without_full_peers() {
+        let (state, _dir) = fixture();
+        let viewer = "3e".repeat(32);
+        let peer = "3f".repeat(32);
+        insert_peer(&state, &viewer, "viewer", 24);
+        insert_peer(&state, &peer, "peer", 25);
+        let mut body = open_zstd_stream(router(state.clone()), &viewer).await;
+        let first = next_zstd_map_response(&mut body).await;
+        assert_eq!(first.peers.len(), 1);
+
+        state
+            .machines
+            .wake_waiters_with(super::super::PendingMapChange::target(
+                MapChangeReason::SelfUpdate,
+                stable_id_from_key(&viewer),
+            ));
+        let refresh = next_zstd_map_response(&mut body).await;
+        // Go's SelfUpdate builds Node+DNSConfig, but connectionEntry
+        // .withSelfDelta drops a Node equal to the last one sent on this
+        // connection (mapper TestSelfSentOnlyWhenChanged); the self node
+        // did not change since the initial map.
+        assert!(refresh.node.is_none());
+        assert!(refresh.dns_config.is_some());
+        assert!(refresh.peers.is_empty());
+        assert!(refresh.peers_changed.is_empty());
+        assert!(refresh.peers_removed.is_empty());
+        assert!(refresh.packet_filters.is_empty());
+        assert!(refresh.ssh_policy.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_route_approval_updates_router_own_allowed_and_primary_routes() {
+        let (state, _dir) = fixture();
+        let key = "3a".repeat(32);
+        let route = "10.77.0.0/24";
+        let mut record = routed_record(&key, "router", 26, vec![route.into()]);
+        record.approved_routes.clear();
+        state.machines.upsert(key.clone(), record);
+
+        let mut body = open_zstd_stream(router(state.clone()), &key).await;
+        let first = next_zstd_map_response(&mut body).await;
+        let initial_self = first.node.as_ref().expect("initial self node");
+        assert!(!initial_self.allowed_ips.iter().any(|ip| ip == route));
+        assert!(!initial_self.primary_routes.iter().any(|ip| ip == route));
+
+        assert!(state.machines.set_approved_routes(&key, vec![route.into()]));
+        let updated = next_zstd_map_response(&mut body).await;
+        let updated_self = updated.node.as_ref().expect("updated self node");
+        assert!(updated_self.allowed_ips.iter().any(|ip| ip == route));
+        assert!(updated_self.primary_routes.iter().any(|ip| ip == route));
+        assert_eq!(updated_self.id, initial_self.id);
+        assert!(updated.peers.is_empty());
+    }
+
+    #[tokio::test]
     async fn stream_true_derp_map_refresh_emits_full_map_response() {
         let (mut state, _dir) = fixture();
         let mut runtime_config = crate::tailscale_wire::RuntimeConfigSnapshot::default();
@@ -4207,10 +5500,7 @@ mod tests {
         let app = router(state.clone());
         let mut body = open_zstd_stream(app, &a).await;
         let first = next_zstd_map_response(&mut body).await;
-        assert_eq!(
-            first.debug.as_ref().map(|debug| debug.disable_log_tail),
-            Some(false)
-        );
+        assert!(first.debug.is_none());
         assert_default_auto_update(first.node.as_ref().expect("own node present"), true);
         assert!(first.derp_map.as_ref().unwrap().regions.is_empty());
         let history_len = state.machines.map_change_history().len();
@@ -4247,11 +5537,19 @@ mod tests {
         });
 
         let updated = next_zstd_map_response(&mut body).await;
-        assert_eq!(
-            updated.debug.as_ref().map(|debug| debug.disable_log_tail),
-            Some(false)
-        );
-        assert_default_auto_update(updated.node.as_ref().expect("own node present"), true);
+        // Go v0.29.5: change.DERPMap() only sets IncludeDERPMap, so
+        // mapper.buildFromChange sends DERPMap + ControlTime and nothing else
+        // (Debug rides full maps only).
+        assert!(updated.debug.is_none());
+        assert!(updated.node.is_none());
+        assert!(updated.peers.is_empty());
+        assert!(updated.peers_changed.is_empty());
+        assert!(updated.dns_config.is_none());
+        assert!(updated.packet_filters.is_empty());
+        assert!(updated.ssh_policy.is_none());
+        assert!(updated.user_profiles.is_empty());
+        assert!(updated.domain.is_empty());
+        assert!(updated.control_time.is_some());
         let derp_map = updated.derp_map.unwrap();
         assert_eq!(
             derp_map
@@ -4696,7 +5994,7 @@ mod tests {
             crate::policy::parse_hujson_policy(deny_policy).unwrap(),
             deny_policy.to_string(),
         );
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
         let primary = owner_for_route(&primary_routes, route).expect("global primary");
         let (primary_name, secondary) = if primary == router_a {
@@ -4809,7 +6107,7 @@ mod tests {
             state.machines.clone(),
             stable_id_from_key(&router_b),
         );
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
         let primary_owner_for = |route: &str| {
             primary_routes
@@ -4830,6 +6128,7 @@ mod tests {
         );
 
         let app = router(state);
+        let mut steered_non_primary = 0usize;
         for (client, expectations) in [
             (
                 &alice,
@@ -4876,14 +6175,23 @@ mod tests {
                         .any(|allowed| allowed == route),
                     "{expected_name} should carry {route} in AllowedIPs"
                 );
-                assert_eq!(
+                // Go TailNode fills PrimaryRoutes with every non-exit route
+                // RoutesForPeer returned for this viewer, so a via-steered
+                // peer lists the prefix even when another router is the
+                // global HA primary. headscale-go v0.29.5 servertest with
+                // this policy: router-a is global primary for both prefixes,
+                // yet bob sees router-b with PrimaryRoutes [10.77.0.0/24]
+                // and alice sees router-b with PrimaryRoutes [10.88.0.0/24].
+                assert!(
                     expected_peer
                         .primary_routes
                         .iter()
                         .any(|primary| primary == route),
-                    primary_owner_for(route) == expected_key,
                     "{expected_name} PrimaryRoutes placement for {route}"
                 );
+                if primary_owner_for(route) != expected_key {
+                    steered_non_primary += 1;
+                }
 
                 let mut route_field_owners = mr
                     .peers
@@ -4902,6 +6210,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            steered_non_primary > 0,
+            "crossed via steering must route some viewer through a non-global-primary router"
+        );
     }
 
     #[tokio::test]
@@ -4925,7 +6237,7 @@ mod tests {
             state.machines.clone(),
             stable_id_from_key(&router_b),
         );
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let router_b_record = snapshot.get(&router_b).expect("router-b record");
         assert!(router_b_record.available_routes.iter().any(|r| r == route));
         assert!(router_b_record.approved_routes.iter().any(|r| r == route));
@@ -4999,6 +6311,16 @@ mod tests {
             policy.to_string(),
         );
         let (router_a, router_b, client_a) = insert_via_exit_nodes(&state);
+        // Bind the policy to the registry as the production control router
+        // does (control_router_with_optional_oidc_inner -> configure_policy).
+        // The inner test router skips that, leaving route reduction on the
+        // unbound PolicyDoc fallback instead of the compiled per-node
+        // matchers that mirror Go's MatchersForNode + CanAccessRoute. Go
+        // keeps 0.0.0.0/0 through ReduceRoutes here (the tagged /32
+        // destinations overlap it) and adds ::/0 through the via Include;
+        // headscale-go v0.29.5 servertest, IPv4-only prefixes: router-a
+        // AllowedIPs [0.0.0.0/0 100.64.0.1/32 ::/0], router-b only its /32.
+        state.machines.configure_policy(&state.policy);
         let _router_a_guard = MachineRegistry::track_stream_connection(
             state.machines.clone(),
             stable_id_from_key(&router_a),
@@ -5077,7 +6399,7 @@ mod tests {
             state.machines.clone(),
             stable_id_from_key(&router_b),
         );
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
         let global_primary = owner_for_route(&primary_routes, route).expect("global primary");
         let (primary_name, non_primary_name, non_primary_via_tag) = if global_primary == router_a {
@@ -5189,7 +6511,7 @@ mod tests {
             stable_id_from_key(&router_b),
         );
 
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let primary_routes = state.machines.primary_routes_for_snapshot(&snapshot);
         let initial_primary = owner_for_route(&primary_routes, route).expect("global primary");
         let (initial_primary_name, failover_name, failover_key) = if initial_primary == router_a {
@@ -5241,7 +6563,7 @@ mod tests {
         assert!(peer_route(&mr, initial_primary_name, route).is_none());
         let failed_over = state
             .machines
-            .primary_routes_for_snapshot(&state.machines.snapshot());
+            .primary_routes_for_snapshot(&state.machines.snapshot_with_metadata());
         assert_eq!(
             failed_over.get(failover_key).cloned().unwrap_or_default(),
             vec![route.to_string()]
@@ -5287,8 +6609,8 @@ mod tests {
         let router_b = changed_peer(&updated, "router-b").expect("router-b changed");
         assert!(router_b.allowed_ips.iter().any(|allowed| allowed == route));
         assert!(
-            updated.dns_config.is_some(),
-            "policy deltas carry policy-derived DNSConfig updates"
+            updated.dns_config.is_none(),
+            "policy deltas leave unchanged DNSConfig out"
         );
     }
 
@@ -5375,8 +6697,8 @@ mod tests {
             .expect("Bob UserProfile present");
         assert_eq!(bob_profile.login_name, "bob");
         assert!(
-            updated.dns_config.is_some(),
-            "policy deltas carry policy-derived DNSConfig updates"
+            updated.dns_config.is_none(),
+            "policy deltas leave unchanged DNSConfig out"
         );
     }
 
@@ -5451,9 +6773,16 @@ mod tests {
             updated.peers.is_empty(),
             "policy refresh should use incremental peer deltas"
         );
-        assert!(
-            updated.peers_changed.is_empty(),
-            "profile-only churn should not force an unchanged peer node delta"
+        // Go's policyChangeResponse resends every remaining visible peer in
+        // PeersChanged ("their AllowedIPs may have changed"), unchanged or not.
+        assert_eq!(
+            updated
+                .peers_changed
+                .iter()
+                .map(|peer| peer.id)
+                .collect::<Vec<_>>(),
+            vec![stable_id_from_key(&bob)],
+            "policy frames resend the remaining visible peers"
         );
         assert!(updated.peers_removed.is_empty());
         let bob_profile = updated
@@ -5468,8 +6797,8 @@ mod tests {
             "https://example.com/bob-after.png"
         );
         assert!(
-            updated.dns_config.is_some(),
-            "policy refresh deltas carry policy-derived DNSConfig updates"
+            updated.dns_config.is_none(),
+            "policy refresh deltas leave unchanged DNSConfig out"
         );
     }
 
@@ -5539,7 +6868,7 @@ mod tests {
 
         let first = state
             .machines
-            .primary_routes_for_snapshot(&state.machines.snapshot());
+            .primary_routes_for_snapshot(&state.machines.snapshot_with_metadata());
         let first_owner = owner_for_route(&first, &route).expect("initial primary owner");
         let old_primary = state
             .machines
@@ -5549,14 +6878,14 @@ mod tests {
 
         let second = state
             .machines
-            .primary_routes_for_snapshot(&state.machines.snapshot());
+            .primary_routes_for_snapshot(&state.machines.snapshot_with_metadata());
         let second_owner = owner_for_route(&second, &route).expect("replacement primary owner");
         assert_ne!(second_owner, first_owner);
 
         state.machines.upsert(first_owner.clone(), old_primary);
         let third = state
             .machines
-            .primary_routes_for_snapshot(&state.machines.snapshot());
+            .primary_routes_for_snapshot(&state.machines.snapshot_with_metadata());
         assert_eq!(
             third.get(&second_owner).cloned().unwrap_or_default(),
             vec![route]
@@ -5632,10 +6961,11 @@ mod tests {
         insert_peer(&state, &a, "peer-a", 10);
         insert_peer(&state, &b, "peer-b", 11);
 
-        let app = router(state);
+        let app = router(state.clone());
         let req = serde_json::json!({
             "NodeKey": format!("nodekey:{a}"),
             "Version": 113,
+            "Endpoints": ["127.0.0.1:41641"],
         });
         let resp = app
             .oneshot(
@@ -5650,10 +6980,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
-        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
-        let node = mr.node.as_ref().expect("own node present");
-        assert_eq!(node.addresses[0], "100.64.0.10/32");
-        assert_eq!(mr.peers.len(), 1);
+        assert!(raw.is_empty(), "native non-stream updates have no map body");
+        assert_eq!(
+            state.machines.get(&a).unwrap().endpoints,
+            vec!["127.0.0.1:41641".to_string()]
+        );
     }
 
     /// Keyed map still works (regression guard).
@@ -5725,6 +7056,36 @@ mod tests {
         zstd::bulk::decompress(framed_body(bytes), 16 * 1024 * 1024).expect("valid zstd frame")
     }
 
+    fn decode_framed_sequence(mut bytes: &[u8]) -> Vec<MapResponse> {
+        let mut responses = Vec::new();
+        while !bytes.is_empty() {
+            assert!(bytes.len() >= 4);
+            let size = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert!(bytes.len() >= 4 + size);
+            responses.push(serde_json::from_slice(&decode_framed(&bytes[..4 + size])).unwrap());
+            bytes = &bytes[4 + size..];
+        }
+        responses
+    }
+
+    /// Decode every `[u32 LE size][zstd(JSON)]` frame of one body chunk into
+    /// its JSON bytes. Go writes `withRemovals`' `{PeersRemoved}` response and
+    /// the following response as separate frames; one chunk may carry both.
+    fn decode_framed_json_sequence(mut bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        while !bytes.is_empty() {
+            assert!(bytes.len() >= 4, "truncated frame header");
+            let size = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert!(
+                bytes.len() >= 4 + size,
+                "truncated frame: header says {size}"
+            );
+            frames.push(decode_framed(&bytes[..4 + size]));
+            bytes = &bytes[4 + size..];
+        }
+        frames
+    }
+
     async fn open_zstd_stream(app: axum::Router, node_key_hex: &str) -> axum::body::Body {
         let req_body = serde_json::json!({ "Stream": true, "Version": 113, "Compress": "zstd" });
         let resp = app
@@ -5744,11 +7105,42 @@ mod tests {
         resp.into_body()
     }
 
+    thread_local! {
+        /// Frames that arrived coalesced in one body chunk behind the one a
+        /// test asked for. Each `#[tokio::test]` runs on its own thread, so
+        /// the queue is per test.
+        static PENDING_MAP_FRAMES: std::cell::RefCell<std::collections::VecDeque<Vec<u8>>> =
+            const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    }
+
+    /// Read the next MapResponse from a zstd stream. The server may write several
+    /// length-prefixed frames in one chunk (the client parses a byte stream, as it
+    /// does for headscale-go's separate writes), so surplus frames are queued.
     async fn next_zstd_map_response(body: &mut axum::body::Body) -> MapResponse {
+        if let Some(frame) = PENDING_MAP_FRAMES.with(|queue| queue.borrow_mut().pop_front()) {
+            return serde_json::from_slice(&decode_framed(&frame)).unwrap();
+        }
         let frame = http_body_util::BodyExt::frame(body).await.unwrap().unwrap();
         let chunk = frame.into_data().unwrap();
-        let decoded = decode_framed(&chunk);
-        serde_json::from_slice(&decoded).unwrap()
+        let mut rest: &[u8] = &chunk;
+        let mut frames = Vec::new();
+        while !rest.is_empty() {
+            assert!(
+                rest.len() >= 4,
+                "truncated frame header: {} bytes",
+                rest.len()
+            );
+            let size = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+            assert!(
+                rest.len() >= 4 + size,
+                "truncated frame: header says {size}"
+            );
+            frames.push(rest[..4 + size].to_vec());
+            rest = &rest[4 + size..];
+        }
+        let first = frames.remove(0);
+        PENDING_MAP_FRAMES.with(|queue| queue.borrow_mut().extend(frames));
+        serde_json::from_slice(&decode_framed(&first)).unwrap()
     }
 
     async fn assert_no_stream_frame(body: &mut axum::body::Body, within: Duration) {
@@ -5941,7 +7333,10 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_removed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
-        assert!(mr.dns_config.is_none());
+        assert!(
+            mr.dns_config.is_some(),
+            "self rename refreshes DNS metadata"
+        );
         assert!(mr.derp_map.is_none());
         assert!(mr.user_profiles.is_empty());
         assert!(mr.packet_filters.is_empty());
@@ -5985,13 +7380,50 @@ mod tests {
 
         let app = router(state.clone());
         let public_app = public_router(state.clone());
-        let mut body = open_zstd_stream(app, &a).await;
+        let mut body = open_zstd_stream(app.clone(), &a).await;
         let first_mr = next_zstd_map_response(&mut body).await;
         assert!(first_mr.node.is_some());
 
         assert!(state.machines.delete(&a));
+        let ended = tokio::time::timeout(
+            Duration::from_secs(3),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("deleting self should promptly end the map stream");
+        assert!(
+            matches!(ended, Some(Err(_))),
+            "deleted node stream should fail so its transport resets"
+        );
         drop(body);
-        tokio::task::yield_now().await;
+
+        let retry = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{a}/map"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "Stream": true,
+                            "Version": 113,
+                            "NodeKey": format!("nodekey:{a}")
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let bytes = to_bytes(retry.into_body(), 4096).await.unwrap();
+        let size = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 4 + size);
+        let retry_map: serde_json::Value = serde_json::from_slice(&bytes[4..]).unwrap();
+        assert_eq!(retry_map["Node"]["Key"], format!("nodekey:{a}"));
+        assert_eq!(retry_map["Node"]["KeyExpiry"], "1970-01-01T00:00:01Z");
+        assert_eq!(retry_map["Node"]["Expired"], true);
+        assert!(retry_map.get("Peers").is_none());
 
         let metrics_resp = public_app
             .oneshot(
@@ -6150,6 +7582,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_true_full_batch_precedes_targeted_ping_without_losing_it() {
+        let (mut state, _dir) = fixture();
+        state.public_control_url = Some("https://control.example".into());
+        let target_key = "ac".repeat(32);
+        let other_key = "ad".repeat(32);
+        insert_peer(&state, &target_key, "target", 10);
+        insert_peer(&state, &other_key, "other", 11);
+        state.machines.enable_map_batcher();
+
+        let app = router(state.clone());
+        let mut target = open_zstd_stream(app.clone(), &target_key).await;
+        let mut other = open_zstd_stream(app, &other_key).await;
+        let _ = next_zstd_map_response(&mut target).await;
+        let _ = next_zstd_map_response(&mut other).await;
+        let _ = state.machines.drain_pending_map_changes();
+
+        let target_id = stable_id_from_key(&target_key);
+        let (ping_id, _response) = state.register_ping(target_id);
+        state.dispatch_ping_request(target_id, &ping_id, true, false);
+        state
+            .machines
+            .record_observed_map_change(MapChangeReason::FullUpdate, None, None);
+        let _ = state.machines.publish_pending_map_changes();
+
+        let full =
+            tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut target))
+                .await
+                .expect("full update for target");
+        assert!(full.derp_map.is_some());
+        assert!(full.ping_request.is_none());
+        let ping =
+            tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut target))
+                .await
+                .expect("ping after full update");
+        assert!(ping.node.is_none());
+        assert!(ping.derp_map.is_none());
+        assert!(ping.peers.is_empty());
+        assert!(ping.ping_request.is_some());
+
+        let other_full =
+            tokio::time::timeout(Duration::from_secs(1), next_zstd_map_response(&mut other))
+                .await
+                .expect("full update for other node");
+        assert!(other_full.derp_map.is_some());
+        assert!(other_full.ping_request.is_none());
+        assert_no_stream_frame(&mut other, Duration::from_millis(30)).await;
+    }
+
+    #[tokio::test]
     async fn stream_true_cancelled_ping_does_not_emit_stale_ping_frame() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
@@ -6294,14 +7775,17 @@ mod tests {
 
         let node_a_id = stable_id_from_key(&a);
         let node_b_id = stable_id_from_key(&b);
+        let _ = state.machines.drain_pending_map_changes();
+
+        insert_peer(&state, &b, "peer-b", 11);
+        // A map session needs an existing node: Go's State.Connect returns no
+        // session and Batcher.AddNode fails its initial map for an unknown
+        // node, so b only joins the batcher once it is registered.
         let _guard_b = MachineRegistry::track_stream_connection_with_grace(
             state.machines.clone(),
             node_b_id,
             Duration::ZERO,
         );
-        let _ = state.machines.drain_pending_map_changes();
-
-        insert_peer(&state, &b, "peer-b", 11);
         let first_batch = state
             .machines
             .publish_pending_map_changes()
@@ -6429,8 +7913,8 @@ mod tests {
                 .any(|profile| profile.id == crate::tailscale_wire::wire::TAGGED_DEVICES_USER_ID)
         );
         assert!(
-            tagged.dns_config.is_some(),
-            "tag churn changes policy-visible state and should carry policy-derived DNS updates"
+            tagged.dns_config.is_none(),
+            "peer tag churn must not resend the viewer DNS config"
         );
 
         assert!(
@@ -6847,36 +8331,31 @@ mod tests {
             .machines
             .configure_nodestore_write_batcher(2, Duration::from_secs(5));
         let history_len = state.machines.map_change_history().len();
-        let machines = state.machines.clone();
-        let pending_new_node = new_node.clone();
-        let rekey = std::thread::spawn(move || {
-            let mut pending = MachineRecord::new_at(
-                chrono::Utc::now(),
-                pending_new_node.clone(),
-                "reauth-machine".into(),
-                String::new(),
-                "old-auth-node".into(),
-                Ipv4Addr::new(100, 64, 0, 13),
-                false,
-            );
-            pending.node_id = Some(42);
-            machines.complete_web_registration(pending, "alice", 2);
-        });
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while state.machines.nodestore_queue_depth() == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "queued auth-completion rekey did not reach the NodeStore worker"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let mut pending = MachineRecord::new_at(
+            chrono::Utc::now(),
+            new_node.clone(),
+            "reauth-machine".into(),
+            String::new(),
+            "old-auth-node".into(),
+            Ipv4Addr::new(100, 64, 0, 13),
+            false,
+        );
+        pending.node_id = Some(42);
+        // Go v0.29.5 re-auth (applyAuthNodeUpdate) refuses to rotate onto a
+        // NodeKey bound to a different machine with ErrNodeKeyInUse before
+        // any NodeStore write, so no auth-completion change is ever queued
+        // behind the delete; node 42 keeps its old key.
+        assert_eq!(
+            state
+                .machines
+                .complete_web_registration(pending, "alice", 2)
+                .unwrap_err(),
+            "node key already in use by another machine"
+        );
+        assert_eq!(state.machines.nodestore_queue_depth(), 0);
 
         assert!(state.machines.delete(&new_node));
-        rekey
-            .join()
-            .expect("queued auth-completion rekey should finish");
-        assert!(state.machines.get(&old_node).is_none());
+        assert!(state.machines.get(&old_node).is_some());
         assert!(state.machines.get(&new_node).is_none());
 
         let changes = state.machines.map_change_history();
@@ -6891,7 +8370,7 @@ mod tests {
         let immediate = http_body_util::BodyExt::frame(&mut body).now_or_never();
         assert!(
             immediate.is_none(),
-            "worker-batched auth rekey/delete must wait for the map-batch tick"
+            "worker-batched delete must wait for the map-batch tick"
         );
 
         publish_test_map_batch().await;
@@ -6899,10 +8378,10 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
-        assert_eq!(mr.peers_removed, vec![42, 99]);
+        assert_eq!(mr.peers_removed, vec![99]);
         assert!(
             mr.dns_config.is_none(),
-            "stale auth-completion policy reason should not turn the peer removal into a policy chunk"
+            "a rejected auth completion must not turn the peer removal into a policy chunk"
         );
     }
 
@@ -6952,7 +8431,9 @@ mod tests {
                 false,
             );
             pending.node_id = Some(42);
-            machines.complete_web_registration(pending, "alice", 2);
+            machines
+                .complete_web_registration(pending, "alice", 2)
+                .unwrap();
         });
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -6994,7 +8475,9 @@ mod tests {
         assert!(mr.peers.is_empty());
         assert_eq!(mr.peers_changed.len(), 1);
         assert_eq!(mr.peers_changed[0].id, 42);
-        assert_eq!(mr.peers_changed[0].name, "old-auth-node-reauth");
+        // Go's auth-path re-auth (HandleNodeFromAuthPath) updates the raw
+        // Hostname but keeps GivenName, so the peer's DNS name is unchanged.
+        assert_eq!(mr.peers_changed[0].name, "old-auth-node");
         assert!(mr.peers_changed_patch.is_empty());
         assert!(mr.peers_removed.is_empty());
         assert!(
@@ -7120,15 +8603,27 @@ mod tests {
             .unwrap();
         policy_update.await.expect("policy update task");
         let chunk = frame.into_data().unwrap();
-        let decoded = decode_framed(&chunk);
-        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        // Go's handleNodeChange/withRemovals sends the hidden peers as their
+        // own `{PeersRemoved}` response ahead of the policy response
+        // (mapper TestHandleNodeChangeSendsRemovalsAsDelta).
+        let mut frames = decode_framed_sequence(&chunk);
+        assert_eq!(frames.len(), 2);
+        let removal = frames.remove(0);
+        assert_eq!(removal.peers_removed, vec![stable_id_from_key(&b)]);
+        assert!(removal.control_time.is_none());
+        assert!(removal.packet_filters.is_empty());
+        assert!(removal.node.is_none());
+        let mr = frames.remove(0);
 
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
-        assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
         assert!(
-            mr.dns_config.is_some(),
-            "policy deltas should carry policy-derived DNSConfig updates"
+            mr.peers_removed.is_empty(),
+            "the policy response never carries the removals"
+        );
+        assert!(
+            mr.dns_config.is_none(),
+            "policy deltas leave unchanged DNSConfig out"
         );
         assert!(
             mr.packet_filters
@@ -7208,11 +8703,16 @@ mod tests {
             crate::policy::parse_hujson_policy(restrictive_policy).unwrap(),
             restrictive_policy.into(),
         );
-        let snapshot = state.machines.snapshot();
+        let snapshot = state.machines.snapshot_with_metadata();
         let served_routes = served_routes_for_snapshot(&snapshot);
-        let allowed_after_reload =
-            allowed_peer_ids_for_snapshot(&state.policy, &snapshot, &alice, &served_routes)
-                .expect("restrictive policy should build a peer map");
+        let allowed_after_reload = allowed_peer_ids_for_snapshot(
+            &state.machines,
+            &state.policy,
+            &snapshot,
+            &alice,
+            &served_routes,
+        )
+        .expect("restrictive policy should build a peer map");
         assert_eq!(
             allowed_after_reload,
             BTreeSet::from([stable_id_from_key(&bob)]),
@@ -7249,19 +8749,34 @@ mod tests {
 
         let frame = pending_frame.await.unwrap().unwrap();
         let chunk = frame.into_data().unwrap();
-        let decoded = decode_framed(&chunk);
-        let delta: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        // Go (handleNodeChange/withRemovals): a `{PeersRemoved}` response
+        // first, then the policy response, which resends every remaining
+        // visible peer in PeersChanged (policyChangeResponse).
+        let mut frames = decode_framed_sequence(&chunk);
+        assert_eq!(frames.len(), 2);
+        let removal = frames.remove(0);
+        assert_eq!(removal.peers_removed, vec![stable_id_from_key(&carol)]);
+        assert!(removal.control_time.is_none());
+        assert!(removal.peers_changed.is_empty());
+        let delta = frames.remove(0);
         assert!(
             delta.node.is_none(),
             "policy visibility narrowing should be a peer delta, not a full self map"
         );
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_changed.is_empty());
+        assert_eq!(
+            delta
+                .peers_changed
+                .iter()
+                .map(|peer| peer.id)
+                .collect::<Vec<_>>(),
+            vec![stable_id_from_key(&bob)]
+        );
         assert!(delta.peers_changed_patch.is_empty());
-        assert_eq!(delta.peers_removed, vec![stable_id_from_key(&carol)]);
+        assert!(delta.peers_removed.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy reload deltas should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "policy reload deltas leave unchanged DNSConfig out"
         );
         let profile_names = delta
             .user_profiles
@@ -7395,8 +8910,8 @@ mod tests {
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy reload deltas should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "policy reload deltas leave unchanged DNSConfig out"
         );
         let peer = changed_peer(&delta, "router").expect("router peer delta");
         assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
@@ -7466,7 +8981,10 @@ mod tests {
             "fresh/no-match ephemeral GC must not wake streams with an empty peers delta"
         );
 
-        tokio::time::advance(MAP_KEEPALIVE_INTERVAL + Duration::from_millis(1)).await;
+        tokio::time::advance(
+            MAP_KEEPALIVE_INTERVAL + MAP_KEEPALIVE_JITTER_UPPER_BOUND + Duration::from_millis(1),
+        )
+        .await;
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -7688,6 +9206,15 @@ mod tests {
         let peer = &mr.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&a));
         assert_eq!(peer.key_expiry, Some(expiry));
+
+        assert!(state.machines.set_expiry(&a, None));
+        let cleared = next_zstd_map_response(&mut body).await;
+        assert!(cleared.peers.is_empty());
+        assert!(cleared.peers_removed.is_empty());
+        assert!(cleared.peers_changed_patch.is_empty());
+        assert_eq!(cleared.peers_changed.len(), 1);
+        assert_eq!(cleared.peers_changed[0].id, stable_id_from_key(&a));
+        assert_eq!(cleared.peers_changed[0].key_expiry, None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -7978,8 +9505,8 @@ mod tests {
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy-reasoned route auto-approval should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "route auto-approval must not resend unchanged DNS config"
         );
         let peer = changed_peer(&delta, "router").expect("router peer delta");
         assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
@@ -8100,8 +9627,8 @@ mod tests {
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy-reasoned route auto-approval should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "route auto-approval must not resend unchanged DNS config"
         );
         let peer = changed_peer(&delta, "router").expect("router peer delta");
         assert!(peer.allowed_ips.iter().any(|allowed| allowed == route));
@@ -8216,8 +9743,8 @@ mod tests {
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy-reasoned route approval should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "route approval must not resend unchanged DNS config"
         );
         let peer = changed_peer(&delta, "router").expect("router peer delta");
         for route in &routes {
@@ -8307,6 +9834,9 @@ mod tests {
         assert_eq!(changed, 1);
         assert!(missing.is_empty());
 
+        // Go v0.29.5 State.Connect appends a PolicyChange only when
+        // NodeNeedsPeerRecompute (subnet router / relay / via target); an
+        // ordinary peer coming online is just the NodeOnline patch.
         let changes = state.machines.map_change_history();
         let new_changes = &changes[history_len..];
         assert_eq!(
@@ -8314,7 +9844,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"], vec!["policy change"]]
+            vec![vec!["node online"], vec!["policy change"]]
         );
         let pending = state.machines.pending_map_changes();
         let observer_changes = pending
@@ -8325,7 +9855,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"], vec!["policy change"]]
+            vec![vec!["node online"], vec!["policy change"]]
         );
 
         tokio::task::yield_now().await;
@@ -8344,13 +9874,18 @@ mod tests {
         assert!(delta.peers.is_empty());
         assert!(delta.peers_removed.is_empty());
         assert!(
-            delta.dns_config.is_some(),
-            "policy-reasoned batched changes should carry policy-derived DNS updates"
+            delta.dns_config.is_none(),
+            "batched policy changes must not resend unchanged DNS config"
         );
-        assert_eq!(delta.peers_changed_patch.len(), 1);
-        let patch = &delta.peers_changed_patch[0];
-        assert_eq!(patch.node_id, stable_id_from_key(&peer_key));
-        assert_eq!(patch.online, Some(true));
+        // Go answers this tick with the NodeOnline patch frame and then the
+        // policy frame, whose PeersChanged resends every visible peer
+        // (policyChangeResponse) -- the online peer included. The coalesced
+        // tick here carries that policy frame's content: the peer arrives as
+        // a whole node already marked online, so the patch is redundant.
+        assert!(delta.peers_changed_patch.is_empty());
+        let peer_delta = changed_peer(&delta, "peer").expect("online peer resent by policy delta");
+        assert_eq!(peer_delta.id, stable_id_from_key(&peer_key));
+        assert_eq!(peer_delta.online, Some(true));
 
         let router_delta = changed_peer(&delta, "router").expect("router route peer delta");
         assert!(
@@ -8541,31 +10076,52 @@ mod tests {
                 .iter()
                 .any(|advertised| advertised == route)
         );
+        // Go's WithSelfNode passes the router's own primaries through
+        // policy.ReduceRoutes(self, ..., global matchers): the only ACL is
+        // alice -> 10.40.0.0/16, so the router can neither reach nor serve
+        // traffic for its route under CanAccessRoute and its self AllowedIPs
+        // stay its addresses (verified against the v0.29.5 mapper; peers
+        // still get the route through RoutesForPeer).
         assert!(
-            self_node.allowed_ips.iter().any(|allowed| allowed == route),
-            "router self node should be route-aware in its first stream response"
+            !self_node.allowed_ips.iter().any(|allowed| allowed == route),
+            "router self node only carries routes its policy lets it access"
         );
 
         let router_id = stable_id_from_key(&router_key);
         let alice_id = stable_id_from_key(&alice);
+        // Go v0.29.5 for this request: Connect emits NodeOnline plus a
+        // PolicyChange (the router is now a subnet router, see
+        // NodeNeedsPeerRecompute); the request's Hostinfo drops the stored
+        // Hostname, so DrainSelfRefreshes adds a SelfUpdate for the router;
+        // the route auto-approval returns change.PolicyChange(), which has
+        // no OriginNode. (This keyed /machine/{key}/map route is a Rust
+        // compatibility route; it publishes the connection change first.)
         let changes = state.machines.map_change_history();
         let new_changes = &changes[history_len..];
         assert_eq!(
             new_changes.len(),
-            2,
-            "initial stream route auto-approval should record lifecycle plus deferred policy changes"
+            3,
+            "initial stream route auto-approval should record lifecycle, self refresh and deferred policy changes: {new_changes:?}"
         );
         let online_change = &new_changes[0];
-        assert_eq!(online_change.reason_labels(), vec!["subnet router online"]);
-        assert_eq!(online_change.change_type(), "full");
-        assert!(online_change.is_full());
-        assert_eq!(online_change.origin_node_id, Some(router_id));
-        let policy_change = &new_changes[1];
+        assert_eq!(
+            online_change.reason_labels(),
+            vec!["node online", "policy change"]
+        );
+        assert_eq!(online_change.change_type(), "policy");
+        assert!(!online_change.is_full());
+        assert!(online_change.content.requires_runtime_peer_computation);
+        assert_eq!(online_change.origin_node_id, None);
+        let self_refresh = &new_changes[1];
+        assert_eq!(self_refresh.reason_labels(), vec!["self update"]);
+        assert_eq!(self_refresh.target_node_id, Some(router_id));
+        assert_eq!(self_refresh.change_type(), "self");
+        let policy_change = &new_changes[2];
         assert_eq!(policy_change.reason_labels(), vec!["policy change"]);
         assert_eq!(policy_change.change_type(), "policy");
         assert!(policy_change.content.include_policy);
         assert!(policy_change.content.requires_runtime_peer_computation);
-        assert_eq!(policy_change.origin_node_id, Some(router_id));
+        assert_eq!(policy_change.origin_node_id, None);
         assert!(!policy_change.is_full());
 
         let pending = state.machines.pending_map_changes();
@@ -8577,7 +10133,7 @@ mod tests {
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["subnet router online"], vec!["policy change"]]
+            vec![vec!["node online", "policy change"], vec!["policy change"]]
         );
 
         publish_test_map_batch().await;
@@ -8588,17 +10144,17 @@ mod tests {
         .await
         .expect("observer route-aware peer delta");
         assert!(
-            alice_delta.node.is_some(),
-            "subnet-router online lifecycle emits a full map update"
+            alice_delta.node.is_none(),
+            "subnet-router online recomputes peers without resending self/config"
         );
-        assert!(alice_delta.peers_changed.is_empty());
+        assert!(alice_delta.peers.is_empty());
         assert!(alice_delta.peers_removed.is_empty());
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
-            .peers
+            .peers_changed
             .iter()
             .find(|peer| peer.id == stable_id_from_key(&router_key))
-            .expect("router peer in full subnet-router online update");
+            .expect("router peer in incremental subnet-router online update");
         assert_eq!(peer.id, stable_id_from_key(&router_key));
         assert_eq!(peer.name, "router");
         assert!(
@@ -8702,8 +10258,11 @@ mod tests {
         let mut router_body = router_task.await.expect("router stream opens");
         let router_first = next_zstd_map_response(&mut router_body).await;
         let router_self = router_first.node.as_ref().expect("router self node");
+        // Go reduces the router's own primaries with ReduceRoutes(self, ...,
+        // global matchers); alice -> 10.41.0.0/16 gives the router no access
+        // to its route, so self AllowedIPs omit it (v0.29.5 mapper).
         assert!(
-            router_self
+            !router_self
                 .allowed_ips
                 .iter()
                 .any(|allowed| allowed == route)
@@ -8715,15 +10274,19 @@ mod tests {
         )
         .await
         .expect("observer route-aware peer delta");
+        // Go v0.29.5 no longer sends a full update when a subnet router comes
+        // online: NodeOnlineFor is a patch and the recompute is the gated
+        // PolicyChange from State.Connect, so the observer gets the router
+        // as an incremental PeersChanged entry and no self node.
         assert!(
-            alice_delta.node.is_some(),
-            "subnet-router online lifecycle emits a full map update after persistence"
+            alice_delta.node.is_none(),
+            "subnet-router online lifecycle recomputes peers incrementally after persistence"
         );
-        assert!(alice_delta.peers_changed.is_empty());
+        assert!(alice_delta.peers.is_empty());
         assert!(alice_delta.peers_removed.is_empty());
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
-            .peers
+            .peers_changed
             .iter()
             .find(|peer| peer.id == stable_id_from_key(&router_key))
             .expect("router peer present after connect");
@@ -8839,7 +10402,7 @@ mod tests {
         assert!(delta.peers_removed.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
-            delta.dns_config.is_some(),
+            delta.dns_config.is_none(),
             "route-health failover uses upstream policy-change delta shape"
         );
 
@@ -9006,7 +10569,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_self_lifecycle_policy_companion_stays_quiet_after_batch_tick() {
+    async fn stream_true_ordinary_self_lifecycle_stays_quiet_after_batch_tick() {
         let (state, _dir) = fixture();
         let a = "a0".repeat(32);
         let b = "b0".repeat(32);
@@ -9031,29 +10594,36 @@ mod tests {
 
         let a_id = stable_id_from_key(&a);
         let b_id = stable_id_from_key(&b);
+        // Go v0.29.5 State.Connect: an ordinary node (not a subnet router,
+        // relay or via target, see PolicyManager.NodeNeedsPeerRecompute)
+        // emits only the NodeOnline patch, no PolicyChange companion.
         let pending = state.machines.pending_map_changes();
         let a_changes = pending
             .get(&a_id)
-            .expect("self stream receives its lifecycle companion batch");
+            .expect("self stream receives its lifecycle batch");
         assert_eq!(
             a_changes
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"]]
+            vec![vec!["node online"]]
         );
         let b_changes = pending
             .get(&b_id)
-            .expect("observer stream receives the same lifecycle companion batch");
+            .expect("observer stream receives the same lifecycle batch");
         assert_eq!(
             b_changes
                 .iter()
                 .map(MapChange::reason_labels)
                 .collect::<Vec<_>>(),
-            vec![vec!["node online", "policy change"]]
+            vec![vec!["node online"]]
         );
 
         publish_test_map_batch().await;
+        // Rust-side behaviour: a tick whose changes leave nothing to send
+        // for this node writes no frame. Go's buildFromChange still writes a
+        // ControlTime-only response once filterVisiblePeerPatches drops the
+        // node's own online patch (observed with the v0.29.5 batcher).
         assert_no_stream_frame(&mut a_body, Duration::from_millis(50)).await;
 
         let b_delta = next_zstd_map_response(&mut b_body).await;
@@ -9065,13 +10635,13 @@ mod tests {
         assert_eq!(b_delta.peers_changed_patch[0].node_id, a_id);
         assert_eq!(b_delta.peers_changed_patch[0].online, Some(true));
         assert!(
-            b_delta.dns_config.is_some(),
+            b_delta.dns_config.is_none(),
             "observer lifecycle companion should retain policy-delta shape"
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_subnet_router_lifecycle_emits_full_map_response_like_headscale_go() {
+    async fn stream_true_subnet_router_lifecycle_recomputes_incremental_peers_like_headscale_go() {
         let (state, _dir) = fixture();
         let observer = "a5".repeat(32);
         let router_key = "b5".repeat(32);
@@ -9107,11 +10677,15 @@ mod tests {
         let observer_changes = pending_online
             .get(&observer_id)
             .expect("subnet-router online change fans out to observer");
-        assert!(observer_changes.iter().any(MapChange::is_full));
+        assert!(
+            observer_changes
+                .iter()
+                .any(|change| change.content.requires_runtime_peer_computation)
+        );
         let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
         assert!(
             immediate.is_none(),
-            "subnet-router lifecycle full update should wait for the map-batch publish"
+            "subnet-router lifecycle policy update should wait for the map-batch publish"
         );
         state
             .machines
@@ -9119,15 +10693,22 @@ mod tests {
             .expect("subnet-router online batch published");
 
         let online = next_zstd_map_response(&mut observer_body).await;
-        assert!(online.node.is_some(), "full map includes self Node");
-        assert!(online.peers_changed.is_empty());
+        assert!(
+            online.node.is_none(),
+            "runtime recompute does not resend self Node"
+        );
+        assert!(online.peers.is_empty());
         assert!(online.peers_changed_patch.is_empty());
         assert!(online.peers_removed.is_empty());
-        let online_router = peer_named(&online, "router").expect("full map includes router peer");
+        let online_router = online
+            .peers_changed
+            .iter()
+            .find(|peer| peer.name == "router")
+            .expect("incremental map includes router peer");
         assert_eq!(online_router.online, Some(true));
         assert!(
             online_router.allowed_ips.iter().any(|ip| ip == route),
-            "full map should carry the route-derived AllowedIPs"
+            "incremental map should carry the route-derived AllowedIPs"
         );
 
         drop(router_body);
@@ -9139,11 +10720,15 @@ mod tests {
         let observer_changes = pending_offline
             .get(&observer_id)
             .expect("subnet-router offline change fans out to observer");
-        assert!(observer_changes.iter().any(MapChange::is_full));
+        assert!(
+            observer_changes
+                .iter()
+                .any(|change| change.content.requires_runtime_peer_computation)
+        );
         let immediate = http_body_util::BodyExt::frame(&mut observer_body).now_or_never();
         assert!(
             immediate.is_none(),
-            "subnet-router offline full update should wait for the map-batch publish"
+            "subnet-router offline policy update should wait for the map-batch publish"
         );
         state
             .machines
@@ -9152,13 +10737,17 @@ mod tests {
 
         let offline = next_zstd_map_response(&mut observer_body).await;
         assert!(
-            offline.node.is_some(),
-            "offline full map includes self Node"
+            offline.node.is_none(),
+            "offline runtime recompute does not resend self Node"
         );
-        assert!(offline.peers_changed.is_empty());
+        assert!(offline.peers.is_empty());
         assert!(offline.peers_changed_patch.is_empty());
         assert!(offline.peers_removed.is_empty());
-        let offline_router = peer_named(&offline, "router").expect("full map includes router peer");
+        let offline_router = offline
+            .peers_changed
+            .iter()
+            .find(|peer| peer.name == "router")
+            .expect("incremental map includes router peer");
         assert_eq!(offline_router.online, Some(false));
         assert!(
             !offline_router.allowed_ips.iter().any(|ip| ip == route),
@@ -9446,13 +11035,22 @@ mod tests {
         let chunk = frame.into_data().unwrap();
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        // Go v0.29.5 buildMapRequestChangeResponse: a disco-key change is
+        // change.NodeKeyRotated, a PeerChange patch carrying Key, DiscoKey,
+        // KeyExpiry and Endpoints; omitzero drops the zero expiry and the
+        // empty endpoints on the wire (checked against the Go mapper).
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_changed_patch.is_empty());
+        assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_removed.is_empty());
-        assert_eq!(mr.peers_changed.len(), 1);
-        let peer = &mr.peers_changed[0];
-        assert_eq!(peer.id, stable_id_from_key(&a));
-        assert_eq!(peer.disco_key.as_deref(), Some(new_disco.as_str()));
+        assert_eq!(mr.peers_changed_patch.len(), 1);
+        let patch = &mr.peers_changed_patch[0];
+        assert_eq!(patch.node_id, stable_id_from_key(&a));
+        assert_eq!(patch.disco_key.as_deref(), Some(new_disco.as_str()));
+        assert_eq!(patch.key.as_deref(), Some(format!("nodekey:{a}").as_str()));
+        assert!(patch.key_expiry.is_none());
+        assert!(patch.endpoints.is_empty());
+        assert!(patch.online.is_none());
+        assert_eq!(patch.derp_region, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -9510,10 +11108,14 @@ mod tests {
             Some(1)
         );
 
+        // Clients resend their whole Hostinfo. Dropping the stored Hostname
+        // would be a peer-visible Hostinfo change (Go peerHostinfoEqual
+        // compares Hostname) and turn this into a whole-node NodeAdded.
         let update_req = serde_json::json!({
             "Version": 113,
             "OmitPeers": true,
             "Hostinfo": {
+                "Hostname": "peer-a",
                 "NetInfo": {
                     "PreferredDERP": 7
                 }
@@ -9589,10 +11191,13 @@ mod tests {
         let _ = state.machines.drain_pending_map_changes();
 
         let history_len = state.machines.map_change_history().len();
+        // Keep the stored Hostname: without it Go classifies the request as
+        // a peer-visible Hostinfo change (NodeAdded), not a DERP patch.
         let update_req = serde_json::json!({
             "Version": 113,
             "OmitPeers": true,
             "Hostinfo": {
+                "Hostname": "peer-a",
                 "NetInfo": {
                     "PreferredDERP": 7
                 }
@@ -9766,10 +11371,14 @@ mod tests {
 
         let history_len = state.machines.map_change_history().len();
         let peer_id = stable_id_from_key(&a);
+        // Keep the stored Hostname: without it Go classifies the request as
+        // a peer-visible Hostinfo change (NodeAdded) plus a DNS-metadata
+        // SelfUpdate, not a DERP patch.
         let update_req = serde_json::json!({
             "Version": 113,
             "OmitPeers": true,
             "Hostinfo": {
+                "Hostname": "peer-a",
                 "NetInfo": {
                     "PreferredDERP": 7
                 }
@@ -9930,7 +11539,7 @@ mod tests {
 
     /// Stream:true: the response body emits the first framed
     /// MapResponse chunk immediately, then a keepalive frame
-    /// (`zstd({"KeepAlive":true})`) after [`MAP_KEEPALIVE_INTERVAL`].
+    /// (`zstd({"KeepAlive":true})`) after the base interval plus session jitter.
     /// We drive `tokio::time::pause` so the test doesn't wait 30s.
     #[tokio::test(start_paused = true)]
     async fn stream_true_emits_keepalive() {
@@ -9969,10 +11578,13 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(mr.peers.len(), 1);
 
-        // Advance virtual time past one keepalive interval and confirm
+        // Advance past the exclusive upper bound of the session period and confirm
         // the next chunk decodes to the canonical `{"KeepAlive":true}`
         // payload (matches upstream `justKeepAliveStr`).
-        tokio::time::advance(MAP_KEEPALIVE_INTERVAL + Duration::from_millis(1)).await;
+        tokio::time::advance(
+            MAP_KEEPALIVE_INTERVAL + MAP_KEEPALIVE_JITTER_UPPER_BOUND + Duration::from_millis(1),
+        )
+        .await;
         let frame = http_body_util::BodyExt::frame(&mut body)
             .await
             .unwrap()
@@ -10364,7 +11976,13 @@ mod tests {
             .unwrap();
         let first = decode_framed(&frame.into_data().unwrap());
         let first_mr: MapResponse = serde_json::from_slice(&first).unwrap();
-        assert!(first_mr.ssh_policy.is_none());
+        assert!(
+            first_mr
+                .ssh_policy
+                .expect("initial SSH policy")
+                .rules
+                .is_empty()
+        );
 
         let raw_policy = r#"{
             "groups": {"group:admins": ["bob@"]},
@@ -10396,14 +12014,84 @@ mod tests {
         .unwrap()
         .unwrap();
         policy_update.await.expect("policy update task");
-        let decoded = decode_framed(&frame.into_data().unwrap());
-        let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        // The empty ACL hides the admin peer: Go sends that removal as its own
+        // `{PeersRemoved}` response before the policy response (withRemovals).
+        let admin_id = stable_id_from_key(&"ca".repeat(32));
+        let mut frames = decode_framed_sequence(&frame.into_data().unwrap());
+        assert_eq!(frames.len(), 2);
+        let removal = frames.remove(0);
+        assert_eq!(removal.peers_removed, vec![admin_id]);
+        assert!(removal.ssh_policy.is_none());
+        let mr = frames.remove(0);
         let ssh = mr
             .ssh_policy
             .expect("SSH policy present after policy update");
         assert_eq!(
             ssh.rules[0].action.hold_and_delegate,
             "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
+        );
+
+        let acl_only_policy = raw_policy.replace(
+            "\"acls\": [],",
+            "\"acls\": [{\"action\":\"accept\",\"src\":[\"*\"],\"dst\":[\"*:*\"]}],",
+        );
+        let acl_update = tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::parse_hujson_policy(&acl_only_policy).unwrap(),
+                    acl_only_policy,
+                );
+            }
+        });
+        let frame = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("ACL-only map chunk")
+        .unwrap()
+        .unwrap();
+        acl_update.await.expect("ACL update task");
+        let decoded = decode_framed(&frame.into_data().unwrap());
+        let acl_delta: MapResponse = serde_json::from_slice(&decoded).unwrap();
+        assert!(
+            acl_delta.ssh_policy.is_none(),
+            "unchanged SSH policy is omitted"
+        );
+        assert!(acl_delta.dns_config.is_none(), "unchanged DNS is omitted");
+
+        let policy_removal = tokio::spawn({
+            let policy = state.policy.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                policy.set(
+                    crate::policy::parse_hujson_policy("{}").unwrap(),
+                    "{}".into(),
+                );
+            }
+        });
+        let frame = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_body_util::BodyExt::frame(&mut body),
+        )
+        .await
+        .expect("policy removal map chunk")
+        .unwrap()
+        .unwrap();
+        policy_removal.await.expect("policy removal task");
+        // `{}` hides the admin peer again: removal response, then policy.
+        let mut frames = decode_framed_json_sequence(&frame.into_data().unwrap());
+        assert_eq!(frames.len(), 2);
+        let removal: MapResponse = serde_json::from_slice(&frames.remove(0)).unwrap();
+        assert_eq!(removal.peers_removed, vec![admin_id]);
+        let decoded = frames.remove(0);
+        assert!(
+            std::str::from_utf8(&decoded)
+                .unwrap()
+                .contains("\"SSHPolicy\":{\"rules\":[]}"),
+            "removed SSH policy must be explicit on the wire"
         );
     }
 
@@ -10611,25 +12299,55 @@ mod tests {
         state.policy.set(doc, raw_policy);
 
         let app = router(state);
-        let resp = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(format!("/machine/nodekey:{node_key}/map"))
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
-        let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+        let self_map = |key: String| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(format!("/machine/nodekey:{key}/map"))
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(br#"{"Version":113}"#.to_vec()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let raw = to_bytes(resp.into_body(), 32 * 1024).await.unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                let mr: MapResponse = serde_json::from_slice(&raw).unwrap();
+                (mr, value)
+            }
+        };
 
+        // Taildrop disabled withholds the *baseline* file-sharing cap
+        // (Go TailNode: `if cfg.Taildrop.Enabled`), as the untagged peer's
+        // own self view shows.
+        let (peer_mr, _) = self_map(peer_key.clone()).await;
+        let peer_node = peer_mr.node.as_ref().expect("peer own node present");
+        assert!(peer_node.cap_map.contains_key(CAPABILITY_ADMIN));
+        assert!(peer_node.cap_map.contains_key(CAPABILITY_SSH));
+        assert!(!peer_node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
+
+        // An explicit policy nodeAttr still grants it: Go overlays
+        // NodeCapMap onto the baseline with maps.Copy after the Taildrop
+        // gate and stamps nodeAttr caps as nil (null on the wire).
+        // Verified against headscale-go v0.29.5 servertest with
+        // WithTaildropEnabled(false): tag:server self CapMap carries
+        // "https://tailscale.com/cap/file-sharing":null, the plain peer none.
+        let (mr, value) = self_map(node_key.clone()).await;
         let node = mr.node.as_ref().expect("own node present");
         assert!(node.cap_map.contains_key(CAPABILITY_ADMIN));
         assert!(node.cap_map.contains_key(CAPABILITY_SSH));
-        assert!(!node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
+        assert!(node.cap_map.contains_key(CAPABILITY_FILE_SHARING));
+        assert_eq!(
+            value["Node"]["CapMap"]
+                .as_object()
+                .expect("self CapMap object")
+                .get(CAPABILITY_FILE_SHARING),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[tokio::test]
@@ -10777,6 +12495,18 @@ mod tests {
         assert!(node.allowed_ips.contains(&"fd7a:115c:a1e0::20/128".into()));
         assert!(node.allowed_ips.contains(&"10.33.0.0/16".into()));
         assert!(node.cap_map.contains_key(NODE_ATTR_DISABLE_IPV4));
+
+        // The "*" nodeAttr also targets the IPv4-only peer. Go's
+        // buildTailPeers passes the peer's own CapMap to TailNode, so its
+        // only address is filtered to a non-nil empty slice ("Addresses":[])
+        // and slices.Concat of nothing is nil, which `omitzero` drops.
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let peer = value["Peers"]
+            .as_array()
+            .and_then(|peers| peers.iter().find(|peer| peer["Name"] == "peer"))
+            .expect("IPv4-only peer present");
+        assert_eq!(peer["Addresses"], serde_json::json!([]));
+        assert!(peer.get("AllowedIPs").is_none());
     }
 
     #[tokio::test]

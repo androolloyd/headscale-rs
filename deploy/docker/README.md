@@ -26,6 +26,14 @@ Multi-stage build producing a minimal Debian-based image:
 - Exposes port 8080 for API
 - Mounts config and data volumes
 
+The example publishes plain HTTP on port 8080. Its `server_url` uses the
+Compose service name, so it is reachable by the example node on the same
+Docker network. Set `server_url` to a URL reachable by your actual clients.
+For a public deployment, terminate TLS at a trusted reverse proxy or
+configure native TLS, use an HTTPS `server_url`, and keep the admin Unix
+socket and optional metrics listener private. The image builds from the
+committed `Cargo.lock` with `--locked`.
+
 ```bash
 # Build
 docker build -t headscale:latest -f Dockerfile ../..

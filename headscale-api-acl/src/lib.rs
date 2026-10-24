@@ -19,6 +19,9 @@
 //! documents and owner-key signing stay outside the headscale-go
 //! compatibility surface.
 //!
+//! [`go_netip`] supplies shared Go-compatible network text primitives for
+//! policy, wire and database adapters without a dependency on those adapters.
+//!
 //! ## Downstream hash binding
 //!
 //! [`AclDoc::policy_hash`] returns the SHA-256 of the canonicalised ACL
@@ -51,6 +54,20 @@
 //! canonical/internal Rust field names (`rules`, `tag_owners`,
 //! `node_attrs`, ...).
 
+pub mod go_dnsname;
+pub mod go_duration;
+mod go_hujson;
+pub mod go_json;
+pub mod go_json_output;
+pub mod go_key;
+pub mod go_netip;
+mod go_policy_json;
+pub mod go_policy_shape;
+mod go_policy_value;
+pub mod go_strconv;
+pub mod go_tailcfg_json;
+pub mod go_unicode;
+
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -59,6 +76,8 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use go_policy_shape::AliasKind;
 
 // =====================================================================
 // Types
@@ -181,6 +200,7 @@ impl<'de> Deserialize<'de> for AclRule {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeAttrGrant {
+    #[serde(default)]
     pub target: Vec<String>,
     #[serde(default)]
     pub attr: Vec<String>,
@@ -194,11 +214,24 @@ pub struct NodeAttrGrant {
 /// and `nodeAttrs[].app` policy entries.
 pub type CapabilityMap = BTreeMap<String, Vec<serde_json::Value>>;
 
+fn deserialize_capability_map<'de, D>(deserializer: D) -> Result<CapabilityMap, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map =
+        Option::<BTreeMap<String, Option<Vec<serde_json::Value>>>>::deserialize(deserializer)?;
+    Ok(map
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, values)| (key, values.unwrap_or_default()))
+        .collect())
+}
+
 fn deserialize_trimmed_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    String::deserialize(deserializer).map(|value| value.trim().to_string())
+    String::deserialize(deserializer).map(|value| go_unicode::trim_space(&value).to_owned())
 }
 
 fn deserialize_policy_test_proto<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -218,7 +251,31 @@ where
     Vec::<String>::deserialize(deserializer).map(|values| {
         values
             .into_iter()
-            .map(|value| value.trim().to_string())
+            .map(|value| go_unicode::trim_space(&value).to_owned())
+            .collect()
+    })
+}
+
+fn normalize_ssh_test_alias(value: &str) -> String {
+    let value = go_unicode::trim_space(value);
+    go_policy_shape::canonical_alias(value).unwrap_or_else(|_| value.to_owned())
+}
+
+fn deserialize_ssh_test_alias<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|value| normalize_ssh_test_alias(&value))
+}
+
+fn deserialize_ssh_test_aliases<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(|values| {
+        values
+            .iter()
+            .map(|value| normalize_ssh_test_alias(value))
             .collect()
     })
 }
@@ -235,7 +292,7 @@ pub struct GrantRule {
     pub dst: Vec<String>,
     #[serde(default, rename = "ip")]
     pub ip: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_capability_map")]
     pub app: CapabilityMap,
     #[serde(default)]
     pub via: Vec<String>,
@@ -274,10 +331,23 @@ pub struct SshRule {
         serialize_with = "serialize_ssh_check_period"
     )]
     pub check_period: Option<String>,
-    #[serde(default, rename = "acceptEnv", alias = "accept_env")]
+    #[serde(
+        default,
+        rename = "acceptEnv",
+        alias = "accept_env",
+        deserialize_with = "null_as_empty_vec"
+    )]
     pub accept_env: Vec<String>,
 }
 
+fn null_as_empty_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<String>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+#[allow(clippy::ref_option)] // serde serialize_with requires &Option<String>.
 fn serialize_ssh_check_period<S>(
     check_period: &Option<String>,
     serializer: S,
@@ -296,6 +366,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyTest {
+    #[serde(default)]
     pub src: String,
     #[serde(default, deserialize_with = "deserialize_policy_test_proto")]
     pub proto: String,
@@ -311,9 +382,9 @@ pub struct PolicyTest {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshPolicyTest {
-    #[serde(deserialize_with = "deserialize_trimmed_string")]
+    #[serde(default, deserialize_with = "deserialize_ssh_test_alias")]
     pub src: String,
-    #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
+    #[serde(default, deserialize_with = "deserialize_ssh_test_aliases")]
     pub dst: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub accept: Vec<String>,
@@ -321,6 +392,15 @@ pub struct SshPolicyTest {
     pub deny: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_trimmed_strings")]
     pub check: Vec<String>,
+}
+
+/// Authoritative account facts for resolving policy user aliases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyUser {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+    pub provider_identifier: Option<String>,
 }
 
 /// Top-level ACL document.
@@ -331,6 +411,11 @@ pub struct SshPolicyTest {
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclDoc {
+    /// Runtime user snapshot. None preserves label-only embedding behavior;
+    /// Some, including an empty list, resolves aliases through account IDs.
+    /// Account state is never part of serialized policy or its canonical hash.
+    #[serde(skip)]
+    pub users: Option<Vec<PolicyUser>>,
     #[serde(default = "default_policy_version")]
     pub version: u32,
     #[serde(default)]
@@ -391,6 +476,7 @@ pub struct NodeView<'a> {
     pub addr: Option<&'a str>,
     pub addrs: &'a [String],
     pub user: Option<&'a str>,
+    pub user_id: Option<u64>,
     pub tags: &'a [String],
 }
 
@@ -400,6 +486,7 @@ impl<'a> NodeView<'a> {
             addr: Some(addr),
             addrs: &[],
             user: None,
+            user_id: None,
             tags: &[],
         }
     }
@@ -409,6 +496,10 @@ impl<'a> NodeView<'a> {
     }
     pub fn with_user(mut self, user: &'a str) -> Self {
         self.user = Some(user);
+        self
+    }
+    pub fn with_user_id(mut self, user_id: Option<u64>) -> Self {
+        self.user_id = user_id;
         self
     }
     pub fn with_tags(mut self, tags: &'a [String]) -> Self {
@@ -472,6 +563,45 @@ pub enum PolicyParseError {
 }
 
 impl AclDoc {
+    /// Pinned Go resolves provider identifiers first, then one unique email
+    /// or stored name. Missing and ambiguous aliases match no account.
+    pub fn resolve_user(&self, alias: &str) -> Option<u64> {
+        self.resolve_user_value(alias.strip_suffix('@').unwrap_or(alias))
+    }
+
+    fn resolve_user_value(&self, token: &str) -> Option<u64> {
+        let users = self.users.as_ref()?;
+        if let Some(user) = users
+            .iter()
+            .find(|user| user.provider_identifier.as_deref() == Some(token))
+        {
+            return Some(user.id);
+        }
+        let mut matching = users
+            .iter()
+            .filter(|user| user.email == token || user.name == token);
+        let user = matching.next()?;
+        matching.next().is_none().then_some(user.id)
+    }
+
+    pub fn user_matches(&self, alias: &str, user_id: Option<u64>, login: Option<&str>) -> bool {
+        if self.users.is_none() {
+            return login.is_some_and(|login| user_matches(alias, login));
+        }
+        let Some(owner) =
+            user_id.or_else(|| login.and_then(|login| self.resolve_user_value(login)))
+        else {
+            return false;
+        };
+        self.resolve_user(alias) == Some(owner)
+    }
+
+    fn identity_matches(&self, entry: &str, principal: &NodeView<'_>) -> bool {
+        principal.any_addr_matches(|addr| entry == addr)
+            || (principal.tags.is_empty()
+                && self.user_matches(entry, principal.user_id, principal.user))
+    }
+
     /// Empty doc, version 1, no rules.
     pub fn empty() -> Self {
         Self {
@@ -649,25 +779,138 @@ fn sort_map_of_vecs(m: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<S
 /// `headscale-api` admin layer drives this through
 /// `POST /api/v1/policy/validate` and `PUT /api/v1/policy`.
 pub fn parse_hujson_policy(raw: &str) -> Result<AclDoc, PolicyParseError> {
-    let stripped = strip_hujson(raw);
-    let value: serde_json::Value =
-        serde_json::from_str(&stripped).map_err(|e| PolicyParseError::Json(e.to_string()))?;
+    let prepared = go_policy_json::prepare(raw).map_err(PolicyParseError::Json)?;
+    parse_prepared_policy(&prepared)
+}
+
+/// Parse native policy bytes and return a valid compilation-only source. The
+/// second value has metadata removed; callers must retain original bytes
+/// separately and must never present this value as the operator's source.
+pub fn parse_hujson_policy_bytes(raw: &[u8]) -> Result<(AclDoc, String), PolicyParseError> {
+    let source = go_hujson::prepare_metadata(raw)
+        .map_err(|error| PolicyParseError::Json(format!("parsing HuJSON: {error}")))?;
+    let prepared =
+        go_policy_json::prepare_standardized(&source, true).map_err(PolicyParseError::Json)?;
+    let doc = parse_prepared_policy(&prepared)?;
+    // Every retained string has passed the native syntax walk. Keep this
+    // defensive String boundary separate from the original byte source.
+    let source = String::from_utf8(source).map_err(|_| {
+        PolicyParseError::Json("parsing policy from bytes: jsontext: invalid UTF-8".to_owned())
+    })?;
+    Ok((doc, source))
+}
+
+fn parse_prepared_policy(prepared: &[u8]) -> Result<AclDoc, PolicyParseError> {
+    let mut value = go_json::value(prepared).map_err(PolicyParseError::Json)?;
+    strip_metadata_members(&mut value);
     let value = normalize_go_policy_top_level(value)?;
-    let mut doc = serde_json::from_value::<AclDoc>(value)
-        .map_err(|e| PolicyParseError::Schema(e.to_string()))?;
+    let mut doc = deserialize_go_policy_value(value)?;
     let grant_rules = acl_rules_from_grants(&doc.grants).map_err(PolicyParseError::Schema)?;
     if !grant_rules.is_empty() {
         let mut rules = grant_rules;
         rules.extend(doc.rules);
         doc.rules = rules;
     }
-    validate_policy(&doc).map_err(PolicyParseError::Schema)?;
+    validate_policy_mode(&doc, true).map_err(PolicyParseError::Schema)?;
     Ok(doc)
+}
+
+/// Decode the normalized typed schema without sending opaque capability
+/// Values through Value::deserialize a second time. In arbitrary-number mode,
+/// serde uses a private object-name sentinel to transport numbers; ordinary
+/// JSON objects with that name must remain ordinary capability objects.
+fn deserialize_go_policy_value(mut value: serde_json::Value) -> Result<AclDoc, PolicyParseError> {
+    fn take_apps(root: &mut serde_json::Value, name: &str) -> Vec<(usize, CapabilityMap)> {
+        let Some(rows) = root.get_mut(name).and_then(serde_json::Value::as_array_mut) else {
+            return Vec::new();
+        };
+        let mut apps = Vec::new();
+        for (index, row) in rows.iter_mut().enumerate() {
+            let Some(fields) = row.as_object_mut() else {
+                continue;
+            };
+            let Some(app) = fields.get("app") else {
+                continue;
+            };
+            let valid = app.is_null()
+                || app.as_object().is_some_and(|caps| {
+                    caps.values()
+                        .all(|values| values.is_null() || values.is_array())
+                });
+            if !valid {
+                // Leave invalid map/list shapes to the existing typed decoder.
+                // They must remain rejected rather than becoming empty maps.
+                continue;
+            }
+            let app = fields.remove("app").expect("app was just inspected");
+            let values = match app {
+                serde_json::Value::Null => CapabilityMap::new(),
+                serde_json::Value::Object(caps) => caps
+                    .into_iter()
+                    .map(|(cap, values)| {
+                        let values = match values {
+                            serde_json::Value::Null => Vec::new(),
+                            serde_json::Value::Array(values) => values,
+                            _ => unreachable!("capability list shape was inspected"),
+                        };
+                        (cap, values)
+                    })
+                    .collect(),
+                _ => unreachable!("capability map shape was inspected"),
+            };
+            apps.push((index, values));
+        }
+        apps
+    }
+    let grants = take_apps(&mut value, "grants");
+    let attrs = take_apps(&mut value, "nodeAttrs");
+    let mut doc = serde_json::from_value::<AclDoc>(value)
+        .map_err(|error| PolicyParseError::Schema(error.to_string()))?;
+    for (index, app) in grants {
+        doc.grants[index].app = app;
+    }
+    for (index, app) in attrs {
+        doc.node_attrs[index].app = app;
+    }
+    Ok(doc)
+}
+
+/// Pinned Go removes `#` members throughout the policy schema before
+/// validation. Grant `app` values are opaque capability payloads, so their
+/// members must be delivered unchanged to clients.
+fn strip_metadata_members(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => object.retain(|key, member| {
+            if key.starts_with('#') {
+                return false;
+            }
+            if key != "app" {
+                strip_metadata_members(member);
+            }
+            true
+        }),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_metadata_members(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Go's unmarshalPolicy reports every unknown member as
+/// `fmt.Errorf("%w: %q", ErrUnknownField, name)`: no nesting context, and Go
+/// `%q` quoting rather than Rust `Debug`.
+fn unknown_field_error(name: &str) -> String {
+    format!("unknown field: {}", go_strconv::quote(name))
 }
 
 fn normalize_go_policy_top_level(
     value: serde_json::Value,
 ) -> Result<serde_json::Value, PolicyParseError> {
+    if value.is_null() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
     let serde_json::Value::Object(object) = value else {
         return Ok(value);
     };
@@ -675,9 +918,12 @@ fn normalize_go_policy_top_level(
     let mut normalized = serde_json::Map::new();
     for (key, value) in object {
         let Some(canonical) = go_policy_field_name(&key) else {
-            return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
+            return Err(PolicyParseError::Schema(unknown_field_error(&key)));
         };
-        let value = normalize_go_policy_field(canonical, value)?;
+        let value = normalize_go_policy_field(
+            canonical,
+            normalize_policy_null("policy", canonical, value),
+        )?;
         if canonical == "groups" {
             validate_go_policy_groups(&value)?;
         }
@@ -717,7 +963,79 @@ fn normalize_go_policy_field(
         "sshTests" => {
             normalize_go_policy_array_objects(value, "sshTests", go_ssh_test_field_name, false)
         }
+        "hosts" => normalize_go_hosts(value),
+        "tagOwners" => {
+            let mut value = value;
+            if let Some(members) = value.as_object_mut() {
+                for list in members.values_mut() {
+                    if list.is_null() {
+                        *list = serde_json::Value::Array(Vec::new());
+                    }
+                }
+            }
+            Ok(value)
+        }
         _ => Ok(value),
+    }
+}
+
+fn normalize_go_hosts(value: serde_json::Value) -> Result<serde_json::Value, PolicyParseError> {
+    if !value.is_object() {
+        return Ok(value);
+    }
+    // Hosts.UnmarshalJSON first decodes the entire map[string]string. Null
+    // clears a plain Go string before hostname/prefix validation.
+    let hosts: BTreeMap<String, Option<String>> = serde_json::from_value(value)
+        .map_err(|error| PolicyParseError::Schema(error.to_string()))?;
+    let mut normalized = serde_json::Map::new();
+    for (host, address) in hosts {
+        if host.contains('@') || host.contains(':') {
+            return Err(PolicyParseError::Schema(format!(
+                "invalid hostname: {}",
+                go_strconv::quote(&host),
+            )));
+        }
+        let address = address.unwrap_or_default();
+        let prefix = if address.contains('/') {
+            go_netip::parse_prefix_text(&address).ok()
+        } else {
+            go_netip::addr_host_prefix_text(&address).filter(|prefix| !prefix.is_empty())
+        }
+        .ok_or_else(|| {
+            PolicyParseError::Schema(format!(
+                "hostname contains invalid IP address: hostname {} address {}",
+                go_strconv::quote(&host),
+                go_strconv::quote(&address),
+            ))
+        })?;
+        normalized.insert(host, serde_json::Value::String(prefix));
+    }
+    Ok(serde_json::Value::Object(normalized))
+}
+
+fn normalize_policy_null(
+    context: &str,
+    field: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+    if !value.is_null() {
+        return value;
+    }
+    match (context, field) {
+        ("policy", "groups" | "hosts" | "tagOwners" | "autoApprovers")
+        | ("autoApprovers", "routes") => Value::Object(serde_json::Map::new()),
+        ("policy", "acls" | "grants" | "nodeAttrs" | "ssh" | "tests" | "sshTests")
+        | ("acls", "src" | "dst")
+        | ("grants", "src" | "dst" | "ip" | "via")
+        | ("nodeAttrs", "target" | "attr" | "ipPool")
+        | ("autoApprovers", "exitNode")
+        | ("ssh", "src" | "dst" | "users" | "acceptEnv")
+        | ("tests", "accept" | "deny")
+        | ("sshTests", "dst" | "accept" | "deny" | "check") => Value::Array(Vec::new()),
+        ("policy", "randomizeClientPort") => Value::Bool(false),
+        ("tests", "src") => Value::String(String::new()),
+        _ => value,
     }
 }
 
@@ -742,11 +1060,29 @@ fn normalize_go_acl_array(value: serde_json::Value) -> Result<serde_json::Value,
             normalized.push(serde_json::Value::Object(object));
             continue;
         }
+        // Go places non-self destinations first only when the ACL contains
+        // a non-autogroup destination. An all-autogroup ACL preserves order.
+        let mut destinations = destinations.clone();
+        if destinations.iter().any(|destination| {
+            !destination
+                .as_str()
+                .and_then(|value| split_go_destination_and_port(value).ok())
+                .is_some_and(|(alias, _)| {
+                    go_policy_shape::alias_kind(&alias) == Some(AliasKind::AutoGroup)
+                })
+        }) {
+            destinations.sort_by_key(|destination| {
+                destination
+                    .as_str()
+                    .and_then(|value| split_go_destination_and_port(value).ok())
+                    .is_some_and(|(alias, _)| alias == "autogroup:self")
+            });
+        }
         for destination in destinations {
             let mut split = object.clone();
             split.insert(
                 "dst".to_string(),
-                serde_json::Value::Array(vec![destination.clone()]),
+                serde_json::Value::Array(vec![destination]),
             );
             normalized.push(serde_json::Value::Object(split));
         }
@@ -778,11 +1114,18 @@ fn normalize_go_policy_array_objects(
 }
 
 fn normalize_go_policy_object_fields(
-    value: serde_json::Value,
+    mut value: serde_json::Value,
     context: &str,
     field_name: fn(&str) -> Option<&'static str>,
     allow_hash_fields: bool,
 ) -> Result<serde_json::Value, PolicyParseError> {
+    if matches!(
+        context,
+        "acls" | "grants" | "nodeAttrs" | "ssh" | "tests" | "sshTests"
+    ) && value.is_null()
+    {
+        value = serde_json::Value::Object(serde_json::Map::new());
+    }
     let object = match value {
         serde_json::Value::Object(object) => object,
         other => return Ok(other),
@@ -794,14 +1137,53 @@ fn normalize_go_policy_object_fields(
             continue;
         }
         let Some(canonical) = field_name(&key) else {
-            return Err(PolicyParseError::Schema(format!(
-                "{context}: unknown field {key:?}"
-            )));
+            return Err(PolicyParseError::Schema(unknown_field_error(&key)));
         };
+        let mut value = normalize_policy_null(context, canonical, value);
+        if context == "acls"
+            && canonical == "dst"
+            && let Some(destinations) = value.as_array_mut()
+        {
+            for destination in destinations {
+                if let Some(text) = destination.as_str()
+                    && let Ok((alias, ports)) = split_go_destination_and_port(text)
+                    && let Some(prefix) = go_policy_shape::alias_prefix(&alias)
+                {
+                    // A typed Prefix stores canonical text and host bits.
+                    // /BitLen also makes zero-ending IPv6 aliases unambiguous
+                    // to the legacy public rule projection's port splitter.
+                    *destination = serde_json::Value::String(format!("{prefix}:{ports}"));
+                }
+            }
+        }
+        if context == "autoApprovers"
+            && canonical == "routes"
+            && let Some(routes) = value.as_object_mut()
+        {
+            for approvers in routes.values_mut() {
+                if approvers.is_null() {
+                    *approvers = serde_json::Value::Array(Vec::new());
+                }
+            }
+        }
         if normalized.insert(canonical.to_string(), value).is_some() {
             return Err(PolicyParseError::Schema(format!(
                 "{context}: duplicate field {canonical:?}"
             )));
+        }
+    }
+    if context == "acls" {
+        // Go ACL struct fields default to zero. aclToGrants ignores the
+        // zero Action and compiles it as accept. Materialize that effective
+        // projection only at the Go boundary; generic/TOML serde keeps its
+        // existing required fields and explicit-action validation.
+        normalized
+            .entry("action".to_owned())
+            .or_insert_with(|| serde_json::Value::String("accept".to_owned()));
+        for field in ["src", "dst"] {
+            normalized
+                .entry(field.to_owned())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
         }
     }
     Ok(serde_json::Value::Object(normalized))
@@ -811,39 +1193,83 @@ fn validate_go_policy_groups(value: &serde_json::Value) -> Result<(), PolicyPars
     let serde_json::Value::Object(groups) = value else {
         return Ok(());
     };
-
-    for (group, members) in groups {
+    let schema = |message| PolicyParseError::Schema(message);
+    // Groups.UnmarshalJSON validates every name before inspecting value types.
+    for group in groups.keys() {
         if !group.starts_with("group:") {
-            return Err(PolicyParseError::Schema(format!(
-                r#"Group has to start with "group:", got: {group:?}"#
+            return Err(schema(format!(
+                "group must start with 'group:', got: {}",
+                go_strconv::quote(group),
             )));
         }
-
-        let serde_json::Value::Array(members) = members else {
-            return Ok(());
+    }
+    for (group, value) in groups {
+        let quoted_group = go_strconv::quote(group);
+        let Some(members) = value.as_array() else {
+            let detail = if let Some(value) = value.as_str() {
+                format!("string: {}", go_strconv::quote(value))
+            } else {
+                go_json_any_type(value).to_owned()
+            };
+            return Err(schema(format!(
+                "group value must be an array of users: group {quoted_group} got {detail}",
+            )));
         };
         for member in members {
-            let Some(member) = member.as_str() else {
-                continue;
-            };
-            if member.starts_with("group:") {
-                return Err(PolicyParseError::Schema(format!(
-                    r"Nested groups are not allowed, found {member:?} inside {group:?}"
-                )));
-            }
-            if !member.contains('@') {
-                return Err(PolicyParseError::Schema(format!(
-                    "Username has to contain @, got: {member:?}"
+            if !member.is_string() {
+                return Err(schema(format!(
+                    "invalid group member type: group {quoted_group} expected string but got {}",
+                    go_json_any_type(member),
                 )));
             }
         }
     }
-
+    let mut names = groups.keys().collect::<Vec<_>>();
+    names.sort();
+    // The selected Go decoder reverse-sorts parents before nested-group
+    // detection, so the deepest non-leaf parent is reported first.
+    for group in names.into_iter().rev() {
+        if let Some(members) = groups.get(group).and_then(serde_json::Value::as_array) {
+            for member in members.iter().filter_map(serde_json::Value::as_str) {
+                if member.starts_with("group:") {
+                    return Err(schema(format!(
+                        "groups[{}]: {}: group members cannot be recursive",
+                        go_strconv::quote(group),
+                        go_strconv::quote(member),
+                    )));
+                }
+            }
+        }
+    }
+    // Group members are Username values, not AliasEnc: no TrimSpace here.
+    for value in groups.values() {
+        if let Some(members) = value.as_array() {
+            for member in members.iter().filter_map(serde_json::Value::as_str) {
+                if !member.contains('@') {
+                    return Err(schema(format!(
+                        "username must contain @, got: {}",
+                        go_strconv::quote(member),
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
+fn go_json_any_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "<nil>",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "float64",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "[]interface {}",
+        serde_json::Value::Object(_) => "map[string]interface {}",
+    }
+}
+
 fn go_policy_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "groups" => Some("groups"),
         "hosts" => Some("hosts"),
         "tagowners" => Some("tagOwners"),
@@ -870,7 +1296,7 @@ fn validate_go_acl_rules(value: &serde_json::Value) -> Result<(), PolicyParseErr
         };
         for key in fields.keys().filter(|key| !key.starts_with('#')) {
             if go_acl_field_name(key).is_none() {
-                return Err(PolicyParseError::Schema(format!("unknown field {key:?}")));
+                return Err(PolicyParseError::Schema(unknown_field_error(key)));
             }
         }
         validate_go_acl_destinations(fields)?;
@@ -880,7 +1306,7 @@ fn validate_go_acl_rules(value: &serde_json::Value) -> Result<(), PolicyParseErr
 }
 
 fn go_acl_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "action" => Some("action"),
         "proto" => Some("proto"),
         "src" => Some("src"),
@@ -890,7 +1316,7 @@ fn go_acl_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_grant_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "src" => Some("src"),
         "dst" => Some("dst"),
         "ip" => Some("ip"),
@@ -901,7 +1327,7 @@ fn go_grant_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_node_attr_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "target" => Some("target"),
         "attr" => Some("attr"),
         "ippool" => Some("ipPool"),
@@ -910,7 +1336,7 @@ fn go_node_attr_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_auto_approvers_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "routes" => Some("routes"),
         "exitnode" => Some("exitNode"),
         _ => None,
@@ -918,7 +1344,7 @@ fn go_auto_approvers_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_ssh_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "action" => Some("action"),
         "src" => Some("src"),
         "dst" => Some("dst"),
@@ -930,7 +1356,7 @@ fn go_ssh_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_policy_test_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "src" => Some("src"),
         "proto" => Some("proto"),
         "accept" => Some("accept"),
@@ -940,7 +1366,7 @@ fn go_policy_test_field_name(field: &str) -> Option<&'static str> {
 }
 
 fn go_ssh_test_field_name(field: &str) -> Option<&'static str> {
-    match field.to_ascii_lowercase().as_str() {
+    match go_policy_shape::folded_name(field).as_str() {
         "src" => Some("src"),
         "dst" => Some("dst"),
         "accept" => Some("accept"),
@@ -995,40 +1421,49 @@ fn normalize_bracketed_ipv6_destination(input: &str) -> Result<Cow<'_, str>, Str
         return Err(ERR_BRACKETS_NOT_IPV6.to_string());
     };
     let host = &input[1..close_bracket];
-    let addr = host
-        .parse::<IpAddr>()
-        .map_err(|_| format!("{ERR_BRACKETS_NOT_IPV6}: {host:?}"))?;
+    let (addr, _) = go_netip::parse_addr(host)
+        .map_err(|_| format!("{ERR_BRACKETS_NOT_IPV6}: {}", go_strconv::quote(host)))?;
     if !addr.is_ipv6() {
-        return Err(format!("{ERR_BRACKETS_NOT_IPV6}: {host:?}"));
+        return Err(format!(
+            "{ERR_BRACKETS_NOT_IPV6}: {}",
+            go_strconv::quote(host)
+        ));
     }
 
     let rest = &input[close_bracket + 1..];
     if rest.is_empty() || !matches!(rest.as_bytes()[0], b':' | b'/') {
-        return Err(format!("{ERR_BRACKETS_NOT_IPV6}: {input:?}"));
+        return Err(format!(
+            "{ERR_BRACKETS_NOT_IPV6}: {}",
+            go_strconv::quote(input)
+        ));
     }
 
     Ok(Cow::Owned(format!("{host}{rest}")))
 }
 
 fn validate_go_acl_alias_syntax(alias: &str) -> Result<(), String> {
-    if alias == "*"
-        || alias.contains('@')
-        || alias.starts_with("group:")
-        || alias.starts_with("tag:")
-        || alias.starts_with("autogroup:")
-        || parse_cidr(alias).is_some()
-        || is_go_host_alias(alias)
-    {
-        return Ok(());
+    go_policy_shape::canonical_alias(alias)?;
+    // AliasWithPorts calls the resulting Alias.Validate, unlike AliasEnc.
+    match go_policy_shape::alias_kind(alias) {
+        Some(AliasKind::Tag) => validate_tag_name(alias),
+        Some(AliasKind::AutoGroup)
+            if !matches!(
+                alias,
+                "autogroup:internet"
+                    | "autogroup:member"
+                    | "autogroup:nonroot"
+                    | "autogroup:tagged"
+                    | "autogroup:self"
+                    | "autogroup:danger-all"
+            ) =>
+        {
+            Err(format!(
+                "invalid autogroup: got {}, must be one of [autogroup:internet autogroup:member autogroup:nonroot autogroup:tagged autogroup:self autogroup:danger-all]",
+                go_strconv::quote(alias)
+            ))
+        }
+        _ => Ok(()),
     }
-
-    Err(format!(
-        r"Invalid alias {alias:?}. An alias must be one of the supported upstream policy alias types"
-    ))
-}
-
-fn is_go_host_alias(alias: &str) -> bool {
-    !alias.contains(':')
 }
 
 fn acl_rules_from_grants(grants: &[GrantRule]) -> Result<Vec<AclRule>, String> {
@@ -1055,6 +1490,13 @@ fn acl_rules_from_grants(grants: &[GrantRule]) -> Result<Vec<AclRule>, String> {
 }
 
 fn validate_policy(doc: &AclDoc) -> Result<(), String> {
+    validate_policy_mode(doc, false)
+}
+
+// Go's native HuJSON schema and this crate's legacy TOML extension have
+// different diagnostic contracts. Keep the existing TOML extension behavior
+// while following the pinned native parse-time chain and multierr phases.
+fn validate_policy_mode(doc: &AclDoc, native: bool) -> Result<(), String> {
     let mut errs = Vec::new();
 
     for (host, prefix) in &doc.hosts {
@@ -1073,8 +1515,10 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     for ssh in &doc.ssh {
         validate_ssh_rule(doc, ssh, &mut errs);
     }
-    validate_policy_tests(doc, &doc.tests, &mut errs);
-    validate_ssh_tests(doc, &doc.ssh_tests, &mut errs);
+    if !native {
+        validate_policy_tests(doc, &doc.tests, &mut errs, false);
+        validate_ssh_tests(doc, &doc.ssh_tests, &mut errs, false);
+    }
     for (tag, owners) in &doc.tag_owners {
         if let Err(err) = validate_tag_name(tag) {
             errs.push(format!("tagOwners[{tag:?}]: {err}"));
@@ -1083,8 +1527,16 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
             validate_owner_ref(doc, owner, &mut errs);
         }
     }
+    // Go Policy.validate checks direct references and then appends the first
+    // chain error from flattenTagOwners. Both diagnostics are retained for an
+    // undefined nested owner; cycles only discard the cycle-causing edge.
+    if native && let Err(error) = validate_tag_owner_chains(doc) {
+        errs.push(error);
+    }
     for (prefix, approvers) in &doc.auto_approvers.routes {
-        if prefix.parse::<IpNet>().is_err() {
+        // Prefix.UnmarshalText accepts empty text as the zero prefix. It
+        // remains an inert map key because it cannot cover an advertised IP.
+        if go_netip::prefix_text(prefix).is_none() {
             errs.push(format!(
                 "autoApprovers route contains invalid prefix {prefix:?}"
             ));
@@ -1096,12 +1548,67 @@ fn validate_policy(doc: &AclDoc) -> Result<(), String> {
     for approver in &doc.auto_approvers.exit_node {
         validate_approver_ref(doc, approver, &mut errs);
     }
-
-    if errs.is_empty() {
-        Ok(())
+    if native {
+        validate_policy_tests(doc, &doc.tests, &mut errs, true);
+        validate_ssh_tests(doc, &doc.ssh_tests, &mut errs, true);
     } else {
-        Err(errs.join("; "))
+        return if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs.join("; "))
+        };
     }
+
+    match validation_errors(errs) {
+        None => Ok(()),
+        Some(error) => Err(error),
+    }
+}
+
+// tailscale.com/util/multierr.New drops nil errors, leaves a single error
+// unchanged, and expands bare multierr children into the parent list. The
+// validation collectors already append bare child errors directly. Render
+// only at a boundary; a wrapped child (such as test(s) failed) stays opaque,
+// and error strings that happen to resemble a multierr are never reparsed.
+fn validation_errors(mut errors: Vec<String>) -> Option<String> {
+    match errors.len() {
+        0 => None,
+        1 => errors.pop(),
+        _ => Some(format!("multiple errors:\n\t{}", errors.join("\n\t"))),
+    }
+}
+
+fn validate_tag_owner_chains(doc: &AclDoc) -> Result<(), String> {
+    for root in doc.tag_owners.keys() {
+        // Keep traversal on the heap: valid tag chains can be deeper than the
+        // policy JSON itself. Active-path membership mirrors Go's visiting map.
+        let mut stack = vec![(root.as_str(), 0)];
+        let mut visiting = BTreeSet::from([root.as_str()]);
+        while let Some(&(tag, next)) = stack.last() {
+            let Some(owner) = doc.tag_owners[tag].get(next) else {
+                stack.pop();
+                visiting.remove(tag);
+                continue;
+            };
+            stack.last_mut().unwrap().1 += 1;
+            // parseOwner selects Username before Tag, so an @-containing
+            // owner remains a username even if its text begins with tag:.
+            if owner.contains('@') || !owner.starts_with("tag:") {
+                continue;
+            }
+            if !doc.tag_owners.contains_key(owner) {
+                return Err(format!(
+                    "tag {} references undefined tag {}",
+                    go_strconv::quote(tag),
+                    go_strconv::quote(owner),
+                ));
+            }
+            if visiting.insert(owner.as_str()) {
+                stack.push((owner.as_str(), 0));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_host_definition(host: &str, prefix: &str, errs: &mut Vec<String>) {
@@ -1156,8 +1663,10 @@ fn validate_grant_rule(doc: &AclDoc, grant: &GrantRule, errs: &mut Vec<String>) 
 
     if grant.dst.iter().any(|dst| dst == "autogroup:self") {
         for src in &grant.src {
-            let allowed =
-                src.contains('@') || src.starts_with("group:") || src == "autogroup:member";
+            let allowed = matches!(
+                go_policy_shape::alias_kind(src),
+                Some(AliasKind::Username | AliasKind::Group)
+            ) || src == "autogroup:member";
             if !allowed {
                 errs.push(
                     "autogroup:self can only be used with users, groups, or supported autogroups"
@@ -1185,7 +1694,8 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
         }
     }
     for target in &grant.target {
-        if let Some(ag) = target.strip_prefix("autogroup:")
+        if go_policy_shape::alias_kind(target) == Some(AliasKind::AutoGroup)
+            && let Some(ag) = target.strip_prefix("autogroup:")
             && !matches!(ag, "member" | "tagged")
         {
             errs.push(format!(
@@ -1202,13 +1712,22 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
         );
     }
     for pool in &grant.ip_pool {
-        let Some(net) = parse_cidr(pool) else {
+        let Some(prefix) = go_netip::prefix_text(pool) else {
             errs.push(format!("nodeAttrs ipPool contains invalid prefix {pool:?}"));
+            continue;
+        };
+        let Some(net) = parse_cidr(&prefix) else {
+            // Empty Prefix text is a valid decoded zero value, whose String
+            // form is "invalid Prefix". Go rejects it at the CGNAT check.
+            errs.push(
+                "nodeAttrs ipPool must be within 100.64.0.0/10: \"invalid Prefix\"".to_owned(),
+            );
             continue;
         };
         if !cgnat_range().contains(&net.network()) || net.prefix_len() < 10 {
             errs.push(format!(
-                "nodeAttrs ipPool must be within 100.64.0.0/10: {pool:?}"
+                "nodeAttrs ipPool must be within 100.64.0.0/10: {}",
+                go_strconv::quote(&prefix),
             ));
             continue;
         }
@@ -1216,9 +1735,12 @@ fn validate_node_attr_grant(doc: &AclDoc, grant: &NodeAttrGrant, errs: &mut Vec<
             if nets_overlap(&net, &reserved) {
                 errs.push(format!(
                     "nodeAttrs ipPool must not overlap reserved Tailscale ranges: \
-                     {pool:?} overlaps {:?}",
-                    reserved.to_string()
+                    {} overlaps {}",
+                    go_strconv::quote(&prefix),
+                    go_strconv::quote(&reserved.to_string()),
                 ));
+                // validateNodeAttrIPPool returns at the first overlap.
+                break;
             }
         }
     }
@@ -1241,7 +1763,10 @@ fn validate_acl_src_dst_combination(rule: &AclRule, errs: &mut Vec<String>) {
     }
 
     for src in &rule.src {
-        if src == "*" || src.contains('@') || src.starts_with("group:") || src == "autogroup:member"
+        if matches!(
+            go_policy_shape::alias_kind(src),
+            Some(AliasKind::Wildcard | AliasKind::Username | AliasKind::Group)
+        ) || src == "autogroup:member"
         {
             continue;
         }
@@ -1258,6 +1783,9 @@ fn validate_grant_src_alias(alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
+    if go_policy_shape::alias_kind(alias) != Some(AliasKind::AutoGroup) {
+        return;
+    }
     let Some(ag) = alias.strip_prefix("autogroup:") else {
         return;
     };
@@ -1281,6 +1809,9 @@ fn validate_acl_src_alias(alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_acl_dst_alias(alias: &str, errs: &mut Vec<String>) {
+    if go_policy_shape::alias_kind(alias) != Some(AliasKind::AutoGroup) {
+        return;
+    }
     let Some(ag) = alias.strip_prefix("autogroup:") else {
         return;
     };
@@ -1310,16 +1841,16 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
     if let Some(period) = rule.check_period.as_deref() {
         if rule.action == "check" {
             match parse_duration_nanos(period) {
-                Some(nanos) if nanos < 0 => errs.push(format!(
+                Ok(nanos) if nanos < 0 => errs.push(format!(
                     "checkPeriod {} must be a positive duration",
                     format_go_duration_nanos(nanos)
                 )),
-                Some(nanos) if nanos <= SSH_CHECK_PERIOD_MAX_NANOS => {}
-                Some(nanos) => errs.push(format!(
+                Ok(nanos) if nanos <= SSH_CHECK_PERIOD_MAX_NANOS => {}
+                Ok(nanos) => errs.push(format!(
                     "checkPeriod {} is above the max (168h)",
                     format_go_duration_nanos(nanos)
                 )),
-                None => errs.push(format!("time: invalid duration {period:?}")),
+                Err(error) => errs.push(error),
             }
         } else {
             errs.push("checkPeriod is only valid with action \"check\"".to_string());
@@ -1351,12 +1882,17 @@ fn validate_ssh_rule(doc: &AclDoc, rule: &SshRule, errs: &mut Vec<String>) {
     validate_ssh_src_dst_combination(&rule.src, &rule.dst, errs);
 }
 
-fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<String>) {
+fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<String>, native: bool) {
+    let mut test_errs = Vec::new();
     for (index, test) in tests.iter().enumerate() {
         if test.accept.is_empty() && test.deny.is_empty() {
-            errs.push(format!(
-                "test {index}: tests entry must include at least one accept or deny assertion"
-            ));
+            test_errs.push(if native {
+                format!("test {index}: test entry must have at least one of \"accept\" or \"deny\"")
+            } else {
+                format!(
+                    "test {index}: tests entry must include at least one accept or deny assertion"
+                )
+            });
         }
 
         let proto = test.proto.trim().to_ascii_lowercase();
@@ -1364,59 +1900,61 @@ fn validate_policy_tests(doc: &AclDoc, tests: &[PolicyTest], errs: &mut Vec<Stri
         if !canonical_proto.is_empty()
             && !matches!(canonical_proto.as_str(), "tcp" | "udp" | "sctp")
         {
-            errs.push(format!(
-                "test {index}: protocol {proto:?} is not allowed in policy tests"
-            ));
+            test_errs.push(if native {
+                format!(
+                    "test {index}: test protocol must be tcp, udp, sctp, or empty: {}",
+                    go_strconv::quote(&proto)
+                )
+            } else {
+                format!("test {index}: protocol {proto:?} is not allowed in policy tests")
+            });
         }
 
         for dst in &test.accept {
             if let Err(err) = validate_policy_test_destination(doc, dst) {
-                errs.push(format!("test {index}, accept {dst:?}: {err}"));
+                test_errs.push(format!("test {index}, accept {dst:?}: {err}"));
             }
         }
         for dst in &test.deny {
             if let Err(err) = validate_policy_test_destination(doc, dst) {
-                errs.push(format!("test {index}, deny {dst:?}: {err}"));
+                test_errs.push(format!("test {index}, deny {dst:?}: {err}"));
             }
         }
+    }
+    if !native {
+        errs.extend(test_errs);
+    } else if let Some(error) = validation_errors(test_errs) {
+        errs.push(format!("test(s) failed:\n{error}"));
     }
 }
 
 fn validate_policy_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> {
-    let (alias, port) = split_upstream_dst_ports(dst)?
-        .ok_or_else(|| "tests destination must include one explicit port".to_string())?;
-    let alias = alias.as_str();
-    let port = port.as_str();
-    if alias == "autogroup:internet" {
-        return Err("autogroup:internet is not allowed as a tests destination".to_string());
+    let go_policy_shape::TestDestination { alias, ports } =
+        go_policy_shape::parse_test_destination(dst)?;
+    let kind = go_policy_shape::alias_kind(&alias);
+    if kind == Some(AliasKind::AutoGroup) && alias == "autogroup:internet" {
+        return Err("autogroup:internet not valid as a test destination".to_owned());
     }
-    if alias.contains('/') {
-        return Err("CIDR ranges are not allowed as tests destinations".to_string());
+    if ports.len() != 1 || ports[0].0 != ports[0].1 {
+        return Err("test destination port must be a single port".to_owned());
     }
-    if port == "*" || port.contains(',') || port.contains('-') {
-        return Err("tests destination must include exactly one port".to_string());
+    if kind == Some(AliasKind::Prefix) && dst.contains('/') {
+        return Err("test destination must be a single host, not a CIDR range".to_owned());
     }
-    if alias.starts_with("tag:") {
-        validate_tag_name(alias)?;
-    }
-    let parsed = parse_upstream_port(port)?;
-    if parsed == 0 {
-        return Err("first port must be >0, or use '*' for wildcard".to_string());
-    }
-    let host = alias.strip_prefix("host:").unwrap_or(alias);
-    if let Some(prefix) = doc.hosts.get(host)
+    if kind == Some(AliasKind::Host)
+        && let Some(prefix) = doc.hosts.get(&alias)
         && parse_cidr(prefix)
             .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 })
     {
-        return Err("host aliases used in tests must resolve to one address".to_string());
+        return Err("test destination must be a single host, not a CIDR range".to_owned());
     }
     Ok(())
 }
 
-fn validate_ssh_tests(doc: &AclDoc, tests: &[SshPolicyTest], errs: &mut Vec<String>) {
+fn validate_ssh_tests(doc: &AclDoc, tests: &[SshPolicyTest], errs: &mut Vec<String>, native: bool) {
     let mut test_errs = Vec::new();
     for (index, test) in tests.iter().enumerate() {
-        if test.src.trim().is_empty() {
+        if go_unicode::trim_space(&test.src).is_empty() {
             test_errs.push(format!(
                 "sshTest {index}: SSH tests entry must have a non-empty src"
             ));
@@ -1432,40 +1970,50 @@ fn validate_ssh_tests(doc: &AclDoc, tests: &[SshPolicyTest], errs: &mut Vec<Stri
             }
         }
     }
-    if !test_errs.is_empty() {
-        errs.push(format!("test(s) failed:\n{}", test_errs.join("\n")));
+    if !native {
+        if !test_errs.is_empty() {
+            errs.push(format!("test(s) failed:\n{}", test_errs.join("\n")));
+        }
+    } else if let Some(error) = validation_errors(test_errs) {
+        errs.push(format!("test(s) failed:\n{error}"));
     }
 }
 
 fn validate_ssh_test_destination(doc: &AclDoc, dst: &str) -> Result<(), String> {
-    if split_upstream_dst_ports(dst)?.is_some() {
-        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
-    }
-    if dst == "autogroup:internet" {
-        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
-    }
-    if let Some(cidr) = parse_cidr(dst)
-        && cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 }
-    {
-        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
-    }
-    let host = dst.strip_prefix("host:").unwrap_or(dst);
-    if let Some(prefix) = doc.hosts.get(host)
-        && parse_cidr(prefix)
-            .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 })
-    {
-        return Err(format!("SSH tests dst contains disallowed element {dst:?}"));
-    }
-    if dst.starts_with("tag:") {
-        validate_tag_name(dst)?;
-    }
-    if dst.starts_with("tag:") && !tag_defined(doc, dst) {
-        return Err(format!("SSH tests dst contains unknown tag {dst:?}"));
+    let disallowed = match go_policy_shape::alias_kind(dst) {
+        Some(AliasKind::AutoGroup) => dst == "autogroup:internet",
+        Some(AliasKind::Prefix) => go_policy_shape::alias_prefix(dst)
+            .and_then(|prefix| parse_cidr(&prefix))
+            .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 }),
+        Some(AliasKind::Host) => doc
+            .hosts
+            .get(dst)
+            .and_then(|prefix| parse_cidr(prefix))
+            .is_some_and(|cidr| cidr.prefix_len() < if cidr.addr().is_ipv4() { 32 } else { 128 }),
+        Some(AliasKind::Tag) if !tag_defined(doc, dst) => {
+            return Err(format!(
+                "SSH tests dst contains unknown tag {}",
+                go_strconv::quote(dst)
+            ));
+        }
+        _ => false,
+    };
+    if disallowed {
+        return Err(format!(
+            "SSH tests dst contains disallowed element {}",
+            go_strconv::quote(dst)
+        ));
     }
     Ok(())
 }
 
 fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
+    if matches!(
+        go_policy_shape::alias_kind(alias),
+        Some(AliasKind::Prefix | AliasKind::Wildcard | AliasKind::Username)
+    ) {
+        return;
+    }
     validate_group_ref(doc, alias, errs);
     validate_tag_ref(doc, alias, errs);
 
@@ -1491,27 +2039,40 @@ fn validate_acl_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_owner_ref(doc: &AclDoc, owner: &str, errs: &mut Vec<String>) {
-    if !owner.contains('@') && !owner.starts_with("group:") && !owner.starts_with("tag:") {
-        errs.push(format!("invalid owner format: {owner:?}"));
-        return;
-    }
-    validate_group_ref(doc, owner, errs);
-    if owner.starts_with("tag:") {
-        validate_tag_ref(doc, owner, errs);
-    }
+    validate_owner_alias(doc, owner, "owner", errs);
 }
 
 fn validate_approver_ref(doc: &AclDoc, approver: &str, errs: &mut Vec<String>) {
-    if !approver.contains('@') && !approver.starts_with("group:") && !approver.starts_with("tag:") {
-        errs.push(format!("invalid auto approver format: {approver:?}"));
+    validate_owner_alias(doc, approver, "auto approver", errs);
+}
+
+fn validate_owner_alias(doc: &AclDoc, alias: &str, kind: &str, errs: &mut Vec<String>) {
+    // parseOwner/parseAutoApprover select Username before Group and Tag.
+    // These types do not apply AliasEnc's TrimSpace or Tag.Validate.
+    if alias.contains('@') {
         return;
     }
-    validate_group_ref(doc, approver, errs);
-    validate_tag_ref(doc, approver, errs);
+    if alias.starts_with("group:") {
+        if !group_defined(doc, alias) {
+            errs.push(format!(
+                "group not defined in policy: {}",
+                go_strconv::quote(alias),
+            ));
+        }
+    } else if alias.starts_with("tag:") {
+        if !tag_defined(doc, alias) {
+            errs.push(format!("tag not found: {}", go_strconv::quote(alias)));
+        }
+    } else {
+        errs.push(format!(
+            "invalid {kind} format: {}",
+            go_strconv::quote(alias),
+        ));
+    }
 }
 
 fn validate_group_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
-    if alias.starts_with("group:") && !group_defined(doc, alias) {
+    if go_policy_shape::alias_kind(alias) == Some(AliasKind::Group) && !group_defined(doc, alias) {
         errs.push(format!(
             "Group {alias:?} is not defined in the Policy, please define or remove the reference to it"
         ));
@@ -1519,7 +2080,7 @@ fn validate_group_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_tag_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
-    if !alias.starts_with("tag:") {
+    if go_policy_shape::alias_kind(alias) != Some(AliasKind::Tag) {
         return;
     }
     if let Err(err) = validate_tag_name(alias) {
@@ -1534,7 +2095,10 @@ fn validate_tag_ref(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
 
 fn validate_tag_name(tag: &str) -> Result<(), String> {
     let Some(rest) = tag.strip_prefix("tag:") else {
-        return Err(format!("tag must start with 'tag:', got: {tag:?}"));
+        return Err(format!(
+            "tag must start with 'tag:', got: {}",
+            go_strconv::quote(tag)
+        ));
     };
     let Some(first) = rest.as_bytes().first() else {
         return Err("tag names must start with a letter, after 'tag:'".to_string());
@@ -1568,7 +2132,7 @@ fn canonical_group_ref(group: &str) -> String {
 }
 
 fn validate_ssh_source_group_recursion(doc: &AclDoc, src: &str, errs: &mut Vec<String>) {
-    if !src.starts_with("group:") {
+    if go_policy_shape::alias_kind(src) != Some(AliasKind::Group) {
         return;
     }
 
@@ -1629,18 +2193,33 @@ fn host_defined(doc: &AclDoc, host: &str) -> bool {
 }
 
 fn is_bare_host_alias(alias: &str) -> bool {
-    alias != "*"
-        && !alias.contains('@')
-        && !alias.contains(':')
-        && !alias.starts_with("group:")
-        && !alias.starts_with("tag:")
-        && !alias.starts_with("autogroup:")
-        && parse_cidr(alias).is_none()
+    go_policy_shape::alias_kind(alias) == Some(AliasKind::Host)
+}
+
+fn validate_ssh_alias_type(alias: &str, source: bool) -> Result<(), String> {
+    let kind = go_policy_shape::alias_kind(alias);
+    let unsupported = match (source, kind) {
+        (true | false, Some(AliasKind::Prefix)) => "*v2.Prefix",
+        (true, Some(AliasKind::Host)) => "*v2.Host",
+        (true, Some(AliasKind::Wildcard)) => "v2.Asterix",
+        (false, Some(AliasKind::Group)) => "*v2.Group",
+        (false, Some(AliasKind::Wildcard)) => {
+            return Err("wildcard (*) is not supported as SSH destination; use 'autogroup:member' for user-owned devices, 'autogroup:tagged' for tagged devices, or specific tags/users".to_owned());
+        }
+        _ => return Ok(()),
+    };
+    let position = if source { "source" } else { "destination" };
+    Err(format!(
+        "alias not supported for SSH {position}: {unsupported}"
+    ))
 }
 
 fn validate_ssh_src_alias(alias: &str, errs: &mut Vec<String>) {
-    if alias == "*" {
-        errs.push("alias v2.Asterix is not supported for SSH source".to_string());
+    if let Err(error) = validate_ssh_alias_type(alias, true) {
+        errs.push(error);
+        return;
+    }
+    if go_policy_shape::alias_kind(alias) != Some(AliasKind::AutoGroup) {
         return;
     }
 
@@ -1663,19 +2242,22 @@ fn validate_ssh_src_alias(alias: &str, errs: &mut Vec<String>) {
 }
 
 fn validate_ssh_dst_alias(doc: &AclDoc, alias: &str, errs: &mut Vec<String>) {
-    if alias == "*" {
-        errs.push(
-            "wildcard (*) is not supported as SSH destination; use 'autogroup:member' for user-owned devices, 'autogroup:tagged' for tagged devices, or specific tags/users"
-                .to_string(),
-        );
+    if let Err(error) = validate_ssh_alias_type(alias, false) {
+        errs.push(error);
         return;
     }
 
-    if alias.starts_with("host:") || host_defined(doc, alias) {
+    if go_policy_shape::alias_kind(alias) == Some(AliasKind::Host)
+        || (go_policy_shape::alias_kind(alias) != Some(AliasKind::Username)
+            && (alias.starts_with("host:") || host_defined(doc, alias)))
+    {
         errs.push(format!("invalid dst {alias:?}"));
         return;
     }
 
+    if go_policy_shape::alias_kind(alias) != Some(AliasKind::AutoGroup) {
+        return;
+    }
     let Some(ag) = alias.strip_prefix("autogroup:") else {
         return;
     };
@@ -1700,17 +2282,20 @@ fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut
     let mut src_usernames: Vec<&str> = Vec::new();
 
     for src in srcs {
-        if src.starts_with("tag:") || src == "autogroup:tagged" {
+        let kind = go_policy_shape::alias_kind(src);
+        if kind == Some(AliasKind::Username) {
+            if !src_usernames.contains(&src.as_str()) {
+                src_usernames.push(src.as_str());
+            }
+        } else if kind == Some(AliasKind::Tag) || src == "autogroup:tagged" {
             src_has_tagged_entities = true;
-        } else if src.starts_with("group:") || src == "autogroup:member" {
+        } else if kind == Some(AliasKind::Group) || src == "autogroup:member" {
             src_has_groups = true;
-        } else if src.contains('@') && !src_usernames.contains(&src.as_str()) {
-            src_usernames.push(src.as_str());
         }
     }
 
     for dst in dsts {
-        if dst.contains('@') {
+        if go_policy_shape::alias_kind(dst) == Some(AliasKind::Username) {
             if src_has_tagged_entities {
                 errs.push(format!(
                     "tags in SSH source cannot access user-owned devices ({dst}); use autogroup:tagged or specific tags as destinations instead"
@@ -1737,98 +2322,19 @@ fn validate_ssh_src_dst_combination(srcs: &[String], dsts: &[String], errs: &mut
 
 const SSH_CHECK_PERIOD_MAX_NANOS: i64 = 168 * 60 * 60 * 1_000_000_000;
 
-fn parse_duration_nanos(input: &str) -> Option<i64> {
-    if input.is_empty() {
-        return None;
-    }
+fn parse_duration_nanos(input: &str) -> Result<i64, String> {
     if input == "always" {
-        return Some(0);
+        Ok(0)
+    } else {
+        go_duration::parse_nanos(input)
     }
-
-    let bytes = input.as_bytes();
-    let mut pos = 0usize;
-    let mut negative = false;
-    if bytes[pos] == b'+' || bytes[pos] == b'-' {
-        negative = bytes[pos] == b'-';
-        pos += 1;
-        if pos == bytes.len() {
-            return None;
-        }
-    }
-    if &input[pos..] == "0" {
-        return Some(0);
-    }
-
-    let mut total: i128 = 0;
-    while pos < bytes.len() {
-        let start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-            pos += 1;
-        }
-        let has_integer = pos > start;
-        let whole: i128 = if has_integer {
-            input[start..pos].parse().ok()?
-        } else {
-            0
-        };
-
-        let mut fraction = 0i128;
-        let mut scale = 1i128;
-        let mut has_fraction = false;
-        if pos < bytes.len() && bytes[pos] == b'.' {
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                has_fraction = true;
-                if scale < 1_000_000_000_000_000_000 {
-                    fraction = fraction
-                        .checked_mul(10)?
-                        .checked_add(i128::from(bytes[pos] - b'0'))?;
-                    scale = scale.checked_mul(10)?;
-                }
-                pos += 1;
-            }
-        }
-        if !has_integer && !has_fraction {
-            return None;
-        }
-
-        let unit_start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_digit() && bytes[pos] != b'.' {
-            pos += 1;
-        }
-        if unit_start == pos {
-            return None;
-        }
-        let unit = &input[unit_start..pos];
-        let multiplier: i128 = match unit {
-            "ns" => 1,
-            "us" | "µs" | "μs" => 1_000,
-            "ms" => 1_000_000,
-            "s" => 1_000_000_000,
-            "m" => 60 * 1_000_000_000,
-            "h" => 60 * 60 * 1_000_000_000,
-            _ => return None,
-        };
-        let whole_nanos = whole.checked_mul(multiplier)?;
-        let fraction_nanos = fraction.checked_mul(multiplier)?.checked_div(scale)?;
-        total = total
-            .checked_add(whole_nanos)?
-            .checked_add(fraction_nanos)?;
-    }
-    if negative {
-        total = total.checked_neg()?;
-    }
-    i64::try_from(total).ok()
 }
 
 fn render_ssh_check_period(period: &str) -> String {
     if period == "always" {
         return period.to_string();
     }
-    if parse_duration_nanos(period) == Some(0) {
-        return "0s".to_string();
-    }
-    period.to_string()
+    parse_duration_nanos(period).map_or_else(|_| period.to_owned(), format_go_duration_nanos)
 }
 
 fn format_go_duration_nanos(nanos: i64) -> String {
@@ -1906,7 +2412,7 @@ fn push_decimal_duration_unit(
     let fraction = total_nanos % unit_nanos;
     out.push_str(&whole.to_string());
     if fraction != 0 {
-        let mut fraction = format!("{:0width$}", fraction, width = width);
+        let mut fraction = format!("{fraction:0width$}");
         while fraction.ends_with('0') {
             fraction.pop();
         }
@@ -1922,60 +2428,95 @@ fn push_decimal_duration_unit(
 /// `headscale-cli::admin::policy::strip_hujson` helper — keep the
 /// two in sync.
 pub fn strip_hujson(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let mut in_str = false;
-    let mut esc = false;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str {
-            out.push(c as char);
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == b'"' {
-                in_str = false;
+    let source = input.as_bytes();
+    let mut comments = Vec::with_capacity(source.len());
+    let mut at = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while at < source.len() {
+        let byte = source[at];
+        if in_string {
+            comments.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
-            i += 1;
+            at += 1;
             continue;
         }
-        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            i += 2;
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
+        if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' && source.get(at + 1) == Some(&b'/') {
+            let start = at;
+            at += 2;
+            while at < source.len() && source[at] != b'\n' {
+                at += 1;
+            }
+            comments.extend(
+                source[start..at]
+                    .iter()
+                    .map(|&byte| if byte == b'\r' { byte } else { b' ' }),
+            );
+            continue;
+        } else if byte == b'/' && source.get(at + 1) == Some(&b'*') {
+            let start = at;
+            at += 2;
+            while at + 1 < source.len() && &source[at..at + 2] != b"*/" {
+                at += 1;
+            }
+            if at + 1 == source.len() || at >= source.len() {
+                // Retain malformed syntax so the decoder reports the error.
+                comments.extend_from_slice(&source[start..]);
+                break;
+            }
+            at += 2;
+            comments.extend(source[start..at].iter().map(|&byte| {
+                if matches!(byte, b'\n' | b'\r') {
+                    byte
+                } else {
+                    b' '
+                }
+            }));
+            continue;
+        }
+        comments.push(byte);
+        at += 1;
+    }
+    // Comments are now whitespace, so a trailing comma followed by comments
+    // is handled the same as one followed by ordinary whitespace.
+    let mut out = Vec::with_capacity(comments.len());
+    in_string = false;
+    escaped = false;
+    for (index, &byte) in comments.iter().enumerate() {
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
             continue;
         }
-        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-            continue;
+        if byte == b'"' {
+            in_string = true;
         }
-        if c == b'"' {
-            in_str = true;
-            out.push('"');
-            i += 1;
-            continue;
-        }
-        if c == b',' {
-            let mut j = i + 1;
-            while j < bytes.len() && (bytes[j] as char).is_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
-                i += 1;
+        if byte == b',' {
+            let next = comments[index + 1..]
+                .iter()
+                .find(|&&byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'));
+            if matches!(next, Some(b']' | b'}')) {
+                out.push(b' ');
                 continue;
             }
         }
-        out.push(c as char);
-        i += 1;
+        out.push(byte);
     }
-    out
+    String::from_utf8(out).expect("standardizing comments preserves UTF-8")
 }
 
 // =====================================================================
@@ -2085,11 +2626,39 @@ impl AclDoc {
                 continue;
             }
 
-            let matched = peer_routes
+            // ViaRoutesForPeer walks resolved destinations before announced
+            // subnet routes. Retain that order and multiplicity; the later
+            // RoutesForPeer append performs its own membership check.
+            let mut matched = Vec::new();
+            for destination in &grant.dst {
+                for prefix in self.expand_route_destination(destination) {
+                    let Some(destination) = parse_cidr(&prefix) else {
+                        continue;
+                    };
+                    for route in peer_routes {
+                        if let Some(prefix) = parse_cidr(route)
+                            && !is_default_route(&prefix)
+                            && nets_overlap(&destination, &prefix)
+                        {
+                            matched.push(route.clone());
+                        }
+                    }
+                }
+            }
+            if grant
+                .dst
                 .iter()
-                .filter(|route| self.grant_dsts_overlap_route(grant, route))
-                .cloned()
-                .collect::<Vec<_>>();
+                .any(|destination| destination == "autogroup:internet")
+            {
+                matched.extend(
+                    peer_routes
+                        .iter()
+                        .filter(|route| {
+                            parse_cidr(route).is_some_and(|prefix| is_default_route(&prefix))
+                        })
+                        .cloned(),
+                );
+            }
             if matched.is_empty() {
                 continue;
             }
@@ -2103,11 +2672,7 @@ impl AclDoc {
             } else {
                 &mut result.exclude
             };
-            for route in matched {
-                if !target.contains(&route) {
-                    target.push(route);
-                }
-            }
+            target.extend(matched);
         }
 
         if !result.include.is_empty() || !result.exclude.is_empty() {
@@ -2157,12 +2722,6 @@ impl AclDoc {
                 .retain(|route| !self.non_via_policy_overlaps_route(viewer, route, false));
         }
 
-        result.include.sort();
-        result.include.dedup();
-        result.exclude.sort();
-        result.exclude.dedup();
-        result.use_primary.sort();
-        result.use_primary.dedup();
         result
     }
 
@@ -2390,15 +2949,79 @@ impl AclDoc {
     }
 
     /// True if the loaded `tagOwners` policy permits `node` to claim
-    /// `tag` during client-requested registration tagging.
+    /// `tag` without a registered-node snapshot. This is Go's direct-user
+    /// fallback; nested tag owners require the resolved node IP set.
     pub fn node_can_have_tag(&self, node: &NodeView<'_>, tag: &str) -> bool {
+        self.node_can_have_tag_with_nodes(node, tag, &[])
+    }
+
+    /// Go UserCanHaveTag: a user or group may directly own the requested tag.
+    /// A tag owner referring to another tag does not grant this user fallback.
+    pub fn user_can_have_tag(&self, user_id: Option<u64>, user: Option<&str>, tag: &str) -> bool {
         let Some(owners) = self.tag_owners.get(tag) else {
             return false;
         };
-        let mut visiting = BTreeSet::new();
         owners
             .iter()
-            .any(|owner| self.tag_owner_matches(node, owner, &mut visiting))
+            .any(|owner| self.user_matches_tag_owner(user_id, user, owner))
+    }
+
+    /// Match Go's resolved tag-owner IP set, then its direct-user fallback.
+    /// Only user-owned registered nodes contribute addresses to that set.
+    pub fn node_can_have_tag_with_nodes(
+        &self,
+        node: &NodeView<'_>,
+        tag: &str,
+        nodes: &[NodeView<'_>],
+    ) -> bool {
+        let Some(owners) = self.tag_owners.get(tag) else {
+            return false;
+        };
+        let in_owner_set = nodes.iter().any(|candidate| {
+            if !candidate.tags.is_empty() {
+                return false;
+            }
+            let mut visiting = BTreeSet::new();
+            if !owners
+                .iter()
+                .any(|owner| self.tag_owner_matches(candidate, owner, &mut visiting))
+            {
+                return false;
+            }
+            candidate.any_addr_matches(|address| {
+                let Ok(address) = address.parse::<IpAddr>() else {
+                    return false;
+                };
+                node.any_addr_matches(|value| value.parse::<IpAddr>() == Ok(address))
+            })
+        });
+        in_owner_set || self.user_can_have_tag(node.user_id, node.user, tag)
+    }
+
+    fn user_matches_tag_owner(
+        &self,
+        user_id: Option<u64>,
+        user: Option<&str>,
+        owner: &str,
+    ) -> bool {
+        if owner.contains('@') {
+            return self.user_matches(owner, user_id, user);
+        }
+        if owner.starts_with("tag:") {
+            return false;
+        }
+        if let Some(group) = owner.strip_prefix("group:") {
+            return self
+                .groups
+                .get(owner)
+                .or_else(|| self.groups.get(group))
+                .is_some_and(|members| {
+                    members.iter().any(|member| {
+                        member.contains('@') && self.user_matches(member, user_id, user)
+                    })
+                });
+        }
+        false
     }
 
     fn tag_owner_matches(
@@ -2408,30 +3031,22 @@ impl AclDoc {
         visiting: &mut BTreeSet<String>,
     ) -> bool {
         if owner.contains('@') {
-            return node.user.is_some_and(|user| user_matches(owner, user));
+            return self.user_matches_tag_owner(node.user_id, node.user, owner);
         }
-        if let Some(group) = owner.strip_prefix("group:") {
-            let Some(members) = self.groups.get(owner).or_else(|| self.groups.get(group)) else {
-                return false;
-            };
-            return members
+        let Some(tag) = owner.strip_prefix("tag:") else {
+            return self.user_matches_tag_owner(node.user_id, node.user, owner);
+        };
+        let owner_tag = format!("tag:{tag}");
+        if !visiting.insert(owner_tag.clone()) {
+            return false;
+        }
+        let result = self.tag_owners.get(&owner_tag).is_some_and(|owners| {
+            owners
                 .iter()
-                .any(|member| self.tag_owner_matches(node, member, visiting));
-        }
-        if let Some(tag) = owner.strip_prefix("tag:") {
-            let owner_tag = format!("tag:{tag}");
-            if !visiting.insert(owner_tag.clone()) {
-                return false;
-            }
-            let result = self.tag_owners.get(&owner_tag).is_some_and(|owners| {
-                owners
-                    .iter()
-                    .any(|owner| self.tag_owner_matches(node, owner, visiting))
-            });
-            visiting.remove(&owner_tag);
-            return result;
-        }
-        false
+                .any(|owner| self.tag_owner_matches(node, owner, visiting))
+        });
+        visiting.remove(&owner_tag);
+        result
     }
 
     /// True if `node` should have a route covering `prefix`
@@ -2450,7 +3065,10 @@ impl AclDoc {
             if !covers(&approver_net, &advertised) {
                 continue;
             }
-            if self.principal_matches(principals, node, None) {
+            if principals
+                .iter()
+                .any(|alias| self.auto_approver_matches(alias, node))
+            {
                 return true;
             }
         }
@@ -2463,7 +3081,18 @@ impl AclDoc {
         if self.auto_approvers.exit_node.is_empty() {
             return false;
         }
-        self.principal_matches(&self.auto_approvers.exit_node, node, None)
+        self.auto_approvers
+            .exit_node
+            .iter()
+            .any(|alias| self.auto_approver_matches(alias, node))
+    }
+
+    fn auto_approver_matches(&self, alias: &str, node: &NodeView<'_>) -> bool {
+        if alias.contains('@') {
+            self.identity_matches(alias, node)
+        } else {
+            self.principal_matches_one(alias, node, None)
+        }
     }
 
     /// Expand a principal token into a context-free list of literal
@@ -2471,6 +3100,12 @@ impl AclDoc {
     /// callers; packet-filter compilation has source/destination
     /// specific wildcard handling.
     pub fn expand_principal(&self, token: &str) -> Vec<String> {
+        if let Some(prefix) = go_policy_shape::alias_prefix(token) {
+            return vec![prefix];
+        }
+        if go_policy_shape::alias_kind(token) == Some(AliasKind::Username) {
+            return vec![token.to_owned()];
+        }
         if token == "*" {
             return wildcard_filter_cidrs();
         }
@@ -2543,6 +3178,12 @@ impl AclDoc {
         principal: &NodeView<'_>,
         peer: Option<&NodeView<'_>>,
     ) -> bool {
+        if let Some(prefix) = go_policy_shape::alias_prefix(entry) {
+            return node_addr_in_cidr(principal, &prefix);
+        }
+        if go_policy_shape::alias_kind(entry) == Some(AliasKind::Username) {
+            return self.identity_matches(entry, principal);
+        }
         if entry == "*" {
             return true;
         }
@@ -2554,6 +3195,17 @@ impl AclDoc {
             return principal.tags.iter().any(|t| tag_matches(t, tag));
         }
         if let Some(ag) = entry.strip_prefix("autogroup:") {
+            if matches!(ag, "member" | "nonroot")
+                && let Some(users) = &self.users
+            {
+                let owner = principal.user_id.or_else(|| {
+                    principal
+                        .user
+                        .and_then(|login| self.resolve_user_value(login))
+                });
+                return principal.tags.is_empty()
+                    && owner.is_some_and(|owner| users.iter().any(|user| user.id == owner));
+            }
             return autogroup_matches(ag, principal, peer);
         }
         if let Some(host) = entry.strip_prefix("host:") {
@@ -2568,7 +3220,7 @@ impl AclDoc {
         if entry.contains('/') {
             return node_addr_in_cidr(principal, entry);
         }
-        identity_matches(entry, principal)
+        self.identity_matches(entry, principal)
     }
 
     fn group_principal_matches(
@@ -2594,7 +3246,7 @@ impl AclDoc {
                     matched = true;
                     break;
                 }
-            } else if identity_matches(member, principal) {
+            } else if self.identity_matches(member, principal) {
                 matched = true;
                 break;
             }
@@ -2693,19 +3345,6 @@ pub fn internet_filter_cidrs() -> Vec<String> {
     ]
 }
 
-fn identity_matches(entry: &str, principal: &NodeView<'_>) -> bool {
-    if principal.any_addr_matches(|addr| entry == addr) {
-        return true;
-    }
-    if principal.tags.is_empty()
-        && let Some(user) = principal.user
-        && user_matches(entry, user)
-    {
-        return true;
-    }
-    false
-}
-
 fn user_matches(entry: &str, user: &str) -> bool {
     entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
 }
@@ -2742,6 +3381,12 @@ fn autogroup_matches(kind: &str, principal: &NodeView<'_>, peer: Option<&NodeVie
         };
         if principal.any_addr_matches(|a| peer.any_addr_matches(|b| a == b)) {
             return true;
+        }
+        if principal.user_id.is_some() || peer.user_id.is_some() {
+            return principal.tags.is_empty()
+                && peer.tags.is_empty()
+                && principal.user_id.is_some()
+                && principal.user_id == peer.user_id;
         }
         if let (Some(a), Some(b)) = (principal.user, peer.user) {
             return principal.tags.is_empty() && peer.tags.is_empty() && a == b;
@@ -2843,38 +3488,88 @@ fn split_upstream_dst_ports(dst: &str) -> Result<Option<(String, String)>, Strin
 
 fn normalize_port_spec(proto: &str, spec: &str) -> Vec<String> {
     if spec.contains('/') || spec.starts_with("*:") {
-        return vec![spec.to_string()];
+        return vec![spec.to_owned()];
     }
-    let mut out = Vec::new();
-    for part in spec.split(',').map(str::trim) {
-        if validate_upstream_port_spec(part).is_err() {
-            continue;
-        }
-        if proto.is_empty() {
-            out.push(format!("*/{part}"));
-        } else {
-            out.push(format!("{proto}/{part}"));
-        }
-    }
-    out
+    // Legacy explicit `ports` input trims individual entries. Native ACL
+    // destinations have already passed the untrimmed Go parser before here.
+    spec.split(',')
+        .map(str::trim)
+        .filter_map(|part| parse_go_port_ranges(part).ok())
+        .flat_map(|ranges| normalized_port_patterns(proto, ranges))
+        .collect()
+}
+
+fn normalized_port_patterns(protocol: &str, ranges: Vec<(u16, u16)>) -> Vec<String> {
+    let protocol = if protocol.is_empty() { "*" } else { protocol };
+    ranges
+        .into_iter()
+        .map(|(first, last)| {
+            let port = if first == 0 && last == 65535 {
+                "*".to_owned()
+            } else if first == last {
+                first.to_string()
+            } else {
+                format!("{first}-{last}")
+            };
+            format!("{protocol}/{port}")
+        })
+        .collect()
 }
 
 fn normalize_grant_ip_spec(spec: &str) -> Result<Vec<String>, String> {
-    let trimmed = spec.trim();
-    if trimmed == "*" {
-        return Ok(vec!["*/*".to_string()]);
-    }
-    let (proto, ports) = if let Some((proto, ports)) = trimmed.split_once(':') {
-        if ports.contains(':') {
-            return Err("expected only one colon in Internet protocol and port type".to_string());
+    // ProtocolPort.UnmarshalJSON validates the literal protocol; unlike ACL
+    // Protocol.UnmarshalJSON it neither lowercases nor maps numeric names.
+    // Grant IP entries also do not use ACL protocol/port compatibility checks.
+    let (protocol, port_spec) = if spec == "*" {
+        ("*", "*")
+    } else if spec.contains(':') {
+        let parts = spec.split(':').collect::<Vec<_>>();
+        if parts.len() != 2 {
+            return Err(format!(
+                "expected only one colon in Internet protocol and port type, got: [{}]({})",
+                parts.join(" "),
+                parts.len(),
+            ));
         }
-        let proto = canonical_upstream_proto(proto.trim())?;
-        (proto, ports.trim())
+        validate_upstream_proto(parts[0])?;
+        (parts[0], parts[1])
     } else {
-        ("*".to_string(), trimmed)
+        ("*", spec)
     };
-    validate_proto_port_compat(&proto, ports)?;
-    Ok(normalize_port_spec(&proto, ports))
+    let ranges = parse_go_port_ranges(port_spec)
+        .map_err(|error| format!("port range {}: {error}", go_strconv::quote(port_spec)))?;
+    Ok(normalized_port_patterns(protocol, ranges))
+}
+
+fn parse_go_port_ranges(spec: &str) -> Result<Vec<(u16, u16)>, String> {
+    if spec == "*" {
+        return Ok(vec![(0, 65535)]);
+    }
+    let mut ranges = Vec::new();
+    for part in spec.split(',') {
+        if part.contains('-') {
+            let ends = part
+                .split('-')
+                .filter(|end| !end.is_empty())
+                .collect::<Vec<_>>();
+            if ends.len() != 2 {
+                return Err("invalid port range format".to_owned());
+            }
+            let first = parse_upstream_port(ends[0])?;
+            let last = parse_upstream_port(ends[1])?;
+            if first > last {
+                return Err("invalid port range: first port is greater than last port".to_owned());
+            }
+            ranges.push((first, last));
+        } else {
+            let port = parse_upstream_port(part)?;
+            if port == 0 {
+                return Err("first port must be >0, or use '*' for wildcard".to_owned());
+            }
+            ranges.push((port, port));
+        }
+    }
+    Ok(ranges)
 }
 
 fn validate_upstream_proto(proto: &str) -> Result<(), String> {
@@ -2882,20 +3577,18 @@ fn validate_upstream_proto(proto: &str) -> Result<(), String> {
         "" | "icmp" | "igmp" | "ipv4" | "ip-in-ip" | "tcp" | "egp" | "igp" | "udp" | "gre"
         | "esp" | "ah" | "ipv6-icmp" | "sctp" | "fc" => Ok(()),
         "*" => Err(
-            "proto name \"*\" not known; use protocol number 0-255 or protocol name (icmp, tcp, udp, etc.)"
-                .to_string(),
+            "proto name \"*\" not known; use protocol number 0-255 or protocol name (icmp, tcp, udp, etc.)".to_string(),
         ),
         other => {
             if other == "0" || (other.len() > 1 && other.starts_with('0')) {
-                return Err(format!(
-                    "leading 0 not permitted in protocol number \"{other}\""
-                ));
+                return Err(format!("leading 0 not permitted in protocol number: {}", go_strconv::quote(other)));
             }
-            match other.parse::<u16>() {
-                Ok(1..=255) => Ok(()),
-                Ok(n) => Err(format!("protocol number {n} out of range (0-255)")),
+            match other.parse::<i64>() {
+                Ok(0..=255) => Ok(()),
+                Ok(n) => Err(format!("protocol number out of range (0-255): {n}")),
                 Err(_) => Err(format!(
-                    "invalid protocol {other:?}: must be a known protocol name or valid protocol number 0-255"
+                    "invalid protocol number: {} must be a known protocol name or valid protocol number 0-255",
+                    go_strconv::quote(other),
                 )),
             }
         }
@@ -2903,9 +3596,17 @@ fn validate_upstream_proto(proto: &str) -> Result<(), String> {
 }
 
 fn canonical_upstream_proto(proto: &str) -> Result<String, String> {
-    let proto = proto.trim().to_ascii_lowercase();
-    if let Some(name) = upstream_proto_number_name(&proto) {
-        return Ok(name.to_string());
+    canonical_go_protocol(proto.trim())
+}
+
+/// Protocol.UnmarshalJSON applies Go simple lowercase and numeric-name
+/// canonicalization before validation. It does not trim protocol whitespace.
+fn canonical_go_protocol(proto: &str) -> Result<String, String> {
+    let proto = go_unicode::to_lowercase(proto);
+    if let Ok(number @ 0..=255) = proto.parse::<i64>()
+        && let Some(name) = upstream_proto_number_name(&number.to_string())
+    {
+        return Ok(name.to_owned());
     }
     validate_upstream_proto(&proto)?;
     Ok(proto)
@@ -2956,10 +3657,14 @@ fn validate_proto_port_compat(proto: &str, spec: &str) -> Result<(), String> {
     if matches!(proto, "" | "*" | "tcp" | "udp" | "sctp") || spec.contains('/') {
         return Ok(());
     }
-    let has_specific_port = spec.split(',').map(str::trim).any(|part| part != "*");
+    let spec = spec.split(',').map(str::trim).collect::<Vec<_>>().join(",");
+    let has_specific_port = parse_go_port_ranges(&spec)?
+        .iter()
+        .any(|&(first, last)| first != 0 || last != 65535);
     if has_specific_port {
         return Err(format!(
-            "protocol {proto:?} does not support specific ports; only \"*\" is allowed"
+            "protocol does not support specific ports: {}, only \"*\" is allowed",
+            go_strconv::quote(proto),
         ));
     }
     Ok(())
@@ -2972,34 +3677,13 @@ fn is_namespaced_alias_without_port(dst: &str) -> bool {
 }
 
 fn validate_upstream_port_spec(spec: &str) -> Result<(), String> {
-    if spec == "*" {
-        return Ok(());
-    }
-    for part in spec.split(',').map(str::trim) {
-        if part.contains('-') {
-            let range_parts: Vec<&str> = part.split('-').filter(|part| !part.is_empty()).collect();
-            if range_parts.len() != 2 {
-                return Err("invalid port range format".to_string());
-            }
-            let first = parse_upstream_port(range_parts[0])?;
-            let last = parse_upstream_port(range_parts[1])?;
-            if first > last {
-                return Err("invalid port range: first port is greater than last port".to_string());
-            }
-        } else {
-            let port = parse_upstream_port(part)?;
-            if port < 1 {
-                return Err("first port must be >0, or use '*' for wildcard".to_string());
-            }
-        }
-    }
-    Ok(())
+    parse_go_port_ranges(spec).map(|_| ())
 }
 
 fn parse_upstream_port(port: &str) -> Result<u16, String> {
     let parsed: i64 = port
         .parse()
-        .map_err(|_| "invalid port number".to_string())?;
+        .map_err(|_| "invalid first integer".to_string())?;
     if !(0..=65_535).contains(&parsed) {
         return Err("port number out of range".to_string());
     }
@@ -3249,14 +3933,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    vec!["fd7a:115c:a1e0::87e1".to_string()],
+                    // Go marshals a single address as a /128 prefix.
+                    vec!["fd7a:115c:a1e0::87e1/128".to_string()],
                     vec!["tcp/80".to_string(), "tcp/443".to_string()]
                 ),
                 (
                     vec!["fd7a:115c:a1e0::2905/64".to_string()],
                     vec!["tcp/22".to_string()]
                 ),
-                (vec!["::1".to_string()], vec!["tcp/80-90".to_string()])
+                (vec!["::1/128".to_string()], vec!["tcp/80-90".to_string()])
             ]
         );
         assert_eq!(
@@ -3296,6 +3981,25 @@ mod tests {
     }
 
     #[test]
+    fn ssh_tests_canonicalize_bare_ip_aliases_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "sshTests": [{
+                "src": "100.64.0.17",
+                "dst": ["100.64.0.16", "fd7a:115c:a1e0::10"],
+                "accept": ["root"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(doc.ssh_tests[0].src, "100.64.0.17/32");
+        assert_eq!(
+            doc.ssh_tests[0].dst,
+            ["100.64.0.16/32", "fd7a:115c:a1e0::10/128"]
+        );
+    }
+
+    #[test]
     fn hujson_accepts_numeric_tcp_policy_test_proto() {
         let raw = r#"{
             "tagOwners": {"tag:server": ["alice@"]},
@@ -3325,8 +4029,14 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("protocol"));
         assert!(msg.contains("CIDR"));
-        assert!(msg.contains("exactly one port"));
-        assert!(msg.contains("accept or deny"));
+        assert!(
+            msg.contains("test destination port must be a single port"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains(r#"at least one of "accept" or "deny""#),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -3354,8 +4064,8 @@ mod tests {
     fn hujson_rejects_acl_destinations_without_ports_like_headscale_go() {
         for (dst, expected) in [
             ("*", "hostport must contain a colon"),
-            ("tag:server", "invalid port number"),
-            ("autogroup:internet", "invalid port number"),
+            ("tag:server", "invalid first integer"),
+            ("autogroup:internet", "invalid first integer"),
         ] {
             let raw = format!(
                 r#"{{
@@ -3381,7 +4091,7 @@ mod tests {
             ]
         }"#;
         let err = parse_hujson_policy(raw).unwrap_err();
-        assert!(format!("{err}").contains("Invalid alias"));
+        assert!(format!("{err}").contains("invalid alias format"), "{err}");
     }
 
     #[test]
@@ -3455,7 +4165,7 @@ mod tests {
                 "*:22-10",
                 "invalid port range: first port is greater than last port",
             ),
-            ("*:abc", "invalid port number"),
+            ("*:abc", "invalid first integer"),
         ] {
             let raw = format!(
                 r#"{{
@@ -3751,18 +4461,21 @@ mod tests {
         let doc = doc_with_rule(&["autogroup:member"], &["autogroup:self"]);
         let user = "alice".to_string();
         let s = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some(&user),
             tags: &[],
         };
         let d = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some(&user),
             tags: &[],
         };
         let s2 = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("bob"),
@@ -4287,7 +5000,7 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("Nested groups are not allowed"));
+        assert!(err.contains("group members cannot be recursive"), "{err}");
     }
 
     #[test]
@@ -4296,12 +5009,12 @@ mod tests {
             (
                 "short-group-name",
                 r#"{"groups":{"admins":["alice@"]}}"#,
-                "Group has to start",
+                "group must start with 'group:'",
             ),
             (
                 "non-user-member",
                 r#"{"groups":{"group:admins":["100.64.0.1"]}}"#,
-                "Username has to contain @",
+                "username must contain @",
             ),
         ] {
             let err = parse_hujson_policy(raw).expect_err(name).to_string();
@@ -4336,7 +5049,9 @@ mod tests {
                     "users": ["root"]
                   }]
                 }"#,
-                "action must be specified",
+                // Go trims spaces only, so the raw tab/newline survive and the
+                // action is invalid rather than missing.
+                r#""\\t\\n" is not a valid action"#,
             ),
             (
                 "invalid",
@@ -4441,13 +5156,14 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(doc.ssh[0].check_period.as_deref(), Some("1.5h"));
+        // Go re-marshals the parsed duration with Duration.String().
+        assert_eq!(doc.ssh[0].check_period.as_deref(), Some("1h30m0s"));
     }
 
     #[test]
     fn rejects_non_go_ssh_check_period_units_like_headscale_go() {
         for (period, expected) in [
-            ("1d", r#"time: invalid duration "1d""#),
+            ("1d", r#"time: unknown unit "d" in duration "1d""#),
             (" 1h", r#"time: invalid duration " 1h""#),
             ("-1m", "checkPeriod -1m0s must be a positive duration"),
         ] {
@@ -4521,6 +5237,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(doc.ssh[0].accept_env, vec!["LANG", "LC_*", "*", "**"]);
+    }
+
+    #[test]
+    fn parses_null_accept_env_and_utf8_ssh_user_like_headscale_go() {
+        let doc = parse_hujson_policy(
+            r#"{
+              // A real policy file may contain comments and UTF-8 names.
+              "ssh": [{
+                "action": "accept",
+                "acceptEnv": null,
+                "src": ["alice@"],
+                "dst": ["autogroup:self"],
+                "users": ["🚀"],
+              }]
+            }"#,
+        )
+        .unwrap();
+        assert!(doc.ssh[0].accept_env.is_empty());
+        assert_eq!(doc.ssh[0].users, ["🚀"]);
     }
 
     #[test]
@@ -4632,13 +5367,13 @@ mod tests {
         .unwrap();
         let rendered = serde_json::to_value(&doc.ssh[0]).unwrap();
 
-        assert_eq!(rendered["checkPeriod"], "24h");
+        assert_eq!(rendered["checkPeriod"], "24h0m0s");
         assert_eq!(rendered["acceptEnv"], serde_json::json!(["LANG"]));
         assert!(rendered.get("check_period").is_none());
         assert!(rendered.get("accept_env").is_none());
 
         let stable = doc.canonical_value();
-        assert_eq!(stable["ssh"][0]["checkPeriod"], "24h");
+        assert_eq!(stable["ssh"][0]["checkPeriod"], "24h0m0s");
         assert_eq!(stable["ssh"][0]["acceptEnv"], serde_json::json!(["LANG"]));
         assert!(stable["ssh"][0].get("check_period").is_none());
         assert!(stable["ssh"][0].get("accept_env").is_none());
@@ -4814,7 +5549,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(r#"invalid dst "host:server""#));
+        assert!(
+            err.contains(r#"invalid alias format: "host:server""#),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4877,6 +5615,35 @@ mod tests {
     }
 
     #[test]
+    fn hujson_strips_metadata_fields_except_inside_app_payloads() {
+        let doc = parse_hujson_policy(
+            r##"{
+              "#ha-meta": {"version": 1},
+              "tagOwners": {"tag:server": ["alice@"]},
+              "grants": [{
+                "src": ["alice@"], "dst": ["tag:server"], "ip": ["tcp:80"],
+                "app": {"example.com/cap/web": [{"#note": "kept", "domain": ["example.com"]}]},
+                "#ha-meta": {"name": "web"}
+              }],
+              "ssh": [{
+                "action": "accept", "src": ["alice@"], "dst": ["tag:server"],
+                "users": ["root"], "#ha-meta": {"name": "admins"}
+              }],
+              "nodeAttrs": [{
+                "target": ["tag:server"], "attr": ["randomize-client-port"],
+                "#ha-meta": {"name": "server"}
+              }]
+            }"##,
+        )
+        .unwrap();
+
+        assert_eq!(doc.grants.len(), 1);
+        assert_eq!(doc.ssh.len(), 1);
+        assert_eq!(doc.node_attrs.len(), 1);
+        assert_eq!(doc.grants[0].app["example.com/cap/web"][0]["#note"], "kept");
+    }
+
+    #[test]
     fn hujson_rejects_acl_deny_action_like_headscale_go() {
         let err = parse_hujson_policy(
             r#"{
@@ -4889,8 +5656,8 @@ mod tests {
         )
         .expect_err("deny action must reject")
         .to_string();
-        assert!(err.contains("invalid action"));
-        assert!(err.contains("accept"));
+        assert!(err.contains("invalid ACL action"), "{err}");
+        assert!(err.contains(r#"action="deny""#), "{err}");
     }
 
     #[test]
@@ -5160,7 +5927,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(r#"unknown field "ipsets""#));
+        assert!(err.contains(r#"unknown field: "ipsets""#), "{err}");
     }
 
     #[test]
@@ -5205,7 +5972,7 @@ mod tests {
         .to_string();
 
         assert!(
-            err.contains("nodeAttrs") && err.contains("unknown field \"app\""),
+            err.contains(r#"unknown field: "app""#),
             "nodeAttrs app should be rejected as an unknown field, got {err}"
         );
     }
@@ -5249,6 +6016,16 @@ mod tests {
     }
 
     #[test]
+    fn native_policy_parser_reshapes_non_tag_via_like_headscale_go() {
+        let err = parse_hujson_policy_bytes(
+            br#"{"grants":[{"src":["*"],"dst":["*"],"ip":["*"],"via":["group:routers"]}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("via can only be a tag"), "{err}");
+    }
+
+    #[test]
     fn hujson_rejects_invalid_grant_app_cap_and_via() {
         for (name, raw, want) in [
             (
@@ -5279,7 +6056,9 @@ mod tests {
             (
                 "via-not-tag",
                 r#"{"grants":[{"src":["*"],"dst":["*"],"ip":["*"],"via":["group:routers"]}]}"#,
-                "via can only be a tag",
+                // The admin-path parser reports the element's own error; the
+                // native bytes parser reshapes it (see the native test below).
+                "tag must start with 'tag:'",
             ),
             (
                 "via-undefined-tag",
@@ -5293,6 +6072,23 @@ mod tests {
                 "{name} should contain {want:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn v0295_grant_port_and_policy_test_parser_edges() {
+        for ip in ["icmp", "tcp:0"] {
+            let raw = format!(r#"{{"grants":[{{"src":["*"],"dst":["*"],"ip":["{ip}"]}}]}}"#);
+            assert!(parse_hujson_policy(&raw).is_err(), "{ip} must be rejected");
+        }
+
+        let missing_src =
+            parse_hujson_policy(r#"{"tests":[{"accept":["tag:server:22"]}]}"#).unwrap();
+        assert_eq!(missing_src.tests[0].src, "");
+
+        let malformed_cidr =
+            parse_hujson_policy(r#"{"tests":[{"src":"alice@","accept":["10.0.0.0/33:443"]}]}"#)
+                .unwrap();
+        assert_eq!(malformed_cidr.tests[0].accept, ["10.0.0.0/33:443"]);
     }
 
     #[test]
@@ -5362,12 +6158,14 @@ mod tests {
     fn evaluate_with_user_principal_match() {
         let doc = doc_with_rule(&["alice"], &["*"]);
         let alice = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
         let bob = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("bob"),
@@ -5389,6 +6187,7 @@ mod tests {
         let mut doc = doc_with_rule(&["group:admins"], &["*"]);
         doc.groups.insert("admins".into(), vec!["alice".into()]);
         let alice = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
@@ -5407,6 +6206,7 @@ mod tests {
         doc.groups.insert("admins".into(), vec!["alice".into()]);
         let tags = vec!["tag:router".to_string()];
         let tagged = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
@@ -5575,6 +6375,7 @@ mod tests {
         d.tag_owners
             .insert("tag:router".into(), vec!["alice@".into()]);
         let node = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
@@ -5592,6 +6393,7 @@ mod tests {
         d.tag_owners
             .insert("tag:db".into(), vec!["group:admins".into()]);
         let node = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
@@ -5602,7 +6404,7 @@ mod tests {
     }
 
     #[test]
-    fn node_can_have_tag_flattens_nested_tag_owners() {
+    fn node_can_have_tag_uses_registered_ips_for_nested_tag_owners() {
         let mut d = AclDoc::empty();
         d.groups.insert("group:ops".into(), vec!["carol@".into()]);
         d.tag_owners
@@ -5617,36 +6419,41 @@ mod tests {
         );
 
         let alice = NodeView {
-            addr: None,
+            user_id: None,
+            addr: Some("100.64.0.1"),
             addrs: &[],
             user: Some("alice"),
             tags: &[],
         };
         let bob = NodeView {
-            addr: None,
+            user_id: None,
+            addr: Some("100.64.0.2"),
             addrs: &[],
             user: Some("bob"),
             tags: &[],
         };
         let carol = NodeView {
-            addr: None,
+            user_id: None,
+            addr: Some("100.64.0.3"),
             addrs: &[],
             user: Some("carol"),
             tags: &[],
         };
         let dave = NodeView {
-            addr: None,
+            user_id: None,
+            addr: Some("100.64.0.4"),
             addrs: &[],
             user: Some("dave"),
             tags: &[],
         };
 
-        assert!(d.node_can_have_tag(&alice, "tag:derived"));
-        assert!(d.node_can_have_tag(&alice, "tag:deep"));
-        assert!(d.node_can_have_tag(&alice, "tag:mixed"));
-        assert!(d.node_can_have_tag(&bob, "tag:mixed"));
-        assert!(d.node_can_have_tag(&carol, "tag:mixed"));
-        assert!(!d.node_can_have_tag(&dave, "tag:derived"));
+        let nodes = [alice.clone(), bob.clone(), carol.clone(), dave.clone()];
+        assert!(d.node_can_have_tag_with_nodes(&alice, "tag:derived", &nodes));
+        assert!(d.node_can_have_tag_with_nodes(&alice, "tag:deep", &nodes));
+        assert!(d.node_can_have_tag_with_nodes(&alice, "tag:mixed", &nodes));
+        assert!(d.node_can_have_tag_with_nodes(&bob, "tag:mixed", &nodes));
+        assert!(d.node_can_have_tag_with_nodes(&carol, "tag:mixed", &nodes));
+        assert!(!d.node_can_have_tag_with_nodes(&dave, "tag:derived", &nodes));
     }
 
     #[test]
@@ -5661,6 +6468,7 @@ mod tests {
         )
         .unwrap();
         let node = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("alice"),
@@ -5682,7 +6490,7 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains(r#"Tag "tag:missing" is not defined"#));
+        assert!(err.contains(r#"tag not found: "tag:missing""#), "{err}");
     }
 
     #[test]
@@ -5741,7 +6549,8 @@ mod tests {
                     "dst": ["tag:1server"]
                   }]
                 }"#,
-                "tag names must start with a letter, after 'tag:'",
+                // v0.29.5 only checks the tag against tagOwners here.
+                "SSH tests dst contains unknown tag",
             ),
         ] {
             let err = parse_hujson_policy(raw).expect_err(name).to_string();
@@ -5761,6 +6570,7 @@ mod tests {
             .insert("tag:ops".into(), vec!["tag:router".into()]);
         let tags = vec!["tag:router".to_string()];
         let node = NodeView {
+            user_id: None,
             addr: None,
             addrs: &[],
             user: Some("bob"),

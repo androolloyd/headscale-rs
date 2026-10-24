@@ -679,6 +679,31 @@ async fn api_policy_put_then_get_round_trips_raw() {
 async fn api_policy_put_auto_approves_existing_node_routes() {
     let policy = PolicyStore::new();
     let reg = Arc::new(MachineRegistry::new());
+    let state = AdminState::builder()
+        .bearer_token(BEARER)
+        .users(UserRegistry::new())
+        .machines(Arc::new(WireMachineAdmin::new(reg.clone())))
+        .preauth(Arc::new(InMemoryPreauthAdmin::new()))
+        .policy(policy)
+        .build();
+    let app = router(state);
+
+    // Go resolves `alice@` through the users table (policy manager users) and
+    // a node is owned by a numeric user id, so the owner must exist and own
+    // the node (Username.Resolve in policy/v2 matches node.User().ID()).
+    let resp = app
+        .clone()
+        .oneshot(req_post_json(
+            "/api/v1/users",
+            r#"{"name":"alice"}"#,
+            Some(BEARER),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let alice: serde_json::Value = serde_json::from_str(&body(resp).await).unwrap();
+    let alice_id = alice["id"].as_u64().expect("created user id");
+
     let node_key = "7a".repeat(32);
     let mut rec = MachineRecord::new_at(
         chrono::Utc::now(),
@@ -689,17 +714,10 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
         std::net::Ipv4Addr::new(100, 64, 0, 7),
         false,
     );
+    rec.user_id = Some(alice_id);
     rec.available_routes = vec!["10.77.1.0/24".into(), "10.99.1.0/24".into()];
     rec.approved_routes = vec!["10.99.1.0/24".into()];
     reg.upsert(node_key.clone(), rec);
-    let state = AdminState::builder()
-        .bearer_token(BEARER)
-        .users(UserRegistry::new())
-        .machines(Arc::new(WireMachineAdmin::new(reg.clone())))
-        .preauth(Arc::new(InMemoryPreauthAdmin::new()))
-        .policy(policy)
-        .build();
-    let app = router(state);
     let raw = r#"{
         "autoApprovers": {
             "routes": {"10.77.0.0/16": ["alice@"]}
@@ -712,7 +730,7 @@ async fn api_policy_put_auto_approves_existing_node_routes() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let b = body(resp).await;
-    assert!(b.contains(r#""autoApprovedNodes":1"#));
+    assert!(b.contains(r#""autoApprovedNodes":1"#), "{b}");
 
     let rec = reg.get(&node_key).expect("node still registered");
     assert_eq!(rec.available_routes, vec!["10.77.1.0/24", "10.99.1.0/24"]);

@@ -31,6 +31,7 @@ use tonic::transport::Server;
 use tonic::transport::server::Connected;
 
 const CLEAN_ENV: &[&str] = &[
+    "RUST_LOG",
     "HEADSCALE_CONFIG",
     "HEADSCALE_LOG",
     "HEADSCALE_URL",
@@ -268,6 +269,84 @@ fn normalize_no_config_warning_timestamp(text: &str) -> String {
     normalized
 }
 
+/// Every config-loading headscale-go command logs the no-config warning when no
+/// file is found, and building the server logs creating/opening the noise key
+/// and database. Their paths and timestamps depend on the host, and dedicated
+/// tests pin their exact shape, so snapshot comparisons that are about other
+/// output ignore them.
+fn drop_startup_noise(text: &str) -> String {
+    text.split_inclusive('\n')
+        .filter(|line| {
+            !(line.contains(" WRN no config file found, using defaults")
+                || line.contains(" INF no private key file at path, creating... path=")
+                || line.contains(" INF Opening database database="))
+        })
+        .collect()
+}
+
+/// Replace the per-run parts of zerolog console lines: the RFC 3339 timestamp,
+/// and the caller, which for headscale-go is a build-time Go source path.
+fn normalize_log_lines(text: &str) -> String {
+    const LEVELS: [&str; 7] = ["INF", "WRN", "ERR", "FTL", "DBG", "TRC", "PNC"];
+    let mut out = String::with_capacity(text.len());
+    for segment in text.split_inclusive('\n') {
+        let bytes = segment.as_bytes();
+        let is_timestamped = bytes.len() > 26
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && (bytes[19] == b'+' || bytes[19] == b'-')
+            && bytes[22] == b':'
+            && bytes[25] == b' '
+            && LEVELS.iter().any(|level| segment[26..].starts_with(level));
+        if !is_timestamped {
+            out.push_str(segment);
+            continue;
+        }
+        let rest = &segment[26..];
+        out.push_str("<timestamp> ");
+        // `FTL <file>:<line> > message` -> `FTL <caller> > message`.
+        if let Some((head, tail)) = rest.split_once(" > ")
+            && head.len() > 4
+            && head[4..].contains(':')
+            && !head[4..].contains(' ')
+            && head[4..]
+                .rsplit(':')
+                .next()
+                .is_some_and(|line| line.chars().all(|c| c.is_ascii_digit()))
+        {
+            out.push_str(&head[..3]);
+            out.push_str(" <caller> > ");
+            out.push_str(tail);
+        } else {
+            out.push_str(rest);
+        }
+    }
+    out
+}
+
+fn comparable_stderr(text: &str) -> String {
+    trim_line_end_spaces(&normalize_log_lines(&drop_startup_noise(text)))
+}
+
+fn comparable_expected(text: &str) -> String {
+    trim_line_end_spaces(&normalize_log_lines(&drop_startup_noise(text)))
+}
+
+fn assert_deprecated_ephemeral_timeout_warning(stderr: &str) {
+    let stderr = drop_startup_noise(stderr);
+    let (timestamp, warning) = stderr
+        .split_once(" WRN \n")
+        .expect("upstream-style deprecation warning");
+    assert!(timestamp.contains('T'), "timestamp: {timestamp}");
+    assert_eq!(
+        warning,
+        "WARN: The \"ephemeral_node_inactivity_timeout\" configuration key is deprecated. Please use \"node.ephemeral.inactivity_timeout\" instead. \"ephemeral_node_inactivity_timeout\" has been removed.\n\n"
+    );
+}
+
 fn assert_stdout_snapshot(args: &[&str], expected: &str) {
     let output = headscale_clean(args);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -276,7 +355,11 @@ fn assert_stdout_snapshot(args: &[&str], expected: &str) {
         trim_line_end_spaces(expected),
         "stdout snapshot for {args:?}"
     );
-    assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+    assert_eq!(
+        comparable_stderr(&stderr(&output)),
+        "",
+        "stderr snapshot for {args:?}"
+    );
 }
 
 fn assert_stdout_stderr_snapshot(args: &[&str], expected_stdout: &str, expected_stderr: &str) {
@@ -288,8 +371,8 @@ fn assert_stdout_stderr_snapshot(args: &[&str], expected_stdout: &str, expected_
         "stdout snapshot for {args:?}"
     );
     assert_eq!(
-        trim_line_end_spaces(&stderr(&output)),
-        trim_line_end_spaces(expected_stderr),
+        comparable_stderr(&stderr(&output)),
+        comparable_expected(expected_stderr),
         "stderr snapshot for {args:?}"
     );
 }
@@ -318,7 +401,11 @@ fn assert_normalized_node_stdout_snapshot(output: &Output, expected: &str, label
         trim_line_end_spaces(expected),
         "stdout snapshot for {label}"
     );
-    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
+    assert_eq!(
+        comparable_stderr(&stderr(output)),
+        "",
+        "stderr snapshot for {label}"
+    );
 }
 
 fn assert_normalized_secret_stdout_snapshot(output: &Output, expected: &str, label: &str) {
@@ -328,7 +415,11 @@ fn assert_normalized_secret_stdout_snapshot(output: &Output, expected: &str, lab
         trim_line_end_spaces(expected),
         "stdout snapshot for {label}"
     );
-    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
+    assert_eq!(
+        comparable_stderr(&stderr(output)),
+        "",
+        "stderr snapshot for {label}"
+    );
 }
 
 fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
@@ -342,8 +433,8 @@ fn assert_stderr_snapshot(args: &[&str], expected_status: i32, expected: &str) {
     );
     assert_eq!(stdout(&output), "", "stdout snapshot for {args:?}");
     assert_eq!(
-        trim_line_end_spaces(&stderr(&output)),
-        trim_line_end_spaces(expected),
+        comparable_stderr(&stderr(&output)),
+        comparable_expected(expected),
         "stderr snapshot for {args:?}"
     );
 }
@@ -387,8 +478,8 @@ fn assert_process_stderr_snapshot(
     );
     assert_eq!(stdout(output), "", "stdout snapshot for {label}");
     assert_eq!(
-        trim_line_end_spaces(&stderr(output)),
-        trim_line_end_spaces(expected),
+        comparable_stderr(&stderr(output)),
+        comparable_expected(expected),
         "stderr snapshot for {label}"
     );
 }
@@ -411,7 +502,11 @@ fn assert_process_stdout_snapshot(
         trim_line_end_spaces(expected),
         "stdout snapshot for {label}"
     );
-    assert_eq!(stderr(output), "", "stderr snapshot for {label}");
+    assert_eq!(
+        comparable_stderr(&stderr(output)),
+        "",
+        "stderr snapshot for {label}"
+    );
 }
 
 fn assert_process_no_config_warning_stderr_snapshot(
@@ -445,6 +540,19 @@ fn configtest_expected_stderr(validation_expected: &str) -> String {
     format!("Error: configuration error: loading configuration: {rest}")
 }
 
+/// `serve` wraps configuration failures as `initializing: loading
+/// configuration: ...`, where `configtest` says `configuration error: loading
+/// configuration: ...`; the snapshots store the bare validation message.
+fn serve_expected_stderr(validation_expected: &str) -> String {
+    let Some(rest) = validation_expected.strip_prefix("Error: ") else {
+        return validation_expected.to_string();
+    };
+    if rest.starts_with("Failed to load config:") {
+        return validation_expected.to_string();
+    }
+    format!("Error: initializing: loading configuration: {rest}")
+}
+
 fn assert_configtest_stderr_snapshot(
     output: &Output,
     expected_status: i32,
@@ -466,7 +574,10 @@ fn assert_config_stderr_snapshot(
 }
 
 async fn wait_for_headscale_status(config: &Path, args: &[&str], expected_status: i32) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Concurrent Postgres process smokes migrate independent databases before
+    // opening their admin socket. Use the paired production harness's setup
+    // budget so a single transport timeout does not consume the whole retry window.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let output = headscale_with_config(config, args);
         if output.status.code() == Some(expected_status) {
@@ -728,6 +839,8 @@ grpc_allow_insecure: true
 unix_socket: {}
 noise:
   private_key_path: {}
+prefixes:
+  v4: 100.64.0.0/10
 dns:
   magic_dns: false
   override_local_dns: false
@@ -745,6 +858,24 @@ policy:
     )
     .unwrap();
     config
+}
+
+fn enable_remote_grpc_tls_fixture(dir: &Path, config: &Path) -> BoxTestResult {
+    use std::fmt::Write as _;
+
+    let material = tls::load_or_generate(
+        dir.join("remote-grpc-tls"),
+        &SanConfig::with_hostname("localhost"),
+    )?;
+    let mut source = fs::read_to_string(config)?;
+    write!(
+        source,
+        "\ntls_cert_path: {}\ntls_key_path: {}\nserver:\n  https_listen: \"127.0.0.1:0\"\n",
+        yaml_double_quoted(&material.cert_path.to_string_lossy()),
+        yaml_double_quoted(&material.key_path.to_string_lossy()),
+    )?;
+    fs::write(config, source)?;
+    Ok(())
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -933,6 +1064,8 @@ grpc_allow_insecure: true
 unix_socket: {}
 noise:
   private_key_path: {}
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -995,7 +1128,7 @@ fn normalize_users_list_stdout(text: &str) -> String {
     let mut normalized = String::new();
     for line in text.lines() {
         let mut line = line.to_string();
-        if line.starts_with("1   ") && line.len() >= 19 {
+        if line.starts_with("1  | ") && line.len() >= 19 {
             let timestamp_start = line.len() - 19;
             line.replace_range(timestamp_start.., "0000-00-00 00:00:00");
         }
@@ -1008,7 +1141,26 @@ fn normalize_users_list_stdout(text: &str) -> String {
 fn normalize_generated_node_stdout(text: &str) -> String {
     let text = replace_short_key_bodies(text, "mkey:");
     let text = replace_short_key_bodies(&text, "nodekey:");
-    replace_rfc3339_second_timestamps(&text)
+    let mut normalized = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find('[') {
+        normalized.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if rest.len() >= 7
+            && rest.as_bytes()[6] == b']'
+            && rest.as_bytes()[1..6]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+        {
+            normalized.push_str("[AAAAA]");
+            rest = &rest[7..];
+        } else {
+            normalized.push('[');
+            rest = &rest[1..];
+        }
+    }
+    normalized.push_str(rest);
+    replace_human_second_timestamps(&replace_rfc3339_second_timestamps(&normalized))
 }
 
 fn normalize_generated_secret_stdout(text: &str) -> String {
@@ -1356,9 +1508,9 @@ fn json_output(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn yaml_output(output: &Output) -> serde_yaml::Value {
+fn yaml_output(output: &Output) -> serde_json::Value {
     assert!(output.status.success(), "stderr: {}", stderr(output));
-    serde_yaml::from_slice(&output.stdout).unwrap()
+    headscale_cli::yaml::from_slice(&output.stdout).unwrap()
 }
 
 fn assert_status_command_failed(output: &Output) {
@@ -1419,20 +1571,37 @@ fn exact_help_aliases_match_current_upstream_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "version"],
-        include_str!("snapshots/version_help.stdout"),
+        include_str!("snapshots/help_version.stdout"),
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "mockoidc"],
-        include_str!("snapshots/mockoidc_help.stdout"),
+        include_str!("snapshots/help_mockoidc.stdout"),
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "dumpConfig"],
         include_str!("snapshots/dump_config_help.stdout"),
     );
     assert_stdout_no_config_warning_snapshot(
-        &["help", "completion", "bash"],
-        include_str!("snapshots/completion_bash_help.stdout"),
+        &["help", "completion"],
+        include_str!("snapshots/help_completion.stdout"),
     );
+    for (shell, expected) in [
+        (
+            "bash",
+            include_str!("snapshots/help_completion_bash.stdout"),
+        ),
+        (
+            "fish",
+            include_str!("snapshots/help_completion_fish.stdout"),
+        ),
+        (
+            "powershell",
+            include_str!("snapshots/help_completion_powershell.stdout"),
+        ),
+        ("zsh", include_str!("snapshots/help_completion_zsh.stdout")),
+    ] {
+        assert_stdout_no_config_warning_snapshot(&["help", "completion", shell], expected);
+    }
     assert_stdout_snapshot(&["auth", "-h"], include_str!("snapshots/auth_help.stdout"));
     assert_stdout_no_config_warning_snapshot(
         &["help", "auth", "register"],
@@ -1768,7 +1937,11 @@ fn generate_private_key_structured_outputs_match_current_upstream_snapshots() {
                 stdout(&output)
             );
         }
-        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+        assert_eq!(
+            comparable_stderr(&stderr(&output)),
+            "",
+            "stderr snapshot for {args:?}"
+        );
     }
 }
 
@@ -1797,7 +1970,7 @@ fn version_ignores_extra_positionals_like_upstream_cobra() {
     let output = headscale_in(&["version", "extra"], cwd.path(), home.path());
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).starts_with("headscale version "));
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 
     let output = headscale_in(
         &["version", "extra", "-o", "json-line"],
@@ -1806,12 +1979,12 @@ fn version_ignores_extra_positionals_like_upstream_cobra() {
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).starts_with(r#"{"version":"#));
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 
     let output = headscale_in(&["version", "--", "-o", "json"], cwd.path(), home.path());
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).starts_with("headscale version "));
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 
     let output = headscale_in(&["version", "extra", "--help"], cwd.path(), home.path());
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -1819,7 +1992,7 @@ fn version_ignores_extra_positionals_like_upstream_cobra() {
         stdout(&output),
         include_str!("snapshots/version_help.stdout")
     );
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -1879,7 +2052,11 @@ fn version_outputs_match_current_upstream_snapshots() {
                 stdout(&output)
             );
         }
-        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+        assert_eq!(
+            comparable_stderr(&stderr(&output)),
+            "",
+            "stderr snapshot for {args:?}"
+        );
     }
 }
 
@@ -1937,7 +2114,11 @@ fn completion_missing_or_unknown_shell_matches_upstream_help() {
             trim_line_end_spaces(include_str!("snapshots/completion_help.stdout")),
             "stdout snapshot for {args:?}"
         );
-        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+        assert_eq!(
+            comparable_stderr(&stderr(&output)),
+            "",
+            "stderr snapshot for {args:?}"
+        );
     }
 }
 
@@ -1956,7 +2137,11 @@ fn generate_missing_or_unknown_subcommand_matches_upstream_help() {
             trim_line_end_spaces(include_str!("snapshots/generate_help.stdout")),
             "stdout snapshot for {args:?}"
         );
-        assert_eq!(stderr(&output), "", "stderr snapshot for {args:?}");
+        assert_eq!(
+            comparable_stderr(&stderr(&output)),
+            "",
+            "stderr snapshot for {args:?}"
+        );
     }
 }
 
@@ -2128,6 +2313,49 @@ fn utility_unknown_flags_match_upstream_stderr_snapshots() {
 }
 
 #[test]
+fn unknown_flags_use_output_format_seen_before_the_error() {
+    for (format, root_snapshot, late_root_snapshot, mockoidc_snapshot) in [
+        (
+            "json",
+            include_str!("snapshots/utility_top_level_prior_output_unknown_flag_json.stderr"),
+            include_str!("snapshots/utility_top_level_late_output_unknown_flag_json.stderr"),
+            include_str!("snapshots/serve_unknown_flag_json.stderr"),
+        ),
+        (
+            "json-line",
+            include_str!("snapshots/utility_top_level_prior_output_unknown_flag_json_line.stderr"),
+            include_str!("snapshots/utility_top_level_late_output_unknown_flag_json_line.stderr"),
+            include_str!("snapshots/serve_unknown_flag_json_line.stderr"),
+        ),
+        (
+            "yaml",
+            include_str!("snapshots/utility_top_level_prior_output_unknown_flag_yaml.stderr"),
+            include_str!("snapshots/utility_top_level_late_output_unknown_flag_yaml.stderr"),
+            include_str!("snapshots/utility_mockoidc_prior_output_unknown_flag_yaml.stderr"),
+        ),
+    ] {
+        assert_stderr_snapshot(&["-o", format, "--bad"], 1, root_snapshot);
+        assert_stderr_snapshot(&["--bad", "-o", format], 1, late_root_snapshot);
+        assert_stderr_snapshot(&["-o", format, "mockoidc", "--bad"], 1, mockoidc_snapshot);
+        assert_stderr_snapshot(
+            &["nodes", "--bad", "-o", format],
+            1,
+            include_str!("snapshots/utility_version_unknown_flag.stderr"),
+        );
+        assert_stderr_snapshot(
+            &["nodes", "list", "--bad", "-o", format],
+            1,
+            include_str!("snapshots/utility_version_unknown_flag.stderr"),
+        );
+    }
+    assert_stderr_snapshot(
+        &["version", "--bad", "-o", "json"],
+        1,
+        include_str!("snapshots/utility_version_unknown_flag.stderr"),
+    );
+}
+
+#[test]
 fn serve_unknown_flags_honor_output_format_like_current_upstream() {
     assert_stderr_snapshot(
         &["serve", "-o", "json", "--bad"],
@@ -2274,7 +2502,7 @@ fn utility_global_flags_consume_help_as_values_like_current_upstream_cobra() {
     let version = headscale_clean(&["version", "--output", "--help"]);
     assert!(version.status.success(), "stderr: {}", stderr(&version));
     assert!(stdout(&version).starts_with("headscale version "));
-    assert_eq!(stderr(&version), "");
+    assert_eq!(comparable_stderr(&stderr(&version)), "");
 }
 
 #[test]
@@ -2679,7 +2907,7 @@ fn utility_extra_args_match_upstream_unknown_command_errors() {
 fn help_topics_with_extra_arg_match_upstream_snapshots() {
     assert_stdout_no_config_warning_snapshot(
         &["help", "version", "bad"],
-        include_str!("snapshots/version_help.stdout"),
+        include_str!("snapshots/help_version.stdout"),
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "auth", "bad"],
@@ -2813,7 +3041,7 @@ fn leading_config_flag_on_version_loads_config_like_upstream_cobra() {
 
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("Failed to load config file"),
+        stderr(&output).contains("error loading config file"),
         "stderr: {}",
         stderr(&output)
     );
@@ -2834,6 +3062,8 @@ database:
     path: "/tmp/headscale-rs-test.sqlite"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -2845,19 +3075,169 @@ dns:
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
+}
+
+#[test]
+fn upstream_config_requires_a_node_prefix_at_configtest_and_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    fs::write(
+        &config,
+        r#"
+server_url: "http://127.0.0.1:8080"
+listen_addr: "127.0.0.1:8080"
+noise:
+  private_key_path: "noise.key"
+dns:
+  magic_dns: false
+  base_domain: tail.test
+  override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: "db.sqlite"
+"#,
+    )
+    .unwrap();
+    assert_process_stderr_snapshot(
+        &headscale_with_config(&config, &["configtest"]),
+        1,
+        include_str!("snapshots/configtest_missing_prefixes.stderr"),
+        "configtest missing prefixes",
+    );
+    assert_process_stderr_snapshot(
+        &headscale_with_config(&config, &["serve"]),
+        1,
+        include_str!("snapshots/serve_missing_prefixes.stderr"),
+        "serve missing prefixes",
+    );
+}
+
+#[test]
+fn configtest_uses_upstream_fatal_log_for_dns_and_database_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    for (extra, expected) in [
+        (
+            "dns:\n  magic_dns: true\n  override_local_dns: false\n",
+            "dns.base_domain must be set when using MagicDNS (dns.magic_dns)",
+        ),
+        (
+            "dns:\n  magic_dns: false\n  override_local_dns: false\n",
+            "invalid database type \"mysql\", must be sqlite, sqlite3 or postgres",
+        ),
+    ] {
+        let database_type = if expected.starts_with("invalid database") {
+            "mysql"
+        } else {
+            "sqlite"
+        };
+        fs::write(
+            &config,
+            format!(
+                "server_url: http://127.0.0.1:8080\nnoise:\n  private_key_path: noise.key\nprefixes:\n  v4: 100.64.0.0/10\n{extra}database:\n  type: {database_type}\n"
+            ),
+        )
+        .unwrap();
+        for args in [&["configtest"][..], &["-o", "json", "configtest"][..]] {
+            let output = headscale_with_config(&config, args);
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(stdout(&output), "");
+            let stderr = stderr(&output);
+            let (timestamp, message) = stderr.split_once(" FTL ").unwrap();
+            assert!(timestamp.contains('T'), "stderr: {stderr}");
+            assert_eq!(message, format!("{expected}\n"));
+        }
+    }
+}
+
+#[test]
+fn oidc_startup_validation_matches_pinned_go_configtest_and_serve_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    for (name, oidc, expected_configtest, expected_serve) in [
+        (
+            "invalid issuer",
+            "oidc:\n  issuer: not-a-url\n  client_id: test\n  client_secret: test\n",
+            [
+                include_str!("snapshots/oidc_configtest_invalid_issuer_human.stderr"),
+                include_str!("snapshots/oidc_configtest_invalid_issuer_json.stderr"),
+                include_str!("snapshots/oidc_configtest_invalid_issuer_json-line.stderr"),
+                include_str!("snapshots/oidc_configtest_invalid_issuer_yaml.stderr"),
+            ],
+            include_str!("snapshots/oidc_serve_invalid_issuer.stderr"),
+        ),
+        (
+            "missing client ID",
+            "oidc:\n  issuer: https://issuer.example\n  client_secret: test\n",
+            [
+                include_str!("snapshots/oidc_configtest_missing_client_id_human.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_id_json.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_id_json-line.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_id_yaml.stderr"),
+            ],
+            include_str!("snapshots/oidc_serve_missing_client_id.stderr"),
+        ),
+        (
+            "missing client secret",
+            "oidc:\n  issuer: https://issuer.example\n  client_id: test\n",
+            [
+                include_str!("snapshots/oidc_configtest_missing_client_secret_human.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_secret_json.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_secret_json-line.stderr"),
+                include_str!("snapshots/oidc_configtest_missing_client_secret_yaml.stderr"),
+            ],
+            include_str!("snapshots/oidc_serve_missing_client_secret.stderr"),
+        ),
+    ] {
+        fs::write(
+            &config_path,
+            format!("server_url: http://127.0.0.1:8080\n{oidc}"),
+        )
+        .unwrap();
+        for (format, expected) in ["", "json", "json-line", "yaml"]
+            .into_iter()
+            .zip(expected_configtest)
+        {
+            let args = if format.is_empty() {
+                vec!["configtest"]
+            } else {
+                vec!["-o", format, "configtest"]
+            };
+            let output = headscale_with_config(&config_path, &args);
+            assert_eq!(output.status.code(), Some(1), "{name} {format}");
+            assert_eq!(stdout(&output), "", "{name} {format}");
+            assert_eq!(stderr(&output), expected, "{name} {format}");
+        }
+        let serve = headscale_with_config(&config_path, &["serve"]);
+        assert_eq!(serve.status.code(), Some(1), "{name} serve");
+        assert_eq!(stdout(&serve), "", "{name} serve");
+        assert_eq!(stderr(&serve), expected_serve, "{name} serve");
+
+        let version = headscale_with_config(&config_path, &["version"]);
+        assert!(version.status.success(), "{name}: {}", stderr(&version));
+        assert!(stdout(&version).starts_with("headscale version "), "{name}");
+        assert_eq!(comparable_stderr(&stderr(&version)), "", "{name} version");
+    }
 }
 
 #[test]
 fn configtest_accepts_current_upstream_https_and_derp_fixture() {
     let config = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/headscale-go-v0.28-config-example.yaml");
+    let dir = tempfile::tempdir().unwrap();
+    let local_config = dir.path().join("config.yaml");
+    let contents = fs::read_to_string(config)
+        .unwrap()
+        .replace("/var/lib/headscale", &dir.path().display().to_string());
+    fs::write(&local_config, contents).unwrap();
 
-    let output = headscale_with_config(&config, &["configtest"]);
+    let output = headscale_with_config(&local_config, &["configtest"]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_deprecated_ephemeral_timeout_warning(&stderr(&output));
 }
 
 #[test]
@@ -2915,7 +3295,7 @@ fn dump_config_missing_target_matches_current_upstream_snapshots() {
 }
 
 #[test]
-fn configtest_rejects_env_invalid_grpc_listen_addr() {
+fn configtest_accepts_env_invalid_grpc_listen_addr_like_go() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     fs::write(
@@ -2924,9 +3304,15 @@ fn configtest_rejects_env_invalid_grpc_listen_addr() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
+database:
+  type: sqlite
+  sqlite:
+    path: "db.sqlite"
 "#,
     )
     .unwrap();
@@ -2938,12 +3324,9 @@ dns:
         &[("HEADSCALE_GRPC_LISTEN_ADDR", "not-a-socket")],
     );
 
-    assert_configtest_stderr_snapshot(
-        &output,
-        1,
-        include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
-        "configtest invalid gRPC listener from env",
-    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -2956,11 +3339,15 @@ fn configtest_accepts_tls_alpn_acme_runtime() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 "#,
@@ -2972,13 +3359,16 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
     assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/configtest_tls_alpn_acme_port_warning.stderr")
+        comparable_stderr(&stderr(&output)),
+        comparable_expected(include_str!(
+            "snapshots/configtest_tls_alpn_acme_port_warning.stderr"
+        ))
     );
 }
 
 #[test]
-fn configtest_accepts_postgres_config() {
+#[cfg(not(feature = "postgres-sqlx"))]
+fn configtest_rejects_postgres_without_driver() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     fs::write(
@@ -2987,6 +3377,8 @@ fn configtest_accepts_postgres_config() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -2998,12 +3390,13 @@ database:
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert!(stderr(&output).contains("compiled without postgres-sqlx support"));
 }
 
 #[test]
+#[cfg(not(feature = "postgres-sqlx"))]
 fn configtest_applies_database_env_overrides() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -3013,6 +3406,8 @@ fn configtest_applies_database_env_overrides() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -3033,9 +3428,9 @@ dns:
             ("HEADSCALE_DATABASE_POSTGRES_SSL", "false"),
         ],
     );
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert!(stderr(&output).contains("compiled without postgres-sqlx support"));
 
     let output = headscale_in_with_env(
         &["configtest"],
@@ -3064,6 +3459,8 @@ fn configtest_rejects_invalid_postgres_pool_config() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -3077,22 +3474,64 @@ database:
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
-    assert_configtest_stderr_snapshot(
-        &output,
-        1,
-        include_str!("snapshots/configtest_invalid_postgres_pool.stderr"),
-        "configtest invalid postgres pool",
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    // database/sql treats a negative open-connection limit as unlimited, so
+    // headscale-go accepts it and fails on the connection instead; the driver
+    // text is not comparable, but the wrapper is.
+    let stderr = comparable_stderr(&stderr(&output));
+    assert!(
+        stderr.starts_with("Error: configuration error: creating new headscale: "),
+        "stderr: {stderr}"
     );
+    assert!(!stderr.contains("must be >= 0"), "stderr: {stderr}");
 }
 
 fn assert_configtest_default_config_snapshot(config: &str, expected: &str, label: &str) {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("config.yaml"), config).unwrap();
+    // headscale-go checks the database type after the aggregated fatal config
+    // errors, so cases that target later validation need one configured.
+    let database = if config.contains("database:") {
+        ""
+    } else {
+        "\ndatabase:\n  type: sqlite\n  sqlite:\n    path: db.sqlite\n"
+    };
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!("{}{database}", with_test_prefix(config)),
+    )
+    .unwrap();
 
     let output = headscale_in(&["configtest"], cwd.path(), home.path());
 
     assert_configtest_stderr_snapshot(&output, 1, expected, label);
+}
+
+fn assert_configtest_default_config_succeeds(config: &str) {
+    let cwd = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        cwd.path().join("config.yaml"),
+        format!(
+            "{}\ndatabase:\n  type: sqlite\n  sqlite:\n    path: db.sqlite\n",
+            with_test_prefix(config)
+        ),
+    )
+    .unwrap();
+
+    let output = headscale_in(&["configtest"], cwd.path(), home.path());
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
+}
+
+fn with_test_prefix(config: &str) -> String {
+    if config.contains("prefixes:") {
+        config.to_string()
+    } else {
+        format!("prefixes:\n  v4: 100.64.0.0/10\n{config}")
+    }
 }
 
 fn assert_serve_default_config_snapshot(config: &str, expected: &str, label: &str) {
@@ -3111,12 +3550,13 @@ fn assert_serve_default_config_args_snapshot(
     fs::write(
         cwd.path().join("config.yaml"),
         format!(
-            r#"{config}
+            r#"{}
 database:
   type: sqlite
   sqlite:
     path: "{}"
 "#,
+            with_test_prefix(config),
             db_path.display()
         ),
     )
@@ -3225,7 +3665,9 @@ dns:
         "configtest server_url under DNS base_domain",
     );
 
-    assert_configtest_default_config_snapshot(
+    // headscale-go's configtest does not open the certificate; only `serve`
+    // does, and fails there with `configuring TLS settings: open ...`.
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
 noise:
@@ -3235,8 +3677,6 @@ dns:
   override_local_dns: false
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
-        include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
-        "configtest incomplete manual TLS",
     );
 
     assert_configtest_default_config_snapshot(
@@ -3249,7 +3689,9 @@ tls_cert_path: "/etc/headscale/cert.pem"
         "configtest TLS conflict",
     );
 
-    assert_configtest_default_config_snapshot(
+    // The ACME listener is only bound by `serve`; headscale-go's configtest
+    // accepts the address as written.
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
 noise:
@@ -3261,8 +3703,6 @@ tls_letsencrypt_hostname: "headscale.example"
 tls_letsencrypt_listen: "not-a-socket"
 tls_letsencrypt_challenge_type: "HTTP-01"
 "#,
-        include_str!("snapshots/configtest_invalid_acme_http01_listen.stderr"),
-        "configtest invalid ACME HTTP-01 listener",
     );
 
     assert_configtest_default_config_snapshot(
@@ -3280,7 +3720,7 @@ tls_letsencrypt_challenge_type: ""
         "configtest empty ACME challenge type",
     );
 
-    assert_configtest_default_config_snapshot(
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
 noise:
@@ -3290,11 +3730,21 @@ dns:
   override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
-        include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
-        "configtest invalid metrics listener",
     );
 
-    assert_configtest_default_config_snapshot(
+    assert_configtest_default_config_succeeds(
+        r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+listen_addr: "not-a-socket"
+"#,
+    );
+
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
 noise:
@@ -3304,11 +3754,11 @@ dns:
   override_local_dns: false
 grpc_listen_addr: "not-a-socket"
 "#,
-        include_str!("snapshots/configtest_invalid_grpc_listen.stderr"),
-        "configtest invalid gRPC listener",
     );
 
-    assert_configtest_default_config_snapshot(
+    // `server.https_listen` is a Rust extension and listeners are bound by
+    // `serve`, so configtest (like headscale-go's) accepts the value as written.
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
 noise:
@@ -3319,8 +3769,6 @@ dns:
 server:
   https_listen: "not-a-socket"
 "#,
-        include_str!("snapshots/configtest_invalid_https_listen.stderr"),
-        "configtest invalid HTTPS listener",
     );
 
     assert_configtest_default_config_snapshot(
@@ -3357,14 +3805,17 @@ derp:
         "configtest DERP missing STUN listener",
     );
 
-    assert_configtest_default_config_snapshot(
+    assert_configtest_default_config_succeeds(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 policy:
   mode: consul
 "#,
-        include_str!("snapshots/configtest_invalid_policy_mode.stderr"),
-        "configtest invalid policy mode",
     );
 
     assert_configtest_default_config_snapshot(
@@ -3395,6 +3846,11 @@ node:
     assert_configtest_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 trusted_proxies:
   - "0.0.0.0/0"
 "#,
@@ -3439,11 +3895,15 @@ fn configtest_applies_policy_env_overrides() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: file
   path: missing-policy.hujson
@@ -3459,7 +3919,7 @@ policy:
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 
     let output = headscale_in_with_env(
         &["configtest"],
@@ -3469,7 +3929,7 @@ policy:
     );
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -3482,11 +3942,15 @@ fn configtest_dns_env_override_requires_global_nameservers() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: database
 "#,
@@ -3518,11 +3982,15 @@ fn configtest_dns_env_nameservers_global_satisfies_override() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: database
 "#,
@@ -3541,7 +4009,7 @@ policy:
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -3554,11 +4022,15 @@ fn configtest_rejects_env_derp_disabled_embedded_region_without_paths() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: database
 "#,
@@ -3596,11 +4068,15 @@ fn configtest_rejects_env_ephemeral_node_inactivity_timeout() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: database
 "#,
@@ -3614,11 +4090,21 @@ policy:
         &[("HEADSCALE_EPHEMERAL_NODE_INACTIVITY_TIMEOUT", "65s")],
     );
 
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_deprecated_ephemeral_timeout_warning(&stderr(&output));
+
+    let output = headscale_in_with_env(
+        &["configtest"],
+        cwd.path(),
+        home.path(),
+        &[("HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT", "65s")],
+    );
     assert_configtest_stderr_snapshot(
         &output,
         1,
-        "Error: Fatal config error: node.ephemeral.inactivity_timeout (65s) is set too low, must be more than 65s\n",
-        "configtest invalid deprecated ephemeral timeout from env",
+        "Error: Fatal config error: node.ephemeral.inactivity_timeout (65s) is set too low, must be more than 1m5s\n",
+        "configtest invalid node ephemeral timeout from env",
     );
 
     let output = headscale_in_with_env(
@@ -3630,7 +4116,7 @@ policy:
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -3643,11 +4129,15 @@ fn configtest_rejects_env_invalid_tuning_node_store_values() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 policy:
   mode: database
 "#,
@@ -3694,7 +4184,7 @@ policy:
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert_eq!(stdout(&output), "");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
 #[test]
@@ -3707,6 +4197,8 @@ fn configtest_rejects_env_invalid_tls_letsencrypt_challenge_type() {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -3740,7 +4232,9 @@ dns:
   magic_dns: false
   override_local_dns: false
 "#,
-        include_str!("snapshots/configtest_missing_noise_private_key.stderr"),
+        &serve_expected_stderr(include_str!(
+            "snapshots/configtest_missing_noise_private_key.stderr"
+        )),
         "serve missing noise private key",
     );
 
@@ -3784,7 +4278,9 @@ dns:
         r#"
 server_url: "headscale.example"
 "#,
-        include_str!("snapshots/configtest_bad_server_url_scheme.stderr"),
+        &serve_expected_stderr(include_str!(
+            "snapshots/configtest_bad_server_url_scheme.stderr"
+        )),
         "serve bad server_url scheme",
     );
 
@@ -3798,7 +4294,9 @@ dns:
   override_local_dns: false
   base_domain: "tail.example.org"
 "#,
-        include_str!("snapshots/configtest_server_url_under_base_domain.stderr"),
+        &serve_expected_stderr(include_str!(
+            "snapshots/configtest_server_url_under_base_domain.stderr"
+        )),
         "serve server_url under DNS base_domain",
     );
 
@@ -3812,6 +4310,8 @@ dns:
   override_local_dns: false
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
+        // Rust rejects the half-configured pair before any state starts; Go only
+        // fails later in `serve`, with `configuring TLS settings: open <cert>`.
         include_str!("snapshots/configtest_manual_tls_incomplete.stderr"),
         "serve incomplete manual TLS",
     );
@@ -3822,7 +4322,7 @@ server_url: "https://headscale.example"
 tls_letsencrypt_hostname: "headscale.example"
 tls_cert_path: "/etc/headscale/cert.pem"
 "#,
-        include_str!("snapshots/configtest_tls_conflict.stderr"),
+        &serve_expected_stderr(include_str!("snapshots/configtest_tls_conflict.stderr")),
         "serve TLS conflict",
     );
 
@@ -3852,6 +4352,8 @@ dns:
   override_local_dns: false
 metrics_listen_addr: "not-a-socket"
 "#,
+        // Rust validates the listener address before starting state; Go only
+        // fails once `serve` tries to bind it.
         include_str!("snapshots/configtest_invalid_metrics_listen.stderr"),
         "serve invalid metrics listener",
     );
@@ -3873,20 +4375,15 @@ grpc_listen_addr: "not-a-socket"
     assert_serve_default_config_snapshot(
         r#"
 server_url: "https://headscale.example"
-policy:
-  mode: consul
-"#,
-        include_str!("snapshots/serve_invalid_policy_mode.stderr"),
-        "serve invalid policy mode",
-    );
-
-    assert_serve_default_config_snapshot(
-        r#"
-server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
 trusted_proxies:
   - "0.0.0.0/0"
 "#,
-        include_str!("snapshots/serve_unsafe_trusted_proxy.stderr"),
+        &serve_expected_stderr(include_str!("snapshots/serve_unsafe_trusted_proxy.stderr")),
         "serve unsafe trusted proxy",
     );
 }
@@ -3926,6 +4423,8 @@ server_url: "https://headscale.example"
 listen_addr: "127.0.0.1:0"
 noise:
   private_key_path: {}
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -3988,6 +4487,8 @@ fn serve_ignores_extra_positional_args_like_upstream_before_validation() {
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -4006,7 +4507,9 @@ database:
     assert_process_stderr_snapshot(
         &output,
         1,
-        include_str!("snapshots/configtest_missing_noise_private_key.stderr"),
+        &serve_expected_stderr(include_str!(
+            "snapshots/configtest_missing_noise_private_key.stderr"
+        )),
         "serve ignores extra positional args",
     );
     assert!(
@@ -4030,6 +4533,8 @@ server_url: "http://127.0.0.1:8080"
 listen_addr: "127.0.0.1:0"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -4338,7 +4843,7 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "mockoidc"],
-        include_str!("snapshots/mockoidc_help.stdout"),
+        include_str!("snapshots/help_mockoidc.stdout"),
     );
     assert_stdout_snapshot(
         &["completion", "--help"],
@@ -4354,7 +4859,7 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "bash"],
-        include_str!("snapshots/completion_bash_help.stdout"),
+        include_str!("snapshots/help_completion_bash.stdout"),
     );
     assert_stdout_snapshot(
         &["completion", "fish", "--help"],
@@ -4362,7 +4867,7 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "fish"],
-        include_str!("snapshots/completion_fish_help.stdout"),
+        include_str!("snapshots/help_completion_fish.stdout"),
     );
     assert_stdout_snapshot(
         &["completion", "powershell", "--help"],
@@ -4370,7 +4875,7 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "powershell"],
-        include_str!("snapshots/completion_powershell_help.stdout"),
+        include_str!("snapshots/help_completion_powershell.stdout"),
     );
     assert_stdout_snapshot(
         &["debug", "--help"],
@@ -4382,7 +4887,7 @@ fn operator_top_level_command_help_matches_snapshots() {
     );
     assert_stdout_no_config_warning_snapshot(
         &["help", "completion", "zsh"],
-        include_str!("snapshots/completion_zsh_help.stdout"),
+        include_str!("snapshots/help_completion_zsh.stdout"),
     );
 }
 
@@ -4394,8 +4899,11 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     let policy_path = dir.path().join("policy.hujson");
     fs::write(
         &config_path,
+        // A complete headscale-go config: the direct-database path loads and
+        // validates the full server configuration first.
         format!(
-            "server:\n  db_path: {}\npolicy:\n  mode: database\n",
+            "server_url: \"http://127.0.0.1:8080\"\nprefixes:\n  v4: 100.64.0.0/10\nnoise:\n  private_key_path: {}\ndns:\n  magic_dns: false\n  override_local_dns: false\ndatabase:\n  type: sqlite\n  sqlite:\n    path: {}\npolicy:\n  mode: database\n",
+            dir.path().join("noise_private.key").display(),
             db_path.display()
         ),
     )
@@ -4416,11 +4924,11 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     let bypass = "--bypass-grpc-and-access-database-directly";
 
     let empty_get = headscale_clean(&["--config", config, "--force", "policy", "get", bypass]);
-    assert_eq!(empty_get.status.code(), Some(6));
+    assert_eq!(empty_get.status.code(), Some(1));
     assert_eq!(stdout(&empty_get), "");
     assert_eq!(
-        stderr(&empty_get),
-        include_str!("snapshots/policy_direct_db_missing.stderr")
+        comparable_stderr(&stderr(&empty_get)),
+        comparable_expected(include_str!("snapshots/policy_direct_db_missing.stderr"))
     );
 
     let set = headscale_clean(&[
@@ -4428,33 +4936,36 @@ fn policy_file_flag_and_direct_database_bypass_match_upstream_shape() {
     ]);
     assert!(set.status.success(), "stderr: {}", stderr(&set));
     assert_eq!(stdout(&set), "Policy updated.\n");
-    assert_eq!(stderr(&set), "");
+    assert_eq!(comparable_stderr(&stderr(&set)), "");
 
     let set_text = headscale_clean(&[
         "--config", config, "--force", "policy", "set", "--file", policy, bypass,
     ]);
     assert!(set_text.status.success(), "stderr: {}", stderr(&set_text));
     assert_eq!(stdout(&set_text), "Policy updated.\n");
-    assert_eq!(stderr(&set_text), "");
+    assert_eq!(comparable_stderr(&stderr(&set_text)), "");
 
     let get = headscale_clean(&[
         "--config", config, "--force", "-o", "json", "policy", "get", bypass,
     ]);
     assert!(get.status.success(), "stderr: {}", stderr(&get));
-    assert_eq!(stdout(&get), "{\n  // preserved\n  \"acls\": []\n}\n");
-    assert_eq!(stderr(&get), "");
+    assert_eq!(stdout(&get), "{\n  // preserved\n  \"acls\": []\n}\n\n");
+    assert_eq!(comparable_stderr(&stderr(&get)), "");
 
     let get_text = headscale_clean(&["--config", config, "--force", "policy", "get", bypass]);
     assert!(get_text.status.success(), "stderr: {}", stderr(&get_text));
-    assert_eq!(stdout(&get_text), "{\n  // preserved\n  \"acls\": []\n}\n");
-    assert_eq!(stderr(&get_text), "");
+    assert_eq!(
+        stdout(&get_text),
+        "{\n  // preserved\n  \"acls\": []\n}\n\n"
+    );
+    assert_eq!(comparable_stderr(&stderr(&get_text)), "");
 
     let check = headscale_clean(&[
         "--config", config, "--force", "policy", "check", "--file", policy, bypass,
     ]);
     assert!(check.status.success(), "stderr: {}", stderr(&check));
     assert_eq!(stdout(&check), "Policy is valid\n");
-    assert_eq!(stderr(&check), "");
+    assert_eq!(comparable_stderr(&stderr(&check)), "");
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -4494,7 +5005,7 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
         );
         assert!(set_json.status.success(), "stderr: {}", stderr(&set_json));
         assert_eq!(stdout(&set_json), "Policy updated.\n");
-        assert_eq!(stderr(&set_json), "");
+        assert_eq!(comparable_stderr(&stderr(&set_json)), "");
 
         let set_text = headscale_with_config(
             &config,
@@ -4502,13 +5013,13 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
         );
         assert!(set_text.status.success(), "stderr: {}", stderr(&set_text));
         assert_eq!(stdout(&set_text), "Policy updated.\n");
-        assert_eq!(stderr(&set_text), "");
+        assert_eq!(comparable_stderr(&stderr(&set_text)), "");
 
         let get =
             headscale_with_config(&config, &["--force", "-o", "json", "policy", "get", bypass]);
         assert!(get.status.success(), "stderr: {}", stderr(&get));
-        assert_eq!(stdout(&get), "{\n  // preserved pg\n  \"acls\": []\n}\n");
-        assert_eq!(stderr(&get), "");
+        assert_eq!(stdout(&get), "{\n  // preserved pg\n  \"acls\": []\n}\n\n");
+        assert_eq!(comparable_stderr(&stderr(&get)), "");
 
         let check = headscale_with_config(
             &config,
@@ -4516,7 +5027,7 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
         );
         assert!(check.status.success(), "stderr: {}", stderr(&check));
         assert_eq!(stdout(&check), "Policy is valid\n");
-        assert_eq!(stderr(&check), "");
+        assert_eq!(comparable_stderr(&stderr(&check)), "");
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
@@ -4526,8 +5037,12 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
     result
 }
 
-#[test]
-fn implemented_admin_local_errors_match_snapshots() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn implemented_admin_local_errors_match_snapshots() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
     assert_stderr_snapshot(
         &["auth", "register"],
         1,
@@ -4558,17 +5073,20 @@ fn implemented_admin_local_errors_match_snapshots() {
         1,
         include_str!("snapshots/users_rename_missing_new_name.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["preauthkeys", "expire"],
         1,
         include_str!("snapshots/preauthkeys_missing_id.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["preauthkeys", "delete"],
         1,
         include_str!("snapshots/preauthkeys_missing_id.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["apikeys", "expire"],
         1,
         include_str!("snapshots/apikeys_missing_selector.stderr"),
@@ -4578,7 +5096,8 @@ fn implemented_admin_local_errors_match_snapshots() {
         1,
         include_str!("snapshots/apikeys_missing_selector.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &[
             "apikeys",
             "delete",
@@ -4688,7 +5207,7 @@ fn implemented_admin_local_errors_match_snapshots() {
     );
     assert_stderr_snapshot(
         &["--address", "http://127.0.0.1:9", "users", "list"],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_missing_api_key.stderr"),
     );
     assert_stderr_snapshot(
@@ -4699,7 +5218,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_missing_api_key_json.stderr"),
     );
     assert_stderr_snapshot(
@@ -4710,7 +5229,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_missing_api_key_json_line.stderr"),
     );
     assert_stderr_snapshot(
@@ -4721,7 +5240,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_missing_api_key_yaml.stderr"),
     );
     assert_stderr_snapshot(
@@ -4733,7 +5252,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        3,
+        1,
         include_str!("snapshots/grpc_remote_connection_failure.stderr"),
     );
     assert_stderr_snapshot(
@@ -4746,7 +5265,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        3,
+        1,
         include_str!("snapshots/grpc_remote_connection_failure_json.stderr"),
     );
     assert_stderr_snapshot(
@@ -4759,7 +5278,7 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        3,
+        1,
         include_str!("snapshots/grpc_remote_connection_failure_json_line.stderr"),
     );
     assert_stderr_snapshot(
@@ -4772,9 +5291,11 @@ fn implemented_admin_local_errors_match_snapshots() {
             "users",
             "list",
         ],
-        3,
+        1,
         include_str!("snapshots/grpc_remote_connection_failure_yaml.stderr"),
     );
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[test]
@@ -4972,6 +5493,59 @@ fn upstream_cli_parse_errors_match_cobra_for_admin_edges() {
 }
 
 #[test]
+fn unknown_admin_commands_and_flags_match_v0295() {
+    assert_stderr_snapshot(
+        &["unrecognized-command"],
+        1,
+        "Error: unknown command \"unrecognized-command\" for \"headscale\"\n",
+    );
+    for (group, snapshot) in [
+        ("nodes", include_str!("snapshots/nodes_help.stdout")),
+        (
+            "preauthkeys",
+            include_str!("snapshots/preauthkeys_help.stdout"),
+        ),
+        ("apikeys", include_str!("snapshots/apikeys_help.stdout")),
+        ("debug", include_str!("snapshots/debug_help.stdout")),
+    ] {
+        assert_stdout_snapshot(&[group, "unrecognized-command"], snapshot);
+        assert_stdout_snapshot(&[group, "unrecognized-command", "--help"], snapshot);
+        assert_stdout_snapshot(&[group, "--help", "unrecognized-command"], snapshot);
+    }
+    for args in [
+        &["users", "create", "--bad"][..],
+        &["users", "list", "--bad"][..],
+        &["nodes", "list", "--bad"][..],
+        &["policy", "get", "--bad"][..],
+    ] {
+        assert_stderr_snapshot(args, 1, "Error: unknown flag: --bad\n");
+    }
+    assert_stderr_snapshot(
+        &["nodes", "register", "--bad"],
+        1,
+        &format!(
+            "{}Error: unknown flag: --bad\n",
+            include_str!("snapshots/nodes_register_help.stderr")
+        ),
+    );
+    assert_stderr_snapshot(
+        &["-o", "json", "users", "create", "--bad"],
+        1,
+        "{\n\t\"error\": \"unknown flag: --bad\"\n}\n",
+    );
+    assert_stderr_snapshot(
+        &["-o", "json-line", "users", "create", "--bad"],
+        1,
+        "{\"error\":\"unknown flag: --bad\"}\n",
+    );
+    assert_stderr_snapshot(
+        &["-o", "yaml", "users", "create", "--bad"],
+        1,
+        "error: 'unknown flag: --bad'\n\n",
+    );
+}
+
+#[test]
 fn unknown_output_selector_falls_back_to_human_version_output() {
     let cwd = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -4980,12 +5554,16 @@ fn unknown_output_selector_falls_back_to_human_version_output() {
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).starts_with("headscale version "));
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 }
 
-#[test]
-fn unknown_output_selector_falls_back_to_human_error_output() {
-    let output = headscale_clean(&["-o", "xml", "preauthkeys", "expire"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_output_selector_falls_back_to_human_error_output() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
+    let output = headscale_with_config(&config, &["-o", "xml", "preauthkeys", "expire"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stdout(&output), "");
@@ -4993,10 +5571,16 @@ fn unknown_output_selector_falls_back_to_human_error_output() {
         stderr(&output),
         include_str!("snapshots/preauthkeys_missing_id.stderr")
     );
+    handle.abort();
+    let _ = handle.await;
 }
 
-#[test]
-fn implemented_admin_errors_follow_output_format() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn implemented_admin_errors_follow_output_format() {
+    let (_dir, _db, socket, handle) = spawn_process_grpc_service(false).await;
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = write_unix_socket_config(config_dir.path(), &socket);
+
     let auth_register = headscale_clean(&["-o", "json", "auth", "register"]);
     assert_eq!(auth_register.status.code(), Some(1));
     assert_eq!(stdout(&auth_register), "");
@@ -5035,7 +5619,7 @@ fn implemented_admin_errors_follow_output_format() {
     assert_eq!(stdout(&users_create), "");
     assert_eq!(stderr(&users_create), "error: missing parameters\n\n");
 
-    let json = headscale_clean(&["-o", "json", "preauthkeys", "expire"]);
+    let json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "expire"]);
     assert_eq!(json.status.code(), Some(1));
     assert_eq!(stdout(&json), "");
     assert_eq!(
@@ -5043,7 +5627,7 @@ fn implemented_admin_errors_follow_output_format() {
         "{\n\t\"error\": \"missing --id parameter: missing parameters\"\n}\n"
     );
 
-    let json_line = headscale_clean(&["-ojson-line", "preauthkeys", "delete"]);
+    let json_line = headscale_with_config(&config, &["-ojson-line", "preauthkeys", "delete"]);
     assert_eq!(json_line.status.code(), Some(1));
     assert_eq!(stdout(&json_line), "");
     assert_eq!(
@@ -5051,7 +5635,7 @@ fn implemented_admin_errors_follow_output_format() {
         "{\"error\":\"missing --id parameter: missing parameters\"}\n"
     );
 
-    let yaml = headscale_clean(&["--output", "yaml", "apikeys", "expire"]);
+    let yaml = headscale_with_config(&config, &["--output", "yaml", "apikeys", "expire"]);
     assert_eq!(yaml.status.code(), Some(1));
     assert_eq!(stdout(&yaml), "");
     assert_eq!(
@@ -5059,17 +5643,20 @@ fn implemented_admin_errors_follow_output_format() {
         "error: 'either --id or --prefix must be provided: missing parameters'\n\n"
     );
 
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["-o", "json", "apikeys", "delete"],
         1,
         include_str!("snapshots/apikeys_delete_missing_selector_json.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["-ojson-line", "apikeys", "delete"],
         1,
         include_str!("snapshots/apikeys_delete_missing_selector_json_line.stderr"),
     );
-    assert_stderr_snapshot(
+    assert_config_stderr_snapshot(
+        &config,
         &["--output", "yaml", "apikeys", "delete"],
         1,
         "error: 'either --id or --prefix must be provided: missing parameters'\n\n",
@@ -5082,12 +5669,14 @@ fn implemented_admin_errors_follow_output_format() {
         "users",
         "list",
     ]);
-    assert_eq!(remote.status.code(), Some(6));
+    assert_eq!(remote.status.code(), Some(1));
     assert_eq!(stdout(&remote), "");
     assert_eq!(
-        stderr(&remote),
-        "{\n\t\"error\": \"HEADSCALE_CLI_API_KEY environment variable needs to be set\"\n}\n"
+        comparable_stderr(&stderr(&remote)),
+        "{\n\t\"error\": \"connecting to headscale: HEADSCALE_CLI_API_KEY environment variable needs to be set\"\n}\n"
     );
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[test]
@@ -5115,14 +5704,15 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
     let grpc = unused_loopback_addr();
     let server_url = format!("http://{listen}");
     let metrics_url = format!("http://{metrics}");
-    let remote_grpc_address = format!("http://{grpc}");
+    let remote_grpc_address = grpc.to_string();
     let config = write_sqlite_serve_config(dir.path(), listen, metrics, grpc);
+    enable_remote_grpc_tls_fixture(dir.path(), &config)?;
     let mut child = spawn_headscale_serve(&config, dir.path())?;
 
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let public_health = headscale_clean(&["status", "--server", &server_url]);
         assert!(
@@ -5134,7 +5724,7 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
             stdout(&public_health),
             format!("Control plane at {server_url} is healthy\n")
         );
-        assert_eq!(stderr(&public_health), "");
+        assert_eq!(comparable_stderr(&stderr(&public_health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "separated"]);
         assert!(
@@ -5143,7 +5733,7 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -5167,7 +5757,7 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
         );
         let remote_health = wait_for_headscale_status(&remote_grpc_config, &["health"], 0).await;
         assert_eq!(stdout(&remote_health), "\n");
-        assert_eq!(stderr(&remote_health), "");
+        assert_eq!(comparable_stderr(&stderr(&remote_health)), "");
 
         let remote_users =
             headscale_with_config(&remote_grpc_config, &["-o", "json", "users", "list"]);
@@ -5196,7 +5786,7 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
         let debug_config = debug_config.json::<serde_json::Value>().await?;
         assert_eq!(
             debug_config["GRPCAddr"].as_str(),
-            Some(&remote_grpc_address[7..])
+            Some(remote_grpc_address.as_str())
         );
         let metrics_addr = metrics.to_string();
         assert_eq!(
@@ -5204,29 +5794,53 @@ async fn serve_sqlite_runtime_separates_public_metrics_and_remote_grpc_smoke() -
             Some(metrics_addr.as_str())
         );
 
+        // headscale-go serves /metrics and /debug/* only on the separate
+        // metrics listener; the public router answers 404 for them.
         let public_metrics = http.get(format!("{server_url}/metrics")).send().await?;
-        assert_eq!(public_metrics.status(), reqwest::StatusCode::OK);
-        let public_metrics_body = public_metrics.text().await?;
-        assert!(
-            !public_metrics_body.contains("headscale_nodes_registered"),
-            "public metrics body: {public_metrics_body}"
-        );
+        assert_eq!(public_metrics.status(), reqwest::StatusCode::NOT_FOUND);
 
         let public_debug_config = http
             .get(format!("{server_url}/debug/config"))
             .send()
             .await?;
-        assert_eq!(public_debug_config.status(), reqwest::StatusCode::OK);
-        let public_debug_config_body = public_debug_config.text().await?;
-        assert!(
-            !public_debug_config_body.contains("\"GRPCAddr\""),
-            "public debug config body: {public_debug_config_body}"
-        );
+        assert_eq!(public_debug_config.status(), reqwest::StatusCode::NOT_FOUND);
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
     .await;
 
+    stop_child(&mut child);
+    result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_unknown_policy_mode_keeps_control_plane_healthy() -> BoxTestResult {
+    let dir = tempfile::tempdir()?;
+    let config = write_sqlite_serve_config(
+        dir.path(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+    );
+    let source = fs::read_to_string(&config)?;
+    fs::write(
+        &config,
+        source.replace("  mode: database\n", "  mode: consul\n"),
+    )?;
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+    let result = async {
+        let health = wait_for_headscale_status(&config, &["health"], 0).await;
+        assert_eq!(stdout(&health), "\n");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
+        let policy = headscale_with_config(&config, &["policy", "get"]);
+        assert_eq!(policy.status.code(), Some(1), "stderr: {}", stderr(&policy));
+        assert_eq!(
+            stderr(&policy),
+            "Error: loading ACL policy: rpc error: code = Unknown desc = no supported policy mode found in configuration, policy.mode: \"consul\"\n"
+        );
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
     stop_child(&mut child);
     result
 }
@@ -5257,6 +5871,8 @@ grpc_listen_addr: "{grpc}"
 grpc_allow_insecure: true
 noise:
   private_key_path: {}
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -5297,7 +5913,7 @@ derp:
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let https_client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -5383,12 +5999,13 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
     let grpc = unused_loopback_addr();
     let server_url = format!("http://{listen}");
     let config = write_postgres_serve_config(dir.path(), database.fields(), listen, metrics, grpc);
+    enable_remote_grpc_tls_fixture(dir.path(), &config)?;
     let mut child = spawn_headscale_serve(&config, dir.path())?;
 
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let public_health = headscale_clean(&["status", "--server", &server_url]);
         assert!(
@@ -5400,7 +6017,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stdout(&public_health),
             format!("Control plane at {server_url} is healthy\n")
         );
-        assert_eq!(stderr(&public_health), "");
+        assert_eq!(comparable_stderr(&stderr(&public_health)), "");
 
         let health_json = headscale_with_config(&config, &["-o", "json", "health"]);
         assert!(
@@ -5420,7 +6037,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let list_users = headscale_with_config(&config, &["users", "list"]);
         assert!(
@@ -5433,7 +6050,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             "stdout: {}",
             stdout(&list_users)
         );
-        assert_eq!(stderr(&list_users), "");
+        assert_eq!(comparable_stderr(&stderr(&list_users)), "");
 
         let list_users_json =
             headscale_with_config(&config, &["-o", "json", "users", "list", "--name", "alice"]);
@@ -5467,7 +6084,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             "stdout: {}",
             stdout(&preauth)
         );
-        assert_eq!(stderr(&preauth), "");
+        assert_eq!(comparable_stderr(&stderr(&preauth)), "");
 
         let preauth_json = headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
         let preauth_json = json_output(&preauth_json);
@@ -5488,7 +6105,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&expire_preauth)
         );
         assert_eq!(stdout(&expire_preauth), "Key expired\n");
-        assert_eq!(stderr(&expire_preauth), "");
+        assert_eq!(comparable_stderr(&stderr(&expire_preauth)), "");
 
         let delete_preauth =
             headscale_with_config(&config, &["preauthkeys", "delete", "--id", &preauth_id]);
@@ -5498,7 +6115,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&delete_preauth)
         );
         assert_eq!(stdout(&delete_preauth), "Key deleted\n");
-        assert_eq!(stderr(&delete_preauth), "");
+        assert_eq!(comparable_stderr(&stderr(&delete_preauth)), "");
 
         let empty_preauth_json =
             headscale_with_config(&config, &["-o", "json", "preauthkeys", "list"]);
@@ -5507,14 +6124,8 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             "stderr: {}",
             stderr(&empty_preauth_json)
         );
-        assert_eq!(
-            json_output(&empty_preauth_json)
-                .as_array()
-                .expect("preauth keys")
-                .len(),
-            0
-        );
-        assert_eq!(stderr(&empty_preauth_json), "");
+        assert!(json_output(&empty_preauth_json).is_null());
+        assert_eq!(comparable_stderr(&stderr(&empty_preauth_json)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -5564,7 +6175,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         assert_eq!(gateway_users["users"][0]["name"].as_str(), Some("alice"));
 
         let remote_grpc_dir = tempfile::tempdir()?;
-        let remote_grpc_address = format!("http://{grpc}");
+        let remote_grpc_address = grpc.to_string();
         let remote_grpc_config = write_remote_grpc_config(
             remote_grpc_dir.path(),
             &remote_grpc_address,
@@ -5572,7 +6183,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         );
         let remote_health = wait_for_headscale_status(&remote_grpc_config, &["health"], 0).await;
         assert_eq!(stdout(&remote_health), "\n");
-        assert_eq!(stderr(&remote_health), "");
+        assert_eq!(comparable_stderr(&stderr(&remote_health)), "");
 
         let remote_users =
             headscale_with_config(&remote_grpc_config, &["-o", "json", "users", "list"]);
@@ -5591,7 +6202,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             "bad-token",
         );
         let bad_remote_auth =
-            wait_for_headscale_status(&bad_remote_grpc_config, &["health"], 4).await;
+            wait_for_headscale_status(&bad_remote_grpc_config, &["health"], 1).await;
         assert_eq!(stdout(&bad_remote_auth), "");
         assert_eq!(
             stderr(&bad_remote_auth),
@@ -5611,7 +6222,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&set_policy)
         );
         assert_eq!(stdout(&set_policy), "Policy updated.\n");
-        assert_eq!(stderr(&set_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
         let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
         assert!(
@@ -5623,7 +6234,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stdout(&get_policy),
             "{\"tagOwners\":{\"tag:server\":[\"alice@\"]}}\n"
         );
-        assert_eq!(stderr(&get_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&get_policy)), "");
 
         let auth_register_id = "abababababababababababab";
         let auth_id = format!("hskey-authreq-{auth_register_id}");
@@ -5646,7 +6257,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -5658,7 +6269,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&auth_register)
         );
         assert_eq!(stdout(&auth_register), "Node pg-admin-node registered\n");
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let nodes_json = json_output(&nodes_json);
@@ -5686,7 +6297,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&rename_node)
         );
         assert_eq!(stdout(&rename_node), "Node renamed\n");
-        assert_eq!(stderr(&rename_node), "");
+        assert_eq!(comparable_stderr(&stderr(&rename_node)), "");
 
         let tag_node = headscale_with_config(
             &config,
@@ -5701,7 +6312,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
         );
         assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
         assert_eq!(stdout(&tag_node), "Node updated\n");
-        assert_eq!(stderr(&tag_node), "");
+        assert_eq!(comparable_stderr(&stderr(&tag_node)), "");
 
         let expire_node =
             headscale_with_config(&config, &["nodes", "expire", "--identifier", &node_id]);
@@ -5711,7 +6322,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&expire_node)
         );
         assert_eq!(stdout(&expire_node), "Node expired\n");
-        assert_eq!(stderr(&expire_node), "");
+        assert_eq!(comparable_stderr(&stderr(&expire_node)), "");
 
         let backfill_ips = headscale_with_config(&config, &["--force", "nodes", "backfillips"]);
         assert!(
@@ -5720,7 +6331,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&backfill_ips)
         );
         assert_eq!(stdout(&backfill_ips), "Node IPs backfilled successfully\n");
-        assert_eq!(stderr(&backfill_ips), "");
+        assert_eq!(comparable_stderr(&stderr(&backfill_ips)), "");
 
         let delete_node = headscale_with_config(
             &config,
@@ -5732,7 +6343,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&delete_node)
         );
         assert_eq!(stdout(&delete_node), "Node deleted\n");
-        assert_eq!(stderr(&delete_node), "");
+        assert_eq!(comparable_stderr(&stderr(&delete_node)), "");
 
         let expire_api_key =
             headscale_with_config(&config, &["apikeys", "expire", "--id", &api_id]);
@@ -5742,7 +6353,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&expire_api_key)
         );
         assert_eq!(stdout(&expire_api_key), "Key expired\n");
-        assert_eq!(stderr(&expire_api_key), "");
+        assert_eq!(comparable_stderr(&stderr(&expire_api_key)), "");
 
         let delete_api_key =
             headscale_with_config(&config, &["apikeys", "delete", "--id", &api_id]);
@@ -5752,7 +6363,7 @@ async fn serve_postgres_runtime_local_grpc_admin_surface_smoke() -> BoxTestResul
             stderr(&delete_api_key)
         );
         assert_eq!(stdout(&delete_api_key), "Key deleted\n");
-        assert_eq!(stderr(&delete_api_key), "");
+        assert_eq!(comparable_stderr(&stderr(&delete_api_key)), "");
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
@@ -5780,7 +6391,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -5789,7 +6400,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let policy_path = dir.path().join("restart-policy.hujson");
         fs::write(
@@ -5807,7 +6418,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&set_policy)
         );
         assert_eq!(stdout(&set_policy), "Policy updated.\n");
-        assert_eq!(stderr(&set_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
         let auth_id = "hskey-authreq-bcbcbcbcbcbcbcbcbcbcbcbc";
         let debug_create = headscale_with_config(
@@ -5831,7 +6442,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -5843,7 +6454,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&auth_register)
         );
         assert_eq!(stdout(&auth_register), "Node pg-restart-node registered\n");
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let nodes_json = json_output(&nodes_json);
@@ -5868,7 +6479,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&approve_routes)
         );
         assert_eq!(stdout(&approve_routes), "Node updated\n");
-        assert_eq!(stderr(&approve_routes), "");
+        assert_eq!(comparable_stderr(&stderr(&approve_routes)), "");
 
         let tag_node = headscale_with_config(
             &config,
@@ -5883,14 +6494,14 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         );
         assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
         assert_eq!(stdout(&tag_node), "Node updated\n");
-        assert_eq!(stderr(&tag_node), "");
+        assert_eq!(comparable_stderr(&stderr(&tag_node)), "");
 
         stop_child(&mut child);
         child = spawn_headscale_serve(&config, dir.path())?;
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let users = headscale_with_config(&config, &["-o", "json", "users", "list"]);
         let users = json_output(&users);
@@ -5903,7 +6514,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stdout(&policy),
             "{\"tagOwners\":{\"tag:router\":[\"alice@\"]},\"acls\":[{\"action\":\"accept\",\"src\":[\"*\"],\"dst\":[\"*:*\"]}]}\n"
         );
-        assert_eq!(stderr(&policy), "");
+        assert_eq!(comparable_stderr(&stderr(&policy)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let nodes = json_output(&nodes);
@@ -5911,7 +6522,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
         assert_eq!(nodes[0]["name"].as_str(), Some("pg-restart-node"));
         assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-restart-node"));
-        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
+        assert_eq!(nodes[0]["user"]["name"].as_str(), Some("tagged-devices"));
         assert_eq!(nodes[0]["tags"], serde_json::json!(["tag:router"]));
         assert_eq!(
             nodes[0]["available_routes"],
@@ -5929,7 +6540,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             routes_stdout.contains("10.40.0.0/24"),
             "routes stdout: {routes_stdout}"
         );
-        assert_eq!(stderr(&routes), "");
+        assert_eq!(comparable_stderr(&stderr(&routes)), "");
 
         let http = reqwest::Client::new();
         let nodestore = http
@@ -5943,7 +6554,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             .get(&node_id)
             .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
         assert_eq!(live_node["hostname"].as_str(), Some("pg-restart-node"));
-        assert_eq!(live_node["user"].as_str(), Some("alice"));
+        assert_eq!(live_node["user"].as_str(), Some(""));
         assert_eq!(live_node["forced_tags"], serde_json::json!(["tag:router"]));
         assert_eq!(
             live_node["available_routes"],
@@ -5961,14 +6572,9 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!(["10.40.0.0/24"])
-        );
-        assert_eq!(
-            debug_routes["primary_routes"]["10.40.0.0/24"],
-            serde_json::json!(node_id_number)
-        );
+        // Go exposes only routes with an online control session in this view.
+        assert_eq!(debug_routes["available_routes"], serde_json::json!({}));
+        assert_eq!(debug_routes["primary_routes"], serde_json::json!({}));
 
         let policy_manager = http
             .get(format!("{metrics_url}/debug/policy-manager"))
@@ -6011,7 +6617,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
             stderr(&rename_after_restart)
         );
         assert_eq!(stdout(&rename_after_restart), "Node renamed\n");
-        assert_eq!(stderr(&rename_after_restart), "");
+        assert_eq!(comparable_stderr(&stderr(&rename_after_restart)), "");
 
         let renamed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let renamed = json_output(&renamed);
@@ -6043,7 +6649,7 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6052,7 +6658,7 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let auth_id = "hskey-authreq-cdcdcdcdcdcdcdcdcdcdcdcd";
         let debug_create = headscale_with_config(
@@ -6074,7 +6680,7 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -6086,7 +6692,7 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
             stderr(&auth_register)
         );
         assert_eq!(stdout(&auth_register), "Node pg-live-node registered\n");
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6121,7 +6727,7 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
         );
         assert!(rename.status.success(), "stderr: {}", stderr(&rename));
         assert_eq!(stdout(&rename), "Node renamed\n");
-        assert_eq!(stderr(&rename), "");
+        assert_eq!(comparable_stderr(&stderr(&rename)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6179,7 +6785,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6188,7 +6794,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let auth_id = "hskey-authreq-acacacacacacacacacacacac";
         let debug_create = headscale_with_config(
@@ -6210,7 +6816,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -6222,7 +6828,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
             stderr(&auth_register)
         );
         assert_eq!(stdout(&auth_register), "Node pg-live-tag-node registered\n");
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6230,7 +6836,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
         let node_id = nodes[0]["id"].as_u64().expect("node id").to_string();
         assert_eq!(nodes[0]["name"].as_str(), Some("pg-live-tag-node"));
         assert_eq!(nodes[0]["user"]["name"].as_str(), Some("alice"));
-        assert_eq!(nodes[0]["tags"], serde_json::json!([]));
+        assert!(nodes[0]["tags"].is_null());
 
         let http = reqwest::Client::new();
         let nodestore = http
@@ -6260,7 +6866,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
             stderr(&set_policy)
         );
         assert_eq!(stdout(&set_policy), "Policy updated.\n");
-        assert_eq!(stderr(&set_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
         let tag_node = headscale_with_config(
             &config,
@@ -6275,7 +6881,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
         );
         assert!(tag_node.status.success(), "stderr: {}", stderr(&tag_node));
         assert_eq!(stdout(&tag_node), "Node updated\n");
-        assert_eq!(stderr(&tag_node), "");
+        assert_eq!(comparable_stderr(&stderr(&tag_node)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6298,7 +6904,7 @@ async fn serve_postgres_runtime_live_cli_policy_tag_updates_nodestore_smoke() ->
                 .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
             if live_node["forced_tags"] == serde_json::json!(["tag:server"]) {
                 assert_eq!(live_node["hostname"].as_str(), Some("pg-live-tag-node"));
-                assert_eq!(live_node["user"].as_str(), Some("alice"));
+                assert_eq!(live_node["user"].as_str(), Some(""));
                 break;
             }
             assert!(
@@ -6334,7 +6940,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6343,7 +6949,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let auth_id = "hskey-authreq-dadadadadadadadadadadada";
         let advertised_route = "10.89.1.0/24";
@@ -6368,7 +6974,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -6383,7 +6989,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             stdout(&auth_register),
             "Node pg-db-policy-router registered\n"
         );
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6396,7 +7002,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             node["available_routes"],
             serde_json::json!([advertised_route])
         );
-        assert_eq!(node["approved_routes"], serde_json::json!([]));
+        assert!(node["approved_routes"].is_null());
 
         let policy_path = dir.path().join("db-policy-live.hujson");
         let policy = r#"{
@@ -6416,7 +7022,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             stderr(&set_policy)
         );
         assert_eq!(stdout(&set_policy), "Policy updated.\n");
-        assert_eq!(stderr(&set_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let approved_nodes = loop {
@@ -6448,7 +7054,7 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             stderr(&get_policy)
         );
         assert_eq!(stdout(&get_policy), format!("{policy}\n"));
-        assert_eq!(stderr(&get_policy), "");
+        assert_eq!(comparable_stderr(&stderr(&get_policy)), "");
 
         let http = reqwest::Client::new();
         let nodestore = http
@@ -6479,14 +7085,8 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!([advertised_route])
-        );
-        assert_eq!(
-            debug_routes["primary_routes"][advertised_route],
-            serde_json::json!(node_id_number)
-        );
+        assert_eq!(debug_routes["available_routes"], serde_json::json!({}));
+        assert_eq!(debug_routes["primary_routes"], serde_json::json!({}));
 
         let policy_manager = http
             .get(format!("{metrics_url}/debug/policy-manager"))
@@ -6552,7 +7152,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6561,7 +7161,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let auth_id = "hskey-authreq-fefefefefefefefefefefefe";
         let advertised_route = "10.88.1.0/24";
@@ -6586,7 +7186,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let auth_register = headscale_with_config(
             &config,
@@ -6601,7 +7201,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             stdout(&auth_register),
             "Node pg-policy-reload-router registered\n"
         );
-        assert_eq!(stderr(&auth_register), "");
+        assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6614,7 +7214,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             node["available_routes"],
             serde_json::json!([advertised_route])
         );
-        assert_eq!(node["approved_routes"], serde_json::json!([]));
+        assert!(node["approved_routes"].is_null());
 
         let reloaded_policy = r#"{
   "autoApprovers": {
@@ -6650,7 +7250,7 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
         let policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
         assert!(policy.status.success(), "stderr: {}", stderr(&policy));
         assert_eq!(stdout(&policy), format!("{reloaded_policy}\n"));
-        assert_eq!(stderr(&policy), "");
+        assert_eq!(comparable_stderr(&stderr(&policy)), "");
 
         let http = reqwest::Client::new();
         let debug_routes = http
@@ -6660,14 +7260,8 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
             .await?;
         assert_eq!(debug_routes.status(), reqwest::StatusCode::OK);
         let debug_routes = debug_routes.json::<serde_json::Value>().await?;
-        assert_eq!(
-            debug_routes["available_routes"][&node_id],
-            serde_json::json!([advertised_route])
-        );
-        assert_eq!(
-            debug_routes["primary_routes"][advertised_route],
-            serde_json::json!(node_id_number)
-        );
+        assert_eq!(debug_routes["available_routes"], serde_json::json!({}));
+        assert_eq!(debug_routes["primary_routes"], serde_json::json!({}));
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
@@ -6696,7 +7290,7 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6705,7 +7299,7 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -6739,7 +7333,7 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
             stderr(&debug_create)
         );
         assert_eq!(stdout(&debug_create), "Node created\n");
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let http = reqwest::Client::new();
         let web_register = http
@@ -6793,7 +7387,7 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
@@ -6862,7 +7456,7 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
         assert!(
@@ -6871,7 +7465,7 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
             stderr(&create_user)
         );
         assert_eq!(stdout(&create_user), "User created\n");
-        assert_eq!(stderr(&create_user), "");
+        assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -6905,13 +7499,13 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
             stderr(&approve_pending)
         );
         assert_eq!(stdout(&approve_pending), "Node created\n");
-        assert_eq!(stderr(&approve_pending), "");
+        assert_eq!(comparable_stderr(&stderr(&approve_pending)), "");
 
         let approve =
             headscale_with_config(&config, &["auth", "approve", "--auth-id", approve_auth_id]);
         assert!(approve.status.success(), "stderr: {}", stderr(&approve));
         assert_eq!(stdout(&approve), "Auth request approved\n");
-        assert_eq!(stderr(&approve), "");
+        assert_eq!(comparable_stderr(&stderr(&approve)), "");
 
         let register_approved = headscale_with_config(
             &config,
@@ -6924,7 +7518,7 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
                 approve_auth_id,
             ],
         );
-        assert_eq!(register_approved.status.code(), Some(6));
+        assert_eq!(register_approved.status.code(), Some(1));
         assert_eq!(stdout(&register_approved), "");
         assert!(
             stderr(&register_approved).contains("auth request already completed"),
@@ -6983,15 +7577,15 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
 
         let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
-        assert_eq!(json_output(&nodes), serde_json::json!([]));
-        assert_eq!(stderr(&nodes), "");
+        assert!(json_output(&nodes).is_null());
+        assert_eq!(comparable_stderr(&stderr(&nodes)), "");
 
         stop_child(&mut child);
         child = spawn_headscale_serve(&config, dir.path())?;
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let nodes_after_restart = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         assert!(
@@ -6999,8 +7593,8 @@ async fn serve_postgres_runtime_auth_approve_reject_terminal_sessions_smoke() ->
             "stderr: {}",
             stderr(&nodes_after_restart)
         );
-        assert_eq!(json_output(&nodes_after_restart), serde_json::json!([]));
-        assert_eq!(stderr(&nodes_after_restart), "");
+        assert!(json_output(&nodes_after_restart).is_null());
+        assert_eq!(comparable_stderr(&stderr(&nodes_after_restart)), "");
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
@@ -7028,7 +7622,7 @@ async fn serve_postgres_runtime_grpc_gateway_user_crud_smoke() -> BoxTestResult 
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -7139,7 +7733,7 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let bootstrap = headscale_with_config(
             &config,
@@ -7249,7 +7843,7 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let listed_user = http
             .get(format!("{server_url}/api/v1/user?name=bob"))
@@ -7295,11 +7889,12 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
             .and_then(|nodes| {
                 nodes.values().find(|node| {
                     node["hostname"].as_str() == Some("pg-user-rename-node")
-                        && node["user"].as_str() == Some("bob")
+                        && node["user"].as_str() == Some("alice@example.com")
                 })
             })
             .unwrap_or_else(|| panic!("missing hydrated renamed-user node {node_id}: {nodestore}"));
-        assert_eq!(live_node["user"].as_str(), Some("bob"));
+        // The wire login remains the email after a display name rename.
+        assert_eq!(live_node["user"].as_str(), Some("alice@example.com"));
         assert_eq!(live_node["hostname"].as_str(), Some("pg-user-rename-node"));
         assert!(
             live_node["ipv4"]
@@ -7334,7 +7929,7 @@ async fn serve_postgres_runtime_grpc_gateway_api_key_lifecycle_smoke() -> BoxTes
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let bootstrap = headscale_with_config(
             &config,
@@ -7453,7 +8048,7 @@ async fn serve_postgres_runtime_gateway_api_key_revocation_restart_smoke() -> Bo
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let bootstrap = headscale_with_config(
             &config,
@@ -7537,7 +8132,7 @@ async fn serve_postgres_runtime_gateway_api_key_revocation_restart_smoke() -> Bo
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let bootstrap_still_valid = http
             .get(format!("{server_url}/api/v1/health"))
@@ -7583,7 +8178,7 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -7623,11 +8218,9 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             .await?;
         assert_eq!(debug_created.status(), reqwest::StatusCode::OK);
         let debug_created = debug_created.json::<serde_json::Value>().await?;
-        let node_id = debug_created["node"]["id"]
-            .as_str()
-            .expect("debug node id")
-            .to_string();
-        assert!(!node_id.is_empty());
+        // The debug response echoes a synthetic node. Go assigns its ID only
+        // when the subsequent registration persists it.
+        assert_eq!(debug_created["node"]["id"].as_str(), Some("0"));
         assert_eq!(
             debug_created["node"]["name"].as_str(),
             Some("pg-gateway-node")
@@ -7666,7 +8259,15 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             .await?;
         assert_eq!(registered.status(), reqwest::StatusCode::OK);
         let registered = registered.json::<serde_json::Value>().await?;
-        assert_eq!(registered["node"]["id"].as_str(), Some(node_id.as_str()));
+        let node_id = registered["node"]["id"]
+            .as_str()
+            .expect("registered node id")
+            .to_string();
+        assert_ne!(node_id, "0");
+        assert_eq!(
+            registered["node"]["nodeKey"],
+            debug_created["node"]["nodeKey"]
+        );
         assert_eq!(
             registered["node"]["registerMethod"].as_str(),
             Some("REGISTER_METHOD_CLI")
@@ -7732,9 +8333,10 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             approved_routes["node"]["approvedRoutes"],
             serde_json::json!(["10.30.0.0/24"])
         );
+        // Approved offline routes are not currently served as subnet routes.
         assert_eq!(
             approved_routes["node"]["subnetRoutes"],
-            serde_json::json!(["10.30.0.0/24"])
+            serde_json::json!([])
         );
 
         let renamed = http
@@ -7826,7 +8428,7 @@ async fn serve_postgres_runtime_grpc_gateway_preauth_key_lifecycle_smoke() -> Bo
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -7958,7 +8560,7 @@ async fn serve_postgres_runtime_gateway_preauth_key_restart_smoke() -> BoxTestRe
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -8024,7 +8626,7 @@ async fn serve_postgres_runtime_gateway_preauth_key_restart_smoke() -> BoxTestRe
 
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let listed_after_restart = http
             .get(format!("{server_url}/api/v1/preauthkey"))
@@ -8122,7 +8724,7 @@ async fn serve_postgres_runtime_grpc_gateway_policy_write_smoke() -> BoxTestResu
     let result = async {
         let health = wait_for_headscale_status(&config, &["health"], 0).await;
         assert_eq!(stdout(&health), "\n");
-        assert_eq!(stderr(&health), "");
+        assert_eq!(comparable_stderr(&stderr(&health)), "");
 
         let api_key = headscale_with_config(
             &config,
@@ -8199,7 +8801,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     for user in ["user1", "user2"] {
         let create = headscale_with_config(&config, &["users", "create", user]);
@@ -8208,7 +8810,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
             stdout(&create),
             include_str!("snapshots/usercommand_create.stdout")
         );
-        assert_eq!(stderr(&create), "");
+        assert_eq!(comparable_stderr(&stderr(&create)), "");
     }
 
     let list = headscale_with_config(&config, &["-o", "json", "users", "list"]);
@@ -8233,7 +8835,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
         stdout(&rename),
         include_str!("snapshots/usercommand_rename.stdout")
     );
-    assert_eq!(stderr(&rename), "");
+    assert_eq!(comparable_stderr(&stderr(&rename)), "");
 
     let renamed = headscale_with_config(
         &config,
@@ -8253,7 +8855,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
         stdout(&destroy),
         include_str!("snapshots/usercommand_destroy.stdout")
     );
-    assert_eq!(stderr(&destroy), "");
+    assert_eq!(comparable_stderr(&stderr(&destroy)), "");
 
     let after_destroy = headscale_with_config(&config, &["-o", "json", "users", "list"]);
     let after_destroy = json_output(&after_destroy);
@@ -8279,7 +8881,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
             ],
         );
         assert!(create.status.success(), "stderr: {}", stderr(&create));
-        assert_eq!(stderr(&create), "");
+        assert_eq!(comparable_stderr(&stderr(&create)), "");
         let key = json_output(&create);
         assert!(key["key"].as_str().unwrap().starts_with("hskey-auth-"));
         assert_eq!(key["user"]["name"].as_str(), Some("newname"));
@@ -8315,7 +8917,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
         stdout(&expire_preauth),
         include_str!("snapshots/preauthkeycommand_expire.stdout")
     );
-    assert_eq!(stderr(&expire_preauth), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_preauth)), "");
 
     let no_expiry = headscale_with_config(
         &config,
@@ -8414,7 +9016,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
         stdout(&expire_api_key),
         include_str!("snapshots/apikeycommand_expire.stdout")
     );
-    assert_eq!(stderr(&expire_api_key), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_api_key)), "");
 
     let delete_api_key = headscale_with_config(&config, &["apikeys", "delete", "--id", "2"]);
     assert!(
@@ -8426,7 +9028,7 @@ async fn usercommand_preauthkeycommand_preauthkeycommandwithoutexpiry_preauthkey
         stdout(&delete_api_key),
         include_str!("snapshots/apikeycommand_delete.stdout")
     );
-    assert_eq!(stderr(&delete_api_key), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_api_key)), "");
 
     let after_api_delete = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
     let after_api_delete = json_output(&after_api_delete);
@@ -8451,7 +9053,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let create_user = headscale_with_config(&config, &["users", "create", "node-user"]);
     assert!(
@@ -8459,7 +9061,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         "stderr: {}",
         stderr(&create_user)
     );
-    assert_eq!(stderr(&create_user), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
     for (name, registration_id) in [
         ("node-1", "aaaaaaaaaaaaaaaaaaaaaaaa"),
@@ -8485,7 +9087,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
             "stderr: {}",
             stderr(&debug_create)
         );
-        assert_eq!(stderr(&debug_create), "");
+        assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
         let register = headscale_with_config(
             &config,
@@ -8504,7 +9106,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
             "stdout: {}",
             stdout(&register)
         );
-        assert_eq!(stderr(&register), "");
+        assert_eq!(comparable_stderr(&stderr(&register)), "");
     }
 
     let listed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
@@ -8535,7 +9137,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         stdout(&expire),
         include_str!("snapshots/nodeexpirecommand_expire.stdout")
     );
-    assert_eq!(stderr(&expire), "");
+    assert_eq!(comparable_stderr(&stderr(&expire)), "");
 
     let rename = headscale_with_config(
         &config,
@@ -8552,7 +9154,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         stdout(&rename),
         include_str!("snapshots/noderenamecommand_rename.stdout")
     );
-    assert_eq!(stderr(&rename), "");
+    assert_eq!(comparable_stderr(&stderr(&rename)), "");
 
     let policy_path = config_dir.path().join("tag-policy.hujson");
     fs::write(
@@ -8567,7 +9169,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         "stderr: {}",
         stderr(&set_policy)
     );
-    assert_eq!(stderr(&set_policy), "");
+    assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
     let tag = headscale_with_config(
         &config,
@@ -8585,7 +9187,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         stdout(&tag),
         include_str!("snapshots/taggednodesclioutput_tag.stdout")
     );
-    assert_eq!(stderr(&tag), "");
+    assert_eq!(comparable_stderr(&stderr(&tag)), "");
 
     let after_mutation = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
     let after_mutation = json_output(&after_mutation);
@@ -8611,7 +9213,7 @@ async fn nodecommand_nodeexpirecommand_noderenamecommand_taggednodesclioutput() 
         stdout(&delete),
         include_str!("snapshots/nodecommand_delete.stdout")
     );
-    assert_eq!(stderr(&delete), "");
+    assert_eq!(comparable_stderr(&stderr(&delete)), "");
 
     let after_delete = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
     let after_delete = json_output(&after_delete);
@@ -8629,7 +9231,7 @@ async fn policycommand_policybrokenconfigcommand() {
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let policy_path = config_dir.path().join("policy.hujson");
     fs::write(
@@ -8648,7 +9250,7 @@ async fn policycommand_policybrokenconfigcommand() {
         stdout(&set_policy),
         include_str!("snapshots/policycommand_set.stdout")
     );
-    assert_eq!(stderr(&set_policy), "");
+    assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
     let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
     assert!(
@@ -8660,7 +9262,7 @@ async fn policycommand_policybrokenconfigcommand() {
         stdout(&get_policy),
         include_str!("snapshots/policycommand_get.stdout")
     );
-    assert_eq!(stderr(&get_policy), "");
+    assert_eq!(comparable_stderr(&stderr(&get_policy)), "");
 
     let bad_policy_path = config_dir.path().join("bad-policy.hujson");
     fs::write(&bad_policy_path, r#"{"unknown":true}"#).unwrap();
@@ -8671,7 +9273,7 @@ async fn policycommand_policybrokenconfigcommand() {
     );
     assert_process_stderr_snapshot(
         &bad_policy,
-        6,
+        1,
         include_str!("snapshots/policybrokenconfigcommand_set_json.stderr"),
         "policy broken config",
     );
@@ -8688,12 +9290,12 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     for user in ["grpcuser1", "grpcuser2"] {
         let create = headscale_with_config(&config, &["users", "create", user]);
         assert!(create.status.success(), "stderr: {}", stderr(&create));
-        assert_eq!(stderr(&create), "");
+        assert_eq!(comparable_stderr(&stderr(&create)), "");
     }
 
     let address_env = [
@@ -8703,7 +9305,7 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
     let no_key = headscale_clean_with_env(&["users", "list", "--output", "json"], &address_env);
     assert_process_stderr_snapshot(
         &no_key,
-        6,
+        1,
         include_str!("snapshots/grpcauthenticationbypass_missing_api_key.stderr"),
         "gRPC missing API key",
     );
@@ -8718,7 +9320,7 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
     let invalid = headscale_clean_with_env(&["users", "list", "--output", "json"], &invalid_env);
     assert_process_stderr_snapshot(
         &invalid,
-        4,
+        1,
         include_str!("snapshots/grpcauthenticationbypass_invalid_api_key.stderr"),
         "gRPC invalid API key",
     );
@@ -8732,7 +9334,7 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
     ];
     let valid = headscale_clean_with_env(&["users", "list", "--output", "json"], &valid_env);
     assert!(valid.status.success(), "stderr: {}", stderr(&valid));
-    assert_eq!(stderr(&valid), "");
+    assert_eq!(comparable_stderr(&stderr(&valid)), "");
     let valid = json_output(&valid);
     assert_eq!(valid.as_array().expect("users").len(), 2);
     assert_eq!(valid[0]["name"].as_str(), Some("grpcuser1"));
@@ -8783,7 +9385,7 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
         headscale_with_config(&invalid_config, &["users", "list", "--output", "json"]);
     assert_process_stderr_snapshot(
         &invalid_config_output,
-        4,
+        1,
         include_str!("snapshots/cliwithconfigauthenticationbypass_invalid_api_key.stderr"),
         "CLI config invalid API key",
     );
@@ -8797,7 +9399,7 @@ async fn grpcauthenticationbypass_cliwithconfigauthenticationbypass() {
         "stderr: {}",
         stderr(&valid_config_output)
     );
-    assert_eq!(stderr(&valid_config_output), "");
+    assert_eq!(comparable_stderr(&stderr(&valid_config_output)), "");
     let valid_config_output = json_output(&valid_config_output);
     assert_eq!(valid_config_output.as_array().expect("users").len(), 2);
     assert_eq!(valid_config_output[0]["name"].as_str(), Some("grpcuser1"));
@@ -8815,7 +9417,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let health_json = headscale_with_config(&config, &["-o", "json", "health"]);
     assert_process_stdout_snapshot(
@@ -8849,7 +9451,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         "health YAML",
     );
     let health_yaml = yaml_output(&health_yaml);
-    assert_eq!(health_yaml["database_connectivity"].as_bool(), Some(true));
+    assert_eq!(health_yaml["databaseconnectivity"].as_bool(), Some(true));
 
     let create_user = headscale_with_config(
         &config,
@@ -8869,7 +9471,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&create_user)
     );
     assert_eq!(stdout(&create_user), "User created\n");
-    assert_eq!(stderr(&create_user), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
     let list_users = headscale_with_config(&config, &["users", "list"]);
     assert!(
@@ -8880,12 +9482,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(
         trim_line_end_spaces(&normalize_users_list_stdout(&stdout(&list_users))),
         concat!(
-            "ID  Name           Username  Email              Created\n",
-            "-------------------------------------------------------------------\n",
-            "1   Alice Example  alice     alice@example.com  0000-00-00 00:00:00\n",
+            "ID | Name          | Username | Email             | Created\n",
+            "1  | Alice Example | alice    | alice@example.com | 0000-00-00 00:00:00\n",
+            "\n",
         )
     );
-    assert_eq!(stderr(&list_users), "");
+    assert_eq!(comparable_stderr(&stderr(&list_users)), "");
 
     let create_user_json = headscale_with_config(
         &config,
@@ -8915,7 +9517,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(bob_json.get("createdAt").is_none());
     assert!(bob_json.get("displayName").is_none());
     assert!(bob_json.get("profilePicUrl").is_none());
-    assert_eq!(stderr(&create_user_json), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user_json)), "");
     let bob_id = bob_json["id"].as_u64().unwrap().to_string();
 
     let list_user_json =
@@ -8932,7 +9534,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(listed_bob_json["created_at"]["seconds"].as_i64().is_some());
     assert!(listed_bob_json.get("createdAt").is_none());
     assert!(listed_bob_json.get("displayName").is_none());
-    assert_eq!(stderr(&list_user_json), "");
+    assert_eq!(comparable_stderr(&stderr(&list_user_json)), "");
 
     let rename_user_json = headscale_with_config(
         &config,
@@ -8952,7 +9554,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(renamed_bob_json["id"].as_u64().unwrap().to_string(), bob_id);
     assert!(renamed_bob_json["created_at"]["seconds"].as_i64().is_some());
     assert!(renamed_bob_json.get("createdAt").is_none());
-    assert_eq!(stderr(&rename_user_json), "");
+    assert_eq!(comparable_stderr(&stderr(&rename_user_json)), "");
 
     let destroy_user_json = headscale_with_config(
         &config,
@@ -8970,7 +9572,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         json_output(&destroy_user_json).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&destroy_user_json), "");
+    assert_eq!(comparable_stderr(&stderr(&destroy_user_json)), "");
 
     let create_user_json_line = headscale_with_config(
         &config,
@@ -8996,7 +9598,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(carol_json_line.get("createdAt").is_none());
     assert!(carol_json_line.get("displayName").is_none());
     assert!(!stdout(&create_user_json_line).contains('\t'));
-    assert_eq!(stderr(&create_user_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user_json_line)), "");
     let carol_id = carol_json_line["id"].as_u64().unwrap().to_string();
 
     let list_user_json_line = headscale_with_config(
@@ -9013,7 +9615,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .is_some()
     );
     assert!(listed_carol_json_line.get("createdAt").is_none());
-    assert_eq!(stderr(&list_user_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&list_user_json_line)), "");
 
     let rename_user_json_line = headscale_with_config(
         &config,
@@ -9039,7 +9641,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .is_some()
     );
     assert!(renamed_carol_json_line.get("createdAt").is_none());
-    assert_eq!(stderr(&rename_user_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&rename_user_json_line)), "");
 
     let destroy_user_json_line = headscale_with_config(
         &config,
@@ -9060,7 +9662,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&destroy_user_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&destroy_user_json_line)), "");
 
     let create_user_yaml = headscale_with_config(
         &config,
@@ -9078,11 +9680,11 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     let dana_yaml = yaml_output(&create_user_yaml);
     assert_eq!(dana_yaml["name"].as_str(), Some("dana"));
-    assert_eq!(dana_yaml["display_name"].as_str(), Some("Dana Example"));
-    assert!(dana_yaml["created_at"]["seconds"].as_i64().is_some());
+    assert_eq!(dana_yaml["displayname"].as_str(), Some("Dana Example"));
+    assert!(dana_yaml["createdat"]["seconds"].as_i64().is_some());
     assert!(dana_yaml.get("createdAt").is_none());
     assert!(dana_yaml.get("displayName").is_none());
-    assert_eq!(stderr(&create_user_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user_yaml)), "");
     let dana_id = dana_yaml["id"].as_u64().unwrap().to_string();
 
     let list_user_yaml =
@@ -9090,9 +9692,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let listed_dana_yaml = yaml_output(&list_user_yaml);
     let listed_dana_yaml = &listed_dana_yaml[0];
     assert_eq!(listed_dana_yaml["name"].as_str(), Some("dana"));
-    assert!(listed_dana_yaml["created_at"]["seconds"].as_i64().is_some());
+    assert!(listed_dana_yaml["createdat"]["seconds"].as_i64().is_some());
     assert!(listed_dana_yaml.get("createdAt").is_none());
-    assert_eq!(stderr(&list_user_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&list_user_yaml)), "");
 
     let rename_user_yaml = headscale_with_config(
         &config,
@@ -9109,13 +9711,9 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     let renamed_dana_yaml = yaml_output(&rename_user_yaml);
     assert_eq!(renamed_dana_yaml["name"].as_str(), Some("dana-renamed"));
-    assert!(
-        renamed_dana_yaml["created_at"]["seconds"]
-            .as_i64()
-            .is_some()
-    );
+    assert!(renamed_dana_yaml["createdat"]["seconds"].as_i64().is_some());
     assert!(renamed_dana_yaml.get("createdAt").is_none());
-    assert_eq!(stderr(&rename_user_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&rename_user_yaml)), "");
 
     let destroy_user_yaml = headscale_with_config(
         &config,
@@ -9130,10 +9728,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&destroy_user_yaml).as_mapping().unwrap().len(),
+        yaml_output(&destroy_user_yaml).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&destroy_user_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&destroy_user_yaml)), "");
 
     let create_preauth = headscale_with_config(
         &config,
@@ -9155,7 +9753,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     let preauth_key = stdout(&create_preauth).trim().to_string();
     assert!(preauth_key.starts_with("hskey-auth-"));
-    assert_eq!(stderr(&create_preauth), "");
+    assert_eq!(comparable_stderr(&stderr(&create_preauth)), "");
 
     let list_preauth = headscale_with_config(&config, &["preauthkeys", "list"]);
     assert!(
@@ -9165,7 +9763,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_normalized_secret_stdout_snapshot(
         &list_preauth,
-        include_str!("snapshots/preauthkeys_list_success.stdout"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/preauthkeys_list_success.stdout")
+        ),
         "preauthkeys list populated",
     );
 
@@ -9196,7 +9797,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&expire_preauth)
     );
     assert_eq!(stdout(&expire_preauth), "Key expired\n");
-    assert_eq!(stderr(&expire_preauth), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_preauth)), "");
     let delete_preauth =
         headscale_with_config(&config, &["preauthkeys", "delete", "--id", &preauth_id]);
     assert!(
@@ -9205,7 +9806,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&delete_preauth)
     );
     assert_eq!(stdout(&delete_preauth), "Key deleted\n");
-    assert_eq!(stderr(&delete_preauth), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_preauth)), "");
     let empty_preauth = headscale_with_config(&config, &["preauthkeys", "list"]);
     assert!(
         empty_preauth.status.success(),
@@ -9214,7 +9815,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_normalized_secret_stdout_snapshot(
         &empty_preauth,
-        include_str!("snapshots/preauthkeys_list_empty.stdout"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/preauthkeys_list_empty.stdout")
+        ),
         "preauthkeys list empty",
     );
 
@@ -9260,7 +9864,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .is_some()
     );
     assert!(created_preauth_json.get("createdAt").is_none());
-    assert_eq!(stderr(&create_preauth_json), "");
+    assert_eq!(comparable_stderr(&stderr(&create_preauth_json)), "");
     let created_preauth_id = created_preauth_json["id"].as_u64().unwrap().to_string();
     let delete_preauth_json = headscale_with_config(
         &config,
@@ -9277,7 +9881,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         json_output(&delete_preauth_json).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&delete_preauth_json), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_preauth_json)), "");
 
     let create_preauth_json_line = headscale_with_config(
         &config,
@@ -9325,7 +9929,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert!(created_preauth_json_line.get("createdAt").is_none());
     assert!(!stdout(&create_preauth_json_line).contains('\t'));
-    assert_eq!(stderr(&create_preauth_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&create_preauth_json_line)), "");
 
     let list_preauth_json_line =
         headscale_with_config(&config, &["-ojson-line", "preauthkeys", "list"]);
@@ -9355,7 +9959,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert!(listed_preauth_json_line.get("createdAt").is_none());
     assert!(listed_preauth_json_line.get("aclTags").is_none());
-    assert_eq!(stderr(&list_preauth_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&list_preauth_json_line)), "");
 
     let preauth_json_line_id = listed_preauth_json_line["id"].as_u64().unwrap().to_string();
     let expire_preauth_json_line = headscale_with_config(
@@ -9376,7 +9980,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&expire_preauth_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_preauth_json_line)), "");
 
     let delete_preauth_json_line = headscale_with_config(
         &config,
@@ -9396,7 +10000,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&delete_preauth_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_preauth_json_line)), "");
 
     let create_preauth_yaml = headscale_with_config(
         &config,
@@ -9423,12 +10027,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .starts_with("hskey-auth-")
     );
     assert_eq!(created_preauth_yaml["reusable"].as_bool(), Some(true));
-    assert!(created_preauth_yaml.get("ephemeral").is_none());
+    assert_eq!(created_preauth_yaml["ephemeral"].as_bool(), Some(false));
     assert_eq!(
-        created_preauth_yaml["acl_tags"],
-        serde_yaml::Value::Sequence(vec![
-            serde_yaml::Value::String("tag:test1".into()),
-            serde_yaml::Value::String("tag:test2".into()),
+        created_preauth_yaml["acltags"],
+        serde_json::Value::Array(vec![
+            serde_json::Value::String("tag:test1".into()),
+            serde_json::Value::String("tag:test2".into()),
         ])
     );
     assert!(created_preauth_yaml.get("aclTags").is_none());
@@ -9438,12 +10042,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .is_some()
     );
     assert!(
-        created_preauth_yaml["created_at"]["seconds"]
+        created_preauth_yaml["createdat"]["seconds"]
             .as_i64()
             .is_some()
     );
     assert!(created_preauth_yaml.get("createdAt").is_none());
-    assert_eq!(stderr(&create_preauth_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&create_preauth_yaml)), "");
 
     let list_preauth_yaml = headscale_with_config(&config, &["-o", "yaml", "preauthkeys", "list"]);
     let listed_preauth_yaml = yaml_output(&list_preauth_yaml);
@@ -9457,20 +10061,20 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert_eq!(listed_preauth_yaml["user"]["name"].as_str(), Some("alice"));
     assert_eq!(listed_preauth_yaml["reusable"].as_bool(), Some(true));
     assert_eq!(
-        listed_preauth_yaml["acl_tags"],
-        serde_yaml::Value::Sequence(vec![
-            serde_yaml::Value::String("tag:test1".into()),
-            serde_yaml::Value::String("tag:test2".into()),
+        listed_preauth_yaml["acltags"],
+        serde_json::Value::Array(vec![
+            serde_json::Value::String("tag:test1".into()),
+            serde_json::Value::String("tag:test2".into()),
         ])
     );
     assert!(
-        listed_preauth_yaml["created_at"]["seconds"]
+        listed_preauth_yaml["createdat"]["seconds"]
             .as_i64()
             .is_some()
     );
     assert!(listed_preauth_yaml.get("createdAt").is_none());
     assert!(listed_preauth_yaml.get("aclTags").is_none());
-    assert_eq!(stderr(&list_preauth_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&list_preauth_yaml)), "");
 
     let preauth_yaml_id = listed_preauth_yaml["id"].as_u64().unwrap().to_string();
     let expire_preauth_yaml = headscale_with_config(
@@ -9485,13 +10089,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&expire_preauth_yaml)
-            .as_mapping()
-            .unwrap()
-            .len(),
+        yaml_output(&expire_preauth_yaml).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&expire_preauth_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_preauth_yaml)), "");
 
     let delete_preauth_yaml = headscale_with_config(
         &config,
@@ -9505,13 +10106,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&delete_preauth_yaml)
-            .as_mapping()
-            .unwrap()
-            .len(),
+        yaml_output(&delete_preauth_yaml).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&delete_preauth_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_preauth_yaml)), "");
 
     let create_api_key =
         headscale_with_config(&config, &["apikeys", "create", "--expiration", "1h"]);
@@ -9523,7 +10121,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let api_key = stdout(&create_api_key).trim().to_string();
     assert!(api_key.starts_with("hskey-api-"));
     let api_prefix = display_prefix(&api_key, "hskey-api-");
-    assert_eq!(stderr(&create_api_key), "");
+    assert_eq!(comparable_stderr(&stderr(&create_api_key)), "");
 
     let list_api_keys = headscale_with_config(&config, &["apikeys", "list"]);
     assert!(
@@ -9534,7 +10132,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     assert!(stdout(&list_api_keys).contains(&api_prefix));
     assert_normalized_secret_stdout_snapshot(
         &list_api_keys,
-        include_str!("snapshots/apikeys_list_success.stdout"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/apikeys_list_success.stdout")
+        ),
         "apikeys list populated",
     );
 
@@ -9550,7 +10151,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&expire_api_key)
     );
     assert_eq!(stdout(&expire_api_key), "Key expired\n");
-    assert_eq!(stderr(&expire_api_key), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_api_key)), "");
     let delete_api_key = headscale_with_config(&config, &["apikeys", "delete", "--id", &api_id]);
     assert!(
         delete_api_key.status.success(),
@@ -9558,7 +10159,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&delete_api_key)
     );
     assert_eq!(stdout(&delete_api_key), "Key deleted\n");
-    assert_eq!(stderr(&delete_api_key), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_api_key)), "");
     let empty_api_keys = headscale_with_config(&config, &["apikeys", "list"]);
     assert!(
         empty_api_keys.status.success(),
@@ -9567,7 +10168,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_normalized_secret_stdout_snapshot(
         &empty_api_keys,
-        include_str!("snapshots/apikeys_list_empty.stdout"),
+        &format!("{}\n", include_str!("snapshots/apikeys_list_empty.stdout")),
         "apikeys list empty",
     );
 
@@ -9581,7 +10182,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         .to_string();
     assert!(api_key_json.starts_with("hskey-api-"));
     let api_json_prefix = display_prefix(&api_key_json, "hskey-api-");
-    assert_eq!(stderr(&create_api_key_json), "");
+    assert_eq!(comparable_stderr(&stderr(&create_api_key_json)), "");
 
     let list_api_keys_json = headscale_with_config(&config, &["-o", "json", "apikeys", "list"]);
     let listed_api_keys = json_output(&list_api_keys_json);
@@ -9606,7 +10207,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         json_output(&expire_api_key_json).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&expire_api_key_json), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_api_key_json)), "");
 
     let delete_api_key_json = headscale_with_config(
         &config,
@@ -9616,7 +10217,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         json_output(&delete_api_key_json).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&delete_api_key_json), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_api_key_json)), "");
 
     let create_api_key_json_line = headscale_with_config(
         &config,
@@ -9626,7 +10227,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         serde_json::from_slice(&create_api_key_json_line.stdout).unwrap();
     assert!(api_key_json_line.starts_with("hskey-api-"));
     assert!(!stdout(&create_api_key_json_line).contains('\t'));
-    assert_eq!(stderr(&create_api_key_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&create_api_key_json_line)), "");
     let api_json_line_prefix = display_prefix(&api_key_json_line, "hskey-api-");
 
     let list_api_keys_json_line =
@@ -9644,7 +10245,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .is_some()
     );
     assert!(listed_api_key_json_line.get("createdAt").is_none());
-    assert_eq!(stderr(&list_api_keys_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&list_api_keys_json_line)), "");
 
     let expire_api_key_json_line = headscale_with_config(
         &config,
@@ -9664,7 +10265,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&expire_api_key_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_api_key_json_line)), "");
 
     let delete_api_key_json_line = headscale_with_config(
         &config,
@@ -9684,7 +10285,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&delete_api_key_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_api_key_json_line)), "");
 
     let create_api_key_yaml = headscale_with_config(
         &config,
@@ -9695,7 +10296,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         .expect("API-key create YAML is the secret string")
         .to_string();
     assert!(api_key_yaml.starts_with("hskey-api-"));
-    assert_eq!(stderr(&create_api_key_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&create_api_key_yaml)), "");
     let api_yaml_prefix = display_prefix(&api_key_yaml, "hskey-api-");
 
     let list_api_keys_yaml = headscale_with_config(&config, &["-o", "yaml", "apikeys", "list"]);
@@ -9706,12 +10307,12 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         Some(api_yaml_prefix.as_str())
     );
     assert!(
-        listed_api_key_yaml["created_at"]["seconds"]
+        listed_api_key_yaml["createdat"]["seconds"]
             .as_i64()
             .is_some()
     );
     assert!(listed_api_key_yaml.get("createdAt").is_none());
-    assert_eq!(stderr(&list_api_keys_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&list_api_keys_yaml)), "");
 
     let expire_api_key_yaml = headscale_with_config(
         &config,
@@ -9725,13 +10326,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&expire_api_key_yaml)
-            .as_mapping()
-            .unwrap()
-            .len(),
+        yaml_output(&expire_api_key_yaml).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&expire_api_key_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_api_key_yaml)), "");
 
     let delete_api_key_yaml = headscale_with_config(
         &config,
@@ -9745,13 +10343,10 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         ],
     );
     assert_eq!(
-        yaml_output(&delete_api_key_yaml)
-            .as_mapping()
-            .unwrap()
-            .len(),
+        yaml_output(&delete_api_key_yaml).as_object().unwrap().len(),
         0
     );
-    assert_eq!(stderr(&delete_api_key_yaml), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_api_key_yaml)), "");
 
     let auth_register_id = "aaaaaaaaaaaaaaaaaaaaaaaa";
     let auth_id = format!("hskey-authreq-{auth_register_id}");
@@ -9774,7 +10369,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&debug_create)
     );
     assert_eq!(stdout(&debug_create), "Node created\n");
-    assert_eq!(stderr(&debug_create), "");
+    assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
     let auth_register = headscale_with_config(
         &config,
         &["auth", "register", "--user", "alice", "--auth-id", &auth_id],
@@ -9785,7 +10380,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&auth_register)
     );
     assert_eq!(stdout(&auth_register), "Node auth-node registered\n");
-    assert_eq!(stderr(&auth_register), "");
+    assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
     let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
     let nodes_json_value = json_output(&nodes_json);
@@ -9814,7 +10409,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&rename_node),
         include_str!("snapshots/nodes_rename_success.stdout")
     );
-    assert_eq!(stderr(&rename_node), "");
+    assert_eq!(comparable_stderr(&stderr(&rename_node)), "");
 
     let policy_path = config_dir.path().join("tag-policy.hujson");
     fs::write(&policy_path, r#"{"tagOwners":{"tag:server":["alice@"]}}"#).unwrap();
@@ -9829,7 +10424,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&set_policy)
     );
     assert_eq!(stdout(&set_policy), "Policy updated.\n");
-    assert_eq!(stderr(&set_policy), "");
+    assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
     let get_policy_json = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
     assert!(
@@ -9841,7 +10436,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&get_policy_json),
         "{\"tagOwners\":{\"tag:server\":[\"alice@\"]}}\n"
     );
-    assert_eq!(stderr(&get_policy_json), "");
+    assert_eq!(comparable_stderr(&stderr(&get_policy_json)), "");
 
     let tag_node = headscale_with_config(
         &config,
@@ -9859,7 +10454,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&tag_node),
         include_str!("snapshots/nodes_tag_success.stdout")
     );
-    assert_eq!(stderr(&tag_node), "");
+    assert_eq!(comparable_stderr(&stderr(&tag_node)), "");
 
     let schedule_expiry = headscale_with_config(
         &config,
@@ -9881,7 +10476,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&schedule_expiry),
         include_str!("snapshots/nodes_expire_scheduled_success.stdout")
     );
-    assert_eq!(stderr(&schedule_expiry), "");
+    assert_eq!(comparable_stderr(&stderr(&schedule_expiry)), "");
 
     let expire_node =
         headscale_with_config(&config, &["nodes", "expire", "--identifier", &node_id]);
@@ -9894,7 +10489,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&expire_node),
         include_str!("snapshots/nodes_expire_success.stdout")
     );
-    assert_eq!(stderr(&expire_node), "");
+    assert_eq!(comparable_stderr(&stderr(&expire_node)), "");
 
     let backfill_ips = headscale_with_config(&config, &["--force", "nodes", "backfillips"]);
     assert!(
@@ -9906,7 +10501,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stdout(&backfill_ips),
         include_str!("snapshots/nodes_backfillips_success.stdout")
     );
-    assert_eq!(stderr(&backfill_ips), "");
+    assert_eq!(comparable_stderr(&stderr(&backfill_ips)), "");
 
     let delete_node = headscale_with_config(
         &config,
@@ -9918,15 +10513,18 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&delete_node)
     );
     assert_eq!(stdout(&delete_node), "Node deleted\n");
-    assert_eq!(stderr(&delete_node), "");
+    assert_eq!(comparable_stderr(&stderr(&delete_node)), "");
     let empty_nodes = headscale_with_config(&config, &["nodes", "list"]);
     assert!(
         empty_nodes.status.success(),
         "stderr: {}",
         stderr(&empty_nodes)
     );
-    assert_eq!(stdout(&empty_nodes), "No nodes registered.\n");
-    assert_eq!(stderr(&empty_nodes), "");
+    assert_eq!(
+        stdout(&empty_nodes),
+        "ID | Hostname | Name | MachineKey | NodeKey | User | Tags | IP addresses | Ephemeral | Last seen | Expiration | Connected | Expired\n\n"
+    );
+    assert_eq!(comparable_stderr(&stderr(&empty_nodes)), "");
 
     let nodes_register_id = "cccccccccccccccccccccccc";
     let nodes_register_auth_id = format!("hskey-authreq-{nodes_register_id}");
@@ -9949,7 +10547,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&nodes_register_pending)
     );
     assert_eq!(stdout(&nodes_register_pending), "Node created\n");
-    assert_eq!(stderr(&nodes_register_pending), "");
+    assert_eq!(comparable_stderr(&stderr(&nodes_register_pending)), "");
 
     let nodes_register = headscale_with_config(
         &config,
@@ -9973,7 +10571,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     );
     assert_eq!(
         stderr(&nodes_register),
-        "use 'headscale auth register --auth-id <id> --user <user>' instead\n"
+        "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead\n"
     );
 
     let approve_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
@@ -10000,7 +10598,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         headscale_with_config(&config, &["auth", "approve", "--auth-id", &approve_auth_id]);
     assert!(approve.status.success(), "stderr: {}", stderr(&approve));
     assert_eq!(stdout(&approve), "Auth request approved\n");
-    assert_eq!(stderr(&approve), "");
+    assert_eq!(comparable_stderr(&stderr(&approve)), "");
 
     let approve_json_id = "eeeeeeeeeeeeeeeeeeeeeeee";
     let approve_json_auth_id = format!("hskey-authreq-{approve_json_id}");
@@ -10039,7 +10637,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&approve_json)
     );
     assert_eq!(json_output(&approve_json).as_object().unwrap().len(), 0);
-    assert_eq!(stderr(&approve_json), "");
+    assert_eq!(comparable_stderr(&stderr(&approve_json)), "");
 
     let reject_id = "cccccccccccccccccccccccc";
     let reject_auth_id = format!("hskey-authreq-{reject_id}");
@@ -10064,7 +10662,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
     let reject = headscale_with_config(&config, &["auth", "reject", "--auth-id", &reject_auth_id]);
     assert!(reject.status.success(), "stderr: {}", stderr(&reject));
     assert_eq!(stdout(&reject), "Auth request rejected\n");
-    assert_eq!(stderr(&reject), "");
+    assert_eq!(comparable_stderr(&stderr(&reject)), "");
 
     let reject_json_line_id = "ffffffffffffffffffffffff";
     let reject_json_line_auth_id = format!("hskey-authreq-{reject_json_line_id}");
@@ -10109,7 +10707,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
             .len(),
         0
     );
-    assert_eq!(stderr(&reject_json_line), "");
+    assert_eq!(comparable_stderr(&stderr(&reject_json_line)), "");
 
     let rename_user = headscale_with_config(
         &config,
@@ -10128,7 +10726,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&rename_user)
     );
     assert_eq!(stdout(&rename_user), "User renamed\n");
-    assert_eq!(stderr(&rename_user), "");
+    assert_eq!(comparable_stderr(&stderr(&rename_user)), "");
     let destroy_user = headscale_with_config(
         &config,
         &["--force", "users", "destroy", "--identifier", "1"],
@@ -10139,7 +10737,7 @@ async fn live_local_grpc_cli_success_outputs_match_snapshots() {
         stderr(&destroy_user)
     );
     assert_eq!(stdout(&destroy_user), "User destroyed\n");
-    assert_eq!(stderr(&destroy_user), "");
+    assert_eq!(comparable_stderr(&stderr(&destroy_user)), "");
 
     handle.abort();
     let _ = handle.await;
@@ -10153,7 +10751,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
     assert!(
@@ -10162,7 +10760,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
         stderr(&create_user)
     );
     assert_eq!(stdout(&create_user), "User created\n");
-    assert_eq!(stderr(&create_user), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
     let registration_id = "dddddddddddddddddddddddd";
     let auth_id = format!("hskey-authreq-{registration_id}");
@@ -10187,7 +10785,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
         stderr(&debug_create)
     );
     assert_eq!(stdout(&debug_create), "Node created\n");
-    assert_eq!(stderr(&debug_create), "");
+    assert_eq!(comparable_stderr(&stderr(&debug_create)), "");
 
     let auth_register = headscale_with_config(
         &config,
@@ -10199,7 +10797,7 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
         stderr(&auth_register)
     );
     assert_eq!(stdout(&auth_register), "Node route-node registered\n");
-    assert_eq!(stderr(&auth_register), "");
+    assert_eq!(comparable_stderr(&stderr(&auth_register)), "");
 
     let nodes_json = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
     let node_id = json_output(&nodes_json)[0]["id"].as_u64().unwrap();
@@ -10209,14 +10807,17 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
     let nodes_list = headscale_with_config(&config, &["nodes", "list"]);
     assert_normalized_node_stdout_snapshot(
         &nodes_list,
-        include_str!("snapshots/nodes_list_success.stdout"),
+        &format!("{}\n", include_str!("snapshots/nodes_list_success.stdout")),
         "nodes list",
     );
 
     let routes_available = headscale_with_config(&config, &["nodes", "list-routes"]);
     assert_normalized_node_stdout_snapshot(
         &routes_available,
-        include_str!("snapshots/nodes_list_routes_available.stdout"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/nodes_list_routes_available.stdout")
+        ),
         "nodes list-routes with advertised route",
     );
 
@@ -10240,7 +10841,10 @@ async fn live_local_grpc_node_list_and_route_outputs_match_snapshots() {
     let routes_approved = headscale_with_config(&config, &["nodes", "list-routes"]);
     assert_normalized_node_stdout_snapshot(
         &routes_approved,
-        include_str!("snapshots/nodes_list_routes_success.stdout"),
+        &format!(
+            "{}\n",
+            include_str!("snapshots/nodes_list_routes_success.stdout")
+        ),
         "nodes list-routes with approved route",
     );
 
@@ -10256,7 +10860,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let create_user = headscale_with_config(&config, &["users", "create", "alice"]);
     assert!(
@@ -10265,27 +10869,27 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
         stderr(&create_user)
     );
     assert_eq!(stdout(&create_user), "User created\n");
-    assert_eq!(stderr(&create_user), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
     assert_config_stderr_snapshot(
         &config,
         &["users", "create", "alice"],
-        6,
+        1,
         include_str!("snapshots/grpc_live_duplicate_user.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["users", "destroy"],
-        6,
+        1,
         include_str!("snapshots/grpc_live_user_selector_required.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "users", "rename", "--new-name", "bob"],
-        6,
+        1,
         include_str!("snapshots/grpc_live_user_selector_required_json.stderr"),
     );
-    assert_config_stderr_snapshot(
+    let rename_by_name = headscale_with_config(
         &config,
         &[
             "users",
@@ -10295,9 +10899,10 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--new-name",
             "alice-renamed-by-name",
         ],
-        6,
-        include_str!("snapshots/grpc_live_user_rename_name_server_error.stderr"),
     );
+    assert_eq!(rename_by_name.status.code(), Some(0));
+    assert_eq!(stdout(&rename_by_name), "User renamed\n");
+    assert_eq!(comparable_stderr(&stderr(&rename_by_name)), "");
     assert_config_stderr_snapshot(
         &config,
         &[
@@ -10307,7 +10912,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--picture-url",
             "https://example.com/%zz",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_live_user_bad_picture_url.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10321,7 +10926,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--expiration",
             "1h",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_live_preauth_missing_user_json_line.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10338,13 +10943,13 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--expiration",
             "1h",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["apikeys", "create", "--expiration", "nope"],
-        6,
+        1,
         include_str!("snapshots/grpc_live_invalid_duration.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10359,13 +10964,13 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--expiration",
             "nope",
         ],
-        6,
+        1,
         include_str!("snapshots/grpc_live_invalid_duration_json.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "apikeys", "expire", "--id", "999"],
-        6,
+        1,
         include_str!("snapshots/grpc_live_apikey_not_found_json.stderr"),
     );
     let missing_auth_id = "hskey-authreq-dddddddddddddddddddddddd";
@@ -10396,7 +11001,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             include_str!("snapshots/grpc_live_auth_missing_json_line.stderr"),
         ),
     ] {
-        assert_config_stderr_snapshot(&config, &args, 5, expected);
+        assert_config_stderr_snapshot(&config, &args, 1, expected);
     }
     assert_config_stderr_snapshot(
         &config,
@@ -10408,7 +11013,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--auth-id",
             missing_auth_id,
         ],
-        5,
+        1,
         &format!(
             "{}\n",
             include_str!("snapshots/grpc_live_auth_missing_yaml.stderr")
@@ -10434,12 +11039,12 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             include_str!("snapshots/grpc_live_auth_reject_missing_json_line.stderr"),
         ),
     ] {
-        assert_config_stderr_snapshot(&config, &args, 5, expected);
+        assert_config_stderr_snapshot(&config, &args, 1, expected);
     }
     assert_config_stderr_snapshot(
         &config,
         &["-o", "yaml", "auth", "reject", "--auth-id", missing_auth_id],
-        5,
+        1,
         &format!(
             "{}\n",
             include_str!("snapshots/grpc_live_auth_reject_missing_yaml.stderr")
@@ -10448,7 +11053,7 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     assert_config_stderr_snapshot(
         &config,
         &["-ojson-line", "nodes", "expire", "--identifier", "404"],
-        5,
+        1,
         include_str!("snapshots/grpc_live_node_not_found_json_line.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10463,8 +11068,8 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
             "--tags",
             "tag:Bad",
         ],
-        6,
-        include_str!("snapshots/grpc_live_bad_tag_yaml.stderr"),
+        1,
+        include_str!("snapshots/grpc_live_node_bad_tag_yaml.stderr"),
     );
 
     let bad_policy_path = config_dir.path().join("bad-policy.hujson");
@@ -10473,13 +11078,13 @@ async fn live_local_grpc_cli_domain_errors_match_snapshots() {
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "policy", "set", "--file", &bad_policy_path],
-        6,
+        1,
         include_str!("snapshots/grpc_live_policy_set_invalid_json.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-ojson-line", "policy", "check", "--file", &bad_policy_path],
-        6,
+        1,
         include_str!("snapshots/grpc_live_policy_check_invalid_json_line.stderr"),
     );
 
@@ -10495,7 +11100,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
 
     let health = wait_for_headscale_status(&config, &["health"], 0).await;
     assert_eq!(stdout(&health), "\n");
-    assert_eq!(stderr(&health), "");
+    assert_eq!(comparable_stderr(&stderr(&health)), "");
 
     let create_user = headscale_with_config(&config, &["users", "create", "remote"]);
     assert!(
@@ -10504,7 +11109,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
         stderr(&create_user)
     );
     assert_eq!(stdout(&create_user), "User created\n");
-    assert_eq!(stderr(&create_user), "");
+    assert_eq!(comparable_stderr(&stderr(&create_user)), "");
 
     let list_users = headscale_with_config(&config, &["users", "list"]);
     assert!(
@@ -10517,30 +11122,30 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
         "stdout: {}",
         stdout(&list_users)
     );
-    assert_eq!(stderr(&list_users), "");
+    assert_eq!(comparable_stderr(&stderr(&list_users)), "");
 
     assert_config_stderr_snapshot(
         &config,
         &["users", "create", "remote"],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_duplicate_user.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "users", "create", "remote"],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_duplicate_user_json.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-ojson-line", "users", "create", "remote"],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_duplicate_user_json_line.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "yaml", "users", "create", "remote"],
-        6,
+        1,
         include_str!("snapshots/grpc_remote_duplicate_user_yaml.stderr"),
     );
 
@@ -10548,7 +11153,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
     assert_config_stderr_snapshot(
         &config,
         &["auth", "approve", "--auth-id", missing_auth_id],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_missing.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10561,7 +11166,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
             "--auth-id",
             missing_auth_id,
         ],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_missing_json.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10573,7 +11178,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
             "--auth-id",
             missing_auth_id,
         ],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_missing_json_line.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10586,7 +11191,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
             "--auth-id",
             missing_auth_id,
         ],
-        5,
+        1,
         &format!(
             "{}\n",
             include_str!("snapshots/grpc_remote_auth_missing_yaml.stderr")
@@ -10595,13 +11200,13 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
     assert_config_stderr_snapshot(
         &config,
         &["auth", "reject", "--auth-id", missing_auth_id],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_reject_missing.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "json", "auth", "reject", "--auth-id", missing_auth_id],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_reject_missing_json.stderr"),
     );
     assert_config_stderr_snapshot(
@@ -10613,13 +11218,13 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
             "--auth-id",
             missing_auth_id,
         ],
-        5,
+        1,
         include_str!("snapshots/grpc_remote_auth_reject_missing_json_line.stderr"),
     );
     assert_config_stderr_snapshot(
         &config,
         &["-o", "yaml", "auth", "reject", "--auth-id", missing_auth_id],
-        5,
+        1,
         &format!(
             "{}\n",
             include_str!("snapshots/grpc_remote_auth_reject_missing_yaml.stderr")
@@ -10650,7 +11255,7 @@ async fn live_remote_grpc_config_success_server_and_auth_errors_match_process_ou
             include_str!("snapshots/grpc_remote_auth_failure_yaml.stderr"),
         ),
     ] {
-        let output = wait_for_headscale_status(&bad_config, args, 4).await;
+        let output = wait_for_headscale_status(&bad_config, args, 1).await;
         assert_eq!(stdout(&output), "", "{label}: stdout");
         assert_eq!(stderr(&output), expected, "{label}: stderr");
     }
@@ -10687,7 +11292,7 @@ async fn live_remote_grpc_health_failure_matches_process_stderr() {
             include_str!("snapshots/grpc_live_health_failure_yaml.stderr"),
         ),
     ] {
-        let output = wait_for_headscale_status(&config, args, 6).await;
+        let output = wait_for_headscale_status(&config, args, 1).await;
         assert_eq!(stdout(&output), "", "{label}: stdout");
         assert_eq!(stderr(&output), expected, "{label}: stderr");
     }
@@ -10702,28 +11307,28 @@ async fn live_local_grpc_health_failure_matches_process_stderr() {
     let config_dir = tempfile::tempdir().unwrap();
     let config = write_unix_socket_config(config_dir.path(), &socket);
 
-    let output = wait_for_headscale_status(&config, &["health"], 6).await;
+    let output = wait_for_headscale_status(&config, &["health"], 1).await;
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure.stderr")
     );
 
-    let output = wait_for_headscale_status(&config, &["-o", "json", "health"], 6).await;
+    let output = wait_for_headscale_status(&config, &["-o", "json", "health"], 1).await;
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure_json.stderr")
     );
 
-    let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 6).await;
+    let output = wait_for_headscale_status(&config, &["-ojson-line", "health"], 1).await;
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
         include_str!("snapshots/grpc_live_health_failure_json_line.stderr")
     );
 
-    let output = wait_for_headscale_status(&config, &["-o", "yaml", "health"], 6).await;
+    let output = wait_for_headscale_status(&config, &["-o", "yaml", "health"], 1).await;
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
@@ -10749,7 +11354,7 @@ async fn hidden_status_probe_uses_failure_exit_codes() {
         stdout(&output),
         format!("Control plane at {} is healthy\n", healthy.base_url())
     );
-    assert_eq!(stderr(&output), "");
+    assert_eq!(comparable_stderr(&stderr(&output)), "");
 
     let unhealthy = MockServer::start_async().await;
     unhealthy
@@ -10761,15 +11366,15 @@ async fn hidden_status_probe_uses_failure_exit_codes() {
     let output = headscale_clean(&["status", "--server", &unhealthy.base_url()]);
     assert_status_command_failed(&output);
     assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/status_http_failure.stderr")
+        comparable_stderr(&stderr(&output)),
+        comparable_expected(include_str!("snapshots/status_http_failure.stderr"))
     );
 
     let output = headscale_clean(&["status"]);
     assert_status_command_failed(&output);
     assert_eq!(
-        stderr(&output),
-        include_str!("snapshots/status_missing_server.stderr")
+        comparable_stderr(&stderr(&output)),
+        comparable_expected(include_str!("snapshots/status_missing_server.stderr"))
     );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -10779,8 +11384,8 @@ async fn hidden_status_probe_uses_failure_exit_codes() {
     assert_status_command_failed(&output);
     assert_eq!(stdout(&output), "");
     assert_eq!(
-        normalize_localhost_port(&stderr(&output)),
-        include_str!("snapshots/status_connection_refused.stderr")
+        normalize_localhost_port(&comparable_stderr(&stderr(&output))),
+        comparable_expected(include_str!("snapshots/status_connection_refused.stderr"))
     );
 }
 
@@ -10812,7 +11417,8 @@ fn explicit_missing_config_still_fails_as_file_load_error() {
     assert_process_stderr_snapshot(
         &output,
         1,
-        include_str!("snapshots/explicit_missing_config.stderr"),
+        &include_str!("snapshots/explicit_missing_config.stderr")
+            .replace("<missing>", missing.to_str().unwrap()),
         "explicit missing config",
     );
 }

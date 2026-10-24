@@ -81,10 +81,17 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     let direct = acl_to_filter_rules(&doc);
     assert_eq!(store_rules.len(), direct.len());
     assert_eq!(store_rules.len(), 1);
+    // headscale-go v0.29.5 renders the wildcard source IPSet in ascending
+    // range order (ipSetToStrings over IPSet.Ranges(); policy/v2/filter_test.go).
     assert_eq!(
         store_rules[0].src_ips,
-        headscale_api_acl::tailnet_filter_srcs()
+        vec![
+            "100.64.0.0-100.115.91.255",
+            "100.115.94.0-100.127.255.255",
+            "fd7a:115c:a1e0::/48",
+        ]
     );
+    assert_eq!(store_rules[0].src_ips, direct[0].src_ips);
     assert_eq!(store_rules[0].dst_ports.len(), 1);
     assert_eq!(store_rules[0].dst_ports[0].ip, "*");
     assert_eq!(store_rules[0].dst_ports[0].ports.first, 0);
@@ -498,6 +505,7 @@ fn node_attrs_and_route_grants_match_secondary_address() {
     let doc = parse_hujson_policy(raw).unwrap();
     let addrs = vec!["100.64.0.30".to_string(), "fd7a:115c:a1e0::30".to_string()];
     let router = NodeView {
+        user_id: None,
         addr: Some("100.64.0.30"),
         addrs: &addrs,
         user: Some("router"),

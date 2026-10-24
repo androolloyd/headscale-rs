@@ -2,11 +2,14 @@
 name = "headscale-db"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND MIT"
 authors.workspace = true
 
 [features]
 default = []
+# Native database/sql pool compatibility; requires this workspace's SQLx-core
+# patch and, for Postgres, its SQLx-postgres patch. The CLI enables it.
+go-pool-compat = ["sqlx/tls-rustls-aws-lc-rs", "dep:sqlx-core", "sqlx-core/go-pem-compat"]
 # Compile SQLx's Postgres driver for parity work without enabling
 # Postgres runtime use in `Database`, which remains SQLite-only.
 postgres-sqlx = ["sqlx/postgres"]
@@ -20,9 +23,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+chrono.workspace = true
 
 # Database
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx-core = { version = "=0.8.6", optional = true, default-features = false }
 
 # Pre-auth key persistence — bcrypt-hashes the bearer token so the
 # canonical store never holds plaintext (parity with the Go
@@ -30,6 +35,10 @@ sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "migrate"] }
 # the major series the rest of the workspace already pulls in via
 # transitive deps (see `cargo tree`).
 bcrypt = "0.16"
+# Reuse bcrypt's already-locked backend for Go's variable-length decoded salt
+# and constant-time raw-byte hash comparison; no dependency version changes.
+blowfish = { version = "0.9.1", features = ["bcrypt"] }
+subtle = { version = "2.6.1", default-features = false }
 # Kept for older callers/tests in this crate; modern pre-auth key
 # generation uses URL-safe random bytes to match headscale-go.
 hex = "0.4"
@@ -37,6 +46,8 @@ hex = "0.4"
 rand_core = { workspace = true }
 
 # Internal crates
+# Pure Go netip and Tailscale public-key text shared with the wire layer.
+headscale-api-acl.workspace = true
 headscale-core.workspace = true
 headscale-identity.workspace = true
 headscale-resources.workspace = true

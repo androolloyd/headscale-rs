@@ -1,0 +1,34 @@
+Pinned CLI table escape measurement
+
+Copyright (c) 2020 pterm
+Copyright (c) 2016 inhere
+
+src/admin/output/pterm.rs adapts pterm v0.12.83 OSC 8 escape handling and
+gookit/color v1.6.1 ClearCode semantics, for width calculation only. Printed
+bytes are unchanged. Original MIT terms are retained in LICENSE-PTERM and
+LICENSE-GOOKIT-COLOR.
+
+src/admin/output/runewidth.rs and runewidth/tables.rs adapt go-runewidth
+v0.0.24 and clipperhouse/uax29/v2 v2.7.0 as selected by headscale v0.29.5.
+Copyright (c) 2016 Yasuhiro Matsumoto
+Copyright (c) 2020 Matt Sherman
+Original MIT terms are retained in LICENSE-GO-RUNEWIDTH and LICENSE-UAX29.
+The port uses the default StrictEmojiNeutral=true condition, the pinned
+Unicode 17 grapheme properties/rules and POSIX environment locale detection.
+tools/generate-cli-runewidth-tables.py translates the source data into scalar
+ranges; it does not run either implementation or provide parity evidence.
+No non-POSIX console code-page discovery is implemented.
+
+Source SHA-256:
+- Go 1.26.9 src/time/format.go: f288c56858ab25828551681778f006b591ed140fc12e60122b6a9a7e35b07eb7
+- prometheus/common v0.68.1 model/time.go: 2eaa3a4820fed568a8ffa74b51d09afe6d127ff90a5caf2f3175eb1ccc12d05d
+- pterm v0.12.83 table_printer.go: 8675715851f7d8c8fac6ee79aa9164b4ed371918f212e59cabc179fbed38940b
+- pterm v0.12.83 internal/utils.go: 8337705f6f1c7976e88f08f1ade3267c9450c1df41545543593a6f002d3af0e7
+- pterm v0.12.83 internal/max_text_width.go: eba65a5524cfc370b8e3ac5122426b83934f31c2dde6bcaf9f95dd3d0ce7b653
+- gookit/color v1.6.1 color.go: 6b76711772025ffb3531033c4a6e40ecc920baef9faa0faae0b606c8155594c3
+- go-runewidth v0.0.24 runewidth.go: 3895be6a83042cf43db221ccf43db5f182b1c7dd7ce4a4ce97cdebf3fd40e786
+- go-runewidth v0.0.24 runewidth_table.go: ebf377ad8197b3a52bcb372f332e15a3233152d345ba5af76cc25344f0027d7e
+- go-runewidth v0.0.24 runewidth_posix.go: b12863c62429bf672f85e334546c33aac4dcc7cea2cac3c59cb754d1e9e37d5a
+- clipperhouse/uax29/v2 v2.7.0 graphemes/trie.go: 3182d14c05afe4d1f11b51227abc9714d3bbe6e15758285cf42de7477c9309d4
+- clipperhouse/uax29/v2 v2.7.0 graphemes/splitfunc.go: fcf903d45e7f661a39369bface6665124ea2a4a32eb78214799f01fbe07f8233
+- clipperhouse/uax29/v2 v2.7.0 graphemes/iterator.go: 8589cdd05439632fe98ea538be979cc00ee4e57c266c205568d28b704c8f2569

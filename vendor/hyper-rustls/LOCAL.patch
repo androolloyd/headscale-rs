@@ -1,0 +1,260 @@
+--- a/vendor/hyper-rustls/Cargo.toml
++++ b/vendor/hyper-rustls/Cargo.toml
+@@ -32,7 +32,7 @@
+ homepage = "https://github.com/rustls/hyper-rustls"
+ documentation = "https://docs.rs/hyper-rustls/"
+ readme = "README.md"
+-license = "Apache-2.0 OR ISC OR MIT"
++license = "(Apache-2.0 OR ISC OR MIT) AND BSD-3-Clause"
+ repository = "https://github.com/rustls/hyper-rustls"
+ 
+ [package.metadata.docs.rs]
+@@ -53,6 +53,7 @@
+ ]
+ 
+ [features]
++go-native-http-proxy = ["tokio/time", "rustls/go-client-record-eof"]
+ aws-lc-rs = ["rustls/aws_lc_rs"]
+ default = [
+     "native-tokio",
+--- a/vendor/hyper-rustls/Cargo.toml.orig
++++ b/vendor/hyper-rustls/Cargo.toml.orig
+@@ -3,7 +3,7 @@
+ version = "0.27.10"
+ edition = "2021"
+ rust-version = "1.85"
+-license = "Apache-2.0 OR ISC OR MIT"
++license = "(Apache-2.0 OR ISC OR MIT) AND BSD-3-Clause"
+ readme = "README.md"
+ description = "Rustls+hyper integration for pure rust HTTPS"
+ homepage = "https://github.com/rustls/hyper-rustls"
+@@ -12,6 +12,7 @@
+ include = ["Cargo.toml", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-ISC", "README.md", "src/**/*.rs"]
+ 
+ [features]
++go-native-http-proxy = ["tokio/time", "rustls/go-client-record-eof"]
+ default = ["native-tokio", "http1", "tls12", "logging", "aws-lc-rs"]
+ aws-lc-rs = ["rustls/aws_lc_rs"]
+ fips = ["aws-lc-rs", "rustls/fips"]
+--- a/vendor/hyper-rustls/src/connector.rs
++++ b/vendor/hyper-rustls/src/connector.rs
+@@ -25,6 +25,10 @@
+     http: T,
+     tls_config: Arc<rustls::ClientConfig>,
+     server_name_resolver: Arc<dyn ResolveServerName + Sync + Send>,
++    #[cfg(feature = "go-native-http-proxy")]
++    go_handshake_timeout: Option<std::time::Duration>,
++    #[cfg(feature = "go-native-http-proxy")]
++    go_record_eof: bool,
+ }
+ 
+ impl<T> HttpsConnector<T> {
+@@ -49,6 +53,10 @@
+             tls_config: tls_config.into(),
+             force_https,
+             server_name_resolver,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_handshake_timeout: None,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_record_eof: false,
+         }
+     }
+ 
+@@ -57,6 +65,40 @@
+     /// If a URL is not `https` when connecting, an error is returned.
+     pub fn enforce_https(&mut self) {
+         self.force_https = true;
++    }
++
++    /// Replace only the owned lower-level connector, preserving TLS policy.
++    /// Used by the explicitly selected native HTTP proxy adapter.
++    #[cfg(feature = "go-native-http-proxy")]
++    #[doc(hidden)]
++    pub fn go_map_http_connector<U>(self, map: impl FnOnce(T) -> U) -> HttpsConnector<U> {
++        HttpsConnector {
++            force_https: self.force_https,
++            http: map(self.http),
++            tls_config: self.tls_config,
++            server_name_resolver: self.server_name_resolver,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_handshake_timeout: self.go_handshake_timeout,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_record_eof: self.go_record_eof,
++        }
++    }
++
++    /// Set a timeout for TLS handshakes on explicitly native HTTP connections.
++    /// The timeout begins after the lower-level connection has completed.
++    #[cfg(feature = "go-native-http-proxy")]
++    #[doc(hidden)]
++    pub fn go_with_tls_handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
++        self.go_handshake_timeout = Some(timeout);
++        self
++    }
++
++    /// Select Go's record-boundary EOF handling on native TLS connections.
++    #[cfg(feature = "go-native-http-proxy")]
++    #[doc(hidden)]
++    pub fn go_with_record_boundary_eof(mut self) -> Self {
++        self.go_record_eof = true;
++        self
+     }
+ }
+ 
+@@ -109,16 +151,73 @@
+         };
+ 
+         let connecting_future = self.http.call(dst);
++        #[cfg(feature = "go-native-http-proxy")]
++        let handshake_timeout = self.go_handshake_timeout;
++        #[cfg(feature = "go-native-http-proxy")]
++        let go_record_eof = self.go_record_eof;
+         Box::pin(async move {
+-            let tcp = connecting_future
++            let tcp = connecting_future.await.map_err(Into::into)?;
++            let connector = TlsConnector::from(cfg);
++            let transport = TokioIo::new(tcp);
++            #[cfg(feature = "go-native-http-proxy")]
++            let mut eof_observer = None;
++            #[cfg(feature = "go-native-http-proxy")]
++            let handshake = if go_record_eof {
++                connector.connect_with(hostname, transport, |connection| {
++                    connection.go_record_boundary_eof(true);
++                    eof_observer = Some(connection.go_record_eof_observer());
++                })
++            } else {
++                connector.connect(hostname, transport)
++            };
++            #[cfg(not(feature = "go-native-http-proxy"))]
++            let handshake = connector.connect(hostname, transport);
++            #[cfg(feature = "go-native-http-proxy")]
++            let tls = match handshake_timeout {
++                Some(timeout) => tokio::time::timeout(timeout, handshake)
++                    .await
++                    .map_err(|_| {
++                        io::Error::new(io::ErrorKind::TimedOut, "net/http: TLS handshake timeout")
++                    })?,
++                None => handshake.await,
++            }
++            .map_err(|error| {
++                let close_notify_eof = go_record_eof
++                    && eof_observer
++                        .as_ref()
++                        .is_some_and(rustls::GoClientEof::received_close_notify)
++                    && error.kind() == io::ErrorKind::InvalidData
++                    && error.get_ref().is_some_and(|cause| {
++                        matches!(
++                            cause.downcast_ref::<rustls::Error>(),
++                            Some(rustls::Error::AlertReceived(
++                                rustls::AlertDescription::CloseNotify
++                            ))
++                        )
++                    });
++                let error = if close_notify_eof {
++                    io::Error::new(io::ErrorKind::Other, "EOF")
++                } else if go_record_eof && error.kind() == io::ErrorKind::UnexpectedEof {
++                    match eof_observer
++                        .as_ref()
++                        .and_then(rustls::GoClientEof::at_record_boundary)
++                    {
++                        Some(true) => io::Error::new(io::ErrorKind::Other, "EOF"),
++                        Some(false) => {
++                            io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected EOF")
++                        }
++                        None => error,
++                    }
++                } else {
++                    error
++                };
++                io::Error::new(io::ErrorKind::Other, error)
++            })?;
++            #[cfg(not(feature = "go-native-http-proxy"))]
++            let tls = handshake
+                 .await
+-                .map_err(Into::into)?;
+-            Ok(MaybeHttpsStream::Https(TokioIo::new(
+-                TlsConnector::from(cfg)
+-                    .connect(hostname, TokioIo::new(tcp))
+-                    .await
+-                    .map_err(io::Error::other)?,
+-            )))
++                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
++            Ok(MaybeHttpsStream::Https(TokioIo::new(tls)))
+         })
+     }
+ }
+@@ -133,6 +232,10 @@
+             http,
+             tls_config: cfg.into(),
+             server_name_resolver: Arc::new(DefaultServerNameResolver::default()),
++            #[cfg(feature = "go-native-http-proxy")]
++            go_handshake_timeout: None,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_record_eof: false,
+         }
+     }
+ }
+@@ -157,10 +260,7 @@
+         let mut hostname = uri.host().unwrap_or_default();
+ 
+         // Remove square brackets around IPv6 address.
+-        if let Some(trimmed) = hostname
+-            .strip_prefix('[')
+-            .and_then(|h| h.strip_suffix(']'))
+-        {
++        if let Some(trimmed) = hostname.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+             hostname = trimmed;
+         }
+ 
+@@ -233,23 +333,17 @@
+ 
+     #[tokio::test]
+     async fn connects_https() {
+-        connect(Allow::Any, Scheme::Https)
+-            .await
+-            .unwrap();
++        connect(Allow::Any, Scheme::Https).await.unwrap();
+     }
+ 
+     #[tokio::test]
+     async fn connects_http() {
+-        connect(Allow::Any, Scheme::Http)
+-            .await
+-            .unwrap();
++        connect(Allow::Any, Scheme::Http).await.unwrap();
+     }
+ 
+     #[tokio::test]
+     async fn connects_https_only() {
+-        connect(Allow::Https, Scheme::Https)
+-            .await
+-            .unwrap();
++        connect(Allow::Https, Scheme::Https).await.unwrap();
+     }
+ 
+     #[tokio::test]
+--- a/vendor/hyper-rustls/src/connector/builder.rs
++++ b/vendor/hyper-rustls/src/connector/builder.rs
+@@ -233,6 +233,10 @@
+             server_name_resolver: self
+                 .server_name_resolver
+                 .unwrap_or_else(|| Arc::new(DefaultServerNameResolver::default())),
++            #[cfg(feature = "go-native-http-proxy")]
++            go_handshake_timeout: None,
++            #[cfg(feature = "go-native-http-proxy")]
++            go_record_eof: false,
+         }
+     }
+ 
+@@ -438,10 +442,7 @@
+             .https_only()
+             .enable_http1()
+             .build();
+-        assert!(connector
+-            .tls_config
+-            .alpn_protocols
+-            .is_empty());
++        assert!(connector.tls_config.alpn_protocols.is_empty());
+         let connector = super::ConnectorBuilder::new()
+             .with_tls_config(tls_config.clone())
+             .https_only()

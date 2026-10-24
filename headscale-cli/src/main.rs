@@ -16,14 +16,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Local;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use rand_core::{OsRng, RngCore};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod acme_issuer;
 mod config;
 mod derp_config;
+mod logging;
 mod mockoidc;
 mod node;
 mod server;
@@ -45,13 +45,7 @@ use headscale_db::DatabaseBackend;
 #[command(disable_version_flag = true)]
 struct Cli {
     /// config file (default is /etc/headscale/config.yaml).
-    #[arg(
-        short,
-        long,
-        env = "HEADSCALE_CONFIG",
-        global = true,
-        allow_hyphen_values = true
-    )]
+    #[arg(short, long, global = true, allow_hyphen_values = true)]
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error).
@@ -254,6 +248,10 @@ enum CompletionShell {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // With this crate's feature set rustls cannot pick a process-level crypto
+    // provider on its own, and the DERP URL fetch, OIDC discovery and ACME
+    // clients would panic on first use. Installing it is idempotent.
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if let Some(help) = upstream_exact_help(&raw_args) {
         print!("{help}");
@@ -289,21 +287,68 @@ async fn main() -> ExitCode {
 
     let skip_config_load = raw_args_skip_config_load(&raw_args);
     let error_output_format = output_format_from_raw_args(&raw_args);
-    let cli = Cli::parse();
+    let cli = match parse_standalone_cli() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.kind() == clap::error::ErrorKind::UnknownArgument {
+                let rendered = error.to_string();
+                if let Some(flag) = rendered
+                    .split("unexpected argument '")
+                    .nth(1)
+                    .and_then(|tail| tail.split_once('\'').map(|(flag, _)| flag))
+                    .filter(|flag| flag.starts_with('-'))
+                    && let Some(cobra_error) = cobra_unknown_flag_error(flag)
+                {
+                    let parts = raw_args
+                        .iter()
+                        .filter_map(|arg| arg.to_str())
+                        .collect::<Vec<_>>();
+                    if matches!(
+                        upstream_exact_command_parts(&parts),
+                        ["nodes" | "node", "register", ..]
+                    ) {
+                        eprint!("{UPSTREAM_NODES_REGISTER_DEPRECATED}");
+                    }
+                    eprint!(
+                        "{}",
+                        admin::output::format_error(
+                            output_format_before_flag_error(&parts, &cobra_error),
+                            &cobra_error
+                        )
+                    );
+                    return ExitCode::from(1);
+                }
+            }
+            error.exit();
+        }
+    };
 
-    // Initialize logging
-    let log_level = cli.log_level.parse().unwrap_or(tracing::Level::INFO);
+    // The upstream log.level setting controls server and configtest startup
+    // logs. Keep the Rust-only CLI/env override when an operator supplied it.
+    let initial_config =
+        (!skip_config_load).then(|| CliConfig::load_initial(cli.config.as_deref()));
+    let logging_config = initial_config
+        .as_ref()
+        .and_then(|loaded| loaded.as_ref().ok())
+        .map(|loaded| &loaded.config);
+    let (log_level, json_logs) = effective_logging(&cli, &raw_args, logging_config);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                format!("headscale={log_level},headscale_core={log_level}").into()
+                format!(
+                    "headscale={log_level},headscale_core={log_level},headscale_api={log_level},headscale_db={log_level}"
+                )
+                .into()
             }),
         )
-        .with(tracing_subscriber::fmt::layer().with_target(true))
+        .with(tracing_subscriber::fmt::layer().with_ansi(false)
+            .event_format(logging::GoEventFormatter::new(json_logs))
+            .with_writer(move || logging::writer(json_logs)))
         .init();
 
-    match Box::pin(dispatch(cli, skip_config_load)).await {
+    match Box::pin(dispatch(cli, initial_config)).await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(MainError::LoggedFatal) => ExitCode::from(1),
         Err(MainError::Admin(e)) => {
             eprint!(
                 "{}",
@@ -318,6 +363,72 @@ async fn main() -> ExitCode {
             );
             ExitCode::from(1)
         }
+    }
+}
+
+fn parse_standalone_cli() -> Result<Cli, clap::Error> {
+    let mut command = Cli::command();
+    // In the binary, Viper-compatible config loading owns these environment
+    // values. Clap's eager bool parsing rejects values that Go casts to false,
+    // and its empty values would incorrectly override file settings. Keep the
+    // public ConnectArgs parser's environment support for library callers.
+    for argument in ["address", "api_key", "unix_socket", "insecure"] {
+        command = command.mut_arg(argument, |argument| argument.env(None::<&str>));
+    }
+    let matches = command.try_get_matches()?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    cli.config = cli
+        .config
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            std::env::var_os("HEADSCALE_CONFIG")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        });
+    Ok(cli)
+}
+
+fn effective_logging(
+    cli: &Cli,
+    raw_args: &[std::ffi::OsString],
+    config: Option<&CliConfig>,
+) -> (tracing_subscriber::filter::LevelFilter, bool) {
+    let configured = config.and_then(|config| config.logging.as_ref());
+    let json = configured.is_some_and(|config| config.format == "json");
+    let explicit_override = std::env::var_os("HEADSCALE_LOG").is_some()
+        || raw_args.iter().any(|arg| {
+            let arg = arg.to_string_lossy();
+            arg == "--log-level" || arg.starts_with("--log-level=")
+        });
+    if explicit_override {
+        return (
+            cli.log_level
+                .parse::<tracing::Level>()
+                .unwrap_or(tracing::Level::INFO)
+                .into(),
+            json,
+        );
+    }
+    (
+        configured.map(|config| config.level.as_str()).map_or(
+            tracing_subscriber::filter::LevelFilter::INFO,
+            parse_go_config_log_level,
+        ),
+        json,
+    )
+}
+
+fn parse_go_config_log_level(level: &str) -> tracing_subscriber::filter::LevelFilter {
+    // headscale-go falls back to DebugLevel when zerolog cannot parse the
+    // configured level (hscontrol/types/config.go::logConfig).
+    use tracing_subscriber::filter::LevelFilter;
+    match logging::configured_level(level) {
+        n if n < 0 => LevelFilter::TRACE,
+        0 => LevelFilter::DEBUG,
+        1 => LevelFilter::INFO,
+        2 => LevelFilter::WARN,
+        3 => LevelFilter::ERROR,
+        _ => LevelFilter::OFF,
     }
 }
 
@@ -365,6 +476,7 @@ fn raw_output_format(value: &str) -> OutputFormat {
 enum MainError {
     Admin(AdminError),
     Other(anyhow::Error),
+    LoggedFatal,
 }
 
 impl From<AdminError> for MainError {
@@ -379,28 +491,94 @@ impl From<anyhow::Error> for MainError {
     }
 }
 
-async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
-    let mut used_default_config = false;
-    let config = if skip_config_load {
-        None
-    } else if let Some(config_path) = &cli.config {
-        Some(
-            CliConfig::load(config_path)
-                .context("Failed to load config file")
-                .map_err(MainError::Other)?,
-        )
-    } else {
-        let loaded = CliConfig::load_default_with_source()
-            .context("Failed to load config")
-            .map_err(MainError::Other)?;
-        used_default_config = loaded.used_defaults;
-        Some(loaded.config)
+async fn dispatch(
+    cli: Cli,
+    initial_config: Option<Result<config::InitialConfigLoad>>,
+) -> Result<(), MainError> {
+    let admin_only_config = uses_admin_config(&cli);
+    let mut policy_input = None;
+    let config = match initial_config {
+        None => None,
+        Some(Err(error)) => {
+            let message = cli.config.as_ref().map_or_else(
+                || "error loading config".to_string(),
+                |path| format!("error loading config file {}", path.display()),
+            );
+            logging::emit_with_fields(
+                false,
+                logging::LogLevel::Fatal,
+                &message,
+                &[
+                    ("caller", concat!(file!(), ":", line!())),
+                    ("error", &format!("{error:#}")),
+                ],
+            );
+            return Err(MainError::LoggedFatal);
+        }
+        Some(Ok(loaded)) => {
+            if loaded.used_defaults() {
+                print_no_config_default_warning();
+            }
+            if let Commands::Policy { action } = &cli.command {
+                let direct = !loads_cli_runtime_config(&cli.command);
+                let upstream = direct
+                    || !merged_connect_args(&cli.connect, Some(&loaded.config))
+                        .should_use_legacy_http_for_migrated_commands();
+                let mut input = admin::policy::PreparedPolicyInput::read(action)
+                    .map_err(|error| standalone_admin_error(error, upstream))?;
+                if direct {
+                    input
+                        .confirm_direct_database_access(cli.connect.force)
+                        .map_err(|error| standalone_admin_error(error, true))?;
+                }
+                policy_input = Some(input);
+            }
+            let json = loaded
+                .config
+                .logging
+                .as_ref()
+                .is_some_and(|logging| logging.format == "json");
+            let level = loaded
+                .config
+                .logging
+                .as_ref()
+                .map_or(1, |logging| logging::configured_level(&logging.level));
+            let mut config = loaded
+                .into_config(!admin_only_config)
+                .map_err(|error| config_load_error(&cli.command, json, level, error))?;
+            if loads_server_runtime_config(&cli.command) {
+                config
+                    .complete_server_config_load()
+                    .map_err(|error| config_load_error(&cli.command, json, level, error))?;
+            } else if !admin_only_config {
+                config
+                    .resolve_oidc_client_secret()
+                    .map_err(|error| config_load_error(&cli.command, json, level, error))?;
+            }
+            Some(config)
+        }
     };
-    let mut connect = merged_connect_args(&cli.connect, config.as_ref());
-    if used_default_config && option_is_empty(connect.address.as_ref()) {
-        connect.warn_no_config_default = true;
-        connect.wrap_grpc_connect_error = true;
+    if loads_cli_runtime_config(&cli.command)
+        && let Some(config) = config.as_ref()
+    {
+        print_invalid_log_format(config);
     }
+    let mut connect = merged_connect_args(&cli.connect, config.as_ref());
+    if let (Some(input), Some(config)) = (policy_input.as_mut(), config.as_ref())
+        && loads_server_runtime_config(&cli.command)
+        && let Some(database) = config.database.as_ref()
+    {
+        let sqlite = database.debug_sqlite();
+        input.set_sqlite_settings(sqlite.write_ahead_log(), sqlite.wal_autocheckpoint());
+        #[cfg(feature = "postgres-sqlx")]
+        input.set_postgres_pool_options(server::postgres_pool_options(database.debug_postgres()));
+    }
+    // Standalone upstream commands use Cobra's runtime error text and exit 1
+    // for both explicit endpoints and endpoints loaded from configuration.
+    connect.wrap_grpc_connect_error = true;
+    let upstream_admin_errors = !connect.should_use_legacy_http_for_migrated_commands()
+        || (matches!(&cli.command, Commands::Policy { .. })
+            && loads_server_runtime_config(&cli.command));
 
     match cli.command {
         Commands::Server {
@@ -411,8 +589,9 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             _ignored_args: _,
         } => {
             if let Some(config) = config.as_ref() {
-                config.validate_for_configtest().map_err(MainError::Other)?;
-                print_config_warnings(config);
+                config
+                    .validate_listener_addresses()
+                    .map_err(MainError::Other)?;
             }
             let server_config = config.as_ref().and_then(|c| c.server.as_ref());
             let defaults = ServerConfig::default();
@@ -449,6 +628,8 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                     .map_or(defaults.ip_allocation, |s| s.ip_allocation.clone()),
                 server_url: server_config.and_then(|s| s.server_url.clone()),
                 state_dir: server_config.map_or(defaults.state_dir, |s| s.state_dir.clone()),
+                noise_private_key_path: server_config
+                    .and_then(|s| s.noise_private_key_path.clone()),
                 https_listen: server_config.and_then(|s| s.https_listen.clone()),
                 metrics_listen_addr: server_config.map_or(defaults.metrics_listen_addr, |s| {
                     s.metrics_listen_addr.clone()
@@ -563,23 +744,30 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
 
         Commands::Users { action } => admin::run_users(&connect, &action)
             .await
-            .map_err(Into::into),
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
         Commands::Nodes { action } => admin::run_nodes(&connect, &action)
             .await
-            .map_err(Into::into),
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
         Commands::Preauthkeys { user, action } => admin::run_preauthkeys(&connect, user, &action)
             .await
-            .map_err(Into::into),
-        Commands::Auth { action } => admin::run_auth(&connect, &action).await.map_err(Into::into),
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
+        Commands::Auth { action } => admin::run_auth(&connect, &action)
+            .await
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
         Commands::Apikeys { action } => admin::run_apikeys(&connect, &action)
             .await
-            .map_err(Into::into),
-        Commands::Policy { action } => admin::run_policy(&connect, &action)
-            .await
-            .map_err(Into::into),
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
+        Commands::Policy { action } => {
+            let result = if let Some(input) = policy_input {
+                admin::run_policy_with_input(&connect, &action, input).await
+            } else {
+                admin::run_policy(&connect, &action).await
+            };
+            result.map_err(|error| standalone_admin_error(error, upstream_admin_errors))
+        }
         Commands::Debug { action } => admin::run_debug(&connect, &action)
             .await
-            .map_err(Into::into),
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
         Commands::Generate { action } => match action {
             GenerateCmd::PrivateKey { .. } => {
                 print_private_key(connect.fmt().map_err(MainError::Admin)?)
@@ -590,7 +778,9 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             .await
             .context("running mock OIDC server")
             .map_err(MainError::Other),
-        Commands::Health => admin::run_health(&connect).await.map_err(Into::into),
+        Commands::Health => admin::run_health(&connect)
+            .await
+            .map_err(|error| standalone_admin_error(error, upstream_admin_errors)),
         Commands::Version => {
             print_version(connect.fmt().map_err(MainError::Admin)?).map_err(MainError::Other)
         }
@@ -598,10 +788,8 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
             generate_completion(&shell);
             Ok(())
         }
-        Commands::Configtest => configtest(config.as_ref()).map_err(MainError::Other),
-        Commands::DumpConfig => {
-            dump_config(config.as_ref(), used_default_config).map_err(MainError::Other)
-        }
+        Commands::Configtest => configtest(config.as_ref()).await.map_err(MainError::Other),
+        Commands::DumpConfig => dump_config(config.as_ref()).map_err(MainError::Other),
 
         Commands::Status { server } => {
             let server_url = server.or_else(|| {
@@ -619,6 +807,79 @@ async fn dispatch(cli: Cli, skip_config_load: bool) -> Result<(), MainError> {
                 .map_err(MainError::Other)
         }
     }
+}
+
+fn uses_admin_config(cli: &Cli) -> bool {
+    loads_cli_runtime_config(&cli.command)
+        || matches!(
+            cli.command,
+            Commands::Version
+                | Commands::Generate { .. }
+                | Commands::Completion { .. }
+                | Commands::Mockoidc
+        )
+}
+
+fn loads_cli_runtime_config(command: &Commands) -> bool {
+    match command {
+        Commands::Users { .. }
+        | Commands::Nodes { .. }
+        | Commands::Preauthkeys { .. }
+        | Commands::Auth { .. }
+        | Commands::Apikeys { .. }
+        | Commands::Debug { .. }
+        | Commands::Health => true,
+        Commands::Policy { action } => match action {
+            PolicyCmd::Get { bypass_direct_db }
+            | PolicyCmd::Set {
+                bypass_direct_db, ..
+            }
+            | PolicyCmd::Check {
+                bypass_direct_db, ..
+            } => !bypass_direct_db,
+        },
+        _ => false,
+    }
+}
+
+fn standalone_admin_error(error: AdminError, upstream: bool) -> MainError {
+    if upstream {
+        MainError::Admin(AdminError::Usage(error.to_string()))
+    } else {
+        MainError::Admin(error)
+    }
+}
+
+fn loads_server_runtime_config(command: &Commands) -> bool {
+    matches!(command, Commands::Server { .. } | Commands::Configtest)
+        || (matches!(command, Commands::Policy { .. }) && !loads_cli_runtime_config(command))
+}
+
+fn config_load_error(command: &Commands, json: bool, level: i8, error: anyhow::Error) -> MainError {
+    if let Some(deprecation) = error.downcast_ref::<config::ConfigDeprecationError>() {
+        if !has_machine_output_argument() {
+            logging::emit(json, logging::LogLevel::Fatal, &deprecation.log_message);
+        }
+        return MainError::LoggedFatal;
+    }
+    if let Some(fatal) = error.downcast_ref::<config::ConfigFatalError>() {
+        let enabled = if fatal.before_log_config {
+            !has_machine_output_argument()
+        } else {
+            level <= 4
+        };
+        if enabled {
+            logging::emit(json, logging::LogLevel::Fatal, &fatal.log_message);
+        }
+        return MainError::LoggedFatal;
+    }
+    let error = match command {
+        Commands::Server { .. } => error.context("initializing: loading configuration"),
+        Commands::Configtest => error.context("configuration error: loading configuration"),
+        Commands::Policy { .. } => error.context("loading config"),
+        _ => error.context("Failed to load config"),
+    };
+    MainError::Other(error)
 }
 
 fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> ConnectArgs {
@@ -641,10 +902,10 @@ fn merged_connect_args(connect: &ConnectArgs, config: Option<&CliConfig>) -> Con
     if !merged.insecure {
         merged.insecure = cli_config.and_then(|cli| cli.insecure).unwrap_or(false);
     }
-    if merged.timeout_secs.is_none() {
-        merged.timeout_secs = cli_config
+    if merged.timeout_secs.is_none() && merged.timeout_nanos.is_none() {
+        merged.timeout_nanos = cli_config
             .and_then(|cli| cli.timeout)
-            .or(Some(config::default_cli_timeout_secs()));
+            .or(Some(config::default_cli_timeout_nanos()));
     }
     if merged.unix_socket.is_none() {
         if let Some(unix_socket) = config.unix_socket.clone() {
@@ -712,64 +973,15 @@ fn direct_postgres_policy_database(
 
 #[cfg(feature = "postgres-sqlx")]
 fn postgres_url_from_config(postgres: &config::UpstreamPostgresConfig) -> Result<String> {
-    let host = non_empty_str(Some(postgres.host())).unwrap_or("localhost");
-    let port = postgres_config_port(postgres).context("database.postgres.port out of range")?;
-    let name = non_empty_str(Some(postgres.name())).unwrap_or("headscale");
-    let mut url = url::Url::parse("postgres://localhost/headscale")
-        .context("build default Postgres database URL")?;
-    url.set_host(Some(host))
-        .map_err(|err| anyhow::anyhow!("database.postgres.host {host:?} is invalid: {err}"))?;
-    url.set_port(Some(port))
-        .map_err(|()| anyhow::anyhow!("database.postgres.port {port} is invalid"))?;
-    url.set_path(name);
-    if let Some(user) = non_empty_str(Some(postgres.user())) {
-        url.set_username(user)
-            .map_err(|()| anyhow::anyhow!("database.postgres.user is invalid"))?;
-    }
-    if let Some(pass) = non_empty_str(Some(postgres.pass())) {
-        url.set_password(Some(pass))
-            .map_err(|()| anyhow::anyhow!("database.postgres.pass is invalid"))?;
-    }
-    if let Some(sslmode) = postgres_sslmode(postgres.ssl()) {
-        url.query_pairs_mut().append_pair("sslmode", sslmode);
-    }
-    Ok(url.to_string())
-}
-
-#[cfg(feature = "postgres-sqlx")]
-fn postgres_config_port(postgres: &config::UpstreamPostgresConfig) -> Result<u16> {
-    let port = postgres.port();
-    if port <= 0 {
-        return Ok(5432);
-    }
-    u16::try_from(port).context("database.postgres.port must be between 1 and 65535")
-}
-
-#[cfg(feature = "postgres-sqlx")]
-fn postgres_sslmode(value: &str) -> Option<&str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" => None,
-        "false" | "disable" => Some("disable"),
-        "true" | "require" => Some("require"),
-        "allow" => Some("allow"),
-        "prefer" => Some("prefer"),
-        "verify-ca" => Some("verify-ca"),
-        "verify-full" => Some("verify-full"),
-        _ => Some(value.trim()),
-    }
+    postgres.connection_url()
 }
 
 fn option_is_empty(value: Option<&String>) -> bool {
-    value.is_none_or(|value| value.trim().is_empty())
+    value.is_none_or(String::is_empty)
 }
 
 fn non_empty_clone(value: Option<&String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty()).cloned()
-}
-
-#[cfg(feature = "postgres-sqlx")]
-fn non_empty_str(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
+    value.filter(|value| !value.is_empty()).cloned()
 }
 
 fn raw_args_skip_config_load<I, S>(args: I) -> bool
@@ -808,7 +1020,8 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         ["serve", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Serve) => {
             Some(UPSTREAM_SERVE_HELP)
         }
-        ["version", "-h" | "--help"] | ["help", "version"] => Some(UPSTREAM_VERSION_HELP),
+        ["version", "-h" | "--help"] => Some(UPSTREAM_VERSION_HELP),
+        ["help", "version"] => Some(UPSTREAM_VERSION_HELP_TOPIC),
         ["version", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::Version) => {
             Some(UPSTREAM_VERSION_HELP)
         }
@@ -824,11 +1037,11 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         ["dumpConfig", tail @ ..] if utility_help_tail(tail, UtilityFlagScope::GlobalConfig) => {
             Some(UPSTREAM_DUMP_CONFIG_HELP)
         }
-        ["mockoidc", "-h" | "--help"] | ["help", "mockoidc"] => Some(UPSTREAM_MOCKOIDC_HELP),
+        ["mockoidc", "-h" | "--help"] => Some(UPSTREAM_MOCKOIDC_HELP),
+        ["help", "mockoidc"] => Some(UPSTREAM_MOCKOIDC_HELP_TOPIC),
         ["mockoidc", tail @ ..] if mockoidc_help_tail(tail) => Some(UPSTREAM_MOCKOIDC_HELP),
-        ["completion", "-h" | "--help"] | ["help", "completion"] | ["completion"] => {
-            Some(UPSTREAM_COMPLETION_HELP)
-        }
+        ["help", "completion"] => Some(UPSTREAM_COMPLETION_HELP_TOPIC),
+        ["completion", "-h" | "--help", ..] | ["completion"] => Some(UPSTREAM_COMPLETION_HELP),
         ["completion", "bash", tail @ ..] if completion_shell_help_tail(tail) => {
             Some(UPSTREAM_COMPLETION_BASH_HELP)
         }
@@ -841,14 +1054,14 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         ["completion", "zsh", tail @ ..] if completion_shell_help_tail(tail) => {
             Some(UPSTREAM_COMPLETION_ZSH_HELP)
         }
-        ["help", "completion", "bash"] => Some(UPSTREAM_COMPLETION_BASH_HELP),
-        ["help", "completion", "fish"] => Some(UPSTREAM_COMPLETION_FISH_HELP),
-        ["help", "completion", "powershell"] => Some(UPSTREAM_COMPLETION_POWERSHELL_HELP),
-        ["help", "completion", "zsh"] => Some(UPSTREAM_COMPLETION_ZSH_HELP),
+        ["help", "completion", "bash"] => Some(UPSTREAM_COMPLETION_BASH_HELP_TOPIC),
+        ["help", "completion", "fish"] => Some(UPSTREAM_COMPLETION_FISH_HELP_TOPIC),
+        ["help", "completion", "powershell"] => Some(UPSTREAM_COMPLETION_POWERSHELL_HELP_TOPIC),
+        ["help", "completion", "zsh"] => Some(UPSTREAM_COMPLETION_ZSH_HELP_TOPIC),
         ["completion", shell, tail @ ..] if completion_unknown_shell_help_tail(shell, tail) => {
             Some(UPSTREAM_COMPLETION_HELP)
         }
-        ["generate" | "gen", "-h" | "--help"]
+        ["generate" | "gen", "-h" | "--help", ..]
         | ["help", "generate" | "gen"]
         | ["generate" | "gen"] => Some(UPSTREAM_GENERATE_HELP),
         ["generate" | "gen", subcommand, tail @ ..]
@@ -860,12 +1073,15 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP)
         }
         ["help", "generate" | "gen", "private-key"] => Some(UPSTREAM_GENERATE_PRIVATE_KEY_HELP),
-        ["debug", "-h" | "--help"] | ["help", "debug"] => Some(UPSTREAM_DEBUG_HELP),
+        ["debug", "-h" | "--help", ..] | ["help", "debug"] => Some(UPSTREAM_DEBUG_HELP),
+        ["debug", subcommand, ..] if unknown_debug_subcommand(subcommand) => {
+            Some(UPSTREAM_DEBUG_HELP)
+        }
         ["debug", "create-node", "-h" | "--help"] | ["help", "debug", "create-node"] => {
             Some(UPSTREAM_DEBUG_CREATE_NODE_HELP)
         }
-        ["auth", "-h" | "--help"] | ["help", "auth"] => Some(UPSTREAM_AUTH_HELP),
-        ["auth", subcommand] if unknown_auth_subcommand(subcommand) => Some(UPSTREAM_AUTH_HELP),
+        ["auth", "-h" | "--help", ..] | ["help", "auth"] => Some(UPSTREAM_AUTH_HELP),
+        ["auth", subcommand, ..] if unknown_auth_subcommand(subcommand) => Some(UPSTREAM_AUTH_HELP),
         ["auth", "register", "-h" | "--help"] | ["help", "auth", "register"] => {
             Some(UPSTREAM_AUTH_REGISTER_HELP)
         }
@@ -875,10 +1091,10 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         ["auth", "reject", "-h" | "--help"] | ["help", "auth", "reject"] => {
             Some(UPSTREAM_AUTH_REJECT_HELP)
         }
-        ["users" | "user", "-h" | "--help"] | ["help", "users" | "user"] => {
+        ["users" | "user", "-h" | "--help", ..] | ["help", "users" | "user"] => {
             Some(UPSTREAM_USERS_HELP)
         }
-        ["users" | "user", subcommand] if unknown_users_subcommand(subcommand) => {
+        ["users" | "user", subcommand, ..] if unknown_users_subcommand(subcommand) => {
             Some(UPSTREAM_USERS_HELP)
         }
         ["users" | "user", "create" | "c" | "new", "-h" | "--help"]
@@ -889,7 +1105,10 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         | ["help", "users" | "user", "rename" | "mv"] => Some(UPSTREAM_USERS_RENAME_HELP),
         ["users" | "user", "destroy" | "delete", "-h" | "--help"]
         | ["help", "users" | "user", "destroy" | "delete"] => Some(UPSTREAM_USERS_DESTROY_HELP),
-        ["nodes" | "node", "-h" | "--help"] | ["help", "nodes" | "node"] => {
+        ["nodes" | "node", "-h" | "--help", ..] | ["help", "nodes" | "node"] => {
+            Some(UPSTREAM_NODES_HELP)
+        }
+        ["nodes" | "node", subcommand, ..] if unknown_nodes_subcommand(subcommand) => {
             Some(UPSTREAM_NODES_HELP)
         }
         ["nodes" | "node", "list" | "ls" | "show", "-h" | "--help"]
@@ -926,10 +1145,16 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
         [
             "preauthkeys" | "preauthkey" | "authkey" | "pre",
             "-h" | "--help",
+            ..,
         ]
         | ["help", "preauthkeys" | "preauthkey" | "authkey" | "pre"] => {
             Some(UPSTREAM_PREAUTHKEYS_HELP)
         }
+        [
+            "preauthkeys" | "preauthkey" | "authkey" | "pre",
+            subcommand,
+            ..,
+        ] if unknown_preauthkeys_subcommand(subcommand) => Some(UPSTREAM_PREAUTHKEYS_HELP),
         [
             "preauthkeys" | "preauthkey" | "authkey" | "pre",
             "create" | "c" | "new",
@@ -970,8 +1195,13 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             "preauthkeys" | "preauthkey" | "authkey" | "pre",
             "delete" | "del" | "rm" | "d",
         ] => Some(UPSTREAM_PREAUTHKEYS_DELETE_HELP),
-        ["apikeys" | "apikey" | "api", "-h" | "--help"]
+        ["apikeys" | "apikey" | "api", "-h" | "--help", ..]
         | ["help", "apikeys" | "apikey" | "api"] => Some(UPSTREAM_APIKEYS_HELP),
+        ["apikeys" | "apikey" | "api", subcommand, ..]
+            if unknown_apikeys_subcommand(subcommand) =>
+        {
+            Some(UPSTREAM_APIKEYS_HELP)
+        }
         [
             "apikeys" | "apikey" | "api",
             "create" | "c" | "new",
@@ -1008,8 +1238,8 @@ fn upstream_known_help(parts: &[&str]) -> Option<&'static str> {
             "apikeys" | "apikey" | "api",
             "delete" | "remove" | "del",
         ] => Some(UPSTREAM_APIKEYS_DELETE_HELP),
-        ["policy", "-h" | "--help"] | ["help", "policy"] => Some(UPSTREAM_POLICY_HELP),
-        ["policy", subcommand] if unknown_policy_subcommand(subcommand) => {
+        ["policy", "-h" | "--help", ..] | ["help", "policy"] => Some(UPSTREAM_POLICY_HELP),
+        ["policy", subcommand, ..] if unknown_policy_subcommand(subcommand) => {
             Some(UPSTREAM_POLICY_HELP)
         }
         ["policy", "get" | "show" | "view" | "fetch", "-h" | "--help"]
@@ -1086,7 +1316,7 @@ fn upstream_help_uses_default_config_warning<S: AsRef<OsStr>>(args: &[S]) -> boo
         return false;
     }
 
-    CliConfig::load_default_with_source().is_ok_and(|loaded| loaded.used_defaults)
+    CliConfig::load_default_admin_with_source().is_ok_and(|loaded| loaded.used_defaults)
 }
 
 fn upstream_exact_help_stderr<S: AsRef<OsStr>>(args: &[S]) -> Option<&'static str> {
@@ -1130,6 +1360,78 @@ fn unknown_policy_subcommand(subcommand: &str) -> bool {
         )
 }
 
+fn unknown_nodes_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-')
+        && !matches!(
+            subcommand,
+            "list"
+                | "ls"
+                | "show"
+                | "list-routes"
+                | "routes"
+                | "lsr"
+                | "get"
+                | "register"
+                | "expire"
+                | "logout"
+                | "exp"
+                | "e"
+                | "rename"
+                | "tag"
+                | "tags"
+                | "t"
+                | "approve-routes"
+                | "delete"
+                | "del"
+                | "backfillips"
+        )
+}
+
+fn unknown_preauthkeys_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-')
+        && !matches!(
+            subcommand,
+            "create"
+                | "c"
+                | "new"
+                | "list"
+                | "ls"
+                | "show"
+                | "expire"
+                | "revoke"
+                | "exp"
+                | "e"
+                | "delete"
+                | "del"
+                | "rm"
+                | "d"
+        )
+}
+
+fn unknown_apikeys_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-')
+        && !matches!(
+            subcommand,
+            "create"
+                | "c"
+                | "new"
+                | "list"
+                | "ls"
+                | "show"
+                | "expire"
+                | "revoke"
+                | "exp"
+                | "e"
+                | "delete"
+                | "remove"
+                | "del"
+        )
+}
+
+fn unknown_debug_subcommand(subcommand: &str) -> bool {
+    !subcommand.starts_with('-') && subcommand != "create-node"
+}
+
 fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     let mut parts = Vec::with_capacity(args.len());
     for arg in args {
@@ -1154,15 +1456,37 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
     }
 
     if let Some(error) = upstream_top_level_unknown_flag(parts.as_slice()) {
-        return Some(format!("{UPSTREAM_TOP_LEVEL_USAGE}\nError: {error}\n"));
+        if let Some(index) = flag_error_index(parts.as_slice(), &error)
+            && matches!(
+                parts.get(index + 1),
+                Some(
+                    &("-c"
+                        | "--config"
+                        | "-o"
+                        | "--output"
+                        | "--server"
+                        | "--token"
+                        | "--address"
+                        | "--api-key"
+                        | "--unix-socket"
+                        | "--log-level")
+                )
+            )
+            && let Some(value) = parts.get(index + 2).filter(|value| !value.starts_with('-'))
+        {
+            return Some(format!(
+                "Error: unknown command \"{value}\" for \"headscale\"\n"
+            ));
+        }
+        let fmt = output_format_before_flag_error(parts.as_slice(), &error);
+        return Some(format!(
+            "{UPSTREAM_TOP_LEVEL_USAGE}\n{}",
+            admin::output::format_error(fmt, &error)
+        ));
     }
 
     if let Some(error) = upstream_unknown_utility_flag(command_parts) {
-        let fmt = if matches!(command_parts, ["mockoidc", ..]) {
-            OutputFormat::Table
-        } else {
-            output_format
-        };
+        let fmt = output_format_before_flag_error(parts.as_slice(), &error);
         return Some(admin::output::format_error(fmt, &error));
     }
 
@@ -1176,6 +1500,45 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
 
     if let Some(error) = upstream_top_level_unknown_command_error(parts.as_slice()) {
         return Some(format!("Error: {error}\n"));
+    }
+
+    if let Some(command) = command_parts.first().copied().filter(|command| {
+        !command.starts_with('-')
+            && !matches!(
+                *command,
+                "serve"
+                    | "mesh-node"
+                    | "identity"
+                    | "users"
+                    | "user"
+                    | "nodes"
+                    | "node"
+                    | "preauthkeys"
+                    | "preauthkey"
+                    | "authkey"
+                    | "pre"
+                    | "auth"
+                    | "apikeys"
+                    | "apikey"
+                    | "api"
+                    | "policy"
+                    | "debug"
+                    | "generate"
+                    | "gen"
+                    | "mockoidc"
+                    | "health"
+                    | "version"
+                    | "completion"
+                    | "configtest"
+                    | "dumpConfig"
+                    | "status"
+                    | "help"
+                    | "server"
+            )
+    }) {
+        return Some(format!(
+            "Error: unknown command \"{command}\" for \"headscale\"\n"
+        ));
     }
 
     if let Some(error) = debug_create_node_namespace_flag_error(parts.as_slice()) {
@@ -1243,6 +1606,27 @@ fn upstream_exact_error<S: AsRef<OsStr>>(args: &[S]) -> Option<String> {
             parts.join(" ")
         )
     })
+}
+
+fn output_format_before_flag_error(parts: &[&str], error: &str) -> OutputFormat {
+    let before = flag_error_index(parts, error).unwrap_or(parts.len());
+    output_format_from_raw_args(&parts[..before])
+}
+
+fn flag_error_index(parts: &[&str], error: &str) -> Option<usize> {
+    let bad_flag = error
+        .strip_prefix("unknown flag: ")
+        .or_else(|| error.strip_prefix("flag needs an argument: "))
+        .or_else(|| {
+            error
+                .starts_with("unknown shorthand flag:")
+                .then(|| error.rsplit_once(" in ").map(|(_, flag)| flag))
+                .flatten()
+        });
+    let bad_flag = bad_flag?;
+    parts
+        .iter()
+        .position(|part| part.split_once('=').map_or(*part, |(flag, _)| flag) == bad_flag)
 }
 
 fn upstream_exact_command_parts<'a>(parts: &'a [&'a str]) -> &'a [&'a str] {
@@ -2341,7 +2725,7 @@ Flags:
 Use "headscale [command] --help" for more information about a command.
 "#;
 
-const UPSTREAM_HELP_HELP: &str = r#"Help provides help for any command in the application.
+const UPSTREAM_HELP_HELP: &str = r"Help provides help for any command in the application.
 Simply type headscale help [path to command] for full details.
 
 Usage:
@@ -2354,7 +2738,7 @@ Global Flags:
   -c, --config string   config file (default is /etc/headscale/config.yaml)
       --force           Disable prompts and forces the execution
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
-"#;
+";
 
 const UPSTREAM_VERSION_HELP: &str = r"The version of headscale.
 
@@ -2365,6 +2749,8 @@ Flags:
   -h, --help            help for version
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
+
+const UPSTREAM_VERSION_HELP_TOPIC: &str = include_str!("../tests/snapshots/help_version.stdout");
 
 const UPSTREAM_SERVE_HELP: &str = r"Launches the headscale server
 
@@ -2433,6 +2819,20 @@ Usage:
 Flags:
   -h, --help   help for mockoidc
 ";
+
+// Cobra's `help <topic>` includes inherited global flags for these utility
+// commands even though `<topic> --help` omits them.
+const UPSTREAM_MOCKOIDC_HELP_TOPIC: &str = include_str!("../tests/snapshots/help_mockoidc.stdout");
+const UPSTREAM_COMPLETION_HELP_TOPIC: &str =
+    include_str!("../tests/snapshots/help_completion.stdout");
+const UPSTREAM_COMPLETION_BASH_HELP_TOPIC: &str =
+    include_str!("../tests/snapshots/help_completion_bash.stdout");
+const UPSTREAM_COMPLETION_FISH_HELP_TOPIC: &str =
+    include_str!("../tests/snapshots/help_completion_fish.stdout");
+const UPSTREAM_COMPLETION_POWERSHELL_HELP_TOPIC: &str =
+    include_str!("../tests/snapshots/help_completion_powershell.stdout");
+const UPSTREAM_COMPLETION_ZSH_HELP_TOPIC: &str =
+    include_str!("../tests/snapshots/help_completion_zsh.stdout");
 
 const UPSTREAM_COMPLETION_HELP: &str = r#"Generate the autocompletion script for headscale for the specified shell.
 See each sub-command's help for details on how to use the generated script.
@@ -3272,18 +3672,78 @@ Global Flags:
   -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
 ";
 
-fn configtest(config: Option<&CliConfig>) -> Result<()> {
+async fn configtest(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
-    config
-        .validate_for_configtest()
-        .context("configuration error: loading configuration")?;
-    print_config_warnings(config);
+    server::initialize_configtest_storage(config)
+        .await
+        .context("configuration error: creating new headscale")?;
     Ok(())
 }
 
+fn print_config_deprecation_warnings(config: &CliConfig) {
+    // Go emits deprecations during server validation, before logConfig sets
+    // the configured level. Only root's literal machine-output scan has
+    // changed that early global threshold at this point.
+    let warnings = config.upstream_deprecation_warnings();
+    if !warnings.is_empty() && !has_machine_output_argument() {
+        let message = warnings
+            .iter()
+            .map(|warning| format!("WARN: {warning}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        logging::emit(
+            config
+                .logging
+                .as_ref()
+                .is_some_and(|config| config.format == "json"),
+            logging::LogLevel::Warn,
+            &format!("\n{message}\n"),
+        );
+    }
+}
+
+fn has_machine_output_argument() -> bool {
+    std::env::args_os().any(|arg| matches!(arg.to_str(), Some("json" | "json-line" | "yaml")))
+}
+
+fn print_invalid_log_format(config: &CliConfig) {
+    let Some(format) = config
+        .logging
+        .as_ref()
+        .map(|logging| logging.format.as_str())
+    else {
+        return;
+    };
+    if matches!(format, "" | "json" | "text") || has_machine_output_argument() {
+        return;
+    }
+    // Go reports this before logConfig installs the configured threshold;
+    // even log.level=disabled must not suppress this initial error. Invalid
+    // formats retain the initial text writer. Keep the actual Rust callsite.
+    logging::emit_with_fields(
+        false,
+        logging::LogLevel::Error,
+        &format!("Could not parse log format: {format}. Valid choices are 'json' or 'text'"),
+        &[
+            ("caller", concat!(file!(), ":", line!())),
+            ("func", "GetLogConfig"),
+        ],
+    );
+}
+
 fn print_config_warnings(config: &CliConfig) {
+    if has_machine_output_argument() {
+        return;
+    }
     for warning in config.upstream_nonfatal_config_warnings() {
-        eprintln!("{warning}");
+        logging::emit(
+            config
+                .logging
+                .as_ref()
+                .is_some_and(|logging| logging.format == "json"),
+            logging::LogLevel::Warn,
+            warning,
+        );
     }
 }
 
@@ -3364,21 +3824,23 @@ fn print_private_key(fmt: headscale_cli::admin::OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn dump_config(config: Option<&CliConfig>, used_default_config: bool) -> Result<()> {
+fn dump_config(config: Option<&CliConfig>) -> Result<()> {
     let config = config.context("configuration was not loaded")?;
-    if used_default_config {
-        print_no_config_default_warning();
-    }
     dump_config_to(config, &PathBuf::from("/etc/headscale/config.dump.yaml"))
 }
 
 fn print_no_config_default_warning() {
-    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
-    eprintln!("{timestamp} WRN no config file found, using defaults");
+    // LoadConfig emits this before applying log.format or disabling logs for
+    // machine output, so it always uses the initial text console writer.
+    logging::emit(
+        false,
+        logging::LogLevel::Warn,
+        "no config file found, using defaults",
+    );
 }
 
 fn dump_config_to(config: &CliConfig, path: &Path) -> Result<()> {
-    let contents = serde_yaml::to_string(config)?;
+    let contents = headscale_cli::yaml::to_string(config)?;
     std::fs::write(path, contents)
         .map_err(|err| anyhow::anyhow!("{}", go_style_open_error("dumping config", path, &err)))?;
     Ok(())
@@ -3422,7 +3884,7 @@ fn go_style_json_string<T: serde::Serialize>(value: &T) -> Result<String> {
 }
 
 fn go_style_yaml_string<T: serde::Serialize>(value: &T) -> Result<String> {
-    let yaml = serde_yaml::to_string(value)?;
+    let yaml = headscale_cli::yaml::to_string(value)?;
     let mut formatted = String::with_capacity(yaml.len());
     for line in yaml.lines() {
         let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();
@@ -3834,6 +4296,16 @@ mod tests {
     }
 
     #[test]
+    fn configured_log_level_uses_upstream_invalid_level_fallback() {
+        use tracing_subscriber::filter::LevelFilter;
+        assert_eq!(parse_go_config_log_level("error"), LevelFilter::ERROR);
+        assert_eq!(parse_go_config_log_level("debug"), LevelFilter::DEBUG);
+        assert_eq!(parse_go_config_log_level("verbose"), LevelFilter::DEBUG);
+        assert_eq!(parse_go_config_log_level("disabled"), LevelFilter::OFF);
+        assert_eq!(parse_go_config_log_level("-1"), LevelFilter::TRACE);
+    }
+
+    #[test]
     fn standalone_cli_accepts_upstream_completion_commands() {
         let parsed = Cli::try_parse_from(["headscale", "completion", "bash"]).unwrap();
         assert!(matches!(
@@ -3914,7 +4386,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "version", "bad"]),
-            Some(UPSTREAM_VERSION_HELP)
+            Some(UPSTREAM_VERSION_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["health", "--config", "missing.yaml", "--help"]),
@@ -4089,7 +4561,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "mockoidc"]),
-            Some(UPSTREAM_MOCKOIDC_HELP)
+            Some(UPSTREAM_MOCKOIDC_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["gen", "--help"]),
@@ -4116,6 +4588,10 @@ mod tests {
             Some(UPSTREAM_GENERATE_HELP)
         );
         assert_eq!(
+            upstream_exact_help(&["help", "completion"]),
+            Some(UPSTREAM_COMPLETION_HELP_TOPIC)
+        );
+        assert_eq!(
             upstream_exact_help(&["completion", "bash", "--help"]),
             Some(UPSTREAM_COMPLETION_BASH_HELP)
         );
@@ -4129,7 +4605,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "completion", "bash"]),
-            Some(UPSTREAM_COMPLETION_BASH_HELP)
+            Some(UPSTREAM_COMPLETION_BASH_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["completion", "fish", "--help"]),
@@ -4137,7 +4613,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "completion", "fish"]),
-            Some(UPSTREAM_COMPLETION_FISH_HELP)
+            Some(UPSTREAM_COMPLETION_FISH_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["completion", "powershell", "--help"]),
@@ -4145,7 +4621,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "completion", "powershell"]),
-            Some(UPSTREAM_COMPLETION_POWERSHELL_HELP)
+            Some(UPSTREAM_COMPLETION_POWERSHELL_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["completion", "zsh", "--help"]),
@@ -4153,7 +4629,7 @@ mod tests {
         );
         assert_eq!(
             upstream_exact_help(&["help", "completion", "zsh"]),
-            Some(UPSTREAM_COMPLETION_ZSH_HELP)
+            Some(UPSTREAM_COMPLETION_ZSH_HELP_TOPIC)
         );
         assert_eq!(
             upstream_exact_help(&["help", "auth", "register"]),
@@ -4306,10 +4782,10 @@ mod tests {
         assert!(!version.human().contains("headscale-rs version"));
     }
 
-    #[test]
-    fn configtest_requires_loaded_config() {
-        assert!(configtest(None).is_err());
-        assert!(configtest(Some(&CliConfig::default())).is_err());
+    #[tokio::test]
+    async fn configtest_requires_loaded_config() {
+        assert!(configtest(None).await.is_err());
+        assert!(configtest(Some(&CliConfig::default())).await.is_err());
 
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
@@ -4319,16 +4795,22 @@ mod tests {
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
 database:
   type: sqlite
+  sqlite:
+    path: "db.sqlite"
 "#,
         )
         .unwrap();
         let config = CliConfig::load(&config_path).unwrap();
-        assert!(configtest(Some(&config)).is_ok());
+        assert!(configtest(Some(&config)).await.is_ok());
+        assert!(dir.path().join("noise_private.key").is_file());
+        assert!(dir.path().join("db.sqlite").is_file());
     }
 
     #[test]
@@ -4375,6 +4857,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -4383,7 +4866,7 @@ database:
                 address: Some("headscale.example:50443".into()),
                 api_key: Some("hskey-api-abcdefghijkl-secret".into()),
                 insecure: Some(true),
-                timeout: Some(3),
+                timeout: Some(3_000_000_000),
             }),
             unix_socket: Some(PathBuf::from("/run/headscale/admin.sock")),
             ..CliConfig::default()
@@ -4397,7 +4880,8 @@ database:
             Some("hskey-api-abcdefghijkl-secret")
         );
         assert!(merged.insecure);
-        assert_eq!(merged.timeout_secs, Some(3));
+        assert_eq!(merged.timeout_secs, None);
+        assert_eq!(merged.timeout_nanos, Some(3_000_000_000));
         assert!(merged.wrap_grpc_connect_error);
         assert_eq!(
             merged.unix_socket.as_deref(),
@@ -4424,6 +4908,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: Some(11),
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -4432,7 +4917,7 @@ database:
                 address: Some("config.example:50443".into()),
                 api_key: Some("config-key".into()),
                 insecure: Some(false),
-                timeout: Some(3),
+                timeout: Some(3_000_000_000),
             }),
             unix_socket: Some(PathBuf::from("/tmp/config.sock")),
             ..CliConfig::default()
@@ -4466,6 +4951,7 @@ database:
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -4512,7 +4998,7 @@ database:
         assert_eq!(
             database,
             DirectPolicyDatabase::Postgres {
-                url: "postgres://hs:secret@db.example:15432/headscale?sslmode=require".into()
+                url: "postgres:///?dbname=headscale&host=db.example&password=secret&port=15432&sslmode=require&user=hs".into()
             }
         );
         #[cfg(not(feature = "postgres-sqlx"))]

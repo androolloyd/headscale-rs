@@ -1,0 +1,42 @@
+Hyper 1.12.0 rebase
+The previously retained Go-derived native client/server adaptations are
+rebased onto the exact selected Hyper 1.12.0 source. Original MIT and retained
+Go BSD-3-Clause terms are unchanged. UPSTREAM.md and LOCAL.patch identify the
+current upstream archive, source scope, conflict resolutions and qualification
+boundaries; older notice sections describe the adaptation's origin.
+
+Native HTTP/2 client idle lifecycle
+Copyright 2009, 2011, 2014 The Go Authors. All rights reserved.
+The default-off, per-builder-selected go-client-idle source adaptation follows
+selected Go1.26.9 net/http/h2_bundle.go stream reservation/admission/idle-close
+phases. Original Hyper MIT terms remain in LICENSE; adapted Go BSD terms are
+in LICENSE-GO. See UPSTREAM.md for source pins, scope and unvalidated boundaries.
+
+Native client capacity and lifecycle observer follow-up
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Additive hidden native adapters follow selected Go1.26.9 net/http/h2_bundle.go
+capacity reservation, unused-connection failure and reset-PING entropy phases.
+Go BSD terms remain in LICENSE-GO; exact source scope is in UPSTREAM.md.
+
+Native delayed admission and caller-sized response bodies
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go supplies native pre-ID request admission,
+independent queued cancellation, caller-sized response reads and response-body
+close/body-kind phases. Hidden native adapters forward those phases to h2.
+Original Hyper MIT and Go BSD terms remain intact; scope is in UPSTREAM.md.
+
+Native early response, request upload and callback ownership
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go supplies status-above-299 body stopping,
+NoBody/empty-request completion, header-before-body reads, reset classification
+and cancellation/cleanup ownership. Private callback delivery acknowledgement
+adapts the request lifecycle to Rust tasks. Original Hyper MIT and Go BSD terms
+remain intact. UPSTREAM.md records exact source pins and unqualified boundaries.
+
+Native HTTP/1 response EOF and early-close ownership
+Copyright 2009 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/transport.go bodyEOFSignal/readLoop/wroteRequest
+and net/http/transfer.go body.readLocked supply caller-observed EOF, early-close
+connection retirement, read-loop acknowledgement and the bounded write wait.
+Original Hyper MIT and Go BSD terms in LICENSE-GO remain intact.
+UPSTREAM.md records the selected native scope and unqualified runtime boundaries.

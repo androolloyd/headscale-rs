@@ -1,1 +1,1 @@
-error: 'not found: no pending auth session for auth_id hskey-authreq-dddddddddddddddddddddddd'
+error: 'approving auth request: rpc error: code = NotFound desc = no pending auth session for auth_id hskey-authreq-dddddddddddddddddddddddd'

@@ -1,1 +1,1 @@
-Error: authentication failed: invalid token
+Error: checking health: rpc error: code = Internal desc = validating token

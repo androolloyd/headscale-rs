@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -26,25 +27,27 @@ import (
 func generateMapperDNSConfig(*types.Config, types.NodeView, tailcfg.NodeCapMap) *tailcfg.DNSConfig
 
 type scenario struct {
-	Name             string            `json:"name"`
-	Policy           json.RawMessage   `json:"policy"`
-	Users            []scenarioUser    `json:"users,omitempty"`
-	Nodes            []scenarioNode    `json:"nodes,omitempty"`
-	FilterNodeChecks []filterNodeCheck `json:"filter_node_checks,omitempty"`
-	PeerMapChecks    []peerMapCheck    `json:"peer_map_checks,omitempty"`
-	RouteChecks      []routeCheck      `json:"route_checks,omitempty"`
-	ViaRouteChecks   []viaRouteCheck   `json:"via_route_checks,omitempty"`
-	TagChecks        []tagCheck        `json:"tag_checks,omitempty"`
-	NodeAttrChecks   []nodeAttrCheck   `json:"node_attr_checks,omitempty"`
-	SSHChecks        []sshCheck        `json:"ssh_checks,omitempty"`
-	ExpectPolicyErr  string            `json:"expect_policy_error,omitempty"`
-	Wire             *wireScenario     `json:"wire,omitempty"`
+	Name              string            `json:"name"`
+	Policy            json.RawMessage   `json:"policy"`
+	Users             []scenarioUser    `json:"users,omitempty"`
+	Nodes             []scenarioNode    `json:"nodes,omitempty"`
+	FilterNodeChecks  []filterNodeCheck `json:"filter_node_checks,omitempty"`
+	PeerMapChecks     []peerMapCheck    `json:"peer_map_checks,omitempty"`
+	RouteChecks       []routeCheck      `json:"route_checks,omitempty"`
+	ViaRouteChecks    []viaRouteCheck   `json:"via_route_checks,omitempty"`
+	TagChecks         []tagCheck        `json:"tag_checks,omitempty"`
+	NodeAttrChecks    []nodeAttrCheck   `json:"node_attr_checks,omitempty"`
+	SSHChecks         []sshCheck        `json:"ssh_checks,omitempty"`
+	ExpectPolicyErr   string            `json:"expect_policy_error,omitempty"`
+	AuditTestVerdicts bool              `json:"audit_test_verdicts,omitempty"`
+	Wire              *wireScenario     `json:"wire,omitempty"`
 }
 
 type scenarioUser struct {
-	ID    uint   `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email,omitempty"`
+	ID                 uint    `json:"id"`
+	Name               string  `json:"name"`
+	Email              string  `json:"email,omitempty"`
+	ProviderIdentifier *string `json:"provider_identifier,omitempty"`
 }
 
 type scenarioNode struct {
@@ -60,20 +63,22 @@ type scenarioNode struct {
 }
 
 type scenarioOutput struct {
-	Engine         string             `json:"engine"`
-	Name           string             `json:"name"`
-	Filter         []filterRuleOut    `json:"filter"`
-	PolicyError    string             `json:"policy_error,omitempty"`
-	FilterForNodes []filterForNodeOut `json:"filter_for_nodes,omitempty"`
-	PeerMaps       []peerMapOut       `json:"peer_maps,omitempty"`
-	RouteApprovals []routeApprovalOut `json:"route_approvals,omitempty"`
-	ViaRoutes      []viaRouteOut      `json:"via_routes,omitempty"`
-	TagChecks      []tagCheckOut      `json:"tag_checks,omitempty"`
-	NodeAttrs      []nodeAttrOut      `json:"node_attrs,omitempty"`
-	SSHPolicies    []sshPolicyOut     `json:"ssh_policies,omitempty"`
-	PolicyTests    []policyTestOut    `json:"policy_tests,omitempty"`
-	SSHTests       []sshPolicyTestOut `json:"ssh_tests,omitempty"`
-	Wire           *wireOutput        `json:"wire,omitempty"`
+	Engine            string             `json:"engine"`
+	Name              string             `json:"name"`
+	Filter            []filterRuleOut    `json:"filter"`
+	PolicyError       string             `json:"policy_error,omitempty"`
+	FilterForNodes    []filterForNodeOut `json:"filter_for_nodes,omitempty"`
+	PeerMaps          []peerMapOut       `json:"peer_maps,omitempty"`
+	RouteApprovals    []routeApprovalOut `json:"route_approvals,omitempty"`
+	ViaRoutes         []viaRouteOut      `json:"via_routes,omitempty"`
+	TagChecks         []tagCheckOut      `json:"tag_checks,omitempty"`
+	NodeAttrs         []nodeAttrOut      `json:"node_attrs,omitempty"`
+	SSHPolicies       []sshPolicyOut     `json:"ssh_policies,omitempty"`
+	PolicyTests       []policyTestOut    `json:"policy_tests,omitempty"`
+	SSHTests          []sshPolicyTestOut `json:"ssh_tests,omitempty"`
+	PolicyTestsPassed *bool              `json:"policy_tests_passed,omitempty"`
+	SSHTestsPassed    *bool              `json:"ssh_tests_passed,omitempty"`
+	Wire              *wireOutput        `json:"wire,omitempty"`
 }
 
 type filterNodeCheck struct {
@@ -530,6 +535,24 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err := json.Unmarshal(sc.Policy, &parsedPolicy); err != nil {
 		return scenarioOutput{}, fmt.Errorf("parse policy for tests in %s: %w", sc.Name, err)
 	}
+	var policyTestsPassed, sshTestsPassed *bool
+	if sc.AuditTestVerdicts {
+		tester, ok := pm.(interface {
+			RunTests() error
+			RunSSHTests() error
+		})
+		if !ok {
+			return scenarioOutput{}, fmt.Errorf("policy manager lacks test verdict methods")
+		}
+		if len(parsedPolicy.Tests) > 0 {
+			passed := tester.RunTests() == nil
+			policyTestsPassed = &passed
+		}
+		if len(parsedPolicy.SSHTests) > 0 {
+			passed := tester.RunSSHTests() == nil
+			sshTestsPassed = &passed
+		}
+	}
 	rules, _ := pm.Filter()
 	filterForNodes, err := runFilterNodeChecks(sc.FilterNodeChecks, pm, nodes)
 	if err != nil {
@@ -564,19 +587,21 @@ func runScenario(path string) (scenarioOutput, error) {
 		return scenarioOutput{}, err
 	}
 	return scenarioOutput{
-		Engine:         "headscale-go",
-		Name:           sc.Name,
-		Filter:         normalizeFilterRules(rules),
-		FilterForNodes: filterForNodes,
-		PeerMaps:       peerMaps,
-		RouteApprovals: routeApprovals,
-		ViaRoutes:      viaRoutes,
-		TagChecks:      tagChecks,
-		NodeAttrs:      nodeAttrs,
-		SSHPolicies:    sshPolicies,
-		PolicyTests:    normalizePolicyTests(parsedPolicy.Tests),
-		SSHTests:       normalizeSSHPolicyTests(parsedPolicy.SSHTests),
-		Wire:           wire,
+		Engine:            "headscale-go",
+		Name:              sc.Name,
+		Filter:            normalizeFilterRules(rules),
+		FilterForNodes:    filterForNodes,
+		PeerMaps:          peerMaps,
+		RouteApprovals:    routeApprovals,
+		ViaRoutes:         viaRoutes,
+		TagChecks:         tagChecks,
+		NodeAttrs:         nodeAttrs,
+		SSHPolicies:       sshPolicies,
+		PolicyTests:       normalizePolicyTests(parsedPolicy.Tests),
+		SSHTests:          normalizeSSHPolicyTests(parsedPolicy.SSHTests),
+		PolicyTestsPassed: policyTestsPassed,
+		SSHTestsPassed:    sshTestsPassed,
+		Wire:              wire,
 	}, nil
 }
 
@@ -590,6 +615,9 @@ func buildUsers(in []scenarioUser) (types.Users, map[uint]*types.User) {
 			},
 			Name:  u.Name,
 			Email: u.Email,
+		}
+		if u.ProviderIdentifier != nil {
+			user.ProviderIdentifier = sql.NullString{String: *u.ProviderIdentifier, Valid: true}
 		}
 		users = append(users, user)
 		byID[u.ID] = &users[len(users)-1]

@@ -1,1 +1,1 @@
-Error: invalid duration unit 'e'; expected one of s/m/h/d
+Error: parsing duration: not a valid duration string: "nope"

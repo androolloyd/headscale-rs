@@ -1,0 +1,10 @@
+Native HTTP routing and request diagnostics
+
+Copyright (c) 2015-present Peter Kieltyka (https://github.com/pkieltyka), Google Inc.
+
+Selected private native method admission and empty-405 Allow behavior follow
+github.com/go-chi/chi/v5 v5.4.0 mux.go/tree.go. The request diagnostic lifecycle
+follows selected middleware/logger.go and middleware/wrap_writer.go semantics.
+These are finite source adaptations, not a replacement chi implementation.
+Original MIT terms are retained in LICENSE-GO-CHI. UPSTREAM.md records source
+pins and remaining write-accounting, parser and runtime qualifications.

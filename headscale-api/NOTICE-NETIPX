@@ -1,0 +1,8 @@
+Go4 netipx IP-set behavior
+
+Copyright (c) 2020 The Inet.af AUTHORS. All rights reserved.
+
+src/policy/resolution.rs follows the partial-set/error contract of IPSetBuilder,
+IPv6 zone stripping on insertion and zone rejection on membership queries from
+go4.org/netipx v0.0.0-20231129151722-fdeea329fbba ipset.go and netipx.go, as used
+by pinned Headscale v0.29.5. The original BSD terms are in LICENSE-NETIPX.

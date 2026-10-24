@@ -1,0 +1,8 @@
+The explicit strict-any and legacy JSON value modes in src/go_policy_value.rs
+follow the duplicate-name, Unicode replacement and binary64-number rules in
+github.com/go-jose/go-jose/v4 v4.1.4 json/decode.go.
+
+Copyright 2010 The Go Authors. All rights reserved.
+
+The JSON fork's BSD redistribution terms are retained in LICENSE-GO-JOSE-JSON.
+Source hashes and implementation limits are recorded in UPSTREAM.md.

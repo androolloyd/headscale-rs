@@ -6,58 +6,22 @@
 //! parse identical bytes through the same state machine. This file keeps
 //! the existing `headscale_api::policy::{parse_hujson_policy,
 //! PolicyParseError}` symbols stable for admin callers and the
-//! `headscale-cli` admin client, while preserving a few public
-//! headscale-go compatibility shims that only affect admin policy input.
+//! `headscale-cli` admin client, while preserving the public error-message
+//! compatibility wrappers. Input bytes reach the shared parser unchanged.
 
 pub use headscale_api_acl::PolicyParseError;
 
 /// Parse an upstream-shaped HuJSON policy.
 pub fn parse_hujson_policy(raw: &str) -> Result<headscale_api_acl::AclDoc, PolicyParseError> {
-    let normalized = normalize_ssh_action_fields(raw);
-    let input = normalized.as_deref().unwrap_or(raw);
-    headscale_api_acl::parse_hujson_policy(input).map_err(normalize_policy_error)
+    headscale_api_acl::parse_hujson_policy(raw).map_err(normalize_policy_error)
 }
 
-fn normalize_ssh_action_fields(raw: &str) -> Option<String> {
-    let stripped = headscale_api_acl::strip_hujson(raw);
-    let mut value = serde_json::from_str::<serde_json::Value>(&stripped).ok()?;
-    let object = value.as_object_mut()?;
-    let ssh_key = object
-        .keys()
-        .find(|key| key.eq_ignore_ascii_case("ssh"))?
-        .clone();
-    let ssh_rules = object.get_mut(&ssh_key)?.as_array_mut()?;
-
-    let mut changed = false;
-    for rule in ssh_rules {
-        let Some(rule) = rule.as_object_mut() else {
-            continue;
-        };
-        let action_key = rule
-            .keys()
-            .find(|key| key.eq_ignore_ascii_case("action"))
-            .cloned();
-        if let Some(key) = action_key {
-            let Some(action) = rule.get(&key).and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let trimmed = action.trim().to_string();
-            if trimmed != action {
-                rule.insert(key, serde_json::Value::String(trimmed));
-                changed = true;
-            }
-        } else {
-            rule.insert(
-                "action".to_string(),
-                serde_json::Value::String(String::new()),
-            );
-            changed = true;
-        }
-    }
-
-    changed
-        .then(|| serde_json::to_string(&value).ok())
-        .flatten()
+/// Parse original byte source without replacing invalid UTF-8. The returned
+/// String is only for compilation/source-shape inspection, never round trips.
+pub fn parse_hujson_policy_bytes(
+    raw: &[u8],
+) -> Result<(headscale_api_acl::AclDoc, String), PolicyParseError> {
+    headscale_api_acl::parse_hujson_policy_bytes(raw).map_err(normalize_policy_error)
 }
 
 fn normalize_policy_error(err: PolicyParseError) -> PolicyParseError {
@@ -161,7 +125,7 @@ mod tests {
                 "action must be specified",
             ),
             (
-                "blank",
+                "escaped_whitespace",
                 r#"{
                   "ssh": [{
                     "action": " \t\n ",
@@ -170,7 +134,7 @@ mod tests {
                     "users": ["root"]
                   }]
                 }"#,
-                "action must be specified",
+                r#""\\t\\n" is not a valid action"#,
             ),
             (
                 "invalid",

@@ -1469,6 +1469,85 @@
   },
   {
     "engine": "headscale",
+    "name": "policy-v0294-metadata-fields",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+          {
+            "IP": "100.64.0.2",
+            "Ports": {
+              "First": 80,
+              "Last": 80
+            }
+          }
+        ],
+        "IPProto": [
+          6
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.2/32"
+            ],
+            "CapMap": {
+              "example.com/cap/web": [
+                {
+                  "#note": "preserved capability payload",
+                  "domain": [
+                    "example.com"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "server-attrs",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-ssh",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "policy-v2-app-cap-grants",
     "filter": [
       {
@@ -6180,6 +6259,165 @@
         ],
         "use_primary": [
 
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "v0295-unknown-group-nodeattrs",
+    "filter": [
+      {
+        "SrcIPs": [
+          "*"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "node_attrs": [
+      {
+        "name": "known-member-retains-nodeattr",
+        "attrs": [
+          "randomize-client-port"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "v0295-unknown-group-ssh-app",
+    "filter": [
+      {
+        "SrcIPs": [
+          "100.64.0.1"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.2/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive": [
+                {
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "SrcIPs": [
+          "100.64.0.2"
+        ],
+        "DstPorts": [
+
+        ],
+        "CapGrant": [
+          {
+            "Dsts": [
+              "100.64.0.1/32"
+            ],
+            "CapMap": {
+              "tailscale.com/cap/drive-sharer": null
+            }
+          }
+        ]
+      }
+    ],
+    "filter_for_nodes": [
+      {
+        "name": "alice-app-grant",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.2"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.1/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive-sharer": null
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "server-app-grant",
+        "rules": [
+          {
+            "SrcIPs": [
+              "100.64.0.1"
+            ],
+            "DstPorts": [
+
+            ],
+            "CapGrant": [
+              {
+                "Dsts": [
+                  "100.64.0.2/32"
+                ],
+                "CapMap": {
+                  "tailscale.com/cap/drive": [
+                    {
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "server-check-period",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": false,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "hold_and_delegate": "https://control.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
+              "allow_agent_forwarding": false,
+              "allow_local_port_forwarding": false,
+              "allow_remote_port_forwarding": false
+            }
+          }
+        ]
+      }
+    ],
+    "ssh_tests": [
+      {
+        "src": "alice@example.com",
+        "dst": [
+          "tag:server"
+        ],
+        "check": [
+          "root"
         ]
       }
     ]

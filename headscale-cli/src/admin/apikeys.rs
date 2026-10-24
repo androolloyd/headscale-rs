@@ -11,9 +11,15 @@ use serde::{Deserialize, Serialize};
 
 use super::AdminError;
 use super::client::AdminClient;
-use super::duration::parse_duration_secs;
+use super::duration::{expiration_from_flag, parse_duration_secs};
 use super::grpc_client::GrpcAdminClient;
-use super::output::{OutputFormat, print_structured, print_table};
+use super::output::{OutputFormat, print_structured, print_table, print_upstream_table};
+use super::proto_output::{impl_go_yaml, print_proto_list};
+
+impl_go_yaml!(ApiKeyOutput {
+    id => "id", prefix => "prefix", expiration => "expiration", created_at => "createdat", last_seen => "lastseen",
+});
+impl_go_yaml!(TimestampOutput { seconds => "seconds", nanos => "nanos" });
 
 #[derive(Debug, Serialize)]
 struct EmptyResponse {}
@@ -59,7 +65,7 @@ pub async fn create_grpc(
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let api_key = client
-        .create_api_key(Some(expiration_unix(expiration)?))
+        .create_api_key_precise(Some(expiration_from_flag(expiration)?))
         .await?;
     if fmt.is_structured() {
         print_structured(fmt, &api_key)?;
@@ -87,7 +93,7 @@ pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Resul
         .map(ApiKeyOutput::from)
         .collect();
     if fmt.is_structured() {
-        print_structured(fmt, &keys)?;
+        print_proto_list(fmt, &keys)?;
     } else {
         render_grpc_keys(&keys);
     }
@@ -148,6 +154,9 @@ fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
 }
 
 fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<'_>, AdminError> {
+    // Cobra returns zero values regardless of whether the flag was present.
+    let prefix = prefix.filter(|value| !value.is_empty());
+    let id = id.filter(|value| *value != 0);
     match (prefix, id) {
         (None, None) => Err(AdminError::Usage(
             "either --id or --prefix must be provided: missing parameters".into(),
@@ -157,10 +166,6 @@ fn identify(prefix: Option<&str>, id: Option<u64>) -> Result<ApiKeyIdentifyBody<
         )),
         (prefix, id) => Ok(ApiKeyIdentifyBody { prefix, id }),
     }
-}
-
-pub(super) fn validate_selector(prefix: Option<&str>, id: Option<u64>) -> Result<(), AdminError> {
-    identify(prefix, id).map(|_| ())
 }
 
 fn expiration_unix(expiration: &str) -> Result<i64, AdminError> {
@@ -193,7 +198,7 @@ fn render_keys(keys: &[ApiKeyAdminKey]) {
 
 fn render_grpc_keys(keys: &[ApiKeyOutput]) {
     if keys.is_empty() {
-        print_table(&["ID", "Prefix", "Expiration", "Created"], &[]);
+        print_upstream_table(&["ID", "Prefix", "Expiration", "Created"], &[]);
         return;
     }
     let rows: Vec<Vec<String>> = keys
@@ -207,7 +212,7 @@ fn render_grpc_keys(keys: &[ApiKeyOutput]) {
             ]
         })
         .collect();
-    print_table(&["ID", "Prefix", "Expiration", "Created"], &rows);
+    print_upstream_table(&["ID", "Prefix", "Expiration", "Created"], &rows);
 }
 
 fn format_optional_unix(v: Option<i64>) -> String {

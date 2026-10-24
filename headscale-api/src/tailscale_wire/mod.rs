@@ -17,6 +17,9 @@
 //! - **`POST /ts2021`** ([`noise`]) — `Upgrade:
 //!   tailscale-control-protocol` handler. Drives the Noise IK responder
 //!   on the hijacked socket + spins up h2 inside the Noise transport.
+//! - **`GET /ts2021`** ([`noise`]) — browser/WASM WebSocket upgrade
+//!   with the deferred Noise initiation in the query string and encrypted
+//!   h2 over binary WebSocket messages.
 //! - **Noise-inner `POST /machine/{node_key}/register`** ([`register`]) —
 //!   decodes a JSON `RegisterRequest`, redeems the presented authkey via
 //!   the injected [`PreauthRedeemer`], allocates a tailnet IP via the
@@ -34,7 +37,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     mpsc as std_mpsc,
 };
 use std::thread;
@@ -54,13 +57,8 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, oneshot, watch};
 
-use self::routes::{
-    DebugRoutes, PrimaryRouteState, active_approved_routes, active_primary_routes,
-    auto_approved_routes_for_node,
-};
-use self::wire::{
-    auto_given_name_base, is_auto_derived_given_name, stable_id_from_key, valid_given_name_label,
-};
+use self::routes::{DebugRoutes, PrimaryRouteState, active_approved_routes, active_primary_routes};
+use self::wire::{auto_given_name_base, stable_id_from_key, valid_given_name_label};
 
 /// Headscale-go default: pending interactive registrations are valid
 /// for 15 minutes before the registration cache can evict them.
@@ -90,33 +88,104 @@ pub mod acme;
 pub mod basic_handlers;
 pub mod be_transport;
 pub mod controlbase;
+mod debug_filters;
+mod debug_float;
+mod debug_json;
+mod debug_nodes;
+mod debug_schema;
 #[cfg(feature = "full")]
 pub mod derp;
 pub mod derp_config;
+mod go_time;
+pub(crate) mod hostinfo;
+mod http_shutdown;
 pub mod key_handler;
 pub mod knock;
+mod machine_snapshot;
 pub mod map;
+mod map_json;
+#[doc(hidden)]
+pub mod native_derp;
+mod native_methods;
+mod native_shutdown;
+pub(super) mod request_log;
+mod snapshot_map;
+pub(crate) use machine_snapshot::MachineSnapshot;
+use snapshot_map::SnapshotMap;
 pub mod noise;
+mod query;
 pub mod raw_tls;
 pub mod register;
+mod register_json;
+mod request_json;
 pub mod routes;
 pub mod serve;
 pub mod ssh;
+mod ssh_url;
 pub mod tls;
+mod web_registration;
 pub mod wire;
+mod wire_ids;
 
 pub use basic_handlers::DebugConfigInfo as RuntimeConfigSnapshot;
 pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
+pub use web_registration::{CompletedWebRegistration, WebRegistrationError, WebRegistrationUser};
 pub use wire::{
     DerpMap, DerpRegion, DerpRegionNode, MachineRecord, MapRequest, MapResponse, NetInfo,
     PingRequest, RegisterRequest, RegisterResponse,
 };
 
+/// Once a durable mutation begins, finish its database/live-state publication
+/// even if the requesting HTTP/2 stream or callback disconnects. The future
+/// owns its mutation guard; dropping the caller's join handle does not abort
+/// the worker. Runtime shutdown and process failure remain separate concerns.
+pub(crate) async fn complete_state_mutation<F, T>(mutation: F) -> Result<T, tokio::task::JoinError>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::spawn(mutation).await
+}
+
 // Re-export the lifecycle helper so downstream crates can spawn the GC
 // sweep without reaching into the module path.
 pub use self::spawn_ephemeral_gc as ephemeral_gc_task;
 pub use self::spawn_node_expiry_waker as node_expiry_waker_task;
+
+/// Distinguish rejected input from policy resolution after a live mutation.
+/// A policy error does not roll back the already published NodeStore write.
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryMutationError {
+    #[error("{0}")]
+    Invalid(std::borrow::Cow<'static, str>),
+    #[error("{0}")]
+    Policy(String),
+}
+
+impl From<&'static str> for RegistryMutationError {
+    fn from(message: &'static str) -> Self {
+        Self::Invalid(message.into())
+    }
+}
+
+impl From<String> for RegistryMutationError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message.into())
+    }
+}
+
+impl RegistryMutationError {
+    fn legacy_message(self) -> &'static str {
+        match self {
+            Self::Invalid(std::borrow::Cow::Borrowed(message)) => message,
+            error => {
+                tracing::error!(%error, "finishing registry mutation");
+                "updating policy manager nodes"
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum MapChangeReason {
@@ -132,6 +201,7 @@ pub enum MapChangeReason {
     UserRemoved,
     SelfUpdate,
     EndpointDerpUpdate,
+    NodeKeyRotated,
     KeyExpiry,
     PolicyChange,
     DnsConfigUpdate,
@@ -158,6 +228,7 @@ impl MapChangeReason {
             Self::UserRemoved => "user removed",
             Self::SelfUpdate => "self update",
             Self::EndpointDerpUpdate => "endpoint/DERP update",
+            Self::NodeKeyRotated => "node key rotated (relogin)",
             Self::KeyExpiry => "key expiry",
             Self::PolicyChange => "policy change",
             Self::DnsConfigUpdate => "DNS config update",
@@ -210,6 +281,7 @@ impl MapChangeContent {
             }
             MapChangeReason::SelfUpdate => {
                 content.include_self = true;
+                content.include_dns = true;
             }
             MapChangeReason::NodeAdded
             | MapChangeReason::NodeUpdated
@@ -230,6 +302,7 @@ impl MapChangeContent {
             MapChangeReason::NodeOnline
             | MapChangeReason::NodeOffline
             | MapChangeReason::EndpointDerpUpdate
+            | MapChangeReason::NodeKeyRotated
             | MapChangeReason::KeyExpiry => {
                 if let Some(node_id) = node_id {
                     content.peer_patches.push(node_id);
@@ -416,12 +489,43 @@ where
     }
 }
 
-fn same_string_set(left: &[String], right: &[String]) -> bool {
-    left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
-}
-
 fn record_is_subnet_router(rec: &MachineRecord) -> bool {
     !active_primary_routes(&rec.available_routes, &rec.approved_routes).is_empty()
+}
+
+fn record_needs_peer_recompute(
+    record: &MachineRecord,
+    policy: Option<&crate::policy::PolicyStore>,
+) -> bool {
+    if record_is_subnet_router(record) {
+        return true;
+    }
+    let Some(policy) = policy else {
+        return false;
+    };
+    let addresses = record.address_strings();
+    policy.is_relay_or_via_target(&crate::policy::NodeView {
+        addr: None,
+        addrs: &addresses,
+        user: (!record.user.is_empty()).then_some(record.user.as_str()),
+        user_id: record.user_id,
+        tags: &record.forced_tags,
+    })
+}
+
+fn update_online_after_expiry(
+    record: &MachineRecord,
+    node_id: u64,
+    state_sessions: &RwLock<BTreeMap<u64, usize>>,
+    online_states: &RwLock<BTreeMap<u64, bool>>,
+) -> bool {
+    let active = state_sessions.read();
+    let should_be_online =
+        active.get(&node_id).copied().unwrap_or(0) > 0 && !record.is_expired_at(Utc::now());
+    let mut online = online_states.write();
+    let was_online = online.get(&node_id).copied().unwrap_or(false);
+    online.insert(node_id, should_be_online);
+    was_online != should_be_online
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,35 +582,21 @@ impl PendingMapChange {
         Self::with_content_node(reason, None, None, Some(node_id))
     }
 
-    fn subnet_router_lifecycle(reason: MapChangeReason, node_id: u64) -> Self {
+    fn lifecycle_peer(reason: MapChangeReason, node_id: u64, recompute: bool) -> Self {
         debug_assert!(matches!(
             reason,
-            MapChangeReason::SubnetRouterOnline | MapChangeReason::SubnetRouterOffline
+            MapChangeReason::NodeOnline | MapChangeReason::NodeOffline | MapChangeReason::NodeAdded
         ));
-        let mut change = Self::global(reason);
-        change.origin_node_id = Some(node_id);
-        change
-    }
-
-    fn lifecycle_peer(reason: MapChangeReason, node_id: u64) -> Self {
-        debug_assert!(matches!(
+        let change = Self::with_content_node(
             reason,
-            MapChangeReason::NodeOnline | MapChangeReason::NodeOffline
-        ));
-        Self::with_content_node(reason, None, Some(node_id), Some(node_id))
-            .with_companion_reason(MapChangeReason::PolicyChange)
-    }
-
-    fn peer_patches(reason: MapChangeReason, node_ids: Vec<u64>) -> Self {
-        Self {
-            reason,
-            companion_reasons: Vec::new(),
-            target_node_id: None,
-            origin_node_id: None,
-            content: MapChangeContent {
-                peer_patches: node_ids,
-                ..MapChangeContent::default()
-            },
+            None,
+            (reason == MapChangeReason::NodeAdded).then_some(node_id),
+            Some(node_id),
+        );
+        if recompute {
+            change.with_companion_reason(MapChangeReason::PolicyChange)
+        } else {
+            change
         }
     }
 
@@ -603,20 +693,71 @@ impl MapResponseDebugStore {
         debug_type: MapResponseDebugType,
         response: &wire::MapResponse,
     ) -> io::Result<Option<PathBuf>> {
+        self.record_serializable(node_id, debug_type, response)
+    }
+
+    fn record_serializable(
+        &self,
+        node_id: u64,
+        debug_type: MapResponseDebugType,
+        response: &impl serde::Serialize,
+    ) -> io::Result<Option<PathBuf>> {
+        if !self.enabled() {
+            return Ok(None);
+        }
+        let body = serde_json::to_vec_pretty(response)
+            .map_err(|err| io::Error::other(format!("encode MapResponse JSON: {err}")))?;
+        self.record_body(node_id, debug_type, &body)
+    }
+
+    pub(crate) fn record_json(
+        &self,
+        node_id: u64,
+        debug_type: MapResponseDebugType,
+        json: &[u8],
+    ) -> io::Result<Option<PathBuf>> {
+        if !self.enabled() {
+            return Ok(None);
+        }
+        let body = headscale_api_acl::go_json_output::indent(json).map_err(io::Error::other)?;
+        self.record_body(node_id, debug_type, &body)
+    }
+
+    fn record_body(
+        &self,
+        node_id: u64,
+        debug_type: MapResponseDebugType,
+        body: &[u8],
+    ) -> io::Result<Option<PathBuf>> {
         let Some(root) = self.root.as_deref() else {
             return Ok(None);
         };
-
         let node_dir = root.join(node_id.to_string());
-        fs::create_dir_all(&node_dir)?;
-        set_mapresponse_debug_permissions(&node_dir)?;
-
-        let body = serde_json::to_vec_pretty(response)
-            .map_err(|err| io::Error::other(format!("encode MapResponse JSON: {err}")))?;
-        let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%S.%f");
+        let mut directory = fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            directory.mode(0o755);
+        }
+        directory.create(&node_dir)?;
+        let now = chrono::Local::now();
+        let mut timestamp = now.format("%Y-%m-%dT%H-%M-%S").to_string();
+        let nanos = now.timestamp_subsec_nanos();
+        if nanos != 0 {
+            timestamp.push('.');
+            timestamp.push_str(format!("{nanos:09}").trim_end_matches('0'));
+        }
         let path = node_dir.join(format!("{timestamp}-{}.json", debug_type.as_str()));
-        fs::write(&path, body)?;
-        set_mapresponse_debug_permissions(&path)?;
+        let mut file = fs::OpenOptions::new();
+        file.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            file.mode(0o755);
+        }
+        use std::io::Write as _;
+        file.open(&path)?.write_all(body)?;
 
         Ok(Some(path))
     }
@@ -628,14 +769,31 @@ impl MapResponseDebugStore {
 
         read_mapresponses_from_directory(root).map(Some)
     }
+
+    pub(crate) fn read_json(&self) -> io::Result<Option<Vec<u8>>> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(None);
+        };
+        debug_json::read(root).map(Some)
+    }
 }
 
 fn read_mapresponses_from_directory(
     root: &Path,
 ) -> io::Result<BTreeMap<u64, Vec<wire::MapResponse>>> {
+    read_mapresponses_with(root, |body| {
+        serde_json::from_slice(body).map_err(io::Error::other)
+    })
+}
+
+fn read_mapresponses_with<T>(
+    root: &Path,
+    decode: impl Fn(&[u8]) -> io::Result<T>,
+) -> io::Result<BTreeMap<u64, Vec<T>>> {
     let mut responses = BTreeMap::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
+    let mut entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
         let Ok(file_type) = entry.file_type() else {
             tracing::error!(path = %entry.path().display(), "stat mapresponse debug entry");
             continue;
@@ -648,13 +806,19 @@ fn read_mapresponses_from_directory(
             tracing::error!(path = %entry.path().display(), "mapresponse debug node directory is not UTF-8");
             continue;
         };
-        let Ok(node_id) = name.parse::<u64>() else {
+        let node_id = name
+            .parse::<u64>()
+            .ok()
+            .filter(|_| name.bytes().all(|byte| byte.is_ascii_digit()));
+        let Some(node_id) = node_id else {
             tracing::error!(node = %name, "parsing mapresponse debug node id");
             continue;
         };
 
-        let mut files = match fs::read_dir(entry.path()) {
-            Ok(files) => files.filter_map(Result::ok).collect::<Vec<_>>(),
+        let mut files = match fs::read_dir(entry.path())
+            .and_then(std::iter::Iterator::collect::<io::Result<Vec<_>>>)
+        {
+            Ok(files) => files,
             Err(err) => {
                 tracing::error!(error = %err, path = %entry.path().display(), "reading mapresponse debug node directory");
                 continue;
@@ -667,9 +831,7 @@ fn read_mapresponses_from_directory(
                 tracing::error!(path = %file.path().display(), "stat mapresponse debug file");
                 continue;
             };
-            if file_type.is_dir()
-                || file.path().extension().and_then(|ext| ext.to_str()) != Some("json")
-            {
+            if file_type.is_dir() || !file.file_name().as_encoded_bytes().ends_with(b".json") {
                 continue;
             }
 
@@ -680,7 +842,7 @@ fn read_mapresponses_from_directory(
                     continue;
                 }
             };
-            let response = match serde_json::from_slice::<wire::MapResponse>(&body) {
+            let response = match decode(&body) {
                 Ok(response) => response,
                 Err(err) => {
                     tracing::error!(error = %err, path = %file.path().display(), "unmarshalling mapresponse debug file");
@@ -697,18 +859,6 @@ fn read_mapresponses_from_directory(
     Ok(responses)
 }
 
-#[cfg(unix)]
-fn set_mapresponse_debug_permissions(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(not(unix))]
-fn set_mapresponse_debug_permissions(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 /// Runtime DERP map store.
 ///
 /// Headscale-go can refresh configured DERP map URLs while the server is
@@ -716,7 +866,7 @@ fn set_mapresponse_debug_permissions(_path: &Path) -> io::Result<()> {
 /// startup: `/map` handlers need a cheap current snapshot, and long-polling map
 /// streams need a wake signal when config refreshes replace the map.
 pub struct DerpMapStore {
-    current: RwLock<wire::DerpMap>,
+    current: RwLock<native_derp::Snapshot>,
     notify: Notify,
     gen_tx: watch::Sender<u64>,
 }
@@ -725,7 +875,10 @@ impl DerpMapStore {
     pub fn new(map: wire::DerpMap) -> Self {
         let (gen_tx, _) = watch::channel(0);
         Self {
-            current: RwLock::new(map),
+            current: RwLock::new(native_derp::Snapshot {
+                projection: map,
+                native: None,
+            }),
             notify: Notify::new(),
             gen_tx,
         }
@@ -736,11 +889,45 @@ impl DerpMapStore {
     }
 
     pub fn snapshot(&self) -> wire::DerpMap {
-        self.current.read().clone()
+        self.current.read().projection.clone()
     }
 
     pub fn set(&self, map: wire::DerpMap) {
-        *self.current.write() = map;
+        *self.current.write() = native_derp::Snapshot {
+            projection: map,
+            native: None,
+        };
+        self.notify_change();
+    }
+
+    #[doc(hidden)]
+    pub fn set_native(&self, map: native_derp::NativeDerpMap) {
+        let projection = map.projection();
+        *self.current.write() = native_derp::Snapshot {
+            projection,
+            native: Some(Arc::new(map)),
+        };
+        self.notify_change();
+    }
+
+    fn paired_snapshot(&self) -> native_derp::Snapshot {
+        let current = self.current.read();
+        native_derp::Snapshot {
+            projection: current.projection.clone(),
+            native: current.native.clone(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn json_snapshot(&self) -> serde_json::Result<serde_json::Value> {
+        let snapshot = self.paired_snapshot();
+        match snapshot.native {
+            Some(native) => native.json_value(),
+            None => serde_json::to_value(snapshot.projection),
+        }
+    }
+
+    fn notify_change(&self) {
         let current_generation = *self.gen_tx.borrow();
         let next_generation = current_generation.wrapping_add(1);
         let _ = self.gen_tx.send(next_generation);
@@ -775,8 +962,8 @@ pub enum WireError {
 ///
 /// Normalized errors from whichever pre-auth-key store backs
 /// [`PreauthRedeemer`]. Downstream impls map their native errors into
-/// these variants — the register handler turns each into a 401 with a
-/// canonical Tailscale-shape `{"error": "..."}` body.
+/// these variants. Registration reports rejection through the Error field
+/// of an HTTP 200 tailcfg RegisterResponse, following pinned headscale-go.
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
 pub enum RedeemError {
     /// Token doesn't match any minted key.
@@ -791,6 +978,28 @@ pub enum RedeemError {
     AlreadyUsed,
 }
 
+/// Registration diagnostic kept alongside the stable redeemer error kind.
+/// Persistent adapters can retain Go's parse/verification error wording
+/// without changing the existing redeem/validate interface for embedders.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct RegistrationRedeemError {
+    pub kind: RedeemError,
+    pub message: String,
+}
+
+impl From<RedeemError> for RegistrationRedeemError {
+    fn from(kind: RedeemError) -> Self {
+        let message = match kind {
+            RedeemError::Unknown => "invalid pre auth key",
+            RedeemError::Expired => "authkey expired",
+            RedeemError::AlreadyUsed => "authkey already used",
+        }
+        .to_owned();
+        Self { kind, message }
+    }
+}
+
 /// Why an IP allocation failed.
 ///
 /// The variant set is intentionally small. Stateful allocators that
@@ -798,9 +1007,9 @@ pub enum RedeemError {
 /// through the handler signatures.
 #[derive(Debug, Error)]
 pub enum AllocError {
-    #[error("ip allocator exhausted")]
+    #[error("failed to allocate IP")]
     Exhausted,
-    #[error("ip allocator internal: {0}")]
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -814,6 +1023,9 @@ pub enum AllocError {
 pub struct RedeemOk {
     /// User label bound to the redeemed preauth key.
     pub user: String,
+    /// Canonical database owner. Display names and emails can be ambiguous
+    /// across OIDC identities and must not be resolved again as credentials.
+    pub user_id: Option<u64>,
     /// True if the redeemed key was minted ephemeral. The wire layer
     /// stamps the resulting `MachineRecord.ephemeral` accordingly so
     /// the ephemeral-GC sweep can find the device after it goes
@@ -838,6 +1050,7 @@ impl RedeemOk {
     pub fn for_user(user: impl Into<String>) -> Self {
         Self {
             user: user.into(),
+            user_id: None,
             ephemeral: false,
             tags: Vec::new(),
             auth_key_id: None,
@@ -845,6 +1058,10 @@ impl RedeemOk {
     }
     pub fn ephemeral(mut self, e: bool) -> Self {
         self.ephemeral = e;
+        self
+    }
+    pub fn user_id(mut self, id: Option<u64>) -> Self {
+        self.user_id = id;
         self
     }
     pub fn tags(mut self, t: Vec<String>) -> Self {
@@ -860,6 +1077,59 @@ impl RedeemOk {
 impl From<String> for RedeemOk {
     fn from(user: String) -> Self {
         Self::for_user(user)
+    }
+}
+
+/// One credential lookup. Built-in native stores retain private loaded
+/// associations; existing wire-only and custom redeemers keep metadata alone.
+#[derive(Clone)]
+pub struct PreauthLookup {
+    pub metadata: RedeemOk,
+    #[cfg(feature = "admin")]
+    pub(crate) native: Option<crate::admin::machines::NativeAuthKey>,
+    #[cfg(feature = "admin")]
+    pub(crate) native_save: Option<Arc<headscale_db::preauth_keys::RegistrationKey>>,
+}
+
+impl PreauthLookup {
+    pub fn metadata_only(metadata: RedeemOk) -> Self {
+        Self {
+            metadata,
+            #[cfg(feature = "admin")]
+            native: None,
+            #[cfg(feature = "admin")]
+            native_save: None,
+        }
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn from_native(
+        metadata: RedeemOk,
+        native: crate::admin::machines::NativeAuthKey,
+        material: headscale_db::preauth_keys::RegistrationKey,
+    ) -> Self {
+        Self {
+            metadata,
+            native: Some(native),
+            native_save: Some(Arc::new(material)),
+        }
+    }
+
+    // Without `admin` there is no native auth key to validate, but the call sites
+    // are feature-independent.
+    #[cfg_attr(not(feature = "admin"), allow(clippy::unused_self))]
+    pub(crate) fn validation_result(&self) -> Option<Result<(), RegistrationRedeemError>> {
+        #[cfg(feature = "admin")]
+        if let Some(key) = &self.native {
+            if key.expiration.is_some_and(|expiry| expiry < Utc::now()) {
+                return Some(Err(RedeemError::Expired.into()));
+            }
+            if !key.reusable && key.used() {
+                return Some(Err(RedeemError::AlreadyUsed.into()));
+            }
+            return Some(Ok(()));
+        }
+        None
     }
 }
 
@@ -881,6 +1151,30 @@ impl From<String> for RedeemOk {
 pub trait PreauthRedeemer: Send + Sync {
     async fn redeem(&self, key: &str) -> Result<RedeemOk, RedeemError>;
 
+    async fn redeem_for_registration(
+        &self,
+        key: &str,
+    ) -> Result<RedeemOk, RegistrationRedeemError> {
+        self.redeem(key).await.map_err(Into::into)
+    }
+
+    /// The persistent registration store will consume this credential in
+    /// the same transaction as the node write when both sides opt in.
+    fn supports_deferred_redemption(&self) -> bool {
+        false
+    }
+
+    async fn validate(&self, _key: &str) -> Result<RedeemOk, RedeemError> {
+        Err(RedeemError::Unknown)
+    }
+
+    async fn validate_for_registration(
+        &self,
+        key: &str,
+    ) -> Result<RedeemOk, RegistrationRedeemError> {
+        self.validate(key).await.map_err(Into::into)
+    }
+
     /// Return key metadata without consuming or validating it.
     ///
     /// Headscale-go first fetches the pre-auth key row and then
@@ -892,17 +1186,48 @@ pub trait PreauthRedeemer: Send + Sync {
     async fn lookup(&self, _key: &str) -> Option<RedeemOk> {
         None
     }
+
+    async fn lookup_for_registration(
+        &self,
+        key: &str,
+    ) -> Result<Option<PreauthLookup>, RegistrationRedeemError> {
+        Ok(self.lookup(key).await.map(PreauthLookup::metadata_only))
+    }
 }
 
 /// Allocates tailnet addresses for a registering node.
 ///
-/// Implementations are expected to be deterministic given
-/// `node_key_hex` when they are mirroring headscale-go's persistent
-/// address semantics, but the trait does not mandate determinism — a
-/// stateful allocator that rotates assignments on each call is also
-/// valid.
+/// Headscale-go uses a stateful prefix allocator; the production implementation
+/// mirrors that behavior. The node-key input also permits deterministic custom
+/// embedders. Registration completion reuses existing addresses before asking
+/// the allocator for a fresh node.
 pub trait IpAllocator: Send + Sync {
+    /// Release a deleted node's addresses. Production mirrors Go FreeIPs;
+    /// existing stateless/custom allocators can keep this default no-op.
+    fn release_addresses(&self, _ipv4: Option<Ipv4Addr>, _ipv6: Option<Ipv6Addr>) {}
+
     fn allocate(&self, node_key_hex: &str) -> Result<Ipv4Addr, AllocError>;
+
+    /// Allocate both enabled families as one operation. Stateful production
+    /// allocators override this to hold the same lock across the pair, like
+    /// Go IPAllocator.Next; existing custom allocators retain their methods.
+    fn allocate_addresses(
+        &self,
+        node_key_hex: &str,
+    ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), String> {
+        let ipv4 = if self.ipv4_enabled() {
+            Some(
+                self.allocate(node_key_hex)
+                    .map_err(|error| format!("allocating IPv4 address: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let ipv6 = self
+            .allocate_ipv6(node_key_hex)
+            .map_err(|error| format!("allocating IPv6 address: {error}"))?;
+        Ok((ipv4, ipv6))
+    }
 
     /// Whether IPv4 is enabled in the current prefix config.
     ///
@@ -934,11 +1259,46 @@ pub trait IpAllocator: Send + Sync {
     }
 }
 
+/// Allocate only after an authenticated registration has selected a fresh node.
+pub(crate) fn allocate_registration_addresses(
+    allocator: &dyn IpAllocator,
+    node_key_hex: &str,
+) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), String> {
+    let (ipv4, ipv6) = allocator
+        .allocate_addresses(node_key_hex)
+        .map_err(|error| format!("allocating IPs: {error}"))?;
+    if ipv4.is_none() && ipv6.is_none() {
+        return Err("allocating IPs: no IP prefixes enabled".into());
+    }
+    Ok((ipv4, ipv6))
+}
+
+/// Historical fallback for embedders that do not supply an IP allocator.
+/// The production runtime always supplies its configured prefix allocator.
+#[cfg(any(feature = "admin", feature = "full"))]
+pub(crate) fn legacy_registration_ipv4(key: &str) -> Ipv4Addr {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let host = ((hash as u32) % ((1u32 << 22) - 3)) + 2;
+    Ipv4Addr::from((0x6440_0000 | host).to_be_bytes())
+}
+
 /// Result of persisting a wire registration into the durable node store.
 #[derive(Debug, Clone)]
 pub struct PersistedMachineRegistration {
     pub record: MachineRecord,
     pub replaced_node_key_hex: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum AuthKeyRegistrationError {
+    #[error(transparent)]
+    Credential(#[from] RedeemError),
+    #[error("{0}")]
+    Storage(String),
 }
 
 /// Optional persistence hook for wire registration.
@@ -950,6 +1310,23 @@ pub struct PersistedMachineRegistration {
 /// registry.
 #[async_trait]
 pub trait MachineRegistrationStore: Send + Sync {
+    fn supports_atomic_auth_key_registration(&self) -> bool {
+        false
+    }
+
+    async fn create_or_update_auth_key_registration_atomic(
+        &self,
+        _record: MachineRecord,
+        _policy: &crate::policy::PolicyStore,
+        _candidate: &str,
+        _auth_key_id: Option<i64>,
+        _require_fresh: bool,
+    ) -> Result<PersistedMachineRegistration, AuthKeyRegistrationError> {
+        Err(AuthKeyRegistrationError::Storage(
+            "atomic auth-key registration is not supported".into(),
+        ))
+    }
+
     async fn create_or_update_auth_key_registration(
         &self,
         record: MachineRecord,
@@ -957,6 +1334,74 @@ pub trait MachineRegistrationStore: Send + Sync {
         auth_key_id: Option<i64>,
     ) -> Result<PersistedMachineRegistration, String>;
 
+    /// Optional native Hostinfo companion. Existing embedders keep their wire
+    /// projection contract; built-in stores preserve the decoded Go shapes.
+    async fn create_or_update_auth_key_registration_with_hostinfo(
+        &self,
+        record: MachineRecord,
+        policy: &crate::policy::PolicyStore,
+        auth_key_id: Option<i64>,
+        _hostinfo: Option<serde_json::Value>,
+    ) -> Result<PersistedMachineRegistration, String> {
+        self.create_or_update_auth_key_registration(record, policy, auth_key_id)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_hostinfo(
+        &self,
+        record: MachineRecord,
+        policy: &crate::policy::PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        _hostinfo: Option<serde_json::Value>,
+    ) -> Result<PersistedMachineRegistration, AuthKeyRegistrationError> {
+        self.create_or_update_auth_key_registration_atomic(
+            record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+        )
+        .await
+    }
+
+    /// Carry a verified lookup to native persistence without changing the
+    /// existing record or custom-store entry points.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_lookup(
+        &self,
+        record: MachineRecord,
+        policy: &crate::policy::PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<serde_json::Value>,
+        _lookup: Option<PreauthLookup>,
+    ) -> Result<PersistedMachineRegistration, AuthKeyRegistrationError> {
+        self.create_or_update_auth_key_registration_atomic_with_hostinfo(
+            record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            hostinfo,
+        )
+        .await
+    }
+
+    /// Native attached stores return the current, already published NodeStore
+    /// snapshot. The map caller must not reapply that record after SQL. Legacy
+    /// custom/headless backends keep the publication step by default.
+    fn runtime_sync_returns_live_snapshot(&self) -> bool {
+        false
+    }
+
+    /// Persist client map fields while preserving server-managed node fields.
+    /// The map caller has applied its live delta and holds the per-machine
+    /// mutation guard. Native attached stores re-read that live snapshot;
+    /// adapters must not acquire the same machine guard again.
     async fn sync_runtime_machine_state(
         &self,
         record: MachineRecord,
@@ -968,8 +1413,39 @@ pub trait MachineRegistrationStore: Send + Sync {
         })
     }
 
+    /// Best-effort disconnect persistence without a policy refresh. Native
+    /// stores re-read the latest NodeStore snapshot under the save mutex and
+    /// write its selected columns, omitting Expiry, as Go persistNode does.
+    /// The timestamp-only default interface remains available to adapters.
+    async fn persist_last_seen(&self, _node_id: u64, _at: DateTime<Utc>) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Save a wire logout while the caller holds the machine guard. For an
+    /// expiry logout the caller has already made the quiet live edit, including
+    /// online state. Save without applying it again; dispatch follows success.
+    /// Ephemeral deletion remains database-first. Adapters must not acquire
+    /// the same machine guard again.
+    async fn persist_wire_logout(
+        &self,
+        _record: &MachineRecord,
+        _at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn delete_machine_registration(&self, _node_key_hex: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    fn supports_guarded_ephemeral_deletion(&self) -> bool {
+        false
+    }
+
+    /// Called with the machine guard held. Implementations must delete only
+    /// the supplied node identity and must not reacquire the guard.
+    async fn delete_ephemeral_registration(&self, _record: &MachineRecord) -> Result<(), String> {
+        Err("guarded ephemeral deletion is not supported".into())
     }
 }
 
@@ -1339,6 +1815,12 @@ impl RouteHealthProbeHandle {
     pub fn abort(&self) {
         self.task.abort();
     }
+
+    /// A detached handle, for callers that stop scheduled work together
+    /// without owning the `JoinHandle`.
+    pub fn abort_handle(&self) -> tokio::task::AbortHandle {
+        self.task.abort_handle()
+    }
 }
 
 /// Start periodic route-candidate health probes.
@@ -1509,11 +1991,13 @@ pub struct RegistrationCache {
 #[derive(Debug)]
 struct RegistrationEntry {
     record: Option<MachineRecord>,
+    hostinfo: Option<serde_json::Value>,
     ssh_binding: Option<SshCheckBinding>,
     oidc_confirmation: Mutex<Option<crate::oidc::OidcPendingRegistrationConfirmation>>,
     expires_at: Instant,
     last_used: AtomicU64,
     outcome: Mutex<Option<RegistrationOutcome>>,
+    ssh_verdict_consumed: AtomicBool,
     notify: Notify,
 }
 
@@ -1543,10 +2027,11 @@ impl SshCheckBinding {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SshAuthRecord {
     at: Instant,
     policy_updated_at: Option<i64>,
+    policy_stamp: Option<crate::policy::SshPolicyStamp>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1585,6 +2070,15 @@ pub enum AuthRequestKind {
     SshCheck(SshCheckBinding),
 }
 
+/// The original auth entry retained by an admitted completion, as Go retains
+/// its *AuthRequest across the registration lock and database work. Eviction
+/// may finish its verdict first; it must never redirect completion to a newer
+/// entry installed under the same auth ID.
+pub(crate) struct RegistrationCompletion {
+    registration_id: String,
+    entry: Arc<RegistrationEntry>,
+}
+
 impl RegistrationCache {
     pub fn new() -> Self {
         Self::with_tuning_and_max_entries(
@@ -1618,13 +2112,20 @@ impl RegistrationCache {
     }
 
     pub fn insert(&self, registration_id: String, record: MachineRecord) {
+        self.insert_with_hostinfo(registration_id, record, None);
+    }
+
+    pub(crate) fn insert_with_hostinfo(
+        &self,
+        registration_id: String,
+        record: MachineRecord,
+        hostinfo: Option<serde_json::Value>,
+    ) {
         self.prune_expired();
-        let entry = Arc::new(RegistrationEntry::new_registration(
-            record,
-            self.expiration,
-            self.next_access(),
-        ));
-        self.insert_entry(registration_id, entry);
+        let mut entry =
+            RegistrationEntry::new_registration(record, self.expiration, self.next_access());
+        entry.hostinfo = hostinfo;
+        self.insert_entry(registration_id, Arc::new(entry));
     }
 
     pub fn insert_ssh_check(&self, auth_id: String, binding: SshCheckBinding) {
@@ -1643,11 +2144,56 @@ impl RegistrationCache {
     }
 
     pub fn get_pending_registration(&self, registration_id: &str) -> Option<MachineRecord> {
+        self.pending_registration_with_hostinfo(registration_id)
+            .map(|(record, _)| record)
+    }
+
+    pub(crate) fn pending_registration_with_hostinfo(
+        &self,
+        registration_id: &str,
+    ) -> Option<(MachineRecord, Option<serde_json::Value>)> {
         let entry = self.get_entry(registration_id)?;
         if entry.outcome().is_some() {
             return None;
         }
-        entry.record.clone()
+        Some((entry.record.clone()?, entry.hostinfo.clone()))
+    }
+
+    pub(crate) fn pending_registration_completion(
+        &self,
+        registration_id: &str,
+    ) -> Option<(
+        MachineRecord,
+        Option<serde_json::Value>,
+        RegistrationCompletion,
+    )> {
+        let entry = self.get_entry(registration_id)?;
+        if entry.outcome().is_some() {
+            return None;
+        }
+        Some((
+            entry.record.clone()?,
+            entry.hostinfo.clone(),
+            RegistrationCompletion {
+                registration_id: registration_id.to_owned(),
+                entry,
+            },
+        ))
+    }
+
+    pub(crate) fn finish_registration(
+        &self,
+        completion: RegistrationCompletion,
+        registered: MachineRecord,
+    ) {
+        // FinishAuth is first-verdict-wins. A prior eviction remains expired,
+        // while the already admitted mutation can still return its SQL result.
+        let RegistrationCompletion {
+            registration_id,
+            entry,
+        } = completion;
+        entry.complete(registered);
+        self.expire_if_current(&registration_id, &entry);
     }
 
     pub fn ssh_binding(&self, auth_id: &str) -> Option<SshCheckBinding> {
@@ -1785,6 +2331,18 @@ impl RegistrationCache {
     }
 
     pub async fn wait_for_auth(&self, auth_id: &str) -> AuthWaitOutcome {
+        self.wait_for_auth_inner(auth_id, false).await
+    }
+
+    pub async fn wait_for_ssh_auth(&self, auth_id: &str) -> AuthWaitOutcome {
+        self.wait_for_auth_inner(auth_id, true).await
+    }
+
+    async fn wait_for_auth_inner(
+        &self,
+        auth_id: &str,
+        consume_ssh_verdict: bool,
+    ) -> AuthWaitOutcome {
         let Some(entry) = self.get_entry(auth_id) else {
             return AuthWaitOutcome::Missing;
         };
@@ -1793,7 +2351,14 @@ impl RegistrationCache {
             let notified = entry.notify.notified();
             tokio::pin!(notified);
 
-            match entry.outcome() {
+            let outcome = entry.outcome();
+            if outcome.is_some()
+                && consume_ssh_verdict
+                && entry.ssh_verdict_consumed.swap(true, Ordering::AcqRel)
+            {
+                return AuthWaitOutcome::Missing;
+            }
+            match outcome {
                 Some(
                     RegistrationOutcome::Registered(_) | RegistrationOutcome::ApprovedWithoutNode,
                 ) => {
@@ -1832,6 +2397,7 @@ impl RegistrationCache {
             SshAuthRecord {
                 at: now,
                 policy_updated_at,
+                policy_stamp: None,
             },
         );
     }
@@ -1845,6 +2411,46 @@ impl RegistrationCache {
             .read()
             .get(&binding.pair())
             .filter(|record| record.policy_updated_at == policy_updated_at)
+            .map(|record| record.at)
+    }
+
+    /// Seed an approval against the live policy identity rather than its
+    /// persisted timestamp. Legacy timestamp helpers remain available, but
+    /// do not grant an approval to the production SSH action handler.
+    pub fn record_ssh_auth_for_policy(
+        &self,
+        binding: &SshCheckBinding,
+        now: Instant,
+        policy: &crate::policy::PolicyStore,
+    ) {
+        policy.with_ssh_auth_stamp(|stamp| self.record_ssh_auth_with_stamp(binding, now, stamp));
+    }
+
+    pub(crate) fn record_ssh_auth_with_stamp(
+        &self,
+        binding: &SshCheckBinding,
+        now: Instant,
+        stamp: crate::policy::SshPolicyStamp,
+    ) {
+        self.last_ssh_auth.write().insert(
+            binding.pair(),
+            SshAuthRecord {
+                at: now,
+                policy_updated_at: stamp.updated_at,
+                policy_stamp: Some(stamp),
+            },
+        );
+    }
+
+    pub(crate) fn last_ssh_auth_with_stamp(
+        &self,
+        binding: &SshCheckBinding,
+        stamp: &crate::policy::SshPolicyStamp,
+    ) -> Option<Instant> {
+        self.last_ssh_auth
+            .read()
+            .get(&binding.pair())
+            .filter(|record| record.policy_stamp.as_ref() == Some(stamp))
             .map(|record| record.at)
     }
 
@@ -1977,11 +2583,13 @@ impl RegistrationEntry {
     fn new_registration(record: MachineRecord, expiration: Duration, last_used: u64) -> Self {
         Self {
             record: Some(record),
+            hostinfo: None,
             ssh_binding: None,
             oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
+            ssh_verdict_consumed: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
@@ -1989,11 +2597,13 @@ impl RegistrationEntry {
     fn new_ssh_check(binding: SshCheckBinding, expiration: Duration, last_used: u64) -> Self {
         Self {
             record: None,
+            hostinfo: None,
             ssh_binding: Some(binding),
             oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
             last_used: AtomicU64::new(last_used),
             outcome: Mutex::new(None),
+            ssh_verdict_consumed: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
@@ -2055,6 +2665,12 @@ impl RegistrationEntry {
     }
 }
 
+#[derive(Eq, PartialEq, Hash)]
+enum RegistrationLockKey {
+    Machine(String),
+    Node(String),
+}
+
 /// In-memory machine registry.
 ///
 /// # Storage shape (#238: `all()` no-clone)
@@ -2077,6 +2693,33 @@ impl RegistrationEntry {
 /// Callers iterate the borrowed map directly. The map-building hot path
 /// in [`map::map_inner`] consumes this shape.
 pub struct MachineRegistry {
+    // PolicyStore owns data snapshots only, so this binding has no registry
+    // back-reference/cycle. Public wire records and their feature graph stay
+    // unchanged. One serving registry binds one policy store.
+    policy_store: RwLock<Option<crate::policy::PolicyStore>>,
+    native_policy_persistence: AtomicBool,
+    // Go Hostinfo values retain nil slices and opt.Bool's explicit unset even
+    // when the stable public HostInfo projection cannot express those shapes.
+    hostinfo_snapshots: Arc<SnapshotMap<u64, hostinfo::HostInfoSnapshot>>,
+    pending_self_refreshes: Mutex<BTreeSet<u64>>,
+    #[cfg(feature = "admin")]
+    pending_native_hostinfo: PendingNativeHostinfoMap,
+    #[cfg(feature = "admin")]
+    pending_native_registrations: Arc<RwLock<HashMap<u64, NativeRegistrationPublication>>>,
+    #[cfg(feature = "admin")]
+    native_registration_revision: AtomicU64,
+    #[cfg(feature = "admin")]
+    native_persistence: Arc<SnapshotMap<u64, crate::admin::machines::NativeNodePersistence>>,
+    #[cfg(feature = "admin")]
+    pending_native_rows: Arc<RwLock<HashMap<u64, StagedNativeRow>>>,
+    #[cfg(feature = "admin")]
+    native_persist_lock: Arc<tokio::sync::Mutex<()>>,
+    // Weak entries serialize live registrations without retaining every
+    // historical machine key. An owned guard retains the active mutex.
+    registration_locks: Mutex<HashMap<RegistrationLockKey, Weak<tokio::sync::Mutex<()>>>>,
+    registration_expiry_nanos: AtomicI64,
+    given_name_domain: RwLock<String>,
+    ip_allocator: RwLock<Option<Weak<dyn IpAllocator>>>,
     /// COW: write paths clone the map, mutate, and swap a new `Arc` in.
     /// Read paths take a read lock just long enough to bump the Arc's
     /// strong count.
@@ -2111,22 +2754,30 @@ pub struct MachineRegistry {
     /// current active `Stream:true` map-response connection count, and
     /// zero-count entries are retained after disconnect to match
     /// headscale-go's `/debug/batcher` rapid-reconnect state.
-    active_connections: RwLock<BTreeMap<u64, usize>>,
+    active_connections: Arc<RwLock<BTreeMap<u64, usize>>>,
+    /// State.Connect sessions include handlers waiting through reconnect grace.
+    /// Every acquired session is released exactly once; batcher removal alone
+    /// does not decrement this count.
+    state_sessions: Arc<RwLock<BTreeMap<u64, usize>>>,
     /// Volatile headscale-go `Node.IsOnline` equivalent. This is kept
     /// separate from persisted machine records: startup/default state
     /// is offline until a streaming map session marks the node online.
-    online_states: RwLock<BTreeMap<u64, bool>>,
-    /// Monotonic per-node stream generation used to suppress stale
-    /// delayed-offline tasks after a rapid reconnect.
-    connection_generations: RwLock<BTreeMap<u64, u64>>,
+    online_states: Arc<RwLock<BTreeMap<u64, bool>>>,
+    /// Go's process-local SessionEpoch, advanced only by Connect. Disconnect
+    /// releases its owned session regardless of newer epochs.
+    connection_generations: Arc<RwLock<BTreeMap<u64, u64>>>,
+    /// Ownership identity for the current incarnation of a node's stream
+    /// counters. Rekeys retain it; actual retirement replaces it.
+    stream_session_epochs: Arc<RwLock<BTreeMap<u64, Arc<()>>>>,
     /// Per-active-stream cancellation flags. Headscale-go reports
     /// server-side batcher shutdown separately from client context
     /// completion in `mapresponse_ended_total`.
-    stream_cancel_flags: RwLock<BTreeMap<u64, Vec<Arc<AtomicBool>>>>,
+    stream_cancel_flags: Arc<RwLock<BTreeMap<u64, Vec<Arc<AtomicBool>>>>>,
+    native_shutdown: Arc<native_shutdown::NativeShutdown>,
     /// Timestamp captured when the final stream for a node disconnects.
     /// Long-offline zero-count entries are cleaned on the upstream batcher
     /// cadence to prevent unbounded debug/runtime state growth.
-    disconnected_at: RwLock<BTreeMap<u64, Instant>>,
+    disconnected_at: Arc<RwLock<BTreeMap<u64, Instant>>>,
     /// Per-node route-health session generation observed in the
     /// previous probe cycle. A timeout on a fresh or replaced session
     /// is deferred to match headscale-go's HA prober.
@@ -2155,12 +2806,22 @@ pub struct MachineRegistry {
     /// configured by production startup it cancels per-node deletion
     /// timers on stream connect and schedules them after disconnect.
     ephemeral_gc: RwLock<Option<Arc<EphemeralNodeGc>>>,
+    /// Disconnect persistence does not depend on enabling ephemeral timers.
+    /// Keep a weak edge because native stores can own this same registry.
+    registration_store: RwLock<Option<Weak<dyn MachineRegistrationStore>>>,
     /// Optional headscale-go-style write worker for NodeStore put paths.
     nodestore_write_queue: RwLock<Option<NodeStoreWriteQueue>>,
     nodestore_write_queue_next_id: AtomicU64,
     /// Prometheus-compatible counters for the Tailscale wire surface.
     metrics: WireMetrics,
 }
+
+type GoHttpRequestLabels = (String, String, String, String, String);
+
+/// Staged native hostinfo keyed by node id: `(revision, node key, snapshot)`.
+#[cfg(feature = "admin")]
+type PendingNativeHostinfoMap =
+    Arc<RwLock<HashMap<u64, (u64, String, hostinfo::HostInfoSnapshot)>>>;
 
 #[derive(Default)]
 struct WireMetrics {
@@ -2171,6 +2832,9 @@ struct WireMetrics {
     mapresponse_last_sent: RwLock<BTreeMap<(String, String), f64>>,
     http_requests: RwLock<BTreeMap<(String, String, String), u64>>,
     http_duration: RwLock<BTreeMap<String, HistogramMetric>>,
+    /// go-chi/metrics labels from the pinned v0.29.5 control router.
+    http_requests_go: RwLock<BTreeMap<GoHttpRequestLabels, u64>>,
+    http_duration_go: RwLock<BTreeMap<(String, String), HistogramMetric>>,
     nodestore_operations: RwLock<BTreeMap<String, u64>>,
     nodestore_operation_duration: RwLock<BTreeMap<String, HistogramMetric>>,
     nodestore_batch_size: RwLock<HistogramMetric>,
@@ -2192,6 +2856,23 @@ pub(crate) const PROMETHEUS_DEFAULT_BUCKETS: &[(f64, &str)] = &[
     (2.5, "2.5"),
     (5.0, "5"),
     (10.0, "10"),
+];
+
+pub(crate) const HTTP_GO_BUCKETS: &[(f64, &str)] = &[
+    (0.005, "0.005"),
+    (0.01, "0.01"),
+    (0.025, "0.025"),
+    (0.05, "0.05"),
+    (0.1, "0.1"),
+    (0.25, "0.25"),
+    (0.5, "0.5"),
+    (1.0, "1"),
+    (2.5, "2.5"),
+    (5.0, "5"),
+    (10.0, "10"),
+    (25.0, "25"),
+    (50.0, "50"),
+    (100.0, "100"),
 ];
 
 pub(crate) const NODESTORE_BATCH_SIZE_BUCKETS: &[(f64, &str)] = &[
@@ -2234,15 +2915,38 @@ impl Default for MachineRegistry {
             watch::channel(Arc::new(BTreeMap::<u64, Vec<MapChange>>::new()));
         let (map_batch_event_tx, _map_batch_event_rx) = broadcast::channel(MAP_BATCH_EVENT_BUFFER);
         Self {
+            policy_store: RwLock::new(None),
+            native_policy_persistence: AtomicBool::new(false),
+            hostinfo_snapshots: Arc::new(SnapshotMap::default()),
+            pending_self_refreshes: Mutex::new(BTreeSet::new()),
+            #[cfg(feature = "admin")]
+            pending_native_hostinfo: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "admin")]
+            pending_native_registrations: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "admin")]
+            native_registration_revision: AtomicU64::new(0),
+            #[cfg(feature = "admin")]
+            native_persistence: Arc::new(SnapshotMap::default()),
+            #[cfg(feature = "admin")]
+            pending_native_rows: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "admin")]
+            native_persist_lock: Arc::new(tokio::sync::Mutex::new(())),
+            registration_locks: Mutex::new(HashMap::new()),
+            registration_expiry_nanos: AtomicI64::new(0),
+            given_name_domain: RwLock::new(String::new()),
+            ip_allocator: RwLock::new(None),
             inner: RwLock::default(),
             notify: Arc::new(Notify::new()),
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
-            active_connections: RwLock::new(BTreeMap::new()),
-            online_states: RwLock::new(BTreeMap::new()),
-            connection_generations: RwLock::new(BTreeMap::new()),
-            stream_cancel_flags: RwLock::new(BTreeMap::new()),
-            disconnected_at: RwLock::new(BTreeMap::new()),
+            active_connections: Arc::new(RwLock::new(BTreeMap::new())),
+            state_sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            online_states: Arc::new(RwLock::new(BTreeMap::new())),
+            connection_generations: Arc::new(RwLock::new(BTreeMap::new())),
+            stream_session_epochs: Arc::new(RwLock::new(BTreeMap::new())),
+            stream_cancel_flags: Arc::new(RwLock::new(BTreeMap::new())),
+            native_shutdown: Arc::new(native_shutdown::NativeShutdown::default()),
+            disconnected_at: Arc::new(RwLock::new(BTreeMap::new())),
             route_health_stable_sessions: RwLock::new(BTreeMap::new()),
             map_changes: RwLock::new(VecDeque::new()),
             pending_map_changes: RwLock::new(BTreeMap::new()),
@@ -2250,6 +2954,7 @@ impl Default for MachineRegistry {
             map_batch_event_tx: Arc::new(map_batch_event_tx),
             map_batcher_enabled: AtomicBool::new(false),
             ephemeral_gc: RwLock::new(None),
+            registration_store: RwLock::new(None),
             nodestore_write_queue: RwLock::new(None),
             nodestore_write_queue_next_id: AtomicU64::new(1),
             metrics: WireMetrics::default(),
@@ -2295,37 +3000,6 @@ impl NodeStoreBoolUpdateOutcome {
             change: None,
             clear_unhealthy_route_state: None,
             final_presence_node_id: None,
-        }
-    }
-
-    fn changed(change: PendingMapChange) -> Self {
-        Self {
-            applied: true,
-            publish_snapshot: true,
-            change: Some(change),
-            clear_unhealthy_route_state: None,
-            final_presence_node_id: None,
-        }
-    }
-
-    fn changed_for_node(change: PendingMapChange, node_id: u64) -> Self {
-        Self {
-            final_presence_node_id: Some(node_id),
-            ..Self::changed(change)
-        }
-    }
-
-    fn changed_for_node_and_clear_unhealthy(
-        change: PendingMapChange,
-        node_id: u64,
-        clear_unhealthy_route_state: Option<u64>,
-    ) -> Self {
-        Self {
-            applied: true,
-            publish_snapshot: true,
-            change: Some(change),
-            clear_unhealthy_route_state,
-            final_presence_node_id: Some(node_id),
         }
     }
 
@@ -2401,6 +3075,25 @@ impl NodeStoreManyUpdateOutcome {
     }
 }
 
+/// The identity and addresses accepted by a NodeStore deletion. Address release
+/// belongs to the caller's state phase, after native persistence is unlocked.
+#[derive(Clone, Copy)]
+pub(crate) struct RemovedNode {
+    pub(crate) id: u64,
+    ipv4: Option<Ipv4Addr>,
+    ipv6: Option<Ipv6Addr>,
+}
+
+impl RemovedNode {
+    fn from_record(key: &str, record: &MachineRecord) -> Self {
+        Self {
+            id: record.stable_node_id_for_key(key),
+            ipv4: record.ipv4,
+            ipv6: record.ipv6,
+        }
+    }
+}
+
 enum NodeStoreWriteWork {
     Upsert {
         node_key_hex: String,
@@ -2409,7 +3102,7 @@ enum NodeStoreWriteWork {
     },
     Delete {
         node_key_hex: String,
-        result_tx: std_mpsc::Sender<bool>,
+        result_tx: std_mpsc::Sender<Option<RemovedNode>>,
     },
     UpdateBool {
         operation: &'static str,
@@ -2436,6 +3129,11 @@ enum NodeStoreWriteCompletion {
         operation: &'static str,
         result_tx: std_mpsc::Sender<bool>,
         result: bool,
+    },
+    Delete {
+        operation: &'static str,
+        result_tx: std_mpsc::Sender<Option<RemovedNode>>,
+        removed: Option<RemovedNode>,
     },
     UpdateBool {
         operation: &'static str,
@@ -2506,9 +3204,932 @@ fn run_nodestore_write_worker(
     }
 }
 
+#[cfg(feature = "admin")]
+struct StagedNativeRow {
+    revision: u64,
+    record: MachineRecord,
+    native: crate::admin::machines::NativeNodePersistence,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Clone)]
+pub(crate) struct NativeRegistrationUpdate {
+    pub(crate) before: MachineRecord,
+    pub(crate) after: MachineRecord,
+    pub(crate) hostinfo_before: hostinfo::HostInfoSnapshot,
+    pub(crate) hostinfo_after: hostinfo::HostInfoSnapshot,
+    pub(crate) native_before: Option<crate::admin::machines::NativeNodePersistence>,
+}
+
+#[cfg(feature = "admin")]
+#[derive(Clone)]
+enum NativeRegistrationPublication {
+    Updated {
+        revision: u64,
+        update: Box<NativeRegistrationUpdate>,
+    },
+    Created {
+        revision: u64,
+        record: Box<MachineRecord>,
+    },
+}
+
+#[cfg(feature = "admin")]
+impl NativeRegistrationPublication {
+    fn after(&self) -> &MachineRecord {
+        match self {
+            Self::Updated { update, .. } => &update.after,
+            Self::Created { record, .. } => record.as_ref(),
+        }
+    }
+
+    fn before(&self) -> Option<&MachineRecord> {
+        match self {
+            Self::Updated { update, .. } => Some(&update.before),
+            Self::Created { .. } => None,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        match self {
+            Self::Updated { revision, .. } | Self::Created { revision, .. } => *revision,
+        }
+    }
+}
+
+/// Owns private publication bookkeeping through a registration completion.
+/// Declare after the machine/node-key guards so cleanup runs before unlocking.
+/// It neither reverts live/durable nodes nor sends a successful change on error.
+#[cfg(feature = "admin")]
+pub(crate) struct RegistrationPublicationScope {
+    registry: Weak<MachineRegistry>,
+    machine_key: String,
+    node_key: String,
+    revision: u64,
+}
+
+#[cfg(feature = "admin")]
+fn registration_revision_after(value: u64, before: u64) -> bool {
+    let distance = value.wrapping_sub(before);
+    distance != 0 && distance < (1u64 << 63)
+}
+
+#[cfg(feature = "admin")]
+impl Drop for RegistrationPublicationScope {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        registry
+            .pending_native_registrations
+            .write()
+            .retain(|_, pending| {
+                let record = pending.after();
+                !(record.machine_key_hex == self.machine_key
+                    && record.node_key_hex == self.node_key
+                    && registration_revision_after(pending.revision(), self.revision))
+            });
+        registry.pending_native_rows.write().retain(|_, staged| {
+            !(staged.record.machine_key_hex == self.machine_key
+                && staged.record.node_key_hex == self.node_key
+                && registration_revision_after(staged.revision, self.revision))
+        });
+        // Pending Hostinfo has not yet become a live snapshot. Node-key guards
+        // serialize its producer and consumer for this completion too.
+        registry
+            .pending_native_hostinfo
+            .write()
+            .retain(|_, (revision, key, _)| {
+                !(key == &self.node_key && registration_revision_after(*revision, self.revision))
+            });
+    }
+}
+
 impl MachineRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn require_native_policy_persistence(&self) {
+        self.native_policy_persistence
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn policy_routes_require_persistence(&self) -> bool {
+        self.native_policy_persistence.load(Ordering::Acquire)
+    }
+
+    /// Bind policy-manager input tracking after initial node hydration. Reusing
+    /// the same store (for another listener/router) does not reset its snapshot.
+    pub fn configure_policy(self: &Arc<Self>, policy: &crate::policy::PolicyStore) {
+        if let Err(error) = self.try_configure_policy(policy) {
+            tracing::error!(%error, "initializing policy manager nodes");
+        }
+    }
+
+    /// Bind policy and propagate initial resolution failure to startup.
+    pub fn try_configure_policy(
+        self: &Arc<Self>,
+        policy: &crate::policy::PolicyStore,
+    ) -> Result<(), String> {
+        let mut bound = self.policy_store.write();
+        if bound
+            .as_ref()
+            .is_some_and(|current| current.same_store(policy))
+        {
+            return policy.compilation_result();
+        }
+        *bound = Some(policy.clone());
+        drop(bound);
+        policy.bind_registry(Arc::downgrade(self));
+        policy.initialize_node_inputs(self.policy_node_inputs())
+    }
+
+    /// Legacy single-record lookups retain the public record model. Internal
+    /// response/policy builders keep their MachineSnapshot for the whole read.
+    #[cfg(feature = "admin")]
+    #[allow(clippy::option_option)] // tri-state: unset / explicit nil Go association / loaded user
+    pub(crate) fn cached_native_user(
+        &self,
+        record: &MachineRecord,
+    ) -> Option<Option<crate::admin::users::UserRecord>> {
+        self.snapshot_with_metadata().cached_native_user(record)
+    }
+
+    pub(crate) fn policy_node_inputs(&self) -> Vec<crate::policy::lifecycle::NodeInput> {
+        let snapshot = self.snapshot_with_metadata();
+        let mut nodes = snapshot
+            .iter()
+            .map(|(key, record)| {
+                let id = record.stable_node_id_for_key(key);
+                let input = crate::policy::lifecycle::NodeInput::from_record(id, record);
+                #[cfg(feature = "admin")]
+                let input = if let Some(native) = snapshot.native.get(&id) {
+                    let mut input = input;
+                    (input.owner_id, input.addrs) = native.policy_owner_and_addresses(record);
+                    if let Some(user) = native.user_association(record) {
+                        input.set_native_association(user.map(|user| user.id));
+                    }
+                    input
+                } else {
+                    input
+                };
+                input
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| node.id);
+        nodes
+    }
+
+    /// Called at Go's policy refresh boundaries, after successful persistence.
+    /// Failed quiet writes leave the earlier policy inputs intact for retries.
+    pub(crate) fn refresh_policy_node_inputs(&self) -> Option<bool> {
+        self.try_refresh_policy_node_inputs()
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager nodes");
+                Some(false)
+            })
+    }
+
+    pub(crate) fn try_refresh_policy_node_inputs(&self) -> Result<Option<bool>, String> {
+        let Some(policy) = self.policy_store.read().clone() else {
+            return Ok(None);
+        };
+        policy
+            .try_replace_node_inputs(self.policy_node_inputs())
+            .map(Some)
+    }
+
+    /// Refresh the bound policy manager after a trusted raw registry update.
+    /// Returns whether policy inputs changed; the embedding caller owns the
+    /// subsequent policy notification. Serving adapters do this themselves.
+    pub fn refresh_policy_nodes(&self) -> bool {
+        self.refresh_policy_node_inputs().unwrap_or(false)
+    }
+
+    /// Fallible raw-update refresh. On error SetNodes retains the new inputs
+    /// and the successful phases preceding the rejected nodeAttrs compilation.
+    pub fn try_refresh_policy_nodes(&self) -> Result<bool, String> {
+        self.try_refresh_policy_node_inputs()
+            .map(|changed| changed.unwrap_or(false))
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn registration_publication_scope(
+        self: &Arc<Self>,
+        record: &MachineRecord,
+    ) -> RegistrationPublicationScope {
+        RegistrationPublicationScope {
+            registry: Arc::downgrade(self),
+            machine_key: record.machine_key_hex.clone(),
+            node_key: record.node_key_hex.clone(),
+            revision: self.native_registration_revision.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Go creates the ID in SQL, then PutNode resolves the original GivenName
+    /// against all earlier writer operations. The bumped name is initially
+    /// live-only; a later cached save persists it.
+    #[cfg(feature = "admin")]
+    pub(crate) fn put_new_native_registration(
+        &self,
+        mut record: MachineRecord,
+        hostinfo: serde_json::Value,
+        native: crate::admin::machines::NativeNodePersistence,
+    ) -> Result<MachineRecord, String> {
+        let id = record
+            .node_id
+            .filter(|id| *id > 0)
+            .ok_or("invalid new node identity")?;
+        let result = Arc::new(Mutex::new(None));
+        let completed = result.clone();
+        let pending = self.pending_native_registrations.clone();
+        let revision = self
+            .native_registration_revision
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        let hostinfos = self.hostinfo_snapshots.clone();
+        let natives = self.native_persistence.clone();
+        let pending_hostinfos = self.pending_native_hostinfo.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "put",
+            Box::new(move |records| {
+                if let Some(existing) = records.get(&record.node_key_hex)
+                    && existing.stable_node_id() != id
+                {
+                    *completed.lock() = Some(Err("node key already exists".into()));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let base = if record.hostname.is_empty() {
+                    "node"
+                } else {
+                    &record.hostname
+                };
+                let taken = records
+                    .iter()
+                    .filter(|(key, node)| node.stable_node_id_for_key(key) != id)
+                    .map(|(_, node)| node.hostname.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                let mut name = base.to_owned();
+                for suffix in 1.. {
+                    if !taken.contains(name.as_str()) {
+                        break;
+                    }
+                    name = format!("{base}-{suffix}");
+                }
+                drop(taken);
+                record.hostname = name;
+                records.retain(|key, node| node.stable_node_id_for_key(key) != id);
+                records.insert(record.node_key_hex.clone(), record.clone());
+                hostinfos.write().insert(
+                    id,
+                    hostinfo::HostInfoSnapshot {
+                        projection: record.host_info_for_node(),
+                        value: hostinfo,
+                    },
+                );
+                natives.write().insert(id, native);
+                pending_hostinfos.write().remove(&id);
+                pending.write().insert(
+                    id,
+                    NativeRegistrationPublication::Created {
+                        revision,
+                        record: Box::new(record.clone()),
+                    },
+                );
+                *completed.lock() = Some(Ok(record));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let result = result.lock().take();
+        if !outcome.applied {
+            return result.unwrap_or_else(|| Err("node changed during new registration".into()));
+        }
+        result.unwrap_or_else(|| Err("node changed during new registration".into()))
+    }
+
+    /// Existing-node auth mutates NodeStore quietly before its SQL write. The
+    /// caller owns the machine/node-key guards and native persistence mutex.
+    #[cfg(feature = "admin")]
+    pub(crate) fn begin_native_registration(
+        &self,
+        id: u64,
+        prepare: impl FnOnce(
+            &MachineRecord,
+            Option<&crate::admin::machines::NativeNodePersistence>,
+        ) -> Result<
+            crate::admin::machines::PreparedNativeRegistration,
+            crate::admin::machines::MachineAdminError,
+        > + Send
+        + 'static,
+    ) -> Result<
+        (
+            NativeRegistrationUpdate,
+            headscale_db::headscale_nodes::CachedNodeRegistration,
+        ),
+        crate::admin::machines::MachineAdminError,
+    > {
+        use crate::admin::machines::MachineAdminError;
+        let completed = Arc::new(Mutex::new(None));
+        let result = completed.clone();
+        let hostinfos = self.hostinfo_snapshots.clone();
+        let natives = self.native_persistence.clone();
+        let pending_hostinfos = self.pending_native_hostinfo.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |records| {
+                let mut matches = records
+                    .iter()
+                    .filter(|(key, record)| record.stable_node_id_for_key(key) == id);
+                let Some((old_key, before)) = matches.next() else {
+                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                        "node no longer exists in NodeStore".into(),
+                    )));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                if matches.next().is_some() {
+                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                        "ambiguous node identity".into(),
+                    )));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let before = before.clone();
+                let old_key = old_key.clone();
+                let before_projection = before.host_info_for_node();
+                let previous_value = match hostinfos.read().get(&id).map_or_else(
+                    || serde_json::to_value(&before_projection),
+                    |snapshot| snapshot.value_for(&before_projection),
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        *result.lock() = Some(Err(MachineAdminError::Storage(error.to_string())));
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    }
+                };
+                let hostinfo_before = hostinfo::HostInfoSnapshot {
+                    projection: before_projection,
+                    value: previous_value,
+                };
+                let mut native_before = natives.read().get(&id).cloned();
+                if let Some(native) = &mut native_before {
+                    native.replace_hostinfo_snapshot(hostinfo_before.clone());
+                }
+                let prepared = match prepare(&before, native_before.as_ref()) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        *result.lock() = Some(Err(error));
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    }
+                };
+                let mut proposed = prepared.record;
+                if proposed.machine_key_hex != before.machine_key_hex {
+                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                        "ambiguous node identity".into(),
+                    )));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                if let Some(other) = records.get(&proposed.node_key_hex)
+                    && other.stable_node_id_for_key(&proposed.node_key_hex) != id
+                {
+                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                        "node key already exists".into(),
+                    )));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                proposed.node_id = Some(id);
+                proposed.hostname.clone_from(&before.hostname);
+                let update = NativeRegistrationUpdate {
+                    hostinfo_before,
+                    hostinfo_after: prepared.native.hostinfo_snapshot(),
+                    native_before,
+                    before,
+                    after: proposed.clone(),
+                };
+                records.remove(&old_key);
+                records.insert(proposed.node_key_hex.clone(), proposed);
+                hostinfos.write().insert(id, update.hostinfo_after.clone());
+                natives.write().insert(id, prepared.native);
+                pending_hostinfos.write().remove(&id);
+                *result.lock() = Some(Ok((update, prepared.registration)));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let result = completed.lock().take();
+        if !outcome.applied {
+            return result.unwrap_or_else(|| {
+                Err(MachineAdminError::BadRequest(
+                    "node changed during registration".into(),
+                ))
+            });
+        }
+        result.unwrap_or_else(|| {
+            Err(MachineAdminError::BadRequest(
+                "node changed during registration".into(),
+            ))
+        })
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn rollback_native_registration(
+        &self,
+        update: &NativeRegistrationUpdate,
+    ) -> Result<(), String> {
+        let update = update.clone();
+        let id = update.before.stable_node_id();
+        let hostinfos = self.hostinfo_snapshots.clone();
+        let natives = self.native_persistence.clone();
+        let pending_hostinfos = self.pending_native_hostinfo.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "put",
+            Box::new(move |records| {
+                let current = records.get(&update.after.node_key_hex);
+                if !current.is_some_and(|record| {
+                    record.stable_node_id() == id
+                        && record.machine_key_hex == update.after.machine_key_hex
+                }) || records
+                    .get(&update.before.node_key_hex)
+                    .is_some_and(|record| record.stable_node_id() != id)
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                records.remove(&update.after.node_key_hex);
+                records.insert(update.before.node_key_hex.clone(), update.before);
+                hostinfos.write().insert(id, update.hostinfo_before);
+                pending_hostinfos.write().remove(&id);
+                let mut native = natives.write();
+                if let Some(before) = update.native_before {
+                    native.insert(id, before);
+                } else {
+                    native.remove(&id);
+                }
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        if outcome.applied {
+            Ok(())
+        } else {
+            Err("node changed before registration rollback".into())
+        }
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn defer_native_registration_publication(&self, update: NativeRegistrationUpdate) {
+        let revision = self
+            .native_registration_revision
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        self.pending_native_registrations.write().insert(
+            update.after.stable_node_id(),
+            NativeRegistrationPublication::Updated {
+                revision,
+                update: Box::new(update),
+            },
+        );
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn native_registration_record(&self, id: u64) -> Option<MachineRecord> {
+        let pending = self.pending_native_registrations.read().get(&id)?.clone();
+        self.get(&pending.after().node_key_hex)
+            .filter(|record| record.stable_node_id() == id)
+    }
+
+    #[cfg(feature = "admin")]
+    fn finish_native_registration_publication(
+        &self,
+        proposed: &MachineRecord,
+    ) -> Result<bool, String> {
+        let id = proposed.stable_node_id();
+        let mut pending = self.pending_native_registrations.write();
+        let Some(update) = pending.get(&id) else {
+            return Ok(false);
+        };
+        if update.after().node_key_hex != proposed.node_key_hex {
+            return Ok(false);
+        }
+        let update = pending.remove(&id).expect("pending registration exists");
+        drop(pending);
+        // CLI/OIDC may hydrate canonical account fields after the native save.
+        // Merge that metadata without reapplying SQL/client snapshots.
+        let metadata = proposed.clone();
+        self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |records| {
+                let Some(current) = records.get_mut(&metadata.node_key_hex) else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                if current.stable_node_id() != id
+                    || current.user_id != metadata.user_id
+                    || current.user != metadata.user
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let changed = current.user_display_name != metadata.user_display_name
+                    || current.user_profile_pic_url != metadata.user_profile_pic_url
+                    || current.user_provider != metadata.user_provider
+                    || current.user_created_at != metadata.user_created_at;
+                current.user_display_name = metadata.user_display_name;
+                current.user_profile_pic_url = metadata.user_profile_pic_url;
+                current.user_provider = metadata.user_provider;
+                current.user_created_at = metadata.user_created_at;
+                NodeStoreBoolUpdateOutcome::quiet(changed)
+            }),
+        );
+        let Some(current) = self
+            .get(&update.after().node_key_hex)
+            .filter(|record| record.stable_node_id() == id)
+        else {
+            return Ok(true);
+        };
+        let mut changes = Self::auth_completion_pending_changes_with_policy(
+            update.before(),
+            &current,
+            id,
+            self.try_refresh_policy_node_inputs()?,
+        );
+        let current_hostinfo = self
+            .map_hostinfo_value(&current)
+            .expect("HostInfo serializes primitive JSON fields");
+        if changes
+            .first()
+            .is_some_and(|change| change.reason == MapChangeReason::NodeKeyRotated)
+            && let NativeRegistrationPublication::Updated { update: prior, .. } = &update
+            && !headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
+                &prior.hostinfo_before.value,
+                &current_hostinfo,
+            )
+        {
+            changes[0] = PendingMapChange::origin(MapChangeReason::NodeAdded, id);
+        }
+        if let Some(before) = update.before()
+            && before.node_key_hex != current.node_key_hex
+            && let Some(gc) = self.ephemeral_gc()
+        {
+            gc.cancel(&before.node_key_hex);
+        }
+        self.wake_waiters_with_many(changes);
+        Ok(true)
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) async fn lock_native_persistence(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.native_persist_lock.clone().lock_owned().await
+    }
+
+    /// SQL row conversion stages metadata until the matching wire record is
+    /// actually published. A read-only projection cannot replace live pointers.
+    #[cfg(feature = "admin")]
+    pub(crate) fn stage_native_row(
+        &self,
+        record: MachineRecord,
+        native: crate::admin::machines::NativeNodePersistence,
+    ) {
+        let revision = self
+            .native_registration_revision
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        self.pending_native_rows.write().insert(
+            record.stable_node_id(),
+            StagedNativeRow {
+                revision,
+                record,
+                native,
+            },
+        );
+    }
+
+    /// Invoke only from a NodeStore writer, before publishing its record map.
+    /// Exact record comparison prevents a staged projection from attaching to
+    /// a different concurrent record for the same ID/key.
+    #[cfg(feature = "admin")]
+    fn native_row_installer(&self) -> impl Fn(&MachineRecord) + Send + 'static {
+        let pending = self.pending_native_rows.clone();
+        let native = self.native_persistence.clone();
+        let hostinfo = self.hostinfo_snapshots.clone();
+        let pending_hostinfo = self.pending_native_hostinfo.clone();
+        move |record| {
+            let id = record.stable_node_id();
+            let staged = {
+                let mut pending = pending.write();
+                if !pending
+                    .get(&id)
+                    .is_some_and(|staged| &staged.record == record)
+                {
+                    return;
+                }
+                pending.remove(&id).map(|staged| staged.native)
+            };
+            if let Some(staged) = staged {
+                pending_hostinfo.write().remove(&id);
+                hostinfo.write().insert(id, staged.hostinfo_snapshot());
+                native.write().insert(id, staged);
+            }
+        }
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn remember_native_persistence(
+        &self,
+        id: u64,
+        captured: &MachineSnapshot,
+        value: crate::admin::machines::NativeNodePersistence,
+    ) {
+        let records = self.inner.write();
+        if !Arc::ptr_eq(&records, &captured.records)
+            || !Arc::ptr_eq(&self.hostinfo_snapshots.read(), &captured.hostinfo)
+            || !Arc::ptr_eq(&self.native_persistence.read(), &captured.native)
+        {
+            // A completed SQL save must not replace metadata from a newer
+            // live record or a same-projection raw/association update.
+            return;
+        }
+        self.pending_native_hostinfo.write().remove(&id);
+        self.hostinfo_snapshots
+            .write()
+            .insert(id, value.hostinfo_snapshot());
+        self.native_persistence.write().insert(id, value);
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn take_native_registration_hostinfo(
+        &self,
+        id: u64,
+        record: &MachineRecord,
+    ) -> Option<hostinfo::HostInfoSnapshot> {
+        let mut pending = self.pending_native_hostinfo.write();
+        let (_, key, snapshot) = pending.get(&id)?;
+        if key != &record.node_key_hex || snapshot.projection != record.host_info_for_node() {
+            return None;
+        }
+        pending.remove(&id).map(|(_, _, snapshot)| snapshot)
+    }
+
+    pub(crate) fn map_hostinfo_value(
+        &self,
+        record: &MachineRecord,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        self.snapshot_with_metadata().map_hostinfo_value(record)
+    }
+
+    /// Apply a native admin edit in the NodeStore writer without dispatching
+    /// a change before its database save. Name reservation shares the writer
+    /// with create/rekey, so collision validation and assignment are atomic.
+    #[cfg(feature = "admin")]
+    pub(crate) fn mutate_native_node_with_view(
+        &self,
+        id: u64,
+        new_name: Option<String>,
+        metadata: Option<crate::admin::machines::NativeNodeMetadataEdit>,
+        update: impl FnOnce(&mut MachineRecord) -> bool + Send + 'static,
+    ) -> Result<Option<crate::admin::machines::MachineAdminView>, String> {
+        if let Some(name) = &new_name {
+            self.validate_given_name(name)?;
+        }
+        let error = Arc::new(Mutex::new(None));
+        let writer_error = error.clone();
+        let captured_view = Arc::new(Mutex::new(None));
+        let writer_view = captured_view.clone();
+        let natives = self.native_persistence.clone();
+        let hostinfos = self.hostinfo_snapshots.clone();
+        let operation = if new_name.is_some() {
+            "set_name"
+        } else {
+            "update"
+        };
+        let outcome = self.apply_nodestore_bool_update(
+            operation,
+            Box::new(move |map| {
+                let keys = map
+                    .iter()
+                    .filter(|(key, record)| record.stable_node_id_for_key(key) == id)
+                    .take(2)
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                let Some(key) = keys.first() else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                if keys.len() != 1 {
+                    *writer_error.lock() = Some("ambiguous node identity".to_string());
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                if new_name.as_ref().is_some_and(|name| {
+                    map.iter()
+                        .any(|(other, record)| other != key && record.hostname == *name)
+                }) {
+                    *writer_error.lock() =
+                        Some("given name already in use by another node".to_string());
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let record = map
+                    .get_mut(key)
+                    .expect("selected node remains in the writer snapshot");
+                let clear_unhealthy = update(record);
+                let metadata = metadata
+                    .filter(|edit| !edit.require_native || natives.read().contains_key(&id));
+                if let Some(metadata) = metadata {
+                    use crate::admin::machines::NativeNodePersistence;
+                    let mut prior = natives.read().get(&id).cloned();
+                    let hostinfo = hostinfos.read().get(&id).cloned();
+                    if let (Some(prior), Some(hostinfo)) = (&mut prior, &hostinfo) {
+                        prior.replace_hostinfo_snapshot(hostinfo.clone());
+                    }
+                    let captured = (|| {
+                        let mut fields =
+                            NativeNodePersistence::snapshot(id, record, prior.as_ref())?;
+                        if prior.is_none()
+                            && let Some(hostinfo) = hostinfo
+                        {
+                            let value = hostinfo.value_for(&record.host_info_for_node()).map_err(
+                                |error| {
+                                    crate::admin::machines::MachineAdminError::Storage(
+                                        error.to_string(),
+                                    )
+                                },
+                            )?;
+                            fields.host_info = (!value.is_null()).then_some(value);
+                        }
+                        if metadata.nil_user {
+                            fields.user_id = None;
+                        }
+                        if metadata.nil_routes {
+                            fields.approved_routes = None;
+                        }
+                        Ok::<_, crate::admin::machines::MachineAdminError>(
+                            NativeNodePersistence::from_snapshot(record, &fields, prior.as_ref()),
+                        )
+                    })();
+                    match captured {
+                        Ok(native) => {
+                            hostinfos.write().insert(id, native.hostinfo_snapshot());
+                            natives.write().insert(id, native);
+                        }
+                        Err(error) => {
+                            // Go has already changed NodeStore when SQL JSON
+                            // encoding fails; keep that live mutation too.
+                            *writer_error.lock() =
+                                Some(crate::admin::machines::native_save_error(error).to_string());
+                        }
+                    }
+                }
+                let native = natives.read().get(&id).cloned();
+                *writer_view.lock() = Some(crate::admin::machines::MachineAdminView::from_wire(
+                    key,
+                    record,
+                    native.as_ref(),
+                    false,
+                ));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(id),
+                    clear_unhealthy_route_state: clear_unhealthy.then_some(id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let result = error.lock().take();
+        match result {
+            Some(error) => Err(error),
+            None => Ok(if outcome.applied {
+                captured_view.lock().take()
+            } else {
+                None
+            }),
+        }
+    }
+
+    fn discard_absent_native_persistence(&self, ids: &[u64]) {
+        let snapshot = self.snapshot();
+        let live = snapshot
+            .iter()
+            .map(|(key, record)| record.stable_node_id_for_key(key))
+            .collect::<BTreeSet<_>>();
+        let mut hostinfo = self.hostinfo_snapshots.write();
+        #[cfg(feature = "admin")]
+        let mut native = self.native_persistence.write();
+        #[cfg(feature = "admin")]
+        let mut pending = self.pending_native_hostinfo.write();
+        for id in ids {
+            if !live.contains(id) {
+                hostinfo.remove(id);
+                #[cfg(feature = "admin")]
+                native.remove(id);
+                #[cfg(feature = "admin")]
+                pending.remove(id);
+                #[cfg(feature = "admin")]
+                self.pending_native_registrations.write().remove(id);
+                #[cfg(feature = "admin")]
+                self.pending_native_rows.write().remove(id);
+            }
+        }
+    }
+
+    /// Register the allocator used by this registry. Weak ownership avoids a
+    /// cycle with embedding allocators; the serving state owns the allocator.
+    pub fn configure_ip_allocator(&self, allocator: &Arc<dyn IpAllocator>) {
+        *self.ip_allocator.write() = Some(Arc::downgrade(allocator));
+    }
+
+    fn release_addresses(&self, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) {
+        let allocator = self.ip_allocator.read().as_ref().and_then(Weak::upgrade);
+        if let Some(allocator) = allocator {
+            allocator.release_addresses(ipv4, ipv6);
+        }
+    }
+
+    /// Configure the same base domain used by map FQDN generation. Empty
+    /// preserves the no-domain embedding contract; production sets it at boot.
+    pub fn configure_given_name_domain(&self, base_domain: &str) {
+        base_domain.clone_into(&mut self.given_name_domain.write());
+    }
+
+    pub(crate) fn validate_given_name(&self, name: &str) -> Result<(), String> {
+        headscale_api_acl::go_dnsname::validate_given_name(name, &self.given_name_domain.read())
+            .map_err(|error| format!("renaming node: {error}"))
+    }
+
+    /// Configure the default lifetime for user-owned registrations. Go stores
+    /// node.expiry as signed nanoseconds; nonpositive values disable defaults.
+    pub fn configure_registration_expiry(&self, nanos: i64) {
+        self.registration_expiry_nanos
+            .store(nanos, Ordering::Relaxed);
+    }
+
+    pub(crate) fn registration_expiry(
+        &self,
+        expiry: Option<DateTime<Utc>>,
+        tagged: bool,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let missing = expiry.is_none_or(|expiry| {
+            expiry.timestamp() == -62_135_596_800 && expiry.timestamp_subsec_nanos() == 0
+        });
+        let nanos = self.registration_expiry_nanos.load(Ordering::Relaxed);
+        if tagged || !missing || nanos <= 0 {
+            return expiry;
+        }
+        Some(
+            now.checked_add_signed(chrono::Duration::nanoseconds(nanos))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+        )
+    }
+
+    pub(crate) async fn lock_registration(
+        &self,
+        machine_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.lock_registration_key(RegistrationLockKey::Machine(machine_key.to_owned()))
+            .await
+    }
+
+    /// Acquire after the machine guard and retain through persistence and
+    /// publication. Different machines may otherwise race to claim one key.
+    pub(crate) async fn lock_node_key_registration(
+        &self,
+        node_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.lock_registration_key(RegistrationLockKey::Node(node_key.to_owned()))
+            .await
+    }
+
+    pub(crate) fn validate_registration_node_key(
+        &self,
+        node_key: &str,
+        machine_key: &str,
+    ) -> Result<(), &'static str> {
+        if self
+            .get(node_key)
+            .is_some_and(|record| record.machine_key_hex != machine_key)
+        {
+            return Err("node key already in use by another machine");
+        }
+        Ok(())
+    }
+
+    async fn lock_registration_key(
+        &self,
+        key: RegistrationLockKey,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.registration_locks.lock();
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     /// Enable headscale-go-style NodeStore write batching for registry mutations.
@@ -2556,11 +4177,15 @@ impl MachineRegistry {
         registration_store: Option<Weak<dyn MachineRegistrationStore>>,
         inactivity_timeout: Duration,
     ) -> EphemeralGcHandle {
+        if let Some(store) = &registration_store {
+            *self.registration_store.write() = Some(store.clone());
+        }
         let gc = Arc::new(EphemeralNodeGc {
             machines: Arc::downgrade(self),
             registration_store,
             inactivity_timeout,
             timers: Mutex::new(BTreeMap::new()),
+            next_generation: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
         if let Some(previous) = self.ephemeral_gc.write().replace(gc.clone()) {
@@ -2571,6 +4196,12 @@ impl MachineRegistry {
 
     fn ephemeral_gc(&self) -> Option<Arc<EphemeralNodeGc>> {
         self.ephemeral_gc.read().clone()
+    }
+
+    fn bind_registration_store(&self, store: Option<&Arc<dyn MachineRegistrationStore>>) {
+        if let Some(store) = store {
+            *self.registration_store.write() = Some(Arc::downgrade(store));
+        }
     }
 
     fn ephemeral_node_key_by_id(&self, node_id: u64) -> Option<String> {
@@ -2634,6 +4265,13 @@ impl MachineRegistry {
     #[must_use]
     pub fn pending_map_changes(&self) -> BTreeMap<u64, Vec<MapChange>> {
         self.pending_map_changes.read().clone()
+    }
+
+    pub(crate) fn has_pending_full_map_change_for_node(&self, node_id: u64) -> bool {
+        self.pending_map_changes
+            .read()
+            .get(&node_id)
+            .is_some_and(|changes| changes.iter().any(MapChange::is_full))
     }
 
     #[must_use]
@@ -2723,22 +4361,23 @@ impl MachineRegistry {
     }
 
     fn wake_waiters_with(&self, change: PendingMapChange) {
-        // `send_modify` returns the previous value but we don't need
-        // it; this just records the bump and broadcasts to every
-        // subscribed receiver. Overflow is a non-issue: u64::MAX
-        // bumps at 1 per ns is 585 years.
-        let mut generation = 0;
-        self.gen_tx.send_modify(|g| {
-            *g = g.wrapping_add(1);
-            generation = *g;
-        });
-        let change = change.into_change(generation);
-        self.push_map_change(change.clone());
-        self.enqueue_map_change(change);
-        self.notify.notify_waiters();
+        self.wake_waiters_with_many(vec![change]);
     }
 
-    fn wake_waiters_with_many(&self, changes: Vec<PendingMapChange>) {
+    fn wake_waiters_with_many(&self, mut changes: Vec<PendingMapChange>) {
+        // Headscale.Change drains State's retained self-refresh list on every
+        // dispatch, including an otherwise empty successful map result. A
+        // failed database save leaves this queue for the next dispatch.
+        let mut self_refreshes = std::mem::take(&mut *self.pending_self_refreshes.lock());
+        let policy = self.policy_store.read().clone();
+        if let Some(policy) = policy {
+            self_refreshes.extend(policy.drain_changed_node_attrs());
+        }
+        changes.extend(
+            self_refreshes
+                .into_iter()
+                .map(|id| PendingMapChange::target(MapChangeReason::SelfUpdate, id)),
+        );
         if changes.is_empty() {
             return;
         }
@@ -2760,12 +4399,9 @@ impl MachineRegistry {
     }
 
     /// Headscale-go `State.ExpireExpiredNodes` parity: find nodes whose
-    /// key-expiry crossed since the previous scheduler pass and wake
-    /// active map streams so they rebuild with `KeyExpiry`/`Expired`.
-    ///
-    /// This is intentionally notification-only. Expired nodes stay in
-    /// the registry and persistent store; auth/register paths decide
-    /// what a client must do next.
+    /// key-expiry crossed since the previous scheduler pass. Revalidate in
+    /// one writer batch and clear their online state before announcing them.
+    /// Nodes and their already-persisted expiry remain in the database.
     pub fn expire_expired_nodes_since(
         &self,
         last_check: DateTime<Utc>,
@@ -2780,32 +4416,72 @@ impl MachineRegistry {
         last_check: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Vec<String> {
-        let start = Instant::now();
-        let expired: Vec<String> = self
+        let candidates = self
             .snapshot()
             .iter()
-            .filter_map(|(node_key, rec)| match rec.expiry {
-                Some(expiry) if expiry > last_check && expiry <= now => Some(node_key.clone()),
-                _ => None,
+            .filter(|(_, record)| {
+                record.is_expired_at(now) && record.expiry.is_some_and(|expiry| expiry > last_check)
             })
-            .collect();
-        if expired.is_empty() {
-            return expired;
+            .map(|(key, record)| record.stable_node_id_for_key(key))
+            .collect::<BTreeSet<_>>();
+        if candidates.is_empty() {
+            return Vec::new();
         }
-
-        let elapsed = start.elapsed();
-        self.record_nodestore_operation("expire", elapsed);
-        self.record_nodestore_batch(expired.len(), elapsed);
-        let expired_node_ids = expired
-            .iter()
-            .map(|node_key| self.stable_node_id_for_key(node_key))
-            .collect::<Vec<_>>();
-        let change = match expired_node_ids.as_slice() {
-            [node_id] => PendingMapChange::origin(MapChangeReason::KeyExpiry, *node_id),
-            _ => PendingMapChange::peer_patches(MapChangeReason::KeyExpiry, expired_node_ids),
-        };
-        self.wake_waiters_with(change);
-        expired
+        let online = self.online_states.clone();
+        let policy = self.policy_store.read().clone();
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let pending = changes.clone();
+        let outcome = self.apply_nodestore_many_update(
+            "expire",
+            Box::new(move |records| {
+                let mut outcome = NodeStoreManyUpdateOutcome::unchanged();
+                let mut online = online.write();
+                let mut changes = pending.lock();
+                for (key, record) in records {
+                    let node_id = record.stable_node_id_for_key(key);
+                    // An expiry restoration/rekey/deletion may have happened
+                    // after candidate selection. Never overwrite that edit.
+                    if !candidates.contains(&node_id)
+                        || !record.is_expired_at(now)
+                        || record.expiry.is_none_or(|expiry| expiry <= last_check)
+                    {
+                        continue;
+                    }
+                    let was_online = online.insert(node_id, false).unwrap_or(false);
+                    changes.push(PendingMapChange::lifecycle_peer(
+                        MapChangeReason::NodeAdded,
+                        node_id,
+                        was_online && record_needs_peer_recompute(record, policy.as_ref()),
+                    ));
+                    outcome.affected_node_keys.push(key.clone());
+                    outcome.affected_node_ids.push(node_id);
+                    outcome.final_presence_node_ids.push(node_id);
+                }
+                outcome.applied = outcome.affected_node_ids.len();
+                outcome.publish_snapshot = outcome.applied != 0;
+                outcome
+            }),
+        );
+        let mut changes = std::mem::take(&mut *changes.lock());
+        if outcome.applied == 0 {
+            return Vec::new();
+        }
+        let present = outcome
+            .final_presence_node_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        changes.retain(|change| {
+            change
+                .origin_node_id
+                .is_some_and(|node_id| present.contains(&node_id))
+        });
+        self.wake_waiters_with_many(changes);
+        outcome
+            .affected_node_keys
+            .into_iter()
+            .zip(outcome.affected_node_ids)
+            .filter_map(|(key, node_id)| present.contains(&node_id).then_some(key))
+            .collect()
     }
 
     /// Insert or replace a machine record. Wakes every pending
@@ -2818,8 +4494,271 @@ impl MachineRegistry {
         self.upsert_with_reason(node_key_hex, rec, None);
     }
 
+    /// Publish a record without waking map streams. Production map updates go
+    /// through `apply_map_runtime_update`; this is a test seam only.
+    #[cfg(test)]
     pub(crate) fn upsert_quiet(&self, node_key_hex: String, rec: MachineRecord) {
         self.upsert_record(node_key_hex, rec);
+    }
+
+    /// Headscale's post-backfill PutNode refresh is by stable ID, retaining
+    /// live Hostinfo and preferring a persisted NetInfo when present. Online
+    /// state is held separately by the stream connection tracker. Merge inside
+    /// one NodeStore writer so a full reload requires only one COW map copy.
+    #[cfg(feature = "admin")]
+    pub(crate) fn refresh_nodes_after_ip_backfill(
+        &self,
+        mut records: Vec<MachineRecord>,
+        native: Vec<(u64, crate::admin::machines::NativeNodePersistence)>,
+    ) {
+        if records.is_empty() {
+            return;
+        }
+        let mut native = native.into_iter().collect::<HashMap<_, _>>();
+        let natives = self.native_persistence.clone();
+        let hostinfos = self.hostinfo_snapshots.clone();
+        let pending = self.pending_native_hostinfo.clone();
+        self.apply_nodestore_many_update(
+            "put_multi",
+            Box::new(move |map| {
+                {
+                    let existing_by_id = map
+                        .iter()
+                        .map(|(key, record)| (record.stable_node_id_for_key(key), record))
+                        .collect::<HashMap<_, _>>();
+                    for record in &mut records {
+                        let node_id = record.stable_node_id_for_key(&record.node_key_hex);
+                        if let Some(existing) = existing_by_id.get(&node_id) {
+                            let mut hostinfo = existing.host_info_for_node();
+                            hostinfo.net_info =
+                                record.host_info_for_node().net_info.or(hostinfo.net_info);
+                            // Hostname is a separate persisted Node field in Go.
+                            let hostname = record.raw_hostname.clone();
+                            record.replace_host_info(hostinfo);
+                            record.raw_hostname = hostname;
+                        }
+                    }
+                }
+                let refreshed_ids = records
+                    .iter()
+                    .map(|record| record.stable_node_id_for_key(&record.node_key_hex))
+                    .collect::<BTreeSet<_>>();
+                // A database node can have a new key. Replace its old ID slot;
+                // Go's ID-keyed store has only one slot for that same node.
+                map.retain(|key, record| {
+                    !refreshed_ids.contains(&record.stable_node_id_for_key(key))
+                });
+                let applied = records.len();
+                for record in records {
+                    let id = record.stable_node_id_for_key(&record.node_key_hex);
+                    if let Some(mut captured) = native.remove(&id) {
+                        let projection = record.host_info_for_node();
+                        let snapshot = captured.hostinfo_snapshot();
+                        if let Ok(value) = snapshot.value_for(&projection) {
+                            captured.replace_hostinfo_snapshot(hostinfo::HostInfoSnapshot {
+                                projection,
+                                value,
+                            });
+                        }
+                        hostinfos.write().insert(id, captured.hostinfo_snapshot());
+                        natives.write().insert(id, captured);
+                        pending.write().remove(&id);
+                    }
+                    map.insert(record.node_key_hex.clone(), record);
+                }
+                // Go's BackfillNodeIPs does not enqueue a map notification or
+                // a policy refresh for these PutNode calls.
+                NodeStoreManyUpdateOutcome {
+                    applied,
+                    publish_snapshot: true,
+                    ..NodeStoreManyUpdateOutcome::unchanged()
+                }
+            }),
+        );
+    }
+
+    /// Create an admin record with the uniqueness checks and insertion in one
+    /// NodeStore write. A snapshot check followed by upsert can replace a node
+    /// registered by another machine while the create was being prepared.
+    #[cfg(feature = "admin")]
+    pub(crate) fn insert_volatile_admin_record(
+        &self,
+        mut record: MachineRecord,
+    ) -> Result<MachineRecord, RegistryMutationError> {
+        let node_key = record.node_key_hex.clone();
+        let node_id = record.stable_node_id_for_key(&node_key);
+        record.node_id = Some(node_id);
+        let result = Arc::new(Mutex::new(None));
+        let completed = result.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "put",
+            Box::new(move |map| {
+                let conflict = if map.contains_key(&node_key) {
+                    Some("node already exists".to_owned())
+                } else {
+                    map.iter().find_map(|(key, existing)| {
+                        if existing.stable_node_id_for_key(key) == node_id {
+                            Some("node ID already exists".to_owned())
+                        } else if record.ipv4.is_some() && existing.ipv4 == record.ipv4 {
+                            record
+                                .ipv4
+                                .map(|ip| format!("IPv4 address {ip} already in use"))
+                        } else if record.ipv6.is_some() && existing.ipv6 == record.ipv6 {
+                            record
+                                .ipv6
+                                .map(|ip| format!("IPv6 address {ip} already in use"))
+                        } else if existing.hostname == record.hostname {
+                            Some("name already exists".to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(error) = conflict {
+                    *completed.lock() = Some(Err(error));
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                map.insert(node_key, record.clone());
+                *completed.lock() = Some(Ok(record));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(node_id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let record = result
+            .lock()
+            .take()
+            .ok_or("node creation changed during publication")??;
+        if !outcome.applied {
+            return Err("node creation changed during publication".into());
+        }
+        self.finish_volatile_node_update(&outcome, MapChangeReason::NodeAdded)
+            .map_err(RegistryMutationError::Policy)?;
+        Ok(record)
+    }
+
+    /// Merge only client-owned map fields into the current node. A snapshot
+    /// taken before an async store write must not restore old authorization,
+    /// owner metadata, IP assignments, or an administratively renamed node.
+    pub(crate) fn apply_runtime_update(
+        &self,
+        before: &MachineRecord,
+        proposed: MachineRecord,
+        reason: Option<MapChangeReason>,
+    ) -> Option<MachineRecord> {
+        self.apply_map_runtime_update(before, proposed, reason, None)
+    }
+
+    pub(crate) fn apply_map_runtime_update(
+        &self,
+        before: &MachineRecord,
+        proposed: MachineRecord,
+        reason: Option<MapChangeReason>,
+        hostinfo: Option<serde_json::Value>,
+    ) -> Option<MachineRecord> {
+        let key = before.node_key_hex.clone();
+        if proposed.node_key_hex != key {
+            return None;
+        }
+        let before = before.clone();
+        let hostinfo_snapshots = self.hostinfo_snapshots.clone();
+        let key_for_update = key.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |records| {
+                let Some(current) = records.get(&key_for_update) else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                if current.machine_key_hex != before.machine_key_hex
+                    || (current.node_id.is_some()
+                        && before.node_id.is_some()
+                        && current.node_id != before.node_id)
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let mut next = current.clone();
+                next.disco_key.clone_from(&proposed.disco_key);
+                next.endpoints.clone_from(&proposed.endpoints);
+                next.replace_host_info(proposed.host_info_for_node());
+                if current.raw_hostname == before.raw_hostname {
+                    next.raw_hostname.clone_from(&proposed.raw_hostname);
+                } else {
+                    next.raw_hostname.clone_from(&current.raw_hostname);
+                }
+                next.os.clone_from(&proposed.os);
+                next.os_version.clone_from(&proposed.os_version);
+                next.home_derp = proposed.home_derp;
+                next.available_routes.clone_from(&proposed.available_routes);
+                next.ssh_host_keys.clone_from(&proposed.ssh_host_keys);
+                if current.hostname == before.hostname
+                    && current.raw_hostname == before.raw_hostname
+                {
+                    next.hostname.clone_from(&proposed.hostname);
+                    if next.raw_hostname != current.raw_hostname
+                        && !next.raw_hostname.is_empty()
+                        && wire::is_auto_derived_given_name(
+                            &current.hostname,
+                            &current.raw_hostname,
+                        )
+                    {
+                        // NodeStore.UpdateNode reserves an automatic name in
+                        // its writer. A snapshot-only lookup can lose a race
+                        // to another registration or an admin rename.
+                        next.hostname = Self::resolve_auto_given_name_from_snapshot(
+                            records,
+                            &key_for_update,
+                            None,
+                            &next.raw_hostname,
+                        );
+                    }
+                }
+                if !Self::policy_identity_without_routes_changed(current, &before)
+                    && current.approved_routes == before.approved_routes
+                {
+                    next.approved_routes.clone_from(&proposed.approved_routes);
+                }
+                if next.node_id.is_none() {
+                    next.node_id = proposed.node_id;
+                }
+                next.last_seen = current.last_seen.max(proposed.last_seen);
+                let changed = hostinfo.is_some()
+                    || current.disco_key != next.disco_key
+                    || current.endpoints != next.endpoints
+                    || current.host_info_for_node() != next.host_info_for_node()
+                    || current.hostname != next.hostname
+                    || current.raw_hostname != next.raw_hostname
+                    || current.available_routes != next.available_routes
+                    || current.approved_routes != next.approved_routes
+                    || current.ssh_host_keys != next.ssh_host_keys
+                    || current.node_id != next.node_id;
+                let publish = changed || current.last_seen != next.last_seen;
+                let node_id = next.stable_node_id_for_key(&key_for_update);
+                let clear_unhealthy =
+                    active_approved_routes(&next.available_routes, &next.approved_routes)
+                        .is_empty();
+                if let Some(value) = hostinfo {
+                    hostinfo_snapshots.write().insert(
+                        node_id,
+                        hostinfo::HostInfoSnapshot {
+                            projection: next.host_info_for_node(),
+                            value,
+                        },
+                    );
+                }
+                records.insert(key_for_update.clone(), next);
+                NodeStoreBoolUpdateOutcome {
+                    applied: true,
+                    publish_snapshot: publish,
+                    change: reason
+                        .filter(|_| changed)
+                        .map(|reason| PendingMapChange::origin(reason, node_id)),
+                    clear_unhealthy_route_state: clear_unhealthy.then_some(node_id),
+                    final_presence_node_id: None,
+                }
+            }),
+        );
+        outcome.applied.then(|| self.get(&key)).flatten()
     }
 
     pub(crate) fn upsert_with_reason(
@@ -2842,26 +4781,221 @@ impl MachineRegistry {
         self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
     }
 
+    #[cfg(test)]
     pub(crate) fn upsert_auth_completion(&self, node_key_hex: String, rec: MachineRecord) {
+        self.try_upsert_auth_completion(node_key_hex, rec)
+            .expect("auth completion policy resolves");
+    }
+
+    pub(crate) fn try_upsert_auth_completion(
+        &self,
+        node_key_hex: String,
+        rec: MachineRecord,
+    ) -> Result<(), String> {
+        #[cfg(feature = "admin")]
+        if self.finish_native_registration_publication(&rec)? {
+            return Ok(());
+        }
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
         let existing = self.get(&node_key_hex);
-        let changes = Self::auth_completion_pending_changes(existing.as_ref(), &rec, node_id);
         let node_key_for_presence = node_key_hex.clone();
+        let published = rec.clone();
         self.upsert_record(node_key_hex, rec);
         if !self.node_key_still_maps_to_node_id(&node_key_for_presence, node_id) {
-            return;
+            return Ok(());
         }
+        let changes = Self::auth_completion_pending_changes_with_policy(
+            existing.as_ref(),
+            &published,
+            node_id,
+            self.try_refresh_policy_node_inputs()?,
+        );
         self.wake_waiters_with_many(changes);
+        Ok(())
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn publish_saved_admin_record(&self, record: MachineRecord) -> Result<(), String> {
+        let key = record.node_key_hex.clone();
+        let id = record.stable_node_id_for_key(&key);
+        self.upsert_record(key.clone(), record);
+        if self.node_key_still_maps_to_node_id(&key, id) {
+            if self.try_refresh_policy_node_inputs()? == Some(true) {
+                self.wake_policy_change(None);
+            } else {
+                self.wake_node_change(MapChangeReason::NodeAdded, id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Publish a volatile auth result with the node-key binding checked in
+    /// the same NodeStore write as insertion/rekey. Per-machine registration
+    /// locks alone cannot exclude a different machine claiming the same key.
+    pub(crate) fn commit_volatile_auth_registration_with_hostinfo(
+        &self,
+        previous_node_key: Option<&str>,
+        mut record: MachineRecord,
+        hostinfo: Option<serde_json::Value>,
+    ) -> Result<MachineRecord, RegistryMutationError> {
+        let previous = previous_node_key.map(str::to_owned);
+        let new_key = record.node_key_hex.clone();
+        let published_key = new_key.clone();
+        let operation = if previous.is_some() {
+            "replace_key"
+        } else {
+            "put"
+        };
+        let committed = Arc::new(Mutex::new(None));
+        let completed = committed.clone();
+        let hostinfo_snapshots = self.hostinfo_snapshots.clone();
+        #[cfg(feature = "admin")]
+        let install_native = self.native_row_installer();
+        let outcome = self.apply_nodestore_bool_update(
+            operation,
+            Box::new(move |map| {
+                let existing = previous.as_ref().and_then(|key| map.get(key)).cloned();
+                if previous.is_some() && existing.is_none() {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let old_id = existing
+                    .as_ref()
+                    .zip(previous.as_ref())
+                    .map(|(old, key)| old.stable_node_id_for_key(key));
+                if let Some(old) = &existing {
+                    if old.machine_key_hex != record.machine_key_hex
+                        || old.created_at != record.created_at
+                        || record.node_id.is_some_and(|id| Some(id) != old_id)
+                    {
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    }
+                    record.node_id = old_id;
+                }
+                let node_id = record.stable_node_id_for_key(&new_key);
+                if let Some(target) = map.get(&new_key)
+                    && (old_id.is_none()
+                        || target.machine_key_hex != record.machine_key_hex
+                        || Some(target.stable_node_id_for_key(&new_key)) != old_id)
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                // Other machine registrations and admin renames use the same
+                // NodeStore writer. Resolve a generated label here so two
+                // snapshots cannot both reserve the same DNS name.
+                record.hostname = if let Some(old) = existing.as_ref() {
+                    old.hostname.clone()
+                } else {
+                    Self::resolve_auto_given_name_from_snapshot(
+                        map,
+                        &new_key,
+                        previous.as_deref(),
+                        &record.raw_hostname,
+                    )
+                };
+                record.node_id = Some(node_id);
+                let local_policy_change =
+                    Self::auth_completion_map_change_reason(existing.as_ref(), &record, None)
+                        == MapChangeReason::PolicyChange;
+                let mut changes = Self::auth_completion_pending_changes_with_policy(
+                    existing.as_ref(),
+                    &record,
+                    node_id,
+                    Some(false),
+                );
+                if changes
+                    .first()
+                    .is_some_and(|change| change.reason == MapChangeReason::NodeKeyRotated)
+                    && let (Some(existing), Some(next_hostinfo)) =
+                        (existing.as_ref(), hostinfo.as_ref())
+                {
+                    let projection = existing.host_info_for_node();
+                    let previous_hostinfo = hostinfo_snapshots
+                        .read()
+                        .get(&node_id)
+                        .map_or_else(
+                            || serde_json::to_value(&projection),
+                            |snapshot| snapshot.value_for(&projection),
+                        )
+                        .expect("HostInfo serializes primitive JSON fields");
+                    if !headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
+                        &previous_hostinfo,
+                        next_hostinfo,
+                    ) {
+                        changes[0] = PendingMapChange::origin(MapChangeReason::NodeAdded, node_id);
+                    }
+                }
+                if let Some(previous) = &previous
+                    && previous != &new_key
+                {
+                    map.remove(previous);
+                }
+                if let Some(value) = hostinfo {
+                    hostinfo_snapshots.write().insert(
+                        node_id,
+                        hostinfo::HostInfoSnapshot {
+                            projection: record.host_info_for_node(),
+                            value,
+                        },
+                    );
+                }
+                #[cfg(feature = "admin")]
+                install_native(&record);
+                map.insert(new_key, record.clone());
+                *completed.lock() = Some((record, changes, local_policy_change));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(node_id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        if !outcome.applied {
+            return Err("node key already exists".into());
+        }
+        let (record, mut changes, local_policy_change) = committed
+            .lock()
+            .take()
+            .ok_or("registration changed during publication")?;
+        // Binding changes retire their old stream/timer ownership inside the
+        // NodeStore writer, before another registration can acquire it.
+        if self.node_key_still_maps_to_node_id(
+            &published_key,
+            record.stable_node_id_for_key(&published_key),
+        ) {
+            if self
+                .try_refresh_policy_node_inputs()
+                .map_err(RegistryMutationError::Policy)?
+                .unwrap_or(local_policy_change)
+            {
+                changes = vec![PendingMapChange::global(MapChangeReason::PolicyChange)];
+            }
+            self.wake_waiters_with_many(changes);
+        }
+        Ok(record)
     }
 
     fn auth_completion_map_change_reason(
         existing: Option<&MachineRecord>,
         rec: &MachineRecord,
+        policy_changed: Option<bool>,
     ) -> MapChangeReason {
-        if existing
-            .is_some_and(|existing| Self::policy_identity_without_routes_changed(existing, rec))
+        let local_policy_change = || {
+            existing.is_none_or(|existing| {
+                Self::policy_identity_without_routes_changed(existing, rec)
+                    || Self::auth_completion_active_approved_routes_changed(Some(existing), rec)
+            })
+        };
+        if policy_changed.unwrap_or_else(local_policy_change) {
+            return MapChangeReason::PolicyChange;
+        }
+        let Some(existing) = existing else {
+            return MapChangeReason::NodeAdded;
+        };
+        let now = Utc::now();
+        if existing.is_expired_at(now) == rec.is_expired_at(now)
+            && existing.hostname == rec.hostname
+            && map::peer_hostinfo_equal(&existing.host_info_for_node(), &rec.host_info_for_node())
         {
-            MapChangeReason::PolicyChange
+            MapChangeReason::NodeKeyRotated
         } else {
             MapChangeReason::NodeAdded
         }
@@ -2871,42 +5005,50 @@ impl MachineRegistry {
         before: &MachineRecord,
         after: &MachineRecord,
     ) -> bool {
-        before.tailscale_user_id() != after.tailscale_user_id()
+        before.user_id != after.user_id
+            // Preserve label-only embedding identities. Native records carry
+            // the numeric owner instead of the synthetic tagged wire user.
+            || (before.user_id.is_none()
+                && after.user_id.is_none()
+                && before.user != after.user)
             || before.ipv4 != after.ipv4
             || before.ipv6 != after.ipv6
-            || !same_string_set(&before.forced_tags, &after.forced_tags)
+            // NodeView.HasPolicyChange uses SliceEqual for Tags: order and
+            // duplicate count are significant; nil and empty are equivalent.
+            || before.forced_tags != after.forced_tags
     }
 
     fn auth_completion_active_approved_routes_changed(
         existing: Option<&MachineRecord>,
         rec: &MachineRecord,
     ) -> bool {
-        let after = active_approved_routes(&rec.available_routes, &rec.approved_routes);
+        // SubnetRoutes and ExitRoutes iterate the announcement slice and keep
+        // duplicates. Their unordered comparison must not reduce it to a set.
+        let active = |record: &MachineRecord| {
+            let mut routes = record
+                .available_routes
+                .iter()
+                .filter(|route| record.approved_routes.contains(route))
+                .cloned()
+                .collect::<Vec<_>>();
+            routes.sort();
+            routes
+        };
+        let after = active(rec);
         match existing {
-            Some(existing) => {
-                active_approved_routes(&existing.available_routes, &existing.approved_routes)
-                    != after
-            }
+            Some(existing) => active(existing) != after,
             None => !after.is_empty(),
         }
     }
 
-    fn auth_completion_pending_changes(
+    fn auth_completion_pending_changes_with_policy(
         existing: Option<&MachineRecord>,
         rec: &MachineRecord,
         node_id: u64,
+        policy_changed: Option<bool>,
     ) -> Vec<PendingMapChange> {
-        let reason = Self::auth_completion_map_change_reason(existing, rec);
-        let mut changes = vec![Self::auth_completion_pending_change(reason, node_id)];
-        if reason != MapChangeReason::PolicyChange
-            && Self::auth_completion_active_approved_routes_changed(existing, rec)
-        {
-            changes.push(PendingMapChange::origin(
-                MapChangeReason::PolicyChange,
-                node_id,
-            ));
-        }
-        changes
+        let reason = Self::auth_completion_map_change_reason(existing, rec, policy_changed);
+        vec![Self::auth_completion_pending_change(reason, node_id)]
     }
 
     fn auth_completion_pending_change(reason: MapChangeReason, node_id: u64) -> PendingMapChange {
@@ -2963,21 +5105,30 @@ impl MachineRegistry {
 
     fn apply_nodestore_upsert_direct(&self, node_key_hex: String, rec: MachineRecord) -> bool {
         let existed;
+        let retired;
         let start = Instant::now();
         {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             existed = next.contains_key(&node_key_hex);
+            #[cfg(feature = "admin")]
+            self.native_row_installer()(&rec);
             next.insert(node_key_hex, rec);
+            retired = self.retire_absent_stream_state(&next);
             *g = Arc::new(next);
         }
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation("put", elapsed);
         self.record_nodestore_batch(1, elapsed);
         existed
     }
 
-    fn enqueue_nodestore_delete(&self, queue: &NodeStoreWriteQueue, node_key_hex: String) -> bool {
+    fn enqueue_nodestore_delete(
+        &self,
+        queue: &NodeStoreWriteQueue,
+        node_key_hex: String,
+    ) -> Option<RemovedNode> {
         let fallback_node_key_hex = node_key_hex.clone();
         let (result_tx, result_rx) = std_mpsc::channel();
         self.metrics
@@ -3006,19 +5157,22 @@ impl MachineRegistry {
         result
     }
 
-    fn apply_nodestore_delete_direct(&self, node_key_hex: &str) -> bool {
+    fn apply_nodestore_delete_direct(&self, node_key_hex: &str) -> Option<RemovedNode> {
         let start = Instant::now();
+        let retired;
         let removed = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
-            let removed = next.remove(node_key_hex).is_some();
+            let removed = next.remove(node_key_hex);
+            retired = self.retire_absent_stream_state(&next);
             *g = Arc::new(next);
             removed
         };
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation("delete", elapsed);
         self.record_nodestore_batch(1, elapsed);
-        removed
+        removed.map(|record| RemovedNode::from_record(node_key_hex, &record))
     }
 
     fn enqueue_nodestore_bool_update(
@@ -3061,15 +5215,18 @@ impl MachineRegistry {
         update: NodeStoreBoolUpdateFn,
     ) -> NodeStoreBoolUpdateOutcome {
         let start = Instant::now();
+        let mut retired = false;
         let outcome = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             let outcome = update(&mut next);
             if outcome.publish_snapshot {
+                retired = self.retire_absent_stream_state(&next);
                 *g = Arc::new(next);
             }
             outcome
         };
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation(operation, elapsed);
         if outcome.publish_snapshot {
@@ -3138,15 +5295,18 @@ impl MachineRegistry {
         update: NodeStoreManyUpdateFn,
     ) -> NodeStoreManyUpdateOutcome {
         let start = Instant::now();
+        let mut retired = false;
         let outcome = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             let outcome = update(&mut next);
             if outcome.publish_snapshot {
+                retired = self.retire_absent_stream_state(&next);
                 *g = Arc::new(next);
             }
             outcome
         };
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation(operation, elapsed);
         if outcome.publish_snapshot {
@@ -3247,6 +5407,7 @@ impl MachineRegistry {
         changes: Vec<PendingMapChange>,
     ) {
         let start = Instant::now();
+        let retired;
         {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
@@ -3254,12 +5415,16 @@ impl MachineRegistry {
                 next.remove(old_node_key_hex);
             }
             next.insert(new_node_key_hex, rec);
+            retired = self.retire_absent_stream_state(&next);
             *g = Arc::new(next);
         }
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation("replace_key", elapsed);
         self.record_nodestore_batch(1, elapsed);
-        self.wake_waiters_with_many(changes);
+        if !changes.is_empty() {
+            self.wake_waiters_with_many(changes);
+        }
     }
 
     fn apply_nodestore_write_batch(&self, batch: Vec<NodeStoreWriteWork>) {
@@ -3270,6 +5435,7 @@ impl MachineRegistry {
         let start = Instant::now();
         let mut completions = Vec::with_capacity(batch.len());
         let mut publish_snapshot = false;
+        let mut retired = false;
         {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
@@ -3281,6 +5447,8 @@ impl MachineRegistry {
                         result_tx,
                     } => {
                         let existed = next.contains_key(&node_key_hex);
+                        #[cfg(feature = "admin")]
+                        self.native_row_installer()(&rec);
                         next.insert(node_key_hex, *rec);
                         publish_snapshot = true;
                         completions.push(NodeStoreWriteCompletion::Bool {
@@ -3293,12 +5461,14 @@ impl MachineRegistry {
                         node_key_hex,
                         result_tx,
                     } => {
-                        let removed = next.remove(&node_key_hex).is_some();
+                        let removed = next
+                            .remove(&node_key_hex)
+                            .map(|record| RemovedNode::from_record(&node_key_hex, &record));
                         publish_snapshot = true;
-                        completions.push(NodeStoreWriteCompletion::Bool {
+                        completions.push(NodeStoreWriteCompletion::Delete {
                             operation: "delete",
                             result_tx,
-                            result: removed,
+                            removed,
                         });
                     }
                     NodeStoreWriteWork::UpdateBool {
@@ -3348,6 +5518,9 @@ impl MachineRegistry {
                         });
                     }
                 }
+                // Retire before the next queued operation can acquire a new
+                // incarnation, including delete/reinsert in the same batch.
+                retired |= self.retire_absent_stream_state(&next);
             }
             for completion in &mut completions {
                 if let NodeStoreWriteCompletion::UpdateBool { outcome, .. } = completion
@@ -3377,11 +5550,13 @@ impl MachineRegistry {
                 *g = Arc::new(next);
             }
         }
+        self.notify_retired_streams(retired);
 
         let elapsed = start.elapsed();
         for completion in &completions {
             let operation = match completion {
                 NodeStoreWriteCompletion::Bool { operation, .. }
+                | NodeStoreWriteCompletion::Delete { operation, .. }
                 | NodeStoreWriteCompletion::UpdateBool { operation, .. }
                 | NodeStoreWriteCompletion::UpdateMany { operation, .. }
                 | NodeStoreWriteCompletion::Unit { operation, .. } => operation,
@@ -3395,6 +5570,14 @@ impl MachineRegistry {
                     result_tx, result, ..
                 } => {
                     let _ = result_tx.send(result);
+                }
+                NodeStoreWriteCompletion::Delete {
+                    result_tx, removed, ..
+                } => {
+                    // A vanished caller cannot take responsibility for release.
+                    if let Err(std_mpsc::SendError(Some(removed))) = result_tx.send(removed) {
+                        self.release_removed_node_addresses(removed);
+                    }
                 }
                 NodeStoreWriteCompletion::UpdateBool {
                     result_tx, outcome, ..
@@ -3415,7 +5598,9 @@ impl MachineRegistry {
                 NodeStoreWriteCompletion::Unit {
                     result_tx, changes, ..
                 } => {
-                    self.wake_waiters_with_many(changes);
+                    if !changes.is_empty() {
+                        self.wake_waiters_with_many(changes);
+                    }
                     let _ = result_tx.send(());
                 }
             }
@@ -3424,6 +5609,82 @@ impl MachineRegistry {
 
     pub(crate) fn wake_node_change(&self, reason: MapChangeReason, node_id: u64) {
         self.wake_waiters_with(PendingMapChange::origin(reason, node_id));
+    }
+
+    fn finish_volatile_node_update(
+        &self,
+        outcome: &NodeStoreBoolUpdateOutcome,
+        reason: MapChangeReason,
+    ) -> Result<bool, String> {
+        if outcome.applied
+            && let Some(id) = outcome.final_presence_node_id
+        {
+            let policy_changed = self.try_refresh_policy_node_inputs()?;
+            match reason {
+                MapChangeReason::TagUpdate if policy_changed.is_some() => {
+                    if policy_changed == Some(true) {
+                        self.wake_policy_change(Some(id));
+                    } else {
+                        self.wake_node_change(MapChangeReason::NodeAdded, id);
+                    }
+                }
+                MapChangeReason::PolicyChange => self.wake_policy_change(None),
+                _ if policy_changed == Some(true) => self.wake_policy_change(None),
+                MapChangeReason::RouteUpdate => {
+                    self.wake_waiters_with(PendingMapChange::broadcast_peer(reason, id));
+                }
+                _ => self.wake_node_change(reason, id),
+            }
+        }
+        Ok(outcome.applied)
+    }
+
+    pub(crate) fn wake_policy_change(&self, origin: Option<u64>) {
+        let mut change = PendingMapChange::global(MapChangeReason::PolicyChange);
+        change.origin_node_id = origin;
+        self.wake_waiters_with(change);
+    }
+
+    pub(crate) fn wake_node_expiry_change(
+        &self,
+        node_id: u64,
+        policy_changed: bool,
+        online_changed: bool,
+    ) {
+        let added = PendingMapChange::origin(MapChangeReason::NodeAdded, node_id);
+        let change = if policy_changed {
+            // SetNodeExpiry merges NodeAdded into a preceding policy change,
+            // retaining its origin and explicit peer ID in one change.
+            let mut change = PendingMapChange::global(MapChangeReason::PolicyChange);
+            change.origin_node_id = added.origin_node_id;
+            change.content.merge(added.content);
+            change.companion_reasons.push(MapChangeReason::NodeAdded);
+            change
+        } else if online_changed && self.node_needs_peer_recompute(node_id) {
+            added.with_companion_reason(MapChangeReason::PolicyChange)
+        } else {
+            added
+        };
+        self.wake_waiters_with(change);
+    }
+
+    pub(crate) fn queue_self_refresh(&self, node_id: u64) {
+        self.pending_self_refreshes.lock().insert(node_id);
+    }
+
+    pub(crate) fn dispatch_map_change(&self, change: Option<(MapChangeReason, u64)>) {
+        self.wake_waiters_with_many(
+            change
+                .into_iter()
+                .map(|(reason, id)| {
+                    if reason == MapChangeReason::PolicyChange {
+                        PendingMapChange::global(reason)
+                    } else {
+                        PendingMapChange::origin(reason, id)
+                    }
+                })
+                .collect(),
+        );
     }
 
     /// Wake all live map streams with an upstream-style `user removed`
@@ -3441,6 +5702,30 @@ impl MachineRegistry {
     /// `all()` accessor that cloned every record into a `Vec`.
     pub fn snapshot(&self) -> Arc<HashMap<String, MachineRecord>> {
         self.inner.read().clone()
+    }
+
+    /// Capture records and their retained side tables while the NodeStore
+    /// writer is excluded. Side tables use COW, so response rebuilds retain
+    /// raw Hostinfo and loaded associations without per-record copies.
+    pub(crate) fn snapshot_with_metadata(&self) -> MachineSnapshot {
+        let records = self.inner.read();
+        let hostinfo = self.hostinfo_snapshots.read();
+        #[cfg(feature = "admin")]
+        let native = self.native_persistence.read();
+        MachineSnapshot {
+            records: records.clone(),
+            hostinfo: hostinfo.clone(),
+            node_attrs: None,
+            #[cfg(feature = "admin")]
+            native: native.clone(),
+        }
+    }
+
+    pub(crate) fn primary_route_assignments(&self) -> BTreeMap<String, u64> {
+        let snapshot = self.snapshot();
+        let mut primary_routes = self.primary_routes.write();
+        self.sync_primary_routes_for_snapshot(&mut primary_routes, &snapshot);
+        primary_routes.primary_assignments()
     }
 
     /// Compute primary subnet routes for a registry snapshot while
@@ -3550,12 +5835,6 @@ impl MachineRegistry {
         };
         self.record_nodestore_operation("list_peers", start.elapsed());
         result
-    }
-
-    fn node_is_subnet_router(&self, node_id: u64) -> bool {
-        self.inner.read().iter().any(|(node_key, rec)| {
-            rec.stable_node_id_for_key(node_key) == node_id && record_is_subnet_router(rec)
-        })
     }
 
     /// Return the current primary advertiser for a subnet prefix.
@@ -3689,10 +5968,16 @@ impl MachineRegistry {
                     return None;
                 }
 
-                let routes = active_approved_routes(&rec.available_routes, &rec.approved_routes);
+                let mut routes =
+                    active_approved_routes(&rec.available_routes, &rec.approved_routes);
                 if routes.is_empty() {
                     None
                 } else {
+                    // Go State.DebugRoutes: slices.SortFunc(approved, netip.Prefix.Compare).
+                    routes.sort_by(|a, b| {
+                        headscale_api_acl::go_netip::prefix_compare(a, b)
+                            .unwrap_or_else(|| a.cmp(b))
+                    });
                     Some((node_id, routes))
                 }
             })
@@ -3735,56 +6020,207 @@ impl MachineRegistry {
         node_id: u64,
         offline_grace: Duration,
     ) -> StreamConnectionGuard {
-        if let Some(node_key) = machines.ephemeral_node_key_by_id(node_id)
-            && let Some(gc) = machines.ephemeral_gc()
-        {
-            gc.cancel(&node_key);
-        }
-        {
-            let mut active = machines.active_connections.write();
-            *active.entry(node_id).or_insert(0) += 1;
-        }
-        machines.disconnected_at.write().remove(&node_id);
-        {
-            let mut generations = machines.connection_generations.write();
-            let generation = generations
-                .get(&node_id)
-                .copied()
-                .unwrap_or(0)
-                .wrapping_add(1);
-            generations.insert(node_id, generation);
-        }
-        let online_changed = {
-            let mut online = machines.online_states.write();
-            let was_online = online.get(&node_id).copied().unwrap_or(false);
-            online.insert(node_id, true);
-            !was_online
-        };
-        if online_changed {
-            let change = if machines.node_is_subnet_router(node_id) {
-                PendingMapChange::subnet_router_lifecycle(
-                    MapChangeReason::SubnetRouterOnline,
-                    node_id,
-                )
-            } else {
-                PendingMapChange::lifecycle_peer(MapChangeReason::NodeOnline, node_id)
-            };
-            machines.wake_waiters_with(change);
-        }
-        machines.primary_routes.write().clear_unhealthy(node_id);
+        let (mut connection, change) =
+            Self::acquire_stream_connection(machines, node_id, offline_grace, false);
+        connection.record_ended = true;
+        connection
+            .machines
+            .dispatch_stream_connection_change(&connection, change);
+        connection
+    }
+
+    fn track_stream_connection_quiet(
+        machines: Arc<Self>,
+        node_id: u64,
+    ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
+        Self::acquire_stream_connection(machines, node_id, STREAM_OFFLINE_GRACE, true)
+    }
+
+    fn acquire_stream_connection(
+        machines: Arc<Self>,
+        node_id: u64,
+        offline_grace: Duration,
+        native: bool,
+    ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
+        let native_work = native.then(|| machines.native_shutdown.begin()).flatten();
+        let shutdown = machines.native_shutdown.clone();
+        let active = machines.active_connections.clone();
+        let sessions = machines.state_sessions.clone();
+        let online = machines.online_states.clone();
+        let generations = machines.connection_generations.clone();
+        let epochs = machines.stream_session_epochs.clone();
+        let disconnected = machines.disconnected_at.clone();
+        let flags = machines.stream_cancel_flags.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
-        machines
-            .stream_cancel_flags
-            .write()
-            .entry(node_id)
-            .or_default()
-            .push(cancelled.clone());
-        StreamConnectionGuard {
-            machines,
-            node_id,
-            offline_grace,
-            cancelled,
+        let cancel_flag = cancelled.clone();
+        let result = Arc::new(Mutex::new(None));
+        let captured = result.clone();
+        let outcome = machines.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |records| {
+                if native && shutdown.is_closing() {
+                    cancel_flag.store(true, Ordering::SeqCst);
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                let Some((_, record)) = records
+                    .iter()
+                    .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+                else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                // Acquire state and batcher ownership in the same writer
+                // operation as expiry/online selection. A missing node owns
+                // no session, flag, generation or synthetic online entry.
+                let mut epochs = epochs.write();
+                let epoch = epochs
+                    .entry(node_id)
+                    .or_insert_with(|| Arc::new(()))
+                    .clone();
+                let mut active = active.write();
+                *active.entry(node_id).or_default() += 1;
+                *sessions.write().entry(node_id).or_default() += 1;
+                let generation = {
+                    let mut generations = generations.write();
+                    let next = generations
+                        .get(&node_id)
+                        .copied()
+                        .unwrap_or(0)
+                        .wrapping_add(1);
+                    generations.insert(node_id, next);
+                    next
+                };
+                disconnected.write().remove(&node_id);
+                let should_be_online = !record.is_expired_at(Utc::now());
+                online.write().insert(node_id, should_be_online);
+                flags.write().entry(node_id).or_default().push(cancel_flag);
+                *captured.lock() = Some((record.clone(), generation, should_be_online, epoch));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(node_id),
+                    clear_unhealthy_route_state: Some(node_id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let acquired = result.lock().take();
+        let generation = acquired
+            .as_ref()
+            .map_or(0, |(_, generation, _, _)| *generation);
+        let epoch = acquired
+            .as_ref()
+            .map_or_else(|| Arc::new(()), |(_, _, _, epoch)| epoch.clone());
+        let mut change = None;
+        if let Some((record, _, should_be_online, _)) = &acquired {
+            // Acquire the stream before cancelling GC. A timer already waiting
+            // behind the machine guard must observe this acquired stream.
+            if let Some(node_key) = machines.ephemeral_node_key_by_id(node_id)
+                && let Some(gc) = machines.ephemeral_gc()
+            {
+                gc.cancel(&node_key);
+            }
+            if outcome.applied {
+                let policy = machines.policy_store.read().clone();
+                change = Some(PendingMapChange::lifecycle_peer(
+                    if *should_be_online {
+                        MapChangeReason::NodeOnline
+                    } else {
+                        MapChangeReason::NodeAdded
+                    },
+                    node_id,
+                    record_needs_peer_recompute(record, policy.as_ref()),
+                ));
+            }
         }
+        (
+            StreamConnectionGuard {
+                machines,
+                node_id,
+                generation,
+                epoch,
+                acquired: acquired.is_some(),
+                record_ended: false,
+                native_work,
+                offline_grace,
+                cancelled,
+            },
+            change,
+        )
+    }
+
+    fn dispatch_stream_connection_change(
+        &self,
+        connection: &StreamConnectionGuard,
+        change: Option<PendingMapChange>,
+    ) {
+        let Some(change) = change else {
+            return;
+        };
+        self.with_current_stream_connection(connection, || self.wake_waiters_with(change));
+    }
+
+    fn dispatch_initial_stream_changes(
+        &self,
+        connection: &StreamConnectionGuard,
+        request_change: Option<(MapChangeReason, u64)>,
+        connection_change: Option<PendingMapChange>,
+    ) {
+        self.with_current_stream_connection(connection, || {
+            self.dispatch_map_change(request_change);
+            if let Some(change) = connection_change {
+                self.wake_waiters_with(change);
+            }
+        });
+    }
+
+    fn with_current_stream_connection(
+        &self,
+        connection: &StreamConnectionGuard,
+        publish: impl FnOnce(),
+    ) {
+        // Retirement shares the NodeStore writer. Do not publish an acquired
+        // session's change after its node incarnation has been replaced.
+        let records = self.inner.read();
+        if connection.acquired
+            && self.stream_epoch_matches(connection.node_id, Some(&connection.epoch))
+            && records
+                .iter()
+                .any(|(key, record)| record.stable_node_id_for_key(key) == connection.node_id)
+        {
+            publish();
+        }
+    }
+
+    /// Stop native map work and wait for owned mutations, transports and
+    /// disconnect persistence. Stop GC timers first, while retaining the
+    /// batcher and database until all owned map cleanup is complete.
+    #[doc(hidden)]
+    pub async fn shutdown_native_streams(&self) {
+        if let Some(gc) = self.ephemeral_gc() {
+            // Go closes ephemeral GC before closing the map batcher. Its
+            // closed flag also prevents disconnect cleanup from rearming it.
+            gc.abort_all();
+        }
+        {
+            // Stream acquisition uses this writer too, so no native session
+            // can register a new flag after shutdown's cancellation sweep.
+            let _records = self.inner.write();
+            self.native_shutdown.mark_closing();
+            for flags in self.stream_cancel_flags.read().values() {
+                for flag in flags {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        self.native_shutdown.wake();
+        self.gen_tx.send_modify(|_| {});
+        self.native_shutdown.drained().await;
+    }
+
+    fn begin_native_work(&self) -> Option<native_shutdown::NativeWork> {
+        self.native_shutdown.begin()
+    }
+
+    async fn native_shutdown_started(&self) {
+        self.native_shutdown.closing().await;
     }
 
     pub fn connection_generation(&self, node_id: u64) -> Option<u64> {
@@ -3820,28 +6256,26 @@ impl MachineRegistry {
             .retain(|node_id, _generation| keep.contains(node_id));
     }
 
-    fn release_stream_connection(&self, node_id: u64) -> Option<u64> {
-        let mut active = self.active_connections.write();
-        let became_idle = if let Some(count) = active.get_mut(&node_id) {
-            let was_active = *count > 0;
-            *count = count.saturating_sub(1);
-            was_active && *count == 0
-        } else {
-            false
-        };
-        drop(active);
-        if !became_idle {
+    /// Batcher.RemoveNode: remove the channel now, leaving state ownership
+    /// for the handler's deferred Disconnect after reconnect grace.
+    fn release_stream_connection(&self, node_id: u64, epoch: &Arc<()>) -> Option<bool> {
+        let epochs = self.stream_session_epochs.read();
+        if !epochs
+            .get(&node_id)
+            .is_some_and(|current| Arc::ptr_eq(current, epoch))
+        {
             return None;
         }
-        self.disconnected_at.write().insert(node_id, Instant::now());
-        let mut generations = self.connection_generations.write();
-        let generation = generations
-            .get(&node_id)
-            .copied()
-            .unwrap_or(0)
-            .wrapping_add(1);
-        generations.insert(node_id, generation);
-        Some(generation)
+        let mut active = self.active_connections.write();
+        let Some(count) = active.get_mut(&node_id) else {
+            return Some(false);
+        };
+        *count = count.saturating_sub(1);
+        let still_connected = *count > 0;
+        if !still_connected {
+            self.disconnected_at.write().insert(node_id, Instant::now());
+        }
+        Some(still_connected)
     }
 
     fn cancel_stream_connections(&self, node_id: u64) {
@@ -3876,8 +6310,6 @@ impl MachineRegistry {
 
         let mut active = self.active_connections.write();
         let mut disconnected_at = self.disconnected_at.write();
-        let mut online = self.online_states.write();
-        let mut generations = self.connection_generations.write();
         let mut route_health_sessions = self.route_health_stable_sessions.write();
         let mut cleaned = Vec::new();
 
@@ -3894,8 +6326,6 @@ impl MachineRegistry {
 
             active.remove(&node_id);
             disconnected_at.remove(&node_id);
-            online.remove(&node_id);
-            generations.remove(&node_id);
             route_health_sessions.remove(&node_id);
             self.pending_map_changes.write().remove(&node_id);
             cleaned.push(node_id);
@@ -3904,91 +6334,192 @@ impl MachineRegistry {
         cleaned
     }
 
-    fn schedule_stream_offline_if_idle(
+    fn schedule_state_session_release(
         machines: Arc<Self>,
         node_id: u64,
         generation: u64,
+        epoch: Arc<()>,
+        still_connected: bool,
         offline_grace: Duration,
+        native_work: Option<native_shutdown::NativeWork>,
     ) {
-        if offline_grace.is_zero() {
-            machines.mark_stream_offline_if_idle(node_id, generation);
+        let may_reconnect = machines.inner.read().iter().any(|(key, record)| {
+            record.stable_node_id_for_key(key) == node_id && !record.is_expired_at(Utc::now())
+        });
+        // A replacement stream, missing node or expired key skips grace, but
+        // never skips releasing the session acquired by this particular guard.
+        if still_connected || !may_reconnect || offline_grace.is_zero() {
+            machines.release_state_session_in_epoch(node_id, generation, Some(epoch), native_work);
             return;
         }
-
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                tokio::time::sleep(offline_grace).await;
-                machines.mark_stream_offline_if_idle(node_id, generation);
+                let start = tokio::time::Instant::now();
+                let deadline = start + offline_grace;
+                let mut ticker = tokio::time::interval_at(
+                    start + Duration::from_secs(1),
+                    Duration::from_secs(1),
+                );
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    if machines.is_stream_connected(node_id)
+                        || tokio::time::Instant::now() >= deadline
+                    {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        () = tokio::time::sleep_until(deadline) => break,
+                    }
+                }
+                machines.release_state_session_in_epoch(
+                    node_id,
+                    generation,
+                    Some(epoch),
+                    native_work,
+                );
             });
         } else {
-            machines.mark_stream_offline_if_idle(node_id, generation);
+            machines.release_state_session_in_epoch(node_id, generation, Some(epoch), native_work);
         }
     }
 
-    fn mark_stream_offline_if_idle(&self, node_id: u64, generation: u64) {
-        let still_idle = self
-            .active_connections
-            .read()
-            .get(&node_id)
-            .copied()
-            .unwrap_or(0)
-            == 0
-            && self
-                .connection_generations
-                .read()
-                .get(&node_id)
-                .copied()
-                .unwrap_or(0)
-                == generation;
-        if !still_idle {
-            return;
-        }
+    #[cfg(test)]
+    fn release_state_session(self: &Arc<Self>, node_id: u64, generation: u64) {
+        // Preserve existing synthetic NodeStore callers without introducing
+        // unowned releases into the production guard path.
+        self.release_state_session_in_epoch(node_id, generation, None, None);
+    }
 
-        let online_changed = {
-            let mut online = self.online_states.write();
-            let was_online = online.get(&node_id).copied().unwrap_or(false);
-            online.insert(node_id, false);
-            was_online
-        };
-        if !online_changed {
-            return;
-        }
-
-        let now = Utc::now();
-        self.primary_routes.write().clear_unhealthy(node_id);
-        self.apply_nodestore_bool_update(
+    fn release_state_session_in_epoch(
+        self: &Arc<Self>,
+        node_id: u64,
+        generation: u64,
+        epoch: Option<Arc<()>>,
+        native_work: Option<native_shutdown::NativeWork>,
+    ) {
+        let sessions = self.state_sessions.clone();
+        let online = self.online_states.clone();
+        let epochs = self.stream_session_epochs.clone();
+        let writer_epoch = epoch.clone();
+        let disconnected = Arc::new(Mutex::new(None));
+        let captured = disconnected.clone();
+        let outcome = self.apply_nodestore_bool_update(
             "update",
-            Box::new(move |map| {
-                let mut found = false;
-                let mut subnet_router = false;
-                if let Some((_node_key, rec)) = map
-                    .iter_mut()
-                    .find(|(node_key, rec)| rec.stable_node_id_for_key(node_key) == node_id)
+            Box::new(move |records| {
+                let epochs = epochs.read();
+                if let Some(epoch) = &writer_epoch
+                    && !epochs
+                        .get(&node_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, epoch))
                 {
-                    rec.last_seen = now;
-                    subnet_router = record_is_subnet_router(rec);
-                    found = true;
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
                 }
-
+                let Some((_, record)) = records
+                    .iter_mut()
+                    .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+                else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                let mut sessions = sessions.write();
+                let remaining = sessions.entry(node_id).or_default();
+                *remaining = remaining.saturating_sub(1);
+                if *remaining > 0 {
+                    return NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(node_id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    };
+                }
+                // Releasing the last state session still stamps LastSeen and
+                // dispatches offline when expiry already made IsOnline=false.
+                let now = Utc::now();
+                online.write().insert(node_id, false);
+                record.last_seen = now;
+                *captured.lock() = Some((record.clone(), now));
                 NodeStoreBoolUpdateOutcome {
-                    applied: true,
-                    publish_snapshot: found,
-                    change: Some(if subnet_router {
-                        PendingMapChange::subnet_router_lifecycle(
-                            MapChangeReason::SubnetRouterOffline,
-                            node_id,
-                        )
-                    } else {
-                        PendingMapChange::lifecycle_peer(MapChangeReason::NodeOffline, node_id)
-                    }),
-                    clear_unhealthy_route_state: None,
                     final_presence_node_id: Some(node_id),
+                    clear_unhealthy_route_state: Some(node_id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
                 }
             }),
         );
+        let disconnected = disconnected.lock().take();
+        if !outcome.applied {
+            return;
+        }
+        let Some((record, now)) = disconnected else {
+            tracing::debug!(
+                node_id,
+                disconnect_epoch = generation,
+                "session released, other control sessions remain"
+            );
+            return;
+        };
+        let store = self
+            .registration_store
+            .read()
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(store) = store
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let machines = self.clone();
+            runtime.spawn(async move {
+                let _native_work = native_work;
+                if !machines.stream_epoch_matches(node_id, epoch.as_ref()) {
+                    return;
+                }
+                // NodeStore is already offline. Go attempts this best-effort
+                // save before Change dispatch and ephemeral timer scheduling.
+                if let Err(error) = store.persist_last_seen(node_id, now).await {
+                    tracing::warn!(node_id, %error, "failed to persist disconnect LastSeen");
+                }
+                machines.dispatch_state_disconnect(node_id, &record, epoch.as_ref());
+            });
+        } else {
+            self.dispatch_state_disconnect(node_id, &record, epoch.as_ref());
+        }
     }
 
-    /// Snapshot batcher connection state by stable node ID.
+    fn stream_epoch_matches(&self, node_id: u64, epoch: Option<&Arc<()>>) -> bool {
+        epoch.is_none_or(|epoch| {
+            self.stream_session_epochs
+                .read()
+                .get(&node_id)
+                .is_some_and(|current| Arc::ptr_eq(current, epoch))
+        })
+    }
+
+    fn dispatch_state_disconnect(
+        &self,
+        node_id: u64,
+        disconnected_record: &MachineRecord,
+        epoch: Option<&Arc<()>>,
+    ) {
+        // Retirement linearizes under the NodeStore writer. Keep this read
+        // guard through synchronous publication and owned timer insertion;
+        // epoch locks themselves are released before either operation.
+        let records = self.inner.read();
+        if !self.stream_epoch_matches(node_id, epoch) {
+            return;
+        }
+        let Some((node_key, record)) = records
+            .iter()
+            .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+        else {
+            return;
+        };
+        let policy = self.policy_store.read().clone();
+        self.wake_waiters_with(PendingMapChange::lifecycle_peer(
+            MapChangeReason::NodeOffline,
+            node_id,
+            record_needs_peer_recompute(disconnected_record, policy.as_ref()),
+        ));
+        if let Some(gc) = self.ephemeral_gc() {
+            gc.schedule_owned(self, node_key.clone(), record, epoch.cloned());
+        }
+    }
+
     pub fn active_connections(&self) -> BTreeMap<u64, usize> {
         self.active_connections.read().clone()
     }
@@ -3996,6 +6527,24 @@ impl MachineRegistry {
     /// Snapshot volatile `Node.IsOnline` state by stable node ID.
     pub(crate) fn online_states(&self) -> BTreeMap<u64, bool> {
         self.online_states.read().clone()
+    }
+
+    #[cfg(feature = "admin")]
+    pub(crate) fn update_online_for_expiry(&self, node_id: u64, record: &MachineRecord) -> bool {
+        update_online_after_expiry(record, node_id, &self.state_sessions, &self.online_states)
+    }
+
+    fn node_needs_peer_recompute(&self, node_id: u64) -> bool {
+        let record = self
+            .inner
+            .read()
+            .iter()
+            .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+            .map(|(_, record)| record.clone());
+        let policy = self.policy_store.read().clone();
+        record
+            .as_ref()
+            .is_some_and(|record| record_needs_peer_recompute(record, policy.as_ref()))
     }
 
     pub(crate) fn record_mapresponse_endpoint_update(&self, status: &str) {
@@ -4042,6 +6591,7 @@ impl MachineRegistry {
         code: u16,
         method: &str,
         path: &str,
+        proto: &str,
         duration: Duration,
     ) {
         {
@@ -4055,6 +6605,27 @@ impl MachineRegistry {
         let mut durations = self.metrics.http_duration.write();
         let sample = durations.entry(path.to_string()).or_default();
         sample.observe(PROMETHEUS_DEFAULT_BUCKETS, seconds);
+
+        let status = code.to_string();
+        let endpoint = format!("{method} {path}");
+        *self
+            .metrics
+            .http_requests_go
+            .write()
+            .entry((
+                String::new(),
+                status.clone(),
+                endpoint.clone(),
+                proto.to_string(),
+                String::new(),
+            ))
+            .or_insert(0) += 1;
+        self.metrics
+            .http_duration_go
+            .write()
+            .entry((status, endpoint))
+            .or_default()
+            .observe(HTTP_GO_BUCKETS, seconds);
     }
 
     fn record_nodestore_operation(&self, operation: &str, duration: Duration) {
@@ -4116,6 +6687,16 @@ impl MachineRegistry {
         self.metrics.http_duration.read().clone()
     }
 
+    pub(crate) fn http_request_go_metrics(
+        &self,
+    ) -> BTreeMap<(String, String, String, String, String), u64> {
+        self.metrics.http_requests_go.read().clone()
+    }
+
+    pub(crate) fn http_duration_go_metrics(&self) -> BTreeMap<(String, String), HistogramMetric> {
+        self.metrics.http_duration_go.read().clone()
+    }
+
     pub(crate) fn nodestore_operation_metrics(&self) -> BTreeMap<String, u64> {
         self.metrics.nodestore_operations.read().clone()
     }
@@ -4161,6 +6742,14 @@ impl MachineRegistry {
         let result = self.inner.read().get(node_key_hex).cloned();
         self.record_nodestore_operation("get_by_key", start.elapsed());
         result
+    }
+
+    fn node_key_by_id(&self, node_id: u64) -> Option<String> {
+        self.inner
+            .read()
+            .iter()
+            .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+            .map(|(key, _)| key.clone())
     }
 
     /// Look up a machine by the TS2021 machine key and user label.
@@ -4242,8 +6831,9 @@ impl MachineRegistry {
         &self,
         old_node_key_hex: &str,
         new_node_key_hex: String,
-        rec: MachineRecord,
+        mut rec: MachineRecord,
     ) {
+        self.inherit_rekey_node_id(old_node_key_hex, &mut rec);
         let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
         self.replace_node_key_with_change(
             old_node_key_hex,
@@ -4256,25 +6846,65 @@ impl MachineRegistry {
         );
     }
 
-    pub(crate) fn replace_node_key_auth_completion(
+    pub(crate) fn try_replace_node_key_auth_completion(
         &self,
         old_node_key_hex: &str,
         new_node_key_hex: String,
-        rec: MachineRecord,
-    ) {
+        mut rec: MachineRecord,
+    ) -> Result<(), String> {
+        #[cfg(feature = "admin")]
+        if self.finish_native_registration_publication(&rec)? {
+            return Ok(());
+        }
         let existing = self.get(old_node_key_hex);
+        if rec.node_id.is_none() {
+            rec.node_id = existing
+                .as_ref()
+                .map(|record| record.stable_node_id_for_key(old_node_key_hex));
+        }
         let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
-        let changes = Self::auth_completion_pending_changes(existing.as_ref(), &rec, new_id);
-        self.replace_node_key_with_changes(old_node_key_hex, new_node_key_hex, rec, changes);
+        let node_key_for_presence = new_node_key_hex.clone();
+        self.replace_node_key_with_changes_and_presence(
+            old_node_key_hex,
+            new_node_key_hex,
+            rec,
+            Vec::new(),
+            Some(new_id),
+        );
+        let Some(current) = self
+            .get(&node_key_for_presence)
+            .filter(|node| node.stable_node_id() == new_id)
+        else {
+            return Ok(());
+        };
+        let changes = Self::auth_completion_pending_changes_with_policy(
+            existing.as_ref(),
+            &current,
+            new_id,
+            self.try_refresh_policy_node_inputs()?,
+        );
+        self.wake_waiters_with_many(changes);
+        Ok(())
     }
 
     pub(crate) fn replace_node_key_quiet(
         &self,
         old_node_key_hex: &str,
         new_node_key_hex: String,
-        rec: MachineRecord,
+        mut rec: MachineRecord,
     ) {
+        self.inherit_rekey_node_id(old_node_key_hex, &mut rec);
         self.replace_node_key_with_change(old_node_key_hex, new_node_key_hex, rec, None);
+    }
+
+    fn inherit_rekey_node_id(&self, old_node_key_hex: &str, record: &mut MachineRecord) {
+        if record.node_id.is_none() {
+            record.node_id = self
+                .inner
+                .read()
+                .get(old_node_key_hex)
+                .map(|old| old.stable_node_id_for_key(old_node_key_hex));
+        }
     }
 
     fn replace_node_key_with_change(
@@ -4299,10 +6929,26 @@ impl MachineRegistry {
         rec: MachineRecord,
         changes: Vec<PendingMapChange>,
     ) {
-        let key_changed = old_node_key_hex != new_node_key_hex;
-        let old_id = self.stable_node_id_for_key(old_node_key_hex);
         let final_presence_node_id =
             (!changes.is_empty()).then(|| rec.stable_node_id_for_key(&new_node_key_hex));
+        self.replace_node_key_with_changes_and_presence(
+            old_node_key_hex,
+            new_node_key_hex,
+            rec,
+            changes,
+            final_presence_node_id,
+        );
+    }
+
+    fn replace_node_key_with_changes_and_presence(
+        &self,
+        old_node_key_hex: &str,
+        new_node_key_hex: String,
+        mut rec: MachineRecord,
+        changes: Vec<PendingMapChange>,
+        final_presence_node_id: Option<u64>,
+    ) {
+        rec.node_key_hex.clone_from(&new_node_key_hex);
         let queue = self.nodestore_write_queue.read().clone();
         if let Some(queue) = queue.as_ref() {
             self.enqueue_nodestore_rekey(
@@ -4316,12 +6962,6 @@ impl MachineRegistry {
         } else {
             self.apply_nodestore_rekey_direct(old_node_key_hex, new_node_key_hex, rec, changes);
         }
-        if key_changed {
-            self.forget_batcher_connection_state(old_id);
-            if let Some(gc) = self.ephemeral_gc() {
-                gc.cancel(old_node_key_hex);
-            }
-        }
     }
 
     /// Complete a web/CLI registration for `user`.
@@ -4331,35 +6971,94 @@ impl MachineRegistry {
     /// pending NodeKey. This mirrors headscale-go reauth: web auth with
     /// empty `Hostinfo.RequestTags` clears a tagged node back to a
     /// user-owned node instead of creating a duplicate.
+    pub(crate) fn auth_path_existing_machine(
+        &self,
+        machine_key_hex: &str,
+        user: &str,
+        user_id: Option<u64>,
+    ) -> Result<Option<(String, MachineRecord)>, &'static str> {
+        let snapshot = self.snapshot();
+        let matches = snapshot
+            .iter()
+            .filter(|(_, node)| node.machine_key_hex == machine_key_hex)
+            .map(|(key, node)| (key.clone(), node.clone()))
+            .collect::<Vec<_>>();
+        let user_owned = matches
+            .iter()
+            .filter(|(_, node)| {
+                node.forced_tags.is_empty()
+                    && user_id.map_or_else(|| node.user == user, |id| node.user_id == Some(id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let tagged = matches
+            .iter()
+            .filter(|(_, node)| !node.forced_tags.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        if user_owned.len() > 1
+            || tagged.len() > 1
+            || (!user_owned.is_empty() && !tagged.is_empty())
+            || (tagged.len() == 1 && matches.len() > 1)
+        {
+            return Err("machine key maps to ambiguous node ownership");
+        }
+        Ok(user_owned
+            .into_iter()
+            .next()
+            .or_else(|| tagged.into_iter().next()))
+    }
+
     pub fn complete_web_registration(
+        &self,
+        pending: MachineRecord,
+        user: &str,
+        register_method: i32,
+    ) -> Result<MachineRecord, &'static str> {
+        self.complete_web_registration_with_hostinfo(pending, user, register_method, None)
+            .map_err(RegistryMutationError::legacy_message)
+    }
+
+    /// Complete a registration while retaining a late policy-resolution error.
+    pub fn try_complete_web_registration(
+        &self,
+        pending: MachineRecord,
+        user: &str,
+        register_method: i32,
+    ) -> Result<MachineRecord, RegistryMutationError> {
+        self.complete_web_registration_with_hostinfo(pending, user, register_method, None)
+    }
+
+    pub(crate) fn complete_web_registration_with_hostinfo(
         &self,
         mut pending: MachineRecord,
         user: &str,
         register_method: i32,
-    ) -> MachineRecord {
+        requested_hostinfo: Option<serde_json::Value>,
+    ) -> Result<MachineRecord, RegistryMutationError> {
+        self.validate_registration_node_key(&pending.node_key_hex, &pending.machine_key_hex)?;
         pending.user = user.to_string();
         pending.register_method = register_method;
 
-        let mut raw_hostname = pending.host_info.hostname.clone();
-        if raw_hostname.is_empty() {
-            raw_hostname.clone_from(&pending.hostname);
-        }
+        // A cached auth payload is a new registration snapshot, so even an
+        // empty reported hostname replaces nodes.hostname on this path.
+        pending.raw_hostname.clone_from(&pending.host_info.hostname);
         let mut replaced_node_key = None;
-        let mut preserved_explicit_given_name = None;
+        let mut preserved_netinfo = None;
         if let Some((old_node_key, existing)) =
-            self.get_by_machine_key_for_user(&pending.machine_key_hex, user)
+            self.auth_path_existing_machine(&pending.machine_key_hex, user, pending.user_id)?
         {
-            let existing_raw_hostname = existing.host_info_for_node().hostname;
-            if !is_auto_derived_given_name(&existing.hostname, &existing_raw_hostname) {
-                preserved_explicit_given_name = Some(existing.hostname.clone());
-            }
-            if raw_hostname.is_empty() {
-                raw_hostname = existing_raw_hostname;
-            }
+            preserved_netinfo = self
+                .map_hostinfo_value(&existing)
+                .map_err(|_| "encoding existing Hostinfo")?
+                .get("NetInfo")
+                .cloned();
+            let was_tagged = !existing.forced_tags.is_empty();
+            let existing_net_info = existing.host_info_for_node().net_info;
+            pending.node_id = Some(existing.stable_node_id_for_key(&old_node_key));
             replaced_node_key = Some(old_node_key);
             pending.ipv4 = existing.ipv4;
             pending.ipv6 = existing.ipv6;
-            pending.node_id = existing.node_id;
             pending.user_id = pending.user_id.or(existing.user_id);
             if pending.user_display_name.is_empty() {
                 pending.user_display_name = existing.user_display_name;
@@ -4368,47 +7067,94 @@ impl MachineRegistry {
                 pending.user_profile_pic_url = existing.user_profile_pic_url;
             }
             pending.created_at = existing.created_at;
-            pending.ephemeral = existing.ephemeral;
-            pending.auth_key_id = pending.auth_key_id.or(existing.auth_key_id);
-            pending.disco_key = existing.disco_key;
-            pending.endpoints = existing.endpoints;
-            pending.home_derp = existing.home_derp;
-            if pending.hostname.is_empty() {
-                pending.hostname = existing.hostname;
+            pending.ephemeral = if was_tagged && pending.forced_tags.is_empty() {
+                false
+            } else {
+                existing.ephemeral
+            };
+            pending.auth_key_id = if was_tagged && pending.forced_tags.is_empty() {
+                None
+            } else {
+                pending.auth_key_id.or(existing.auth_key_id)
+            };
+            if !(was_tagged && pending.forced_tags.is_empty()) {
+                pending.register_method = existing.register_method;
             }
-            if pending.os.is_empty() {
-                pending.os = existing.os;
+            if was_tagged && !pending.forced_tags.is_empty() {
+                pending.expiry = existing.expiry.filter(|expiry| *expiry >= Utc::now());
             }
-            if pending.os_version.is_empty() {
-                pending.os_version = existing.os_version;
+            if pending.endpoints.is_empty() {
+                pending.endpoints = existing.endpoints;
             }
+            if pending.host_info.net_info.is_none() {
+                pending.host_info.net_info = existing_net_info;
+            }
+            pending.home_derp = pending
+                .host_info
+                .net_info
+                .as_ref()
+                .map_or(0, |info| info.preferred_derp);
 
-            let mut approved_routes = existing
-                .approved_routes
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>();
-            approved_routes.extend(pending.approved_routes);
-            pending.approved_routes = approved_routes.into_iter().collect();
+            pending.approved_routes = existing.approved_routes;
+        } else if pending.host_info.net_info.is_none() {
+            // Different-account auth creates a new node. Carry only NetInfo
+            // from another user on this same proven machine, as Go does.
+            let snapshot = self.snapshot();
+            let previous = snapshot
+                .iter()
+                .filter(|(_, node)| {
+                    node.machine_key_hex == pending.machine_key_hex
+                        && node.forced_tags.is_empty()
+                        && pending
+                            .user_id
+                            .map_or_else(|| node.user != user, |id| node.user_id != Some(id))
+                })
+                .min_by_key(|(key, node)| node.stable_node_id_for_key(key));
+            if let Some((_, node)) = previous {
+                pending.host_info.net_info = node.host_info_for_node().net_info;
+                preserved_netinfo = self
+                    .map_hostinfo_value(node)
+                    .map_err(|_| "encoding existing Hostinfo")?
+                    .get("NetInfo")
+                    .cloned();
+            }
         }
 
-        pending.hostname = preserved_explicit_given_name.unwrap_or_else(|| {
-            self.resolve_auto_given_name(
-                &pending.node_key_hex,
-                &raw_hostname,
-                replaced_node_key.as_deref(),
-            )
-        });
-        if let Some(old_node_key) = replaced_node_key {
-            self.replace_node_key_auth_completion(
-                &old_node_key,
-                pending.node_key_hex.clone(),
-                pending.clone(),
-            );
-        } else {
-            self.upsert_auth_completion(pending.node_key_hex.clone(), pending.clone());
+        if !pending.forced_tags.is_empty() {
+            pending.clear_user_identity();
         }
-
-        pending
+        pending.home_derp = pending
+            .host_info
+            .net_info
+            .as_ref()
+            .map_or(0, |info| info.preferred_derp);
+        let now = Utc::now();
+        if replaced_node_key.is_none() {
+            pending.approved_routes.clear();
+            pending.created_at = now;
+            pending.ephemeral = false;
+            pending.auth_key_id = None;
+            if !pending.forced_tags.is_empty() {
+                pending.compact_fresh_web_request_tags();
+            }
+        }
+        pending.last_seen = now;
+        pending.expiry = self.registration_expiry(pending.expiry, pending.is_tagged(), now);
+        let hostinfo = requested_hostinfo
+            .map(|requested| {
+                hostinfo::registration_value(
+                    &requested,
+                    &pending.host_info_for_node(),
+                    preserved_netinfo.as_ref(),
+                )
+            })
+            .transpose()
+            .map_err(|_| "encoding registration Hostinfo")?;
+        self.commit_volatile_auth_registration_with_hostinfo(
+            replaced_node_key.as_deref(),
+            pending,
+            hostinfo,
+        )
     }
 
     /// Number of registered machines.
@@ -4441,6 +7187,36 @@ impl MachineRegistry {
         self.update_with_operation("update", f)
     }
 
+    /// Refresh live node profiles after a user rename and queue a durable
+    /// policy map change. A plain NodeUpdated wake can be processed before a
+    /// separate policy notification, leaving autogroup:self filters stale.
+    pub fn refresh_user_identity(
+        &self,
+        user_id: u64,
+        login_name: String,
+        display_name: String,
+        profile_pic_url: String,
+    ) -> usize {
+        self.update_with_operation_and_optional_change("user identity", move |records| {
+            let mut updated = 0;
+            for record in records.values_mut() {
+                if record.user_id == Some(user_id) {
+                    record.set_user_identity(
+                        Some(user_id),
+                        login_name.clone(),
+                        display_name.clone(),
+                        profile_pic_url.clone(),
+                    );
+                    updated += 1;
+                }
+            }
+            (
+                updated,
+                (updated > 0).then(|| PendingMapChange::global(MapChangeReason::PolicyChange)),
+            )
+        })
+    }
+
     fn update_with_operation<R, F>(&self, operation: &str, f: F) -> R
     where
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
@@ -4457,6 +7233,7 @@ impl MachineRegistry {
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> (R, Option<PendingMapChange>),
     {
         let start = Instant::now();
+        let mut retired = false;
         let (r, change) = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
@@ -4464,10 +7241,12 @@ impl MachineRegistry {
             // `None` means the caller observed no lifecycle mutation, so keep
             // the current snapshot/generation intact.
             if change.is_some() {
+                retired = self.retire_absent_stream_state(&next);
                 *g = Arc::new(next);
             }
             (r, change)
         };
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation(operation, elapsed);
         if let Some(change) = change {
@@ -4487,13 +7266,16 @@ impl MachineRegistry {
         F: FnOnce(&mut HashMap<String, MachineRecord>) -> R,
     {
         let start = Instant::now();
+        let retired;
         let r = {
             let mut g = self.inner.write();
             let mut next = (**g).clone();
             let r = f(&mut next);
+            retired = self.retire_absent_stream_state(&next);
             *g = Arc::new(next);
             r
         };
+        self.notify_retired_streams(retired);
         let elapsed = start.elapsed();
         self.record_nodestore_operation(operation, elapsed);
         self.record_nodestore_batch(1, elapsed);
@@ -4511,30 +7293,106 @@ impl MachineRegistry {
     /// otherwise. Mirrors `db.SetExpiry` in
     /// `juanfont/headscale@main:hscontrol/db/node.go`.
     pub fn set_expiry(&self, node_key_hex: &str, expiry: Option<DateTime<Utc>>) -> bool {
+        self.try_set_expiry(node_key_hex, expiry)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after expiry");
+                false
+            })
+    }
+
+    /// State.SetNodeExpiry's live phase, for callers that must persist before
+    /// policy refresh/dispatch. Retain both the accepted view and the original
+    /// online transition instead of applying a second expiry edit after SQL.
+    pub(crate) fn set_node_expiry_quiet(
+        &self,
+        node_id: u64,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Option<(MachineRecord, bool)> {
+        let sessions = self.state_sessions.clone();
+        let online = self.online_states.clone();
+        let result = Arc::new(Mutex::new(None));
+        let captured = result.clone();
+        let outcome = self.apply_nodestore_bool_update(
+            "update",
+            Box::new(move |records| {
+                let Some((_, record)) = records
+                    .iter_mut()
+                    .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+                else {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                };
+                record.expiry = expiry;
+                let changed = update_online_after_expiry(record, node_id, &sessions, &online);
+                *captured.lock() = Some((record.clone(), changed));
+                NodeStoreBoolUpdateOutcome {
+                    final_presence_node_id: Some(node_id),
+                    ..NodeStoreBoolUpdateOutcome::quiet(true)
+                }
+            }),
+        );
+        let result = result.lock().take();
+        outcome.applied.then_some(result).flatten()
+    }
+
+    /// Set expiry and report a subsequent policy-manager refresh failure.
+    pub fn try_set_expiry(
+        &self,
+        node_key_hex: &str,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Result<bool, String> {
         let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
+        let online = self.online_states.clone();
+        let active = self.state_sessions.clone();
+        let changed = Arc::new(AtomicBool::new(false));
+        let online_changed = changed.clone();
+        let outcome = self.apply_nodestore_bool_update(
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.expiry = expiry;
-                    NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
-                        node_id,
-                    )
+                    online_changed.store(
+                        update_online_after_expiry(rec, node_id, &active, &online),
+                        Ordering::SeqCst,
+                    );
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(node_id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
-        )
-        .applied
+        );
+        if outcome.applied
+            && let Some(node_id) = outcome.final_presence_node_id
+        {
+            self.wake_node_expiry_change(
+                node_id,
+                self.try_refresh_policy_node_inputs()? == Some(true),
+                changed.load(Ordering::SeqCst),
+            );
+        }
+        Ok(outcome.applied)
     }
 
     /// Rename a machine. Upstream's `db.NodeRenameNode` validates
     /// against `dnsname.ValidLabel` and rejects duplicate GivenNames
     /// without auto-suffixing.
     pub fn rename(&self, node_key_hex: &str, new_hostname: String) -> bool {
+        self.try_rename(node_key_hex, new_hostname)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after rename");
+                false
+            })
+    }
+
+    /// Rename and report any subsequent policy-refresh error.
+    pub fn try_rename(&self, node_key_hex: &str, new_hostname: String) -> Result<bool, String> {
+        if self.validate_given_name(&new_hostname).is_err() {
+            return Ok(false);
+        }
         let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
+        let outcome = self.apply_nodestore_bool_update(
             "set_name",
             Box::new(move |map| {
                 if !valid_given_name_label(&new_hostname) {
@@ -4550,16 +7408,16 @@ impl MachineRegistry {
                     Some(rec) => {
                         let node_id = rec.stable_node_id_for_key(&node_key_hex);
                         rec.hostname = new_hostname;
-                        NodeStoreBoolUpdateOutcome::changed_for_node(
-                            PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
-                            node_id,
-                        )
+                        NodeStoreBoolUpdateOutcome {
+                            final_presence_node_id: Some(node_id),
+                            ..NodeStoreBoolUpdateOutcome::quiet(true)
+                        }
                     }
                     None => NodeStoreBoolUpdateOutcome::unchanged(false),
                 }
             }),
-        )
-        .applied
+        );
+        self.finish_volatile_node_update(&outcome, MapChangeReason::NodeAdded)
     }
 
     /// Logout a machine: stamps `expiry = now()` so the next `/map`
@@ -4570,60 +7428,113 @@ impl MachineRegistry {
     /// upstream behaviour is "logged-out node still exists, but must
     /// re-authenticate." `delete` is the destructive counterpart.
     pub fn logout(&self, node_key_hex: &str) -> bool {
-        let now = Utc::now();
-        let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
-            "update",
-            Box::new(move |map| match map.get_mut(&node_key_hex) {
-                Some(rec) => {
-                    let node_id = rec.stable_node_id_for_key(&node_key_hex);
-                    rec.expiry = Some(now);
-                    NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::origin(MapChangeReason::NodeAdded, node_id),
-                        node_id,
-                    )
-                }
-                None => NodeStoreBoolUpdateOutcome::unchanged(false),
-            }),
-        )
-        .applied
+        self.set_expiry(node_key_hex, Some(Utc::now()))
     }
 
     /// Remove a machine from the registry entirely. Mirrors
     /// `db.DeleteNode`. Returns `true` on success.
     pub fn delete(&self, node_key_hex: &str) -> bool {
-        let Some(node_id) = self
-            .inner
-            .read()
-            .get(node_key_hex)
-            .map(|rec| rec.stable_node_id_for_key(node_key_hex))
-        else {
-            return false;
-        };
+        self.try_delete(node_key_hex).unwrap_or_else(|error| {
+            tracing::error!(%error, "updating policy manager after node deletion");
+            false
+        })
+    }
 
-        self.cancel_stream_connections(node_id);
+    /// Delete and report a subsequent policy-manager refresh failure. Cache,
+    /// sessions and address release are not rolled back after that late error.
+    pub fn try_delete(&self, node_key_hex: &str) -> Result<bool, String> {
+        let Some(removed) = self.remove_node_quiet(node_key_hex) else {
+            return Ok(false);
+        };
+        let node_id = removed.id;
+        self.release_removed_node_addresses(removed);
+        self.finish_node_removal(node_id)?;
+        Ok(true)
+    }
+
+    /// Durable native deletion keeps its save mutex through this cache phase,
+    /// then releases it before address release, policy refresh and dispatch.
+    pub(crate) fn remove_node_quiet(&self, node_key_hex: &str) -> Option<RemovedNode> {
+        if !self.inner.read().contains_key(node_key_hex) {
+            return None;
+        }
+
         let queue = self.nodestore_write_queue.read().clone();
         let removed = if let Some(queue) = queue.as_ref() {
             self.enqueue_nodestore_delete(queue, node_key_hex.to_string())
         } else {
-            self.update_with_operation_and_optional_change("delete", |map| {
-                if map.remove(node_key_hex).is_some() {
-                    (true, Some(PendingMapChange::peers_removed(vec![node_id])))
-                } else {
-                    (false, None)
-                }
-            })
+            self.apply_nodestore_delete_direct(node_key_hex)
         };
-        if removed {
-            self.forget_batcher_connection_state(node_id);
-            if let Some(gc) = self.ephemeral_gc() {
-                gc.cancel(node_key_hex);
-            }
-            if queue.is_some() {
-                self.wake_waiters_with(PendingMapChange::peers_removed(vec![node_id]));
-            }
+        if let Some(removed) = &removed {
+            self.discard_absent_native_persistence(&[removed.id]);
         }
         removed
+    }
+
+    pub(crate) fn release_removed_node_addresses(&self, removed: RemovedNode) {
+        self.release_addresses(removed.ipv4, removed.ipv6);
+    }
+
+    fn try_delete_gc_owned(
+        &self,
+        node_key: &str,
+        node_id: u64,
+        machine_key: &str,
+        epoch: Option<Arc<()>>,
+    ) -> Result<bool, String> {
+        let key = node_key.to_owned();
+        let machine_key = machine_key.to_owned();
+        let epochs = self.stream_session_epochs.clone();
+        let removed = Arc::new(Mutex::new(None));
+        let captured = removed.clone();
+        self.apply_nodestore_bool_update(
+            "delete",
+            Box::new(move |records| {
+                let epochs = epochs.read();
+                if let Some(epoch) = &epoch
+                    && !epochs
+                        .get(&node_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, epoch))
+                {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                if !records.get(&key).is_some_and(|record| {
+                    record.stable_node_id_for_key(&key) == node_id
+                        && record.machine_key_hex == machine_key
+                }) {
+                    return NodeStoreBoolUpdateOutcome::unchanged(false);
+                }
+                if let Some(record) = records.remove(&key) {
+                    *captured.lock() = Some(RemovedNode::from_record(&key, &record));
+                    NodeStoreBoolUpdateOutcome::quiet(true)
+                } else {
+                    NodeStoreBoolUpdateOutcome::unchanged(false)
+                }
+            }),
+        );
+        let Some(removed) = removed.lock().take() else {
+            return Ok(false);
+        };
+        self.discard_absent_native_persistence(&[node_id]);
+        self.release_removed_node_addresses(removed);
+        self.finish_node_removal(node_id)?;
+        Ok(true)
+    }
+
+    pub(crate) fn finish_node_removal(&self, node_id: u64) -> Result<(), String> {
+        let mut changes = vec![PendingMapChange::peers_removed(vec![node_id])];
+        match self.try_refresh_policy_node_inputs() {
+            Ok(Some(true)) => changes.push(PendingMapChange::global(MapChangeReason::PolicyChange)),
+            Ok(_) => {}
+            Err(error) => {
+                self.wake_waiters_with_many(changes);
+                return Err(format!(
+                    "updating policy manager after node deletion: {error}"
+                ));
+            }
+        }
+        self.wake_waiters_with_many(changes);
+        Ok(())
     }
 
     /// Stamp `last_seen = now()` on the given node. Called from the
@@ -4661,55 +7572,120 @@ impl MachineRegistry {
     /// updates are rejected, matching upstream's `db.SetTags` /
     /// `State.SetNodeTags` boundary.
     pub fn set_forced_tags(&self, node_key_hex: &str, tags: Vec<String>) -> bool {
+        self.try_set_forced_tags(node_key_hex, tags)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after tags");
+                false
+            })
+    }
+
+    /// Set tags and report any subsequent policy-refresh error.
+    pub fn try_set_forced_tags(
+        &self,
+        node_key_hex: &str,
+        mut tags: Vec<String>,
+    ) -> Result<bool, String> {
         if tags.is_empty() {
-            return false;
+            return Ok(false);
         }
+        tags.sort();
+        tags.dedup();
         let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
+        let outcome = self.apply_nodestore_bool_update(
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
-                Some(rec) if rec.forced_tags != tags => {
+                Some(rec) => {
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.forced_tags = tags;
-                    NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::global(MapChangeReason::TagUpdate),
-                        node_id,
-                    )
+                    rec.clear_user_identity();
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(node_id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
                 }
-                Some(_) => NodeStoreBoolUpdateOutcome::unchanged(true),
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
-        )
-        .applied
+        );
+        self.finish_volatile_node_update(&outcome, MapChangeReason::TagUpdate)
     }
 
     /// Replace a machine's approved subnet routes. Empty list clears
     /// route approval. The register/map paths maintain
     /// `available_routes`; this method records operator approval.
     pub fn set_approved_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
+        self.try_set_approved_routes(node_key_hex, routes)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after route approval");
+                false
+            })
+    }
+
+    /// Set approved routes and report any subsequent policy-refresh error.
+    pub fn try_set_approved_routes(
+        &self,
+        node_key_hex: &str,
+        routes: Vec<String>,
+    ) -> Result<bool, String> {
         let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
+        let outcome = self.apply_nodestore_bool_update(
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
-                    if rec.approved_routes == routes {
-                        return NodeStoreBoolUpdateOutcome::unchanged(true);
-                    }
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.approved_routes = routes;
                     let clear_unhealthy =
-                        active_primary_routes(&rec.available_routes, &rec.approved_routes)
+                        active_approved_routes(&rec.available_routes, &rec.approved_routes)
                             .is_empty();
-                    NodeStoreBoolUpdateOutcome::changed_for_node_and_clear_unhealthy(
-                        PendingMapChange::global(MapChangeReason::PolicyChange),
-                        node_id,
-                        clear_unhealthy.then_some(node_id),
-                    )
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(node_id),
+                        clear_unhealthy_route_state: clear_unhealthy.then_some(node_id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
-        )
-        .applied
+        );
+        self.finish_volatile_node_update(&outcome, MapChangeReason::PolicyChange)
+    }
+
+    /// Go policy auto-approval updates stable IDs in one quiet NodeStore batch,
+    /// then persists still-present nodes. Concurrently absent IDs are skipped.
+    pub(crate) fn apply_policy_route_approvals(
+        &self,
+        updates: Vec<(u64, Vec<String>)>,
+    ) -> Vec<u64> {
+        if updates.is_empty() {
+            return Vec::new();
+        }
+        let mut updates = updates.into_iter().collect::<HashMap<_, _>>();
+        let outcome = self.apply_nodestore_many_update(
+            "update_multi",
+            Box::new(move |map| {
+                let mut ids = Vec::new();
+                let mut clear_unhealthy_route_states = Vec::new();
+                for (key, record) in map.iter_mut() {
+                    let id = record.stable_node_id_for_key(key);
+                    if let Some(routes) = updates.remove(&id) {
+                        record.approved_routes = routes;
+                        if active_approved_routes(&record.available_routes, &record.approved_routes)
+                            .is_empty()
+                        {
+                            clear_unhealthy_route_states.push(id);
+                        }
+                        ids.push(id);
+                    }
+                }
+                ids.sort_unstable();
+                NodeStoreManyUpdateOutcome {
+                    applied: ids.len(),
+                    publish_snapshot: !ids.is_empty(),
+                    clear_unhealthy_route_states,
+                    final_presence_node_ids: ids,
+                    ..NodeStoreManyUpdateOutcome::unchanged()
+                }
+            }),
+        );
+        outcome.final_presence_node_ids
     }
 
     /// Replace approved routes on multiple machines as one atomic NodeStore
@@ -4720,8 +7696,20 @@ impl MachineRegistry {
         &self,
         updates: Vec<(String, Vec<String>)>,
     ) -> (usize, Vec<String>) {
+        self.try_set_approved_routes_many(updates)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after batch route approval");
+                (0, Vec::new())
+            })
+    }
+
+    /// Batch route approval with a fallible post-mutation policy refresh.
+    pub fn try_set_approved_routes_many(
+        &self,
+        updates: Vec<(String, Vec<String>)>,
+    ) -> Result<(usize, Vec<String>), String> {
         if updates.is_empty() {
-            return (0, Vec::new());
+            return Ok((0, Vec::new()));
         }
 
         let outcome = self.apply_nodestore_many_update(
@@ -4750,7 +7738,7 @@ impl MachineRegistry {
                     if rec.approved_routes != routes {
                         let node_id = rec.stable_node_id_for_key(&node_key_hex);
                         rec.approved_routes = routes;
-                        if active_primary_routes(&rec.available_routes, &rec.approved_routes)
+                        if active_approved_routes(&rec.available_routes, &rec.approved_routes)
                             .is_empty()
                         {
                             clear_unhealthy_route_states.push(node_id);
@@ -4763,8 +7751,7 @@ impl MachineRegistry {
                 NodeStoreManyUpdateOutcome {
                     applied,
                     publish_snapshot: applied > 0,
-                    change: (applied > 0)
-                        .then(|| PendingMapChange::global(MapChangeReason::PolicyChange)),
+                    change: None,
                     clear_unhealthy_route_states,
                     missing_node_keys: Vec::new(),
                     affected_node_keys: Vec::new(),
@@ -4774,14 +7761,31 @@ impl MachineRegistry {
             }),
         );
 
-        (outcome.applied, outcome.missing_node_keys)
+        if outcome.applied > 0 {
+            self.try_refresh_policy_node_inputs()?;
+            self.wake_policy_change(None);
+        }
+        Ok((outcome.applied, outcome.missing_node_keys))
     }
 
     /// Replace a machine's advertised subnet routes. Empty list clears
     /// advertised routes while preserving operator approvals.
     pub fn set_available_routes(&self, node_key_hex: &str, routes: Vec<String>) -> bool {
+        self.try_set_available_routes(node_key_hex, routes)
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "updating policy manager after advertised routes");
+                false
+            })
+    }
+
+    /// Set advertised routes and report any subsequent policy-refresh error.
+    pub fn try_set_available_routes(
+        &self,
+        node_key_hex: &str,
+        routes: Vec<String>,
+    ) -> Result<bool, String> {
         let node_key_hex = node_key_hex.to_string();
-        self.apply_nodestore_bool_update(
+        let outcome = self.apply_nodestore_bool_update(
             "update",
             Box::new(move |map| match map.get_mut(&node_key_hex) {
                 Some(rec) => {
@@ -4790,15 +7794,15 @@ impl MachineRegistry {
                     }
                     let node_id = rec.stable_node_id_for_key(&node_key_hex);
                     rec.available_routes = routes;
-                    NodeStoreBoolUpdateOutcome::changed_for_node(
-                        PendingMapChange::broadcast_peer(MapChangeReason::RouteUpdate, node_id),
-                        node_id,
-                    )
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(node_id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
                 }
                 None => NodeStoreBoolUpdateOutcome::unchanged(false),
             }),
-        )
-        .applied
+        );
+        self.finish_volatile_node_update(&outcome, MapChangeReason::RouteUpdate)
     }
 
     /// Remove every ephemeral node whose `last_seen` is older than
@@ -4811,22 +7815,35 @@ impl MachineRegistry {
     /// seen within `grace` are also ignored — operators wire this to a
     /// 60s tokio task and the upstream default grace is ~120s.
     pub fn gc_ephemeral(&self, grace: std::time::Duration) -> Vec<String> {
+        self.try_gc_ephemeral(grace).unwrap_or_else(|error| {
+            tracing::error!(%error, "updating policy manager after ephemeral GC");
+            Vec::new()
+        })
+    }
+
+    /// Sweep ephemeral nodes and propagate late policy resolution failure.
+    /// Removed records, address release and connection cleanup remain applied.
+    pub fn try_gc_ephemeral(&self, grace: std::time::Duration) -> Result<Vec<String>, String> {
         let now = Utc::now();
         let cutoff_chrono =
             chrono::Duration::from_std(grace).unwrap_or(chrono::Duration::seconds(0));
         let deadline = now - cutoff_chrono;
-        let active_connections = self.active_connections.read().clone();
-        let online_states = self.online_states.read().clone();
+        let state_sessions = self.state_sessions.clone();
+        let online_states = self.online_states.clone();
+        let released_addresses = Arc::new(Mutex::new(Vec::new()));
+        let writer_releases = released_addresses.clone();
         let outcome = self.apply_nodestore_many_update(
             "delete_multi",
             Box::new(move |map| {
+                let state_sessions = state_sessions.read();
+                let online_states = online_states.read();
                 let to_drop: Vec<(String, u64)> = map
                     .iter()
                     .filter(|(node_key, rec)| {
                         let node_id = rec.stable_node_id_for_key(node_key);
                         rec.ephemeral
                             && rec.last_seen < deadline
-                            && active_connections.get(&node_id).copied().unwrap_or(0) == 0
+                            && state_sessions.get(&node_id).copied().unwrap_or(0) == 0
                             && !online_states.get(&node_id).copied().unwrap_or(false)
                     })
                     .map(|(k, rec)| (k.clone(), rec.stable_node_id_for_key(k)))
@@ -4837,7 +7854,9 @@ impl MachineRegistry {
                 }
 
                 for (node_key_hex, _node_id) in &to_drop {
-                    map.remove(node_key_hex);
+                    if let Some(record) = map.remove(node_key_hex) {
+                        writer_releases.lock().push((record.ipv4, record.ipv6));
+                    }
                 }
 
                 let affected_node_keys = to_drop
@@ -4851,7 +7870,7 @@ impl MachineRegistry {
                 NodeStoreManyUpdateOutcome {
                     applied: to_drop.len(),
                     publish_snapshot: true,
-                    change: Some(PendingMapChange::peers_removed(affected_node_ids.clone())),
+                    change: None,
                     clear_unhealthy_route_states: Vec::new(),
                     missing_node_keys: Vec::new(),
                     affected_node_keys,
@@ -4861,34 +7880,65 @@ impl MachineRegistry {
             }),
         );
         if outcome.applied == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
+        let releases = std::mem::take(&mut *released_addresses.lock());
+        for (ipv4, ipv6) in releases {
+            self.release_addresses(ipv4, ipv6);
+        }
         let removed_keys = outcome.affected_node_keys;
         let removed_ids = outcome.affected_node_ids;
-
-        let mut active = self.active_connections.write();
-        let mut online = self.online_states.write();
-        let mut generations = self.connection_generations.write();
-        let mut disconnected_at = self.disconnected_at.write();
-        let mut route_health_sessions = self.route_health_stable_sessions.write();
-        for node_id in &removed_ids {
-            active.remove(node_id);
-            online.remove(node_id);
-            generations.remove(node_id);
-            disconnected_at.remove(node_id);
-            route_health_sessions.remove(node_id);
+        self.discard_absent_native_persistence(&removed_ids);
+        let mut changes = vec![PendingMapChange::peers_removed(removed_ids)];
+        let refreshed = self.try_refresh_policy_node_inputs();
+        if refreshed? == Some(true) {
+            changes.push(PendingMapChange::global(MapChangeReason::PolicyChange));
         }
-        removed_keys
+        self.wake_waiters_with_many(changes);
+        Ok(removed_keys)
     }
 
-    fn forget_batcher_connection_state(&self, node_id: u64) {
-        self.active_connections.write().remove(&node_id);
-        self.online_states.write().remove(&node_id);
-        self.connection_generations.write().remove(&node_id);
-        self.disconnected_at.write().remove(&node_id);
-        self.route_health_stable_sessions.write().remove(&node_id);
-        self.pending_map_changes.write().remove(&node_id);
+    /// Called only with the NodeStore writer held. No NodeStore acquisition or
+    /// notification is allowed while the epoch retirement lock is held.
+    fn retire_absent_stream_state(&self, records: &HashMap<String, MachineRecord>) -> bool {
+        if let Some(gc) = self.ephemeral_gc() {
+            gc.retire_absent_timers(records);
+        }
+        let mut epochs = self.stream_session_epochs.write();
+        if epochs.is_empty() {
+            return false;
+        }
+        let live_ids = records
+            .iter()
+            .map(|(key, record)| record.stable_node_id_for_key(key))
+            .collect::<std::collections::HashSet<_>>();
+        let removed = epochs
+            .keys()
+            .filter(|id| !live_ids.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for node_id in &removed {
+            epochs.remove(node_id);
+            self.cancel_stream_connections(*node_id);
+            self.stream_cancel_flags.write().remove(node_id);
+            self.active_connections.write().remove(node_id);
+            self.state_sessions.write().remove(node_id);
+            self.online_states.write().remove(node_id);
+            self.connection_generations.write().remove(node_id);
+            self.disconnected_at.write().remove(node_id);
+            self.route_health_stable_sessions.write().remove(node_id);
+            self.pending_map_changes.write().remove(node_id);
+        }
+        !removed.is_empty()
+    }
+
+    fn notify_retired_streams(&self, retired: bool) {
+        if retired {
+            // Wake sticky deletion watchers after releasing the NodeStore and
+            // epoch locks, without inventing another semantic map change.
+            self.gen_tx.send_modify(|_| {});
+        }
     }
 
     fn forget_stream_cancel_flag(&self, node_id: u64, cancelled: &Arc<AtomicBool>) {
@@ -4906,6 +7956,11 @@ impl MachineRegistry {
 pub struct StreamConnectionGuard {
     machines: Arc<MachineRegistry>,
     node_id: u64,
+    generation: u64,
+    epoch: Arc<()>,
+    acquired: bool,
+    record_ended: bool,
+    native_work: Option<native_shutdown::NativeWork>,
     offline_grace: Duration,
     cancelled: Arc<AtomicBool>,
 }
@@ -4938,8 +7993,17 @@ struct EphemeralNodeGc {
     machines: Weak<MachineRegistry>,
     registration_store: Option<Weak<dyn MachineRegistrationStore>>,
     inactivity_timeout: Duration,
-    timers: Mutex<BTreeMap<String, tokio::task::JoinHandle<()>>>,
+    timers: Mutex<BTreeMap<String, EphemeralGcTimer>>,
+    next_generation: AtomicU64,
     closed: AtomicBool,
+}
+
+struct EphemeralGcTimer {
+    generation: u64,
+    node_id: u64,
+    machine_key_hex: String,
+    epoch: Option<Arc<()>>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl EphemeralNodeGc {
@@ -4972,22 +8036,57 @@ impl EphemeralNodeGc {
     }
 
     fn schedule(self: &Arc<Self>, node_key_hex: String) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
         let Some(machines) = self.machines.upgrade() else {
             return;
         };
-        let Some(rec) = machines.get(&node_key_hex) else {
+        let records = machines.inner.read();
+        let Some(rec) = records.get(&node_key_hex) else {
             return;
         };
+        let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        let epoch = Some(
+            machines
+                .stream_session_epochs
+                .write()
+                .entry(node_id)
+                .or_insert_with(|| Arc::new(()))
+                .clone(),
+        );
+        self.schedule_owned(&machines, node_key_hex, rec, epoch);
+    }
+
+    /// Caller holds the NodeStore read guard through timer installation, so a
+    /// writer cannot retire/rebind the selected node between lookup and insert.
+    fn schedule_owned(
+        self: &Arc<Self>,
+        machines: &MachineRegistry,
+        node_key_hex: String,
+        rec: &MachineRecord,
+        mut epoch: Option<Arc<()>>,
+    ) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         if !rec.ephemeral {
             self.cancel(&node_key_hex);
             return;
         }
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        if !machines.stream_epoch_matches(node_id, epoch.as_ref()) {
+            return;
+        }
+        if epoch.is_none() {
+            epoch = Some(
+                machines
+                    .stream_session_epochs
+                    .write()
+                    .entry(node_id)
+                    .or_insert_with(|| Arc::new(()))
+                    .clone(),
+            );
+        }
         if machines
-            .active_connections
+            .state_sessions
             .read()
             .get(&node_id)
             .copied()
@@ -4998,46 +8097,122 @@ impl EphemeralNodeGc {
             return;
         }
 
+        let mut timers = self.timers.lock();
+        // Close sets the flag before taking this same lock. A scheduler that
+        // passed the early check must not install a timer after close drained it.
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let timeout = self.inactivity_timeout;
         let gc = Arc::downgrade(self);
         let task_node_key = node_key_hex.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
             if let Some(gc) = gc.upgrade() {
-                gc.fire(task_node_key).await;
+                gc.fire(task_node_key, generation).await;
             }
         });
-        if let Some(previous) = self.timers.lock().insert(node_key_hex, handle) {
-            previous.abort();
+        if let Some(previous) = timers.insert(
+            node_key_hex,
+            EphemeralGcTimer {
+                generation,
+                node_id,
+                machine_key_hex: rec.machine_key_hex.clone(),
+                epoch,
+                task: handle,
+            },
+        ) {
+            previous.task.abort();
         }
     }
 
+    /// The NodeStore writer retires old bindings before any subsequent writer
+    /// can insert or acquire their replacements. This does not read NodeStore.
+    fn retire_absent_timers(&self, records: &HashMap<String, MachineRecord>) {
+        self.timers.lock().retain(|key, timer| {
+            let retained = records.get(key).is_some_and(|record| {
+                record.stable_node_id_for_key(key) == timer.node_id
+                    && record.machine_key_hex == timer.machine_key_hex
+            });
+            if !retained {
+                timer.task.abort();
+            }
+            retained
+        });
+    }
+
     fn cancel(&self, node_key_hex: &str) {
-        if let Some(handle) = self.timers.lock().remove(node_key_hex) {
-            handle.abort();
+        if let Some(timer) = self.timers.lock().remove(node_key_hex) {
+            timer.task.abort();
         }
     }
 
     fn abort_all(&self) {
         self.closed.store(true, Ordering::SeqCst);
         let timers = std::mem::take(&mut *self.timers.lock());
-        for (_node_key, handle) in timers {
-            handle.abort();
+        for (_node_key, timer) in timers {
+            timer.task.abort();
         }
     }
 
-    async fn fire(self: Arc<Self>, node_key_hex: String) {
-        self.timers.lock().remove(&node_key_hex);
+    fn claim_timer(&self, node_key: &str, generation: u64) -> bool {
+        let mut timers = self.timers.lock();
+        if timers
+            .get(node_key)
+            .is_some_and(|timer| timer.generation == generation)
+        {
+            timers.remove(node_key);
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn fire(self: Arc<Self>, node_key_hex: String, generation: u64) {
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
         let Some(machines) = self.machines.upgrade() else {
+            self.claim_timer(&node_key_hex, generation);
             return;
         };
-        let Some(rec) = machines.get(&node_key_hex) else {
+        let expected = self.timers.lock().get(&node_key_hex).and_then(|timer| {
+            (timer.generation == generation).then(|| {
+                (
+                    timer.node_id,
+                    timer.machine_key_hex.clone(),
+                    timer.epoch.clone(),
+                )
+            })
+        });
+        let Some((expected_id, expected_machine_key, epoch)) = expected else {
             return;
         };
-        let node_id = rec.stable_node_id_for_key(&node_key_hex);
+        // Leave the timer cancellable while waiting behind a reconnect,
+        // registration or admin mutation. Claim its generation only once
+        // this callback owns the machine's mutation step.
+        let registration = machines.lock_registration(&expected_machine_key).await;
+        let record = {
+            let records = machines.inner.read();
+            let current = self.claim_timer(&node_key_hex, generation);
+            if !current
+                || self.closed.load(Ordering::SeqCst)
+                || !machines.stream_epoch_matches(expected_id, epoch.as_ref())
+            {
+                return;
+            }
+            let Some(record) = records.get(&node_key_hex) else {
+                return;
+            };
+            if record.machine_key_hex != expected_machine_key
+                || record.stable_node_id_for_key(&node_key_hex) != expected_id
+            {
+                return;
+            }
+            record.clone()
+        };
+        let node_id = record.stable_node_id_for_key(&node_key_hex);
         if machines
             .active_connections
             .read()
@@ -5045,61 +8220,98 @@ impl EphemeralNodeGc {
             .copied()
             .unwrap_or(0)
             > 0
+            || !record.ephemeral
         {
             return;
         }
-        if !rec.ephemeral {
-            return;
-        }
-
-        if let Some(store) = self
+        let store = self
             .registration_store
             .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            && let Err(error) = store.delete_machine_registration(&node_key_hex).await
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(store) = store
+            .as_ref()
+            .filter(|store| !store.supports_guarded_ephemeral_deletion())
         {
-            tracing::warn!(
-                target = "tailscale_wire::gc",
-                node_key = %node_key_hex,
-                %error,
-                "ephemeral GC failed to delete persisted node"
-            );
+            // Preserve the original hook contract for custom adapters. They
+            // may acquire the machine guard themselves; only explicitly
+            // opted-in stores can be called while this guard is held.
+            drop(registration);
+            if let Err(error) = store.delete_machine_registration(&node_key_hex).await {
+                tracing::warn!(target: "tailscale_wire::gc", node_key = %node_key_hex, %error,
+                    "ephemeral GC failed to delete persisted node");
+                return;
+            }
+            if let Err(error) = machines.try_delete_gc_owned(
+                &node_key_hex,
+                expected_id,
+                &expected_machine_key,
+                epoch.clone(),
+            ) {
+                tracing::warn!(target: "tailscale_wire::gc", node_key = %node_key_hex, %error,
+                    "ephemeral GC failed after cache deletion");
+            }
             return;
         }
-
-        if machines.delete(&node_key_hex) {
-            tracing::info!(
-                target = "tailscale_wire::gc",
-                node_key = %node_key_hex,
-                "ephemeral GC removed node"
-            );
+        if let Err(error) = complete_state_mutation(async move {
+            let _registration = registration;
+            if let Some(store) = store
+                && let Err(error) = store.delete_ephemeral_registration(&record).await
+            {
+                tracing::warn!(target: "tailscale_wire::gc", node_key = %node_key_hex, %error,
+                    "ephemeral GC failed to delete persisted node");
+                return;
+            }
+            match machines.try_delete_gc_owned(
+                &node_key_hex,
+                expected_id,
+                &expected_machine_key,
+                epoch,
+            ) {
+                Ok(true) => tracing::info!(target: "tailscale_wire::gc", node_key = %node_key_hex,
+                    "ephemeral GC removed node"),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(target: "tailscale_wire::gc", node_key = %node_key_hex, %error,
+                    "ephemeral GC failed after cache deletion");
+                }
+            }
+        })
+        .await
+        {
+            tracing::warn!(target: "tailscale_wire::gc", %error, "ephemeral GC mutation task failed");
         }
     }
 }
 
 impl Drop for StreamConnectionGuard {
     fn drop(&mut self) {
+        if !self.acquired {
+            return;
+        }
         let end_reason = if self.cancelled.load(Ordering::SeqCst) {
             "cancelled"
         } else {
             "done"
         };
-        if let Some(generation) = self.machines.release_stream_connection(self.node_id) {
-            if let Some(node_key) = self.machines.ephemeral_node_key_by_id(self.node_id)
-                && let Some(gc) = self.machines.ephemeral_gc()
-            {
-                gc.schedule(node_key);
-            }
-            MachineRegistry::schedule_stream_offline_if_idle(
-                self.machines.clone(),
-                self.node_id,
-                generation,
-                self.offline_grace,
-            );
-        }
+        let still_connected = self
+            .machines
+            .release_stream_connection(self.node_id, &self.epoch);
         self.machines
             .forget_stream_cancel_flag(self.node_id, &self.cancelled);
-        self.machines.record_mapresponse_ended(end_reason);
+        if let Some(still_connected) = still_connected {
+            MachineRegistry::schedule_state_session_release(
+                self.machines.clone(),
+                self.node_id,
+                self.generation,
+                self.epoch.clone(),
+                still_connected,
+                self.offline_grace,
+                self.native_work.take(),
+            );
+        }
+        if self.record_ended {
+            self.machines.record_mapresponse_ended(end_reason);
+        }
     }
 }
 
@@ -5124,7 +8336,13 @@ pub fn spawn_ephemeral_gc(
         tick.tick().await;
         loop {
             tick.tick().await;
-            let removed = machines.gc_ephemeral(grace);
+            let removed = match machines.try_gc_ephemeral(grace) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    tracing::error!(%error, "ephemeral GC policy refresh failed");
+                    continue;
+                }
+            };
             if !removed.is_empty() {
                 tracing::info!(
                     target = "tailscale_wire::gc",
@@ -5259,7 +8477,10 @@ mod registry_tests {
             user_id: None,
             user_display_name: String::new(),
             user_profile_pic_url: String::new(),
+            user_provider: String::new(),
+            user_created_at: None,
             hostname: format!("host-{host}"),
+            raw_hostname: format!("host-{host}"),
             os: "linux".to_string(),
             os_version: "test".to_string(),
             host_info: wire::HostInfo {
@@ -5583,7 +8804,7 @@ mod registry_tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=138")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5970,6 +9191,82 @@ mod registry_tests {
 
         let registered = state.machines.get(&pending.node_key_hex).unwrap();
         assert_eq!(registered.user, "preferred@example.com");
+    }
+
+    // oidc.go handleRegistration runs State.AutoApproveRoutes right after
+    // HandleNodeFromAuthPath; SetApprovedRoutes yields change.PolicyChange(),
+    // sent after the registration's own change.
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_auto_approves_policy_routes() {
+        let state = test_state();
+        let raw_policy = r#"{"autoApprovers":{"routes":{"10.81.0.0/16":["alice@example.com"]}}}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let registration_id = "a".repeat(24);
+        let mut pending = mk_record(14);
+        pending.user.clear();
+        pending.available_routes = vec!["10.81.1.0/24".into(), "10.99.0.0/24".into()];
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+        let history_len = state.machines.map_change_history().len();
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        handler
+            .complete_oidc_registration(&registration_id, &oidc_test_user(), None)
+            .await
+            .unwrap();
+
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert_eq!(registered.user, "alice@example.com");
+        assert_eq!(
+            registered.available_routes,
+            vec!["10.81.1.0/24", "10.99.0.0/24"]
+        );
+        assert_eq!(registered.approved_routes, vec!["10.81.1.0/24"]);
+        let changes = state.machines.map_change_history();
+        let last = changes[history_len..]
+            .last()
+            .expect("registration records map changes");
+        assert_eq!(last.reason_labels(), vec!["policy change"]);
+        assert!(last.content.include_policy);
+    }
+
+    #[tokio::test]
+    async fn wire_oidc_registration_handler_without_matching_approver_approves_nothing() {
+        let state = test_state();
+        let raw_policy =
+            r#"{"autoApprovers":{"routes":{"10.81.0.0/16":["someone-else@example.com"]}}}"#;
+        state.policy.set(
+            crate::policy::parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let registration_id = "b".repeat(24);
+        let mut pending = mk_record(15);
+        pending.user.clear();
+        pending.available_routes = vec!["10.81.1.0/24".into()];
+        state
+            .registration_cache
+            .insert(registration_id.clone(), pending.clone());
+        let history_len = state.machines.map_change_history().len();
+
+        let handler = WireOidcRegistrationHandler {
+            state: state.clone(),
+        };
+        handler
+            .complete_oidc_registration(&registration_id, &oidc_test_user(), None)
+            .await
+            .unwrap();
+
+        let registered = state.machines.get(&pending.node_key_hex).unwrap();
+        assert!(registered.approved_routes.is_empty());
+        // Only the registration's own change; an unchanged approval adds no
+        // SetApprovedRoutes PolicyChange.
+        assert_eq!(state.machines.map_change_history()[history_len..].len(), 1);
     }
 
     #[tokio::test]
@@ -6755,12 +10052,11 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let mut rec = mk_record(1);
         rec.node_key_hex = "node-noop-update".into();
-        rec.forced_tags = vec!["tag:server".into()];
         reg.upsert(rec.node_key_hex.clone(), rec);
         let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
 
         let before = reg.snapshot();
-        assert!(reg.set_forced_tags("node-noop-update", vec!["tag:server".into()]));
+        assert!(reg.set_available_routes("node-noop-update", Vec::new()));
         let after = reg.snapshot();
 
         assert!(
@@ -6852,7 +10148,7 @@ mod registry_tests {
         let batch_size_before = reg.nodestore_batch_size_metrics();
 
         let first_reg = reg.clone();
-        let first = std::thread::spawn(move || first_reg.mark_stream_offline_if_idle(first_id, 1));
+        let first = std::thread::spawn(move || first_reg.release_state_session(first_id, 1));
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while reg.nodestore_queue_depth() == 0 {
@@ -6868,7 +10164,7 @@ mod registry_tests {
             "first offline update should wait for another item or the timeout"
         );
 
-        reg.mark_stream_offline_if_idle(second_id, 1);
+        reg.release_state_session(second_id, 1);
         first
             .join()
             .expect("first offline update thread should finish");
@@ -7330,14 +10626,14 @@ mod registry_tests {
         assert!(!gen_rx.has_changed().unwrap());
 
         assert_eq!(
-            reg.wake_expired_nodes_between(base, expiry),
+            reg.wake_expired_nodes_between(base, expiry + chrono::Duration::nanoseconds(1)),
             vec!["nk-a".to_string()]
         );
         assert!(gen_rx.has_changed().unwrap());
         gen_rx.borrow_and_update();
         let stored = reg.get("nk-a").expect("expired node remains registered");
         assert_eq!(stored.expiry, Some(expiry));
-        assert!(stored.is_expired_at(expiry));
+        assert!(stored.is_expired_at(expiry + chrono::Duration::nanoseconds(1)));
 
         assert!(
             reg.wake_expired_nodes_between(expiry, expiry + chrono::Duration::seconds(1))
@@ -7405,7 +10701,7 @@ mod registry_tests {
         pending.hostname = "Peer.One!".into();
         pending.host_info.hostname = "Peer.One!".into();
 
-        let completed = reg.complete_web_registration(pending, "alice", 2);
+        let completed = reg.complete_web_registration(pending, "alice", 2).unwrap();
         assert_eq!(completed.hostname, "peer-one-1");
         assert_eq!(reg.get("nk-pending").unwrap().hostname, "peer-one-1");
     }
@@ -7426,7 +10722,7 @@ mod registry_tests {
         pending.hostname = "client-new-host".into();
         pending.host_info.hostname = "client-new-host".into();
 
-        let completed = reg.complete_web_registration(pending, "alice", 2);
+        let completed = reg.complete_web_registration(pending, "alice", 2).unwrap();
         assert_eq!(completed.hostname, "admin-name");
         assert!(reg.get("nk-existing").is_none());
         let stored = reg.get("nk-pending").unwrap();
@@ -7451,7 +10747,7 @@ mod registry_tests {
         pending.hostname = "client-new-host".into();
         pending.host_info.hostname = "client-new-host".into();
 
-        let completed = reg.complete_web_registration(pending, "alice", 2);
+        let completed = reg.complete_web_registration(pending, "alice", 2).unwrap();
         assert_eq!(completed.node_id, Some(777));
         assert_eq!(completed.user_id, Some(7));
         assert!(reg.get("nk-existing").is_none());
@@ -7582,6 +10878,45 @@ mod registry_tests {
             reg.get("nk-a").is_none(),
             "disconnect should schedule upstream-style ephemeral deletion"
         );
+        gc.abort();
+    }
+
+    #[tokio::test]
+    async fn ephemeral_gc_cancel_or_reschedule_discards_queued_deletion() {
+        let reg = Arc::new(MachineRegistry::new());
+        let mut rec = mk_record(4);
+        rec.ephemeral = true;
+        reg.upsert("nk-a".to_string(), rec);
+        let deleted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let store: Arc<dyn MachineRegistrationStore> = Arc::new(RecordingDeletionStore {
+            deleted: deleted.clone(),
+        });
+        let gc = reg.configure_ephemeral_gc(Some(Arc::downgrade(&store)), Duration::from_secs(60));
+        assert_eq!(gc.schedule_existing(), 1);
+        let first_generation = gc.inner.timers.lock()["nk-a"].generation;
+
+        // The timer has fired and its callback is queued, but the node
+        // reconnects before the callback is run.
+        gc.inner.cancel("nk-a");
+        gc.inner
+            .clone()
+            .fire("nk-a".to_string(), first_generation)
+            .await;
+        assert!(reg.get("nk-a").is_some());
+        assert!(deleted.lock().is_empty());
+
+        // A later disconnect arms a new timer. The old callback must neither
+        // remove that timer nor delete the newly reconnected node.
+        gc.inner.schedule("nk-a".to_string());
+        let second_generation = gc.inner.timers.lock()["nk-a"].generation;
+        assert_ne!(first_generation, second_generation);
+        gc.inner
+            .clone()
+            .fire("nk-a".to_string(), first_generation)
+            .await;
+        assert_eq!(gc.inner.timers.lock()["nk-a"].generation, second_generation);
+        assert!(reg.get("nk-a").is_some());
+        assert!(deleted.lock().is_empty());
         gc.abort();
     }
 
@@ -7725,13 +11060,19 @@ mod registry_tests {
             .iter()
             .map(MapChange::reason_label)
             .collect::<Vec<_>>();
+        // headscale-go v0.29.5 State.Connect: the node's key is expired
+        // (set_expiry(now)), so ShouldBeOnline() is false and Connect emits
+        // change.NodeAdded(id) instead of NodeOnline; Disconnect emits
+        // change.NodeOffline(id). Neither adds a PolicyChange because the
+        // node is not a subnet router (its route is announced, not approved),
+        // relay target or via target (PolicyManager.NodeNeedsPeerRecompute).
         assert_eq!(
             labels,
             vec![
                 "node added",
                 "route update",
                 "node added",
-                "node online",
+                "node added",
                 "node offline",
                 "peers removed",
             ]
@@ -7742,7 +11083,7 @@ mod registry_tests {
             .collect::<Vec<_>>();
         assert_eq!(
             types,
-            vec!["peers", "peers", "peers", "policy", "policy", "peers"]
+            vec!["peers", "peers", "peers", "peers", "patch", "peers"]
         );
         assert!(
             changes
@@ -7760,22 +11101,18 @@ mod registry_tests {
         assert_eq!(changes[2].target_node_id, None);
         assert_eq!(changes[2].content.peers_changed, vec![node_id]);
         assert_eq!(changes[3].target_node_id, None);
-        assert_eq!(
-            changes[3].reason_labels(),
-            vec!["node online", "policy change"]
-        );
-        assert!(changes[3].content.include_policy);
-        assert!(changes[3].content.requires_runtime_peer_computation);
+        // change.NodeAdded: PeersChanged [id], OriginNode id.
+        assert_eq!(changes[3].reason_labels(), vec!["node added"]);
+        assert!(!changes[3].content.include_policy);
+        assert!(!changes[3].content.requires_runtime_peer_computation);
         assert_eq!(changes[3].origin_node_id, Some(node_id));
-        assert_eq!(changes[3].content.peer_patches, vec![node_id]);
+        assert_eq!(changes[3].content.peers_changed, vec![node_id]);
         assert_eq!(changes[4].target_node_id, None);
-        assert_eq!(
-            changes[4].reason_labels(),
-            vec!["node offline", "policy change"]
-        );
-        assert!(changes[4].content.include_policy);
-        assert!(changes[4].content.requires_runtime_peer_computation);
-        assert_eq!(changes[4].origin_node_id, Some(node_id));
+        // change.NodeOffline: a PeerPatches entry, no OriginNode.
+        assert_eq!(changes[4].reason_labels(), vec!["node offline"]);
+        assert!(!changes[4].content.include_policy);
+        assert!(!changes[4].content.requires_runtime_peer_computation);
+        assert_eq!(changes[4].origin_node_id, None);
         assert_eq!(changes[4].content.peer_patches, vec![node_id]);
         assert_eq!(changes[5].target_node_id, None);
         assert_eq!(changes[5].content.peers_removed, vec![node_id]);
@@ -7869,7 +11206,7 @@ mod registry_tests {
             PendingMapChange::target(MapChangeReason::SelfUpdate, node_id).into_change(3);
         assert!(self_only.content.include_self);
         assert!(!self_only.content.include_derp_map);
-        assert!(!self_only.content.include_dns);
+        assert!(self_only.content.include_dns);
         assert!(!self_only.content.include_domain);
         assert!(!self_only.content.include_policy);
         assert!(self_only.is_self_only());
@@ -7918,6 +11255,12 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = 1001;
         let node_b = 1002;
+        for (id, host) in [(node_a, 1), (node_b, 2)] {
+            let mut record = mk_record(host);
+            record.node_id = Some(id);
+            record.node_key_hex = format!("batcher-{id}");
+            reg.upsert(record.node_key_hex.clone(), record);
+        }
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -7948,7 +11291,7 @@ mod registry_tests {
     }
 
     #[tokio::test]
-    async fn subnet_router_stream_lifecycle_queues_full_updates() {
+    async fn subnet_router_stream_lifecycle_queues_policy_recompute() {
         let reg = Arc::new(MachineRegistry::new());
         let observer_key = "subnet-observer";
         let router_key = "subnet-router";
@@ -7974,17 +11317,18 @@ mod registry_tests {
             .map_change_history()
             .pop()
             .expect("router online records a map change");
-        assert_eq!(online.reason_labels(), vec!["subnet router online"]);
-        assert_eq!(online.change_type(), "full");
-        assert_eq!(online.origin_node_id, Some(router_id));
-        assert!(online.is_full());
+        assert_eq!(online.reason_labels(), vec!["node online", "policy change"]);
+        assert_eq!(online.change_type(), "policy");
+        assert_eq!(online.origin_node_id, None);
+        assert!(!online.is_full());
+        assert!(online.content.requires_runtime_peer_computation);
         let pending = reg.pending_map_changes();
         assert!(
             pending
                 .get(&observer_id)
                 .expect("observer receives subnet-router online change")
                 .iter()
-                .any(MapChange::is_full)
+                .any(|change| change.content.requires_runtime_peer_computation)
         );
         let _ = reg.drain_pending_map_changes();
 
@@ -7994,17 +11338,21 @@ mod registry_tests {
             .map_change_history()
             .pop()
             .expect("router offline records a map change");
-        assert_eq!(offline.reason_labels(), vec!["subnet router offline"]);
-        assert_eq!(offline.change_type(), "full");
-        assert_eq!(offline.origin_node_id, Some(router_id));
-        assert!(offline.is_full());
+        assert_eq!(
+            offline.reason_labels(),
+            vec!["node offline", "policy change"]
+        );
+        assert_eq!(offline.change_type(), "policy");
+        assert_eq!(offline.origin_node_id, None);
+        assert!(!offline.is_full());
+        assert!(offline.content.requires_runtime_peer_computation);
         let pending = reg.pending_map_changes();
         assert!(
             pending
                 .get(&observer_id)
                 .expect("observer receives subnet-router offline change")
                 .iter()
-                .any(MapChange::is_full)
+                .any(|change| change.content.requires_runtime_peer_computation)
         );
     }
 
@@ -8013,6 +11361,8 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = stable_id_from_key("user-removed-a");
         let node_b = stable_id_from_key("user-removed-b");
+        reg.upsert("user-removed-a".into(), mk_record(1));
+        reg.upsert("user-removed-b".into(), mk_record(2));
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -8048,6 +11398,12 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = 2001;
         let node_b = 2002;
+        for (id, host) in [(node_a, 1), (node_b, 2)] {
+            let mut record = mk_record(host);
+            record.node_id = Some(id);
+            record.node_key_hex = format!("batcher-{id}");
+            reg.upsert(record.node_key_hex.clone(), record);
+        }
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -8101,6 +11457,12 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = 2101;
         let node_b = 2102;
+        for (id, host) in [(node_a, 1), (node_b, 2)] {
+            let mut record = mk_record(host);
+            record.node_id = Some(id);
+            record.node_key_hex = format!("batcher-{id}");
+            reg.upsert(record.node_key_hex.clone(), record);
+        }
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -8139,6 +11501,12 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = stable_id_from_key("nk-a");
         let node_b = stable_id_from_key("nk-b");
+        // A map stream only exists for a node in the NodeStore (Go's poll
+        // path validates the node before State.Connect / Batcher.AddNode), and
+        // the registry deliberately gives a missing node no session or
+        // batcher entry. Register both nodes before their streams connect.
+        reg.upsert("nk-a".to_string(), mk_record(1));
+        reg.upsert("nk-b".to_string(), mk_record(2));
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -8149,7 +11517,6 @@ mod registry_tests {
             node_b,
             Duration::ZERO,
         );
-        reg.upsert("nk-b".to_string(), mk_record(2));
         let _ = reg.drain_pending_map_changes();
 
         reg.enqueue_map_change(
@@ -8224,6 +11591,12 @@ mod registry_tests {
         let reg = Arc::new(MachineRegistry::new());
         let node_a = 3001;
         let node_b = 3002;
+        for (id, host) in [(node_a, 1), (node_b, 2)] {
+            let mut record = mk_record(host);
+            record.node_id = Some(id);
+            record.node_key_hex = format!("batcher-{id}");
+            reg.upsert(record.node_key_hex.clone(), record);
+        }
         let _guard_a = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_a,
@@ -8265,6 +11638,10 @@ mod registry_tests {
     async fn map_change_batcher_tick_publishes_pending_batch() {
         let reg = Arc::new(MachineRegistry::new());
         let node_id = 4001;
+        let mut record = mk_record(1);
+        record.node_id = Some(node_id);
+        record.node_key_hex = "batcher-4001".into();
+        reg.upsert(record.node_key_hex.clone(), record);
         let _guard = MachineRegistry::track_stream_connection_with_grace(
             reg.clone(),
             node_id,
@@ -8368,8 +11745,8 @@ mod registry_tests {
         let cleaned = reg.cleanup_offline_connections(Duration::ZERO);
         assert_eq!(cleaned, vec![node_id]);
         assert!(!reg.active_connections().contains_key(&node_id));
-        assert!(!reg.online_states().contains_key(&node_id));
-        assert!(reg.connection_generation(node_id).is_none());
+        assert_eq!(reg.online_states().get(&node_id), Some(&false));
+        assert_eq!(reg.connection_generation(node_id), Some(generation));
         assert!(!reg.disconnected_at.read().contains_key(&node_id));
         assert!(
             !reg.route_health_stable_sessions
@@ -8401,8 +11778,8 @@ mod registry_tests {
         assert_eq!(reg.online_states().get(&node_id), Some(&true));
         assert_eq!(
             reg.map_change_history().len(),
-            history_len,
-            "headscale-go AddNode of another channel does not emit a duplicate online change"
+            history_len + 1,
+            "headscale-go Connect of another channel emits its lightweight online change"
         );
 
         drop(second);
@@ -8411,7 +11788,7 @@ mod registry_tests {
         assert!(!reg.disconnected_at.read().contains_key(&node_id));
         assert_eq!(
             reg.map_change_history().len(),
-            history_len,
+            history_len + 1,
             "headscale-go RemoveNode reports still connected while another channel remains"
         );
 
@@ -8527,7 +11904,7 @@ mod registry_tests {
         reg.upsert("nk-a".to_string(), mk_record(7));
         assert!(reg.set_forced_tags("nk-a", vec!["tag:dev".into(), "tag:ci".into()]));
         let rec = reg.get("nk-a").unwrap();
-        assert_eq!(rec.forced_tags, vec!["tag:dev", "tag:ci"]);
+        assert_eq!(rec.forced_tags, vec!["tag:ci", "tag:dev"]);
         // Replace, not merge.
         assert!(reg.set_forced_tags("nk-a", vec!["tag:prod".into()]));
         assert_eq!(reg.get("nk-a").unwrap().forced_tags, vec!["tag:prod"]);
@@ -8570,12 +11947,9 @@ mod registry_tests {
         let generation = reg.subscribe_gen();
         let _handle = reg.configure_nodestore_write_batcher(1, Duration::from_secs(5));
 
+        // An unchanged route announcement (Go: UpdateNodeFromMapRequest with
+        // no route/hostinfo delta) is a true no-op.
         assert!(reg.set_available_routes(router_key, vec![route.into()]));
-        assert!(reg.set_approved_routes(router_key, vec![route.into()]));
-
-        let updated = reg.get(router_key).expect("router remains registered");
-        assert_eq!(updated.available_routes, vec![route]);
-        assert_eq!(updated.approved_routes, vec![route]);
         assert_eq!(
             reg.map_change_history().len(),
             history_len,
@@ -8592,6 +11966,30 @@ mod registry_tests {
         assert!(
             Arc::ptr_eq(&snapshot, &reg.snapshot()),
             "unchanged route state should not publish a fresh NodeStore snapshot"
+        );
+
+        // headscale-go v0.29.5 State.SetApprovedRoutes always runs
+        // NodeStore.UpdateNode and always returns a change: when
+        // persistNodeAndRefreshPolicy's change is not full it is replaced by
+        // change.PolicyChange(), even if the approved set is unchanged. So
+        // re-approving the same routes emits exactly one global policy change.
+        assert!(reg.set_approved_routes(router_key, vec![route.into()]));
+
+        let updated = reg.get(router_key).expect("router remains registered");
+        assert_eq!(updated.available_routes, vec![route]);
+        assert_eq!(updated.approved_routes, vec![route]);
+        let changes = reg.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_labels(), vec!["policy change"]);
+        assert_eq!(new_changes[0].origin_node_id, None);
+        assert_eq!(new_changes[0].target_node_id, None);
+        assert!(new_changes[0].content.include_policy);
+        assert!(new_changes[0].content.requires_runtime_peer_computation);
+        assert!(
+            reg.pending_map_changes()
+                .contains_key(&stable_id_from_key(observer_key)),
+            "the policy change reaches the connected observer"
         );
     }
 
@@ -9226,24 +12624,29 @@ mod registry_tests {
         pending.available_routes = vec!["10.0.0.0/24".into(), "10.1.0.0/24".into()];
         pending.approved_routes = vec!["10.1.0.0/24".into()];
 
-        let registered = reg.complete_web_registration(pending, "alice", 2);
+        let registered = reg.complete_web_registration(pending, "alice", 2).unwrap();
         assert_eq!(registered.node_key_hex, "new-node");
         assert_eq!(registered.machine_key_hex, "same-machine");
         assert_eq!(registered.user, "alice");
-        assert_eq!(registered.auth_key_id, Some(7));
+        assert_eq!(registered.auth_key_id, None);
         assert!(registered.forced_tags.is_empty());
         assert_eq!(registered.ipv4, old_ip);
         assert_eq!(registered.created_at, old_created_at);
+        // headscale-go v0.29.5 applyAuthNodeUpdate (HandleNodeFromAuthPath)
+        // never touches ApprovedRoutes on re-auth: the existing node keeps its
+        // approved set and the cached registration's routes are not merged in.
+        // Route approval happens afterwards in the caller's AutoApproveRoutes
+        // (policy auto-approvers only).
         assert_eq!(
             registered.approved_routes,
-            vec!["10.0.0.0/24", "10.1.0.0/24", "10.99.0.0/24"]
+            vec!["10.0.0.0/24", "10.99.0.0/24"]
         );
         assert_eq!(registered.register_method, 2);
 
         assert_eq!(reg.len(), 1, "reauth must not duplicate the node");
         assert!(reg.get("old-node").is_none());
         let stored = reg.get("new-node").unwrap();
-        assert_eq!(stored.auth_key_id, Some(7));
+        assert_eq!(stored.auth_key_id, None);
         assert!(stored.forced_tags.is_empty());
         assert_eq!(stored.ipv4, old_ip);
 
@@ -9259,6 +12662,60 @@ mod registry_tests {
                 .content
                 .requires_runtime_peer_computation
         );
+    }
+
+    #[test]
+    fn complete_web_registration_reclaims_null_owner_tagged_node_in_place() {
+        let reg = MachineRegistry::new();
+        let mut existing = mk_record(8);
+        existing.node_id = Some(42);
+        existing.node_key_hex = "old-tagged-node".into();
+        existing.machine_key_hex = "tagged-machine".into();
+        existing.user.clear();
+        existing.user_id = None;
+        existing.forced_tags = vec!["tag:server".into()];
+        existing.auth_key_id = Some(7);
+        existing.ephemeral = true;
+        existing.expiry = Some(Utc::now() - chrono::Duration::hours(1));
+        existing.register_method = 1;
+        let ip = existing.ipv4;
+        reg.upsert(existing.node_key_hex.clone(), existing);
+
+        let mut readvertised = mk_record(9);
+        readvertised.node_key_hex = "readvertised-node".into();
+        readvertised.machine_key_hex = "tagged-machine".into();
+        readvertised.user_id = Some(10);
+        readvertised.forced_tags = vec!["tag:server".into()];
+        let tagged = reg
+            .complete_web_registration(readvertised, "alice", 3)
+            .unwrap();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("old-tagged-node").is_none());
+        assert_eq!(tagged.node_id, Some(42));
+        assert_eq!(tagged.ipv4, ip);
+        assert!(tagged.user.is_empty());
+        assert_eq!(tagged.user_id, None);
+        assert_eq!(tagged.auth_key_id, Some(7));
+        assert_eq!(tagged.expiry, None);
+        assert_eq!(tagged.register_method, 1);
+
+        let mut untagged = mk_record(10);
+        untagged.node_key_hex = "personal-node".into();
+        untagged.machine_key_hex = "tagged-machine".into();
+        untagged.user_id = Some(10);
+        let future_expiry = Utc::now() + chrono::Duration::hours(1);
+        untagged.expiry = Some(future_expiry);
+        let personal = reg.complete_web_registration(untagged, "alice", 3).unwrap();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("readvertised-node").is_none());
+        assert_eq!(personal.node_id, Some(42));
+        assert_eq!(personal.ipv4, ip);
+        assert_eq!(personal.user, "alice");
+        assert_eq!(personal.user_id, Some(10));
+        assert!(personal.forced_tags.is_empty());
+        assert_eq!(personal.auth_key_id, None);
+        assert!(!personal.ephemeral);
+        assert_eq!(personal.expiry, Some(future_expiry));
     }
 
     #[test]
@@ -9336,26 +12793,23 @@ mod registry_tests {
         rec.user = "router".into();
         rec.available_routes = vec!["10.32.0.0/24".into()];
         rec.approved_routes = vec!["10.32.0.0/24".into()];
-        let node_id = rec.stable_node_id_for_key(&rec.node_key_hex);
 
         reg.upsert_auth_completion(rec.node_key_hex.clone(), rec);
 
+        // headscale-go v0.29.5 HandleNodeFromPreAuthKey returns ONE change,
+        // reauthChange(node, keysOnly, policyChanged): a new node always
+        // changes the policy manager's node set (SetNodes ->
+        // nodesHavePolicyAffectingChanges on a length change), so the result
+        // is a global change.PolicyChange(), not NodeAdded plus a second
+        // route-scoped PolicyChange. (AutoApproveRoutes' own change is emitted
+        // separately by the auth handler, not by the auth completion.)
         let changes = reg.map_change_history();
-        assert_eq!(changes.len(), 2);
-        assert_eq!(changes[0].reason_labels(), vec!["node added"]);
-        assert_eq!(changes[0].change_type(), "peers");
-        assert_eq!(changes[0].origin_node_id, Some(node_id));
-        assert_eq!(changes[0].content.peers_changed, vec![node_id]);
-        assert!(!changes[0].content.include_policy);
-        assert_eq!(changes[1].reason_labels(), vec!["policy change"]);
-        assert_eq!(changes[1].change_type(), "policy");
-        assert_eq!(changes[1].origin_node_id, Some(node_id));
-        assert!(changes[1].content.include_policy);
-        assert!(changes[1].content.requires_runtime_peer_computation);
-        assert_eq!(
-            changes[0].generation, changes[1].generation,
-            "one auth-completion event should preserve ordered changes under one stream generation"
-        );
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].reason_labels(), vec!["policy change"]);
+        assert_eq!(changes[0].change_type(), "policy");
+        assert_eq!(changes[0].origin_node_id, None);
+        assert!(changes[0].content.include_policy);
+        assert!(changes[0].content.requires_runtime_peer_computation);
     }
 
     #[test]
@@ -9372,18 +12826,19 @@ mod registry_tests {
 
         let mut updated = existing;
         updated.approved_routes = vec!["10.33.0.0/24".into()];
-        let node_id = updated.stable_node_id_for_key(&updated.node_key_hex);
         reg.upsert_auth_completion(updated.node_key_hex.clone(), updated);
 
+        // headscale-go v0.29.5: a change in the node's active approved
+        // routes (SubnetRoutes/ExitRoutes) is a NodeView.HasPolicyChange, so
+        // SetNodes reports a policy change and reauthChange returns a single
+        // global change.PolicyChange().
         let changes = reg.map_change_history();
         let new_changes = &changes[history_len..];
-        assert_eq!(new_changes.len(), 2);
-        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
-        assert_eq!(new_changes[0].origin_node_id, Some(node_id));
-        assert_eq!(new_changes[1].reason_labels(), vec!["policy change"]);
-        assert_eq!(new_changes[1].origin_node_id, Some(node_id));
-        assert!(new_changes[1].content.include_policy);
-        assert!(new_changes[1].content.requires_runtime_peer_computation);
+        assert_eq!(new_changes.len(), 1, "{new_changes:?}");
+        assert_eq!(new_changes[0].reason_labels(), vec!["policy change"]);
+        assert_eq!(new_changes[0].origin_node_id, None);
+        assert!(new_changes[0].content.include_policy);
+        assert!(new_changes[0].content.requires_runtime_peer_computation);
     }
 
     /// `gc_ephemeral` only collects ephemeral rows where last_seen is
@@ -9624,60 +13079,33 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
         user: &crate::oidc::OidcStoredUser,
         node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
-        let user_name = oidc_wire_user_name(user);
-        let mut pending = self
+        let completed = self
             .state
-            .registration_cache
-            .get(registration_id)
-            .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
-        pending.set_user_identity(
-            Some(user.id),
-            user_name.clone(),
-            user.display_name.clone(),
-            user.profile_pic_url.clone(),
-        );
-        let requested_tags = crate::policy::validate_requested_tags_for_node(
-            &self.state.policy,
-            &pending.primary_addr_string().unwrap_or_default(),
-            &user_name,
-            &mut pending.forced_tags,
-        )
-        .map_err(crate::oidc::OidcRegistrationError::Store)?;
-        pending.expiry = if requested_tags {
-            None
-        } else {
-            node_expiry.or(pending.expiry)
-        };
-
-        pending.approved_routes = auto_approved_routes_for_node(
-            &self.state.policy,
-            &pending.primary_addr_string().unwrap_or_default(),
-            Some(&user_name),
-            &pending.forced_tags,
-            &pending.approved_routes,
-            &pending.available_routes,
-        )
-        .map_err(crate::oidc::OidcRegistrationError::Store)?;
-
-        let new_node = self
-            .state
-            .machines
-            .get_by_machine_key_for_user(&pending.machine_key_hex, &user_name)
-            .is_none();
-        let registered = self.state.machines.complete_web_registration(
-            pending,
-            &user_name,
-            REGISTER_METHOD_OIDC,
-        );
-        if self
-            .state
-            .registration_cache
-            .complete(registration_id, registered)
-        {
-            Ok(crate::oidc::OidcRegistrationResult { new_node })
-        } else {
-            Err(crate::oidc::OidcRegistrationError::SessionExpired)
-        }
+            .complete_volatile_web_registration(
+                registration_id,
+                WebRegistrationUser {
+                    id: Some(user.id),
+                    name: oidc_wire_user_name(user),
+                    display_name: user.display_name.clone(),
+                    profile_pic_url: user.profile_pic_url.clone(),
+                    provider: user.provider.clone(),
+                    created_at: None,
+                },
+                node_expiry,
+                REGISTER_METHOD_OIDC,
+            )
+            .await
+            .map_err(|error| match error {
+                WebRegistrationError::SessionExpired => {
+                    crate::oidc::OidcRegistrationError::SessionExpired
+                }
+                WebRegistrationError::Store(error) => {
+                    crate::oidc::OidcRegistrationError::Store(error)
+                }
+            })?;
+        Ok(crate::oidc::OidcRegistrationResult {
+            new_node: completed.new_node,
+        })
     }
 
     async fn complete_oidc_auth_request(
@@ -9687,8 +13115,16 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
     ) -> Result<(), crate::oidc::OidcAuthError> {
         let Some(binding) = self.state.registration_cache.ssh_binding(auth_id) else {
             if self.state.registration_cache.get(auth_id).is_some() {
+                tracing::warn!(
+                    auth_id = %format_args!("hskey-authreq-{auth_id}"),
+                    "OIDC callback hit non-registration path with auth request that is not an SSH check binding"
+                );
                 return Err(crate::oidc::OidcAuthError::NotSshCheck);
             }
+            tracing::debug!(
+                auth_id = %format_args!("hskey-authreq-{auth_id}"),
+                "auth session expired before authorization completed"
+            );
             return Err(crate::oidc::OidcAuthError::SessionExpired);
         };
 
@@ -9696,14 +13132,34 @@ impl crate::oidc::OidcRegistrationHandler for WireOidcRegistrationHandler {
         let Some((_node_key, src_node)) = snapshot.iter().find(|(node_key, record)| {
             record.stable_node_id_for_key(node_key) == binding.src_node_id
         }) else {
+            tracing::warn!(
+                auth_id = %format_args!("hskey-authreq-{auth_id}"),
+                src_node_id = binding.src_node_id,
+                "SSH check src node no longer exists"
+            );
             return Err(crate::oidc::OidcAuthError::SourceNodeMissing);
         };
 
         if src_node.is_tagged() || src_node.user_id.is_none() {
+            tracing::warn!(
+                auth_id = %format_args!("hskey-authreq-{auth_id}"),
+                src_node_id = binding.src_node_id,
+                src_is_tagged = src_node.is_tagged(),
+                oidc_user = %user.username(),
+                "SSH check rejected: src node has no user owner"
+            );
             return Err(crate::oidc::OidcAuthError::SourceNodeNoUserOwner);
         }
 
         if src_node.user_id != Some(user.id) {
+            tracing::warn!(
+                auth_id = %format_args!("hskey-authreq-{auth_id}"),
+                src_node_id = binding.src_node_id,
+                src_owner_id = src_node.user_id.expect("user owner checked above"),
+                oidc_user_id = user.id,
+                oidc_user = %user.username(),
+                "SSH check rejected: OIDC user is not the owner of src node"
+            );
             return Err(crate::oidc::OidcAuthError::UserNotSourceOwner);
         }
 
@@ -9778,6 +13234,16 @@ fn oidc_registration_confirm_info_from_record(
 }
 
 fn short_machine_key(machine_key_hex: &str) -> String {
+    if let Ok(bytes) = hex::decode(machine_key_hex)
+        && bytes.len() == 32
+    {
+        if bytes.iter().all(|&byte| byte == 0) {
+            return String::new();
+        }
+        let encoded =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes[..4]);
+        return format!("[{}]", &encoded[..5]);
+    }
     let short = machine_key_hex.chars().take(12).collect::<String>();
     if short.is_empty() {
         "unknown".to_string()
@@ -9803,8 +13269,23 @@ fn control_router_with_optional_oidc_inner(
     wrap_knock: bool,
     options: ControlRouterOptions,
 ) -> Router {
+    state
+        .machines
+        .bind_registration_store(state.registration_store.as_ref());
+    state.machines.configure_policy(&state.policy);
+    state
+        .machines
+        .configure_registration_expiry(state.runtime_config.node.expiry);
+    state
+        .machines
+        .configure_given_name_domain(&state.runtime_config.base_domain);
+    state.machines.configure_ip_allocator(&state.ip_allocator);
     let knock_cfg = state.knock.clone();
     let metrics_registry = Arc::clone(&state.machines);
+    let native_methods = state.machines.policy_routes_require_persistence();
+    let include_derp_routes = !native_methods || state.runtime_config.derp.server_enabled;
+    #[cfg(feature = "full")]
+    let include_derp_routes = include_derp_routes || state.native_derp.is_some();
     let mut inner = Router::new()
         .route("/robots.txt", get(basic_handlers::handle_robots))
         .route("/version", get(basic_handlers::handle_version))
@@ -9820,21 +13301,25 @@ fn control_router_with_optional_oidc_inner(
             get(basic_handlers::handle_swagger_api_v1),
         )
         .route("/verify", post(basic_handlers::handle_verify))
-        .route("/derp/probe", any(basic_handlers::handle_derp_probe))
-        .route(
-            "/derp/latency-check",
-            any(basic_handlers::handle_derp_probe),
-        )
-        .route(
-            "/bootstrap-dns",
-            any(basic_handlers::handle_derp_bootstrap_dns),
-        )
         .route("/favicon.ico", get(basic_handlers::handle_favicon))
         .route("/key", get(key_handler::handle_key))
         .route(
             "/machine/ping-response",
             head(basic_handlers::handle_ping_response),
         );
+
+    if include_derp_routes {
+        inner = inner
+            .route("/derp/probe", any(basic_handlers::handle_derp_probe))
+            .route(
+                "/derp/latency-check",
+                any(basic_handlers::handle_derp_probe),
+            )
+            .route(
+                "/bootstrap-dns",
+                any(basic_handlers::handle_derp_bootstrap_dns),
+            );
+    }
 
     if options.include_health_route {
         inner = inner.route("/health", get(basic_handlers::handle_health));
@@ -9852,20 +13337,37 @@ fn control_router_with_optional_oidc_inner(
         let register_oidc = oidc.clone();
         let auth_oidc = oidc.clone();
         let callback_oidc = oidc.clone();
+        let confirm_get_oidc = oidc.clone();
         let confirm_oidc = oidc;
         inner
             .route(
                 "/register/:registration_id",
-                get(move |axum::extract::Path(registration_id): axum::extract::Path<String>| {
+                get(move |axum::extract::Path(registration_id): axum::extract::Path<String>,
+                          tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>| {
                     let oidc = register_oidc.clone();
-                    async move { crate::oidc::handle_register(oidc, registration_id).await }
+                    async move {
+                        crate::oidc::handle_register_with_request_security(
+                            oidc,
+                            registration_id,
+                            tls.is_some(),
+                        )
+                        .await
+                    }
                 }),
             )
             .route(
                 "/auth/:auth_id",
-                get(move |axum::extract::Path(auth_id): axum::extract::Path<String>| {
+                get(move |axum::extract::Path(auth_id): axum::extract::Path<String>,
+                          tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>| {
                     let oidc = auth_oidc.clone();
-                    async move { crate::oidc::handle_auth(oidc, auth_id).await }
+                    async move {
+                        crate::oidc::handle_auth_with_request_security(
+                            oidc,
+                            auth_id,
+                            tls.is_some(),
+                        )
+                        .await
+                    }
                 }),
             )
             .route(
@@ -9873,10 +13375,10 @@ fn control_router_with_optional_oidc_inner(
                 get(
                     move |headers: axum::http::HeaderMap,
                           tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>,
-                          query: axum::extract::Query<crate::oidc::OidcCallbackQuery>| {
+                          axum::extract::RawQuery(query): axum::extract::RawQuery| {
                         let oidc = callback_oidc.clone();
                         async move {
-                            crate::oidc::handle_callback_with_request_security(
+                            crate::oidc::handle_callback_with_raw_query(
                                 oidc,
                                 headers,
                                 query,
@@ -9889,19 +13391,33 @@ fn control_router_with_optional_oidc_inner(
             )
             .route(
                 "/register/confirm/:auth_id",
-                post(
+                get(
+                    move |axum::extract::Path(auth_id): axum::extract::Path<String>,
+                          headers: axum::http::HeaderMap| {
+                        let oidc = confirm_get_oidc.clone();
+                        async move {
+                            crate::oidc::handle_register_confirm_get_with_user_refresh(
+                                &oidc, &auth_id, &headers,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .post(
                     move |axum::extract::Path(auth_id): axum::extract::Path<String>,
                           headers: axum::http::HeaderMap,
                           tls: Option<axum::extract::Extension<raw_tls::TlsRequest>>,
+                          axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
                           body: axum::body::Bytes| {
                         let oidc = confirm_oidc.clone();
                         async move {
-                            crate::oidc::handle_register_confirm_with_request_security(
+                            crate::oidc::handle_register_confirm_with_request_security_and_query(
                                 oidc,
                                 auth_id,
                                 headers,
                                 body,
                                 tls.is_some(),
+                                uri.query(),
                             )
                             .await
                         }
@@ -9917,14 +13433,33 @@ fn control_router_with_optional_oidc_inner(
             .route("/auth/:auth_id", get(basic_handlers::handle_web_auth))
     };
 
-    let inner = inner
-        .route("/ts2021", post(noise::handle_ts2021_post))
-        .fallback(basic_handlers::handle_fallback)
-        .with_state(state)
-        .layer(middleware::from_fn(move |req: Request, next: Next| {
-            let metrics_registry = Arc::clone(&metrics_registry);
-            async move { record_http_metrics(metrics_registry, req, next).await }
-        }));
+    let inner = inner.route(
+        "/ts2021",
+        get(noise::handle_ts2021_websocket).post(noise::handle_ts2021_post),
+    );
+    let inner = if native_methods {
+        inner
+            .route("/", get(basic_handlers::handle_blank))
+            .fallback(native_methods::not_found)
+            .layer(middleware::from_fn(native_methods::admit))
+    } else {
+        inner.fallback(basic_handlers::handle_fallback)
+    };
+    let inner =
+        inner
+            .with_state(state)
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                let metrics_registry = Arc::clone(&metrics_registry);
+                async move { record_http_metrics(metrics_registry, req, next, true).await }
+            }));
+
+    let inner = if native_methods {
+        Router::new()
+            .fallback_service(inner)
+            .layer(middleware::from_fn(native_methods::finalize))
+    } else {
+        inner
+    };
 
     let inner = if wrap_knock {
         // PSK-gated handshake — third layer of the active-probe shield.
@@ -10027,7 +13562,7 @@ pub fn metrics_debug_router(state: WireState) -> Router {
         .with_state(state)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let metrics_registry = Arc::clone(&metrics_registry);
-            async move { record_http_metrics(metrics_registry, req, next).await }
+            async move { record_http_metrics(metrics_registry, req, next, false).await }
         }))
         .layer(middleware::from_fn(debug_access_control))
         .layer(middleware::from_fn(security_headers))
@@ -10108,9 +13643,9 @@ fn allow_debug_access_with_key(req: &Request) -> bool {
 }
 
 fn debug_key_from_query(query: &str) -> Option<String> {
-    form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
-        (key == "debugkey" && !value.is_empty()).then(|| value.into_owned())
-    })
+    String::from_utf8(self::query::first_value(query, "debugkey")?)
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 fn debug_peer_ip(req: &Request) -> Option<IpAddr> {
@@ -10184,34 +13719,58 @@ pub fn apply_security_headers(headers: &mut HeaderMap) {
 
 async fn record_http_metrics(
     machines: Arc<MachineRegistry>,
-    req: Request,
+    mut req: Request,
     next: Next,
+    log_requests: bool,
 ) -> AxumResponse {
     let method = req.method().as_str().to_string();
+    let event = if log_requests && machines.policy_routes_require_persistence() {
+        request_log::start(&mut req)
+    } else {
+        None
+    };
+    // headscale-go v0.29.5's chi metrics collector skips preflight requests,
+    // while recording normal control-plane traffic (including /ts2021).
+    if method == "OPTIONS" {
+        return request_log::wrap(event, next.run(req).await);
+    }
     let metric_path = prometheus_http_path(req.uri().path()).map(str::to_string);
+    let mut proto = format!("{:?}", req.version());
+    let websocket_upgrade = req
+        .headers()
+        .get("connection")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("upgrade"))
+        && req
+            .headers()
+            .get("upgrade")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    if websocket_upgrade {
+        proto.push_str(" WebSocket");
+    }
 
     let Some(metric_path) = metric_path else {
-        return next.run(req).await;
+        return request_log::wrap(event, next.run(req).await);
     };
 
     let start = Instant::now();
     let response = next.run(req).await;
     let code = response.status().as_u16();
-    machines.record_http_request(code, &method, &metric_path, start.elapsed());
-    response
+    machines.record_http_request(code, &method, &metric_path, &proto, start.elapsed());
+    request_log::wrap(event, response)
 }
 
 fn prometheus_http_path(path: &str) -> Option<&'static str> {
     match path {
-        "/ts2021"
-        | "/machine/map"
-        | "/derp"
-        | "/derp/probe"
-        | "/derp/latency-check"
-        | "/bootstrap-dns"
-        | "/metrics"
-        | "/debug" => None,
+        "/metrics" | "/debug" => None,
         path if path.starts_with("/debug/") => None,
+        "/ts2021" => Some("/ts2021"),
+        "/machine/map" => Some("/machine/map"),
+        "/derp" => Some("/derp"),
+        "/derp/probe" => Some("/derp/probe"),
+        "/derp/latency-check" => Some("/derp/latency-check"),
+        "/bootstrap-dns" => Some("/bootstrap-dns"),
         "/robots.txt" => Some("/robots.txt"),
         "/health" => Some("/health"),
         "/version" => Some("/version"),
@@ -10223,10 +13782,14 @@ fn prometheus_http_path(path: &str) -> Option<&'static str> {
         "/swagger/v1/openapiv2.json" => Some("/swagger/v1/openapiv2.json"),
         "/favicon.ico" => Some("/favicon.ico"),
         "/machine/register" => Some("/machine/register"),
+        "/oidc/callback" => Some("/oidc/callback"),
         path if is_single_segment_after(path, "/apple/") => Some("/apple/{platform}"),
-        path if is_single_segment_after(path, "/register/") => Some("/register/{registration_id}"),
+        path if is_single_segment_after(path, "/register/") => Some("/register/{auth_id}"),
+        path if is_single_segment_after(path, "/register/confirm/") => {
+            Some("/register/confirm/{auth_id}")
+        }
         path if is_machine_subpath(path, "register") => Some("/machine/{node_key}/register"),
-        path if is_machine_subpath(path, "map") => None,
+        path if is_machine_subpath(path, "map") => Some("/machine/{node_key}/map"),
         _ => Some("/"),
     }
 }

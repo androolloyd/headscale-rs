@@ -1,0 +1,11 @@
+Go Postgres driver error-envelope reference
+
+Copyright (c) 2013-2021 Jack Christensen
+
+src/go_error.rs follows PgError.Error in github.com/jackc/pgx/v5
+v5.10.0 pgconn/errors.go, used by headscale-go v0.29.5. The original
+MIT terms are retained in LICENSE-PGX. No pgx runtime dependency is added.
+Source SHA-256:
+f41cc9624094ad0f35c58ddb8e1fdd7bd2da39cae285edebd2b87f4c4e9708c0
+SQLx supplies severity/message/SQLSTATE; localized severity and wider
+connection/protocol/pool/driver/version behavior remain unqualified.

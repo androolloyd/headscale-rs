@@ -1,1 +1,1 @@
-{"error":"server error (500): pinging database: forced offline"}
+{"error":"checking health: rpc error: code = Unknown desc = pinging database: forced offline"}

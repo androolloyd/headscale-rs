@@ -109,9 +109,7 @@ fn assert_acme_cache_unwritten(cache_dir: &Path, hostname: &str) {
         !cache_dir.join(hostname).exists(),
         "ACME certificate cache should not be written before startup bind failure"
     );
-    let entry_count = fs::read_dir(cache_dir)
-        .map(std::iter::Iterator::count)
-        .unwrap_or(0);
+    let entry_count = fs::read_dir(cache_dir).map_or(0, std::iter::Iterator::count);
     assert_eq!(
         entry_count, 0,
         "ACME cache directory should stay empty before startup bind failure"
@@ -158,6 +156,8 @@ regions:
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "127.0.0.1:443"
 metrics_listen_addr: "{metrics_addr}"
 noise:
@@ -253,6 +253,8 @@ fn serve_tls_alpn_explicit_https_listen_stops_before_public_ca_on_http_bind_coll
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "{http_addr}"
 metrics_listen_addr: ""
 noise:
@@ -330,6 +332,8 @@ fn serve_tls_alpn_remote_grpc_collision_bootstraps_without_public_ca_cache_write
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "127.0.0.1:443"
 metrics_listen_addr: ""
 noise:
@@ -406,6 +410,8 @@ fn serve_tls_alpn_ignores_http01_listen_before_public_ca_on_remote_grpc_collisio
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "127.0.0.1:443"
 metrics_listen_addr: ""
 noise:
@@ -488,6 +494,8 @@ fn serve_tls_alpn_public_https_collision_stops_before_public_ca_cache_write() {
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "{https_addr}"
 metrics_listen_addr: ""
 noise:
@@ -564,6 +572,8 @@ fn serve_http01_public_acme_stops_before_public_ca_on_metrics_bind_collision() {
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "127.0.0.1:0"
 metrics_listen_addr: "{metrics_addr}"
 noise:
@@ -641,6 +651,8 @@ fn serve_http01_remote_grpc_collision_bootstraps_without_public_ca_cache_write()
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "127.0.0.1:0"
 metrics_listen_addr: ""
 noise:
@@ -718,6 +730,8 @@ fn serve_http01_public_https_collision_stops_before_public_ca_cache_write() {
         format!(
             r#"
 server_url: "https://headscale.example"
+prefixes:
+  v4: "100.64.0.0/10"
 listen_addr: "{https_addr}"
 metrics_listen_addr: ""
 noise:

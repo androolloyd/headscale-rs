@@ -1,0 +1,84 @@
+--- a/vendor/http/Cargo.toml
++++ b/vendor/http/Cargo.toml
+@@ -38,6 +38,8 @@
+ [features]
+ default = ["std"]
+ std = []
++# Explicit native Go byte-budget response profile; defaults retain u16 indices.
++go-native-header-capacity = []
+ 
+ [lib]
+ name = "http"
+--- a/vendor/http/Cargo.toml.orig
++++ b/vendor/http/Cargo.toml.orig
+@@ -34,6 +34,8 @@
+ [features]
+ default = ["std"]
+ std = []
++# Explicit native Go byte-budget response profile; defaults retain u16 indices.
++go-native-header-capacity = []
+ 
+ [dependencies]
+ bytes = "1"
+--- a/vendor/http/src/header/map.rs
++++ b/vendor/http/src/header/map.rs
+@@ -283,10 +283,20 @@
+ /// You may notice that `u16` may represent more than 32,768 values. This is
+ /// true, but 32,768 should be plenty and it allows us to reserve the top bit
+ /// for future usage.
++// Native response admission needs more entries within its 10-MiB budget.
++// Feature unification widens this private representation for the build.
++#[cfg(not(feature = "go-native-header-capacity"))]
+ type Size = u16;
++#[cfg(feature = "go-native-header-capacity")]
++type Size = u32;
+ 
+ /// This limit falls out from above.
++#[cfg(not(feature = "go-native-header-capacity"))]
+ const MAX_SIZE: usize = 1 << 15;
++// Larger than the native 10-MiB response byte budget permits, including raw
++// minimal fields. Preserve the all-ones empty sentinel.
++#[cfg(feature = "go-native-header-capacity")]
++const MAX_SIZE: usize = 1 << 22;
+ 
+ /// An entry in the hash table. This represents the full hash code for an entry
+ /// as well as the position of the entry in the `entries` vector.
+@@ -303,7 +313,9 @@
+ /// bits is fine since we know that the `indices` vector will never grow beyond
+ /// that size.
+ #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+-struct HashValue(u16);
++// Keep hash width in step with the selected index width; otherwise larger
++// tables would put every key into the original 16-bit bucket range.
++struct HashValue(Size);
+ 
+ /// Stores the data associated with a `HeaderMap` entry. Only the first value is
+ /// included in this struct. If a header name has more than one associated
+@@ -754,7 +766,7 @@
+     /// ```
+     pub fn try_reserve(&mut self, additional: usize) -> Result<(), MaxSizeReached> {
+         // TODO: This can't overflow if done properly... since the max # of
+-        // elements is u16::MAX.
++        // elements is bounded by the selected MAX_SIZE.
+         let cap = self
+             .entries
+             .len()
+@@ -1753,7 +1765,7 @@
+ 
+         if self.danger.is_yellow() {
+             // Overflow is not a concern here: entries.len() is bounded by
+-            // MAX_SIZE (2^15) and LOAD_FACTOR_THRESHOLD is 5, so the product
++            // MAX_SIZE (at most 2^22) and LOAD_FACTOR_THRESHOLD is 5, so the product
+             // fits comfortably within a usize.
+             if self.entries.len() * LOAD_FACTOR_THRESHOLD >= self.indices.len() {
+                 // Transition back to green danger level
+@@ -3743,7 +3755,7 @@
+         }
+     };
+ 
+-    HashValue((hash & MASK) as u16)
++    HashValue((hash & MASK) as Size)
+ }
+ 
+ struct FnvHasher(u64);
+

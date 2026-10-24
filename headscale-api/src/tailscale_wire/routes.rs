@@ -3,16 +3,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::policy::{NodeView, PolicyStore};
+use crate::policy::{NodeView, PolicyStore, RouteApprovalSnapshot};
 use serde::{Deserialize, Serialize};
 
-fn is_exit_route(prefix: &ipnet::IpNet) -> bool {
-    match prefix {
-        ipnet::IpNet::V4(net) => net.addr() == Ipv4Addr::UNSPECIFIED && net.prefix_len() == 0,
-        ipnet::IpNet::V6(net) => net.addr() == Ipv6Addr::UNSPECIFIED && net.prefix_len() == 0,
-    }
+fn is_exit_route(prefix: &str) -> bool {
+    matches!(prefix, "0.0.0.0/0" | "::/0")
+}
+
+fn sort_routes(routes: &mut [String]) {
+    routes.sort_by(|a, b| {
+        headscale_api_acl::go_netip::prefix_compare(a, b).unwrap_or_else(|| a.cmp(b))
+    });
 }
 
 fn normalize_route_set<I, S>(routes: I, expand_exit_routes: bool) -> Result<Vec<String>, String>
@@ -23,15 +25,15 @@ where
     let mut out = Vec::new();
     for route in routes {
         let route = route.as_ref();
-        let prefix = route.parse::<ipnet::IpNet>().map_err(|e| e.to_string())?;
+        let prefix = headscale_api_acl::go_netip::parse_prefix_text(route)?;
         if expand_exit_routes && is_exit_route(&prefix) {
             out.push("0.0.0.0/0".to_string());
             out.push("::/0".to_string());
         } else {
-            out.push(prefix.to_string());
+            out.push(prefix);
         }
     }
-    out.sort();
+    sort_routes(&mut out);
     out.dedup();
     Ok(out)
 }
@@ -69,19 +71,16 @@ where
     let mut out = BTreeSet::new();
     for route in routes {
         let route = route.as_ref();
-        let prefix = route.parse::<ipnet::IpNet>().map_err(|e| e.to_string())?;
+        let prefix = headscale_api_acl::go_netip::parse_prefix_text(route)?;
         if !is_exit_route(&prefix) {
-            out.insert(prefix.to_string());
+            out.insert(prefix);
         }
     }
     Ok(out)
 }
 
 fn is_exit_route_str(route: &str) -> bool {
-    match route.parse::<ipnet::IpNet>() {
-        Ok(prefix) => is_exit_route(&prefix),
-        Err(_) => false,
-    }
+    headscale_api_acl::go_netip::parse_prefix_text(route).is_ok_and(|prefix| is_exit_route(&prefix))
 }
 
 /// Stateful primary route selector matching headscale-go's
@@ -150,7 +149,8 @@ impl PrimaryRouteState {
     }
 
     pub fn primary_routes(&self, node_id: u64) -> Vec<String> {
-        self.primaries
+        let mut routes = self
+            .primaries
             .iter()
             .filter_map(|(route, primary)| {
                 if *primary == node_id {
@@ -159,7 +159,13 @@ impl PrimaryRouteState {
                     None
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        sort_routes(&mut routes);
+        routes
+    }
+
+    pub(crate) fn primary_assignments(&self) -> BTreeMap<String, u64> {
+        self.primaries.clone()
     }
 
     pub fn primary_route_for(&self, route: &str) -> Option<u64> {
@@ -172,7 +178,11 @@ impl PrimaryRouteState {
             available_routes: self
                 .routes
                 .iter()
-                .map(|(node_id, routes)| (*node_id, routes.iter().cloned().collect()))
+                .map(|(node_id, routes)| {
+                    let mut routes = routes.iter().cloned().collect::<Vec<_>>();
+                    sort_routes(&mut routes);
+                    (*node_id, routes)
+                })
                 .collect(),
             primary_routes: self.primaries.clone(),
         }
@@ -235,7 +245,10 @@ impl PrimaryRouteState {
 
     pub fn debug_string(&self) -> String {
         let mut out = String::new();
-        for (route, node_id) in &self.primaries {
+        let mut routes = self.primaries.keys().cloned().collect::<Vec<_>>();
+        sort_routes(&mut routes);
+        for route in routes {
+            let node_id = self.primaries[&route];
             let _ = writeln!(out, "{route}: {node_id}");
         }
         out
@@ -298,28 +311,27 @@ impl PrimaryRouteState {
 /// subnet routes: they are included in `AllowedIPs`/gRPC serving-route
 /// output but never in `PrimaryRoutes`.
 pub fn active_exit_routes(available_routes: &[String], approved_routes: &[String]) -> Vec<String> {
-    let available = normalize_advertised_routes_lossy(available_routes)
+    active_approved_routes(available_routes, approved_routes)
         .into_iter()
         .filter(|route| is_exit_route_str(route))
-        .collect::<BTreeSet<_>>();
-    normalize_advertised_routes_lossy(approved_routes)
-        .into_iter()
-        .filter(|route| is_exit_route_str(route) && available.contains(route))
         .collect()
 }
 
-/// Return the approved routes that are also currently advertised by a
-/// node. Headscale uses this intersection for the active route set.
+/// Return approved routes in announced order, retaining announced duplicates.
+/// Go Node.SubnetRoutes/ExitRoutes walk AnnouncedRoutes and test membership;
+/// approval order and duplicate approvals do not change the output.
 pub fn active_approved_routes(
     available_routes: &[String],
     approved_routes: &[String],
 ) -> Vec<String> {
-    let available = normalize_advertised_routes_lossy(available_routes)
-        .into_iter()
+    let approved = approved_routes
+        .iter()
+        .filter_map(|route| headscale_api_acl::go_netip::parse_prefix_text(route).ok())
         .collect::<BTreeSet<_>>();
-    normalize_advertised_routes_lossy(approved_routes)
-        .into_iter()
-        .filter(|route| available.contains(route))
+    available_routes
+        .iter()
+        .filter_map(|route| headscale_api_acl::go_netip::parse_prefix_text(route).ok())
+        .filter(|route| approved.contains(route))
         .collect()
 }
 
@@ -343,38 +355,87 @@ pub fn active_primary_routes(
 /// clears them.
 pub(crate) fn auto_approved_routes_for_node(
     policy: &PolicyStore,
-    addr: &str,
+    addresses: &[String],
     user: Option<&str>,
+    user_id: Option<u64>,
     tags: &[String],
     current_approved: &[String],
     announced_routes: &[String],
 ) -> Result<Vec<String>, String> {
-    let mut approved = normalize_advertised_routes(current_approved)?;
-    let announced = normalize_advertised_routes(announced_routes)?;
+    let approvers = policy.route_approval_snapshot();
+    let approved = auto_approved_routes_with_snapshot(
+        &approvers,
+        addresses,
+        user,
+        user_id,
+        tags,
+        current_approved,
+        announced_routes,
+    )?;
+    if auto_approval_changed(current_approved, &approved)? {
+        Ok(approved)
+    } else {
+        // State.AutoApproveRoutes leaves the live vector untouched when Go's
+        // sorted comparison reports no change, including ordering-only input.
+        Ok(current_approved.to_vec())
+    }
+}
+
+fn typed_prefixes(values: &[String]) -> Result<Vec<String>, String> {
+    values
+        .iter()
+        .map(|value| {
+            headscale_api_acl::go_netip::prefix_text(value)
+                .ok_or_else(|| "invalid route prefix text".to_owned())
+        })
+        .collect()
+}
+
+/// One policy snapshot can evaluate every node in an auto-approval batch.
+/// Empty typed prefixes are Go zero values and are removed from the result.
+pub(crate) fn auto_approved_routes_with_snapshot(
+    approvers: &RouteApprovalSnapshot,
+    addresses: &[String],
+    user: Option<&str>,
+    user_id: Option<u64>,
+    tags: &[String],
+    current_approved: &[String],
+    announced_routes: &[String],
+) -> Result<Vec<String>, String> {
+    let mut approved = typed_prefixes(current_approved)?;
+    let announced = typed_prefixes(announced_routes)?;
     let view = NodeView {
-        addr: Some(addr),
-        addrs: &[],
+        user_id,
+        addr: addresses.first().map(String::as_str),
+        addrs: addresses,
         user,
         tags,
     };
-
     for route in announced {
-        if approved.contains(&route) {
+        if route.is_empty() || approved.contains(&route) {
             continue;
         }
-        let can_approve = if is_exit_route_str(&route) {
-            policy.auto_approves_exit_node(&view)
-        } else {
-            policy.auto_approves_route(&view, &route)
-        };
+        let can_approve =
+            !addresses.is_empty() && approvers.approves(&view, &route, is_exit_route_str(&route));
         if can_approve {
             approved.push(route);
         }
     }
-
-    approved.sort();
+    sort_routes(&mut approved);
     approved.dedup();
+    approved.retain(|route| !route.is_empty());
     Ok(approved)
+}
+
+/// Go compares the sorted current vector without compacting its duplicates.
+/// An ordering-only difference is not a policy change; duplicate/zero cleanup is.
+pub(crate) fn auto_approval_changed(
+    current: &[String],
+    approved: &[String],
+) -> Result<bool, String> {
+    let mut current = typed_prefixes(current)?;
+    sort_routes(&mut current);
+    Ok(current != approved)
 }
 
 /// Compute the active primary subnet routes per node from a fresh
@@ -414,10 +475,6 @@ where
             }
         })
         .collect()
-}
-
-fn normalize_advertised_routes_lossy(routes: &[String]) -> Vec<String> {
-    normalize_advertised_routes(routes).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -533,8 +590,9 @@ mod tests {
         let policy = PolicyStore::new();
         let approved = auto_approved_routes_for_node(
             &policy,
-            "100.64.0.8",
+            &p(&["100.64.0.8"]),
             Some("alice"),
+            None,
             &[],
             &p(&["10.99.0.0/24"]),
             &p(&["10.40.0.0/24"]),
@@ -549,8 +607,9 @@ mod tests {
         let policy = PolicyStore::new();
         let approved = auto_approved_routes_for_node(
             &policy,
-            "100.64.0.8",
+            &p(&["100.64.0.8"]),
             Some("alice"),
+            None,
             &[],
             &p(&["10.99.0.0/24", "10.99.0.0/24"]),
             &[],
@@ -559,8 +618,16 @@ mod tests {
 
         assert_eq!(approved, p(&["10.99.0.0/24"]));
         assert_eq!(
-            auto_approved_routes_for_node(&policy, "100.64.0.8", Some("alice"), &[], &[], &[])
-                .unwrap(),
+            auto_approved_routes_for_node(
+                &policy,
+                &p(&["100.64.0.8"]),
+                Some("alice"),
+                None,
+                &[],
+                &[],
+                &[]
+            )
+            .unwrap(),
             Vec::<String>::new()
         );
     }

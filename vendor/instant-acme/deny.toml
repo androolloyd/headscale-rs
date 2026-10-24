@@ -1,0 +1,20 @@
+[advisories]
+yanked = "deny"
+ignore = [
+  # RUSTSEC-2026-0009: Vulnerability in time
+  #   Not applicable - `instant-acme` only parses RFC-3339 dates from a trusted
+  #   source (the ACME server). Updating `time` requires an MSRV bump.
+  "RUSTSEC-2026-0009"
+]
+
+[licenses]
+version = 2
+allow = ["Apache-2.0", "BSD-3-Clause", "CDLA-Permissive-2.0", "ISC", "MIT", "OpenSSL", "Unicode-3.0"]
+
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]

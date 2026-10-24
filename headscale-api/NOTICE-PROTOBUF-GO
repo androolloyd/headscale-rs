@@ -1,0 +1,13 @@
+The uint64 JSON decoding portions of src/grpc_gateway.rs adapt source from
+Google's Go protocol buffers implementation, module
+google.golang.org/protobuf v1.36.11:
+
+  encoding/protojson/decode.go
+  internal/encoding/json/decode.go
+  internal/encoding/json/decode_number.go
+  internal/encoding/json/decode_token.go
+
+Copyright 2018 The Go Authors. All rights reserved.
+
+Redistribution terms are retained in LICENSE-PROTOBUF-GO.
+Source hashes and implementation limits are recorded in UPSTREAM.md.

@@ -52,6 +52,7 @@ use ipnet::IpNet;
 use tokio::task::JoinHandle;
 
 use super::acme::AcmeHttp01ChallengeStore;
+pub use super::http_shutdown::HttpShutdownControl;
 use super::raw_tls;
 use super::tls::{ReloadableServerConfig, SanConfig, TlsMaterial, TlsMaterialSource};
 use super::{WireError, WireState, control_router, control_router_with_oidc, metrics_debug_router};
@@ -193,6 +194,67 @@ pub async fn serve(
     cfg: ServeConfig,
     extra_routes: Router,
 ) -> Result<ServeHandle, WireError> {
+    serve_inner(
+        state,
+        cfg,
+        extra_routes,
+        None,
+        #[cfg(feature = "full")]
+        None,
+    )
+    .await
+}
+
+/// Native CLI serving with Go's bounded ordinary HTTP shutdown lifecycle.
+#[doc(hidden)]
+pub async fn serve_with_shutdown(
+    state: WireState,
+    cfg: ServeConfig,
+    extra_routes: Router,
+) -> Result<(ServeHandle, HttpShutdownControl), WireError> {
+    let shutdown = HttpShutdownControl::default();
+    let handle = serve_inner(
+        state,
+        cfg,
+        extra_routes,
+        Some(shutdown.clone()),
+        #[cfg(feature = "full")]
+        None,
+    )
+    .await?;
+    Ok((handle, shutdown))
+}
+
+/// Native ACME serving with certificate preparation installed before acceptance.
+#[cfg(feature = "full")]
+#[doc(hidden)]
+pub async fn serve_with_acme_provider(
+    state: WireState,
+    cfg: ServeConfig,
+    extra_routes: Router,
+    provider: Arc<dyn super::tls::AcmeCertificateProvider>,
+) -> Result<(ServeHandle, HttpShutdownControl), WireError> {
+    let shutdown = HttpShutdownControl::default();
+    let handle = serve_inner(
+        state,
+        cfg,
+        extra_routes,
+        Some(shutdown.clone()),
+        Some(provider),
+    )
+    .await?;
+    Ok((handle, shutdown))
+}
+
+async fn serve_inner(
+    state: WireState,
+    cfg: ServeConfig,
+    extra_routes: Router,
+    shutdown: Option<HttpShutdownControl>,
+    #[cfg(feature = "full")] certificate_provider: Option<
+        Arc<dyn super::tls::AcmeCertificateProvider>,
+    >,
+) -> Result<ServeHandle, WireError> {
     let oidc = cfg.oidc.clone();
     let acme_http01_store = cfg.acme_http01.clone();
     let acme_http01_host = cfg.acme_http01_host.clone();
@@ -202,6 +264,11 @@ pub async fn serve(
         cfg.acme_http01.clone(),
         cfg.acme_http01_host.clone(),
     ));
+    let app = if state.machines.policy_routes_require_persistence() {
+        app.layer(middleware::from_fn(super::request_log::middleware))
+    } else {
+        app
+    };
     let app = app.layer(middleware::from_fn_with_state(
         cfg.trusted_proxies.clone(),
         trusted_proxy_headers,
@@ -288,35 +355,64 @@ pub async fn serve(
     };
 
     let tls_material = if https_listener.is_some() {
-        Some(cfg.tls_source.load()?)
+        #[cfg(feature = "full")]
+        let material = match &certificate_provider {
+            Some(provider) => provider.initial_material()?,
+            None => cfg.tls_source.load()?,
+        };
+        #[cfg(not(feature = "full"))]
+        let material = cfg.tls_source.load()?;
+        Some(material)
     } else {
         None
     };
 
     let http = if let Some(http_listener) = http_listener {
         let http_app = app.clone();
-        Some(tokio::spawn(async move {
-            axum::serve(
+        Some(if let Some(shutdown) = &shutdown {
+            let group = shutdown.main.clone();
+            let work = group.listener().expect("new native listener group is open");
+            tokio::spawn(super::http_shutdown::serve_listener(
                 http_listener,
-                http_app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(std::io::Error::other)
-        }))
+                http_app,
+                group,
+                work,
+            ))
+        } else {
+            tokio::spawn(async move {
+                axum::serve(
+                    http_listener,
+                    http_app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(std::io::Error::other)
+            })
+        })
     } else {
         None
     };
 
     let (metrics, metrics_addr) = if let Some((metrics_listener, metrics_addr)) = metrics_listener {
         let metrics_app = metrics_debug_router(state.clone());
-        let metrics = tokio::spawn(async move {
-            axum::serve(
+        let metrics = if let Some(shutdown) = &shutdown {
+            let group = shutdown.debug.clone();
+            let work = group.listener().expect("new native listener group is open");
+            tokio::spawn(super::http_shutdown::serve_listener(
                 metrics_listener,
-                metrics_app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(std::io::Error::other)
-        });
+                metrics_app,
+                group,
+                work,
+            ))
+        } else {
+            tokio::spawn(async move {
+                axum::serve(
+                    metrics_listener,
+                    metrics_app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(std::io::Error::other)
+            })
+        };
         (Some(metrics), Some(metrics_addr))
     } else {
         (None, None)
@@ -339,8 +435,9 @@ pub async fn serve(
             (None, None)
         };
 
-    // HTTPS branch — only mint TLS material when an https addr is
-    // actually configured.
+    // HTTPS branch — prepare listener TLS configuration only when an HTTPS
+    // address is configured. Native ACME starts without ordinary credentials;
+    // its provider prepares those during the requesting handshake.
     //
     // Implementation note: we deliberately route HTTPS through
     // `raw_tls::serve_raw_tls`, **not** `axum_server::bind_rustls`.
@@ -362,16 +459,28 @@ pub async fn serve(
             "wire surface listening (HTTPS, raw rustls)"
         );
         let server_config = ReloadableServerConfig::new(Arc::clone(&material.server_config));
+        #[cfg(feature = "full")]
+        if let Some(provider) = certificate_provider {
+            server_config.set_certificate_provider(provider);
+        }
         let https_app = app.clone();
         let wire_state = state.clone();
+        let trusted_proxies = cfg.trusted_proxies.clone();
         let reloader = server_config.clone();
+        let native = shutdown.as_ref().map(|shutdown| {
+            let group = shutdown.main.clone();
+            let work = group.listener().expect("new native listener group is open");
+            (group, work)
+        });
         let handle = tokio::spawn(async move {
-            raw_tls::serve_bound_raw_tls(
+            raw_tls::serve_bound_raw_tls_with_shutdown(
                 https_listener,
                 https_addr,
                 server_config,
                 https_app,
                 wire_state,
+                native,
+                trusted_proxies,
             )
             .await
         });
@@ -398,11 +507,129 @@ async fn trusted_proxy_headers(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    let remote_addr = request_log_remote_addr(request.headers(), peer, &trusted);
     let resolved_peer = resolve_trusted_proxy_headers(request.headers_mut(), peer, &trusted);
+    request.extensions_mut().insert(remote_addr);
     if resolved_peer != peer {
         request.extensions_mut().insert(ConnectInfo(resolved_peer));
     }
     next.run(request).await
+}
+
+/// Keep the request logger's Go RemoteAddr separate from ConnectInfo, whose
+/// socket-shaped value is also consumed by existing auth/debug middleware.
+pub(super) fn request_log_remote_addr(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted: &TrustedProxyConfig,
+) -> super::request_log::RequestLogRemoteAddr {
+    let forwarded = trusted
+        .is_trusted(peer.ip())
+        .then(|| request_log_forwarded_addr(headers, trusted))
+        .flatten();
+    super::request_log::RequestLogRemoteAddr(forwarded.unwrap_or_else(|| peer.to_string()))
+}
+
+// Selected realclientip-go v1.0.0's log identity is deliberately independent
+// of the older ConnectInfo projection. Single headers select their LAST
+// instance; XFF concatenates instances and searches from the right. Invalid
+// rightmost untrusted elements stop the search rather than being skipped.
+fn request_log_forwarded_addr(headers: &HeaderMap, trusted: &TrustedProxyConfig) -> Option<String> {
+    for name in [HEADER_TRUE_CLIENT_IP, HEADER_X_REAL_IP] {
+        if let Some(value) = headers.get_all(name).iter().next_back()
+            && let Ok(value) = std::str::from_utf8(value.as_bytes())
+            && let Some(address) = request_log_ip(value)
+        {
+            return Some(address.render());
+        }
+    }
+    let lines: Vec<_> = headers.get_all(HEADER_X_FORWARDED_FOR).iter().collect();
+    for line in lines.into_iter().rev() {
+        let Ok(line) = std::str::from_utf8(line.as_bytes()) else {
+            return None;
+        };
+        for part in line.rsplit(',') {
+            let address = request_log_ip(headscale_api_acl::go_unicode::trim_space(part))?;
+            if !request_log_trusted_range(address.ip, trusted) {
+                return Some(address.render());
+            }
+        }
+    }
+    None
+}
+
+struct RequestLogIp {
+    ip: IpAddr,
+    zone: String,
+}
+
+impl RequestLogIp {
+    fn render(self) -> String {
+        if self.zone.is_empty() {
+            self.ip.to_string()
+        } else {
+            format!("{}%{}", self.ip, self.zone)
+        }
+    }
+}
+
+fn request_log_ip(value: &str) -> Option<RequestLogIp> {
+    // realclientip ParseIPAddr first attempts net.SplitHostPort. That parser
+    // validates framing, not port syntax; any successfully split port drops.
+    let colon = value.rfind(':');
+    let split = colon.and_then(|colon| {
+        if let Some(inner) = value.strip_prefix('[') {
+            let end = value.find(']')?;
+            (end + 1 == colon && !inner.contains('[') && !value[end + 1..].contains(']'))
+                .then_some(&value[1..end])
+        } else {
+            (!value[..colon].contains(':') && !value.contains(['[', ']']))
+                .then_some(&value[..colon])
+        }
+    });
+    let mut host = split.unwrap_or(value);
+    if host.starts_with('[') && host.ends_with(']') && host.len() >= 2 {
+        host = &host[1..host.len() - 1];
+    }
+    let (host, zone) = host
+        .rfind('%')
+        .filter(|at| *at > 0)
+        .map_or((host, ""), |at| (&host[..at], &host[at + 1..]));
+    let mut ip: IpAddr = host.parse().ok()?;
+    // net.IP.String and IPNet.Contains unmap IPv4-mapped IPv6 addresses.
+    if let IpAddr::V6(v6) = ip
+        && let Some(v4) = v6.to_ipv4_mapped()
+    {
+        ip = IpAddr::V4(v4);
+    }
+    if ip.is_unspecified() {
+        return None;
+    }
+    Some(RequestLogIp {
+        ip,
+        zone: zone.to_owned(),
+    })
+}
+
+fn request_log_trusted_range(ip: IpAddr, trusted: &TrustedProxyConfig) -> bool {
+    // net.IPNet.Contains normalizes an already-masked mapped IPv6 network to
+    // IPv4. An ordinary IPv6 network never contains an IPv4 candidate.
+    trusted.cidrs.iter().any(|network| match network {
+        IpNet::V4(network) => matches!(ip, IpAddr::V4(ip) if network.contains(&ip)),
+        IpNet::V6(network) => {
+            if let Some(mapped) = network.network().to_ipv4_mapped() {
+                let bits = network.prefix_len().saturating_sub(96);
+                let mask = if bits == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - bits)
+                };
+                matches!(ip, IpAddr::V4(ip) if u32::from(ip) & mask == u32::from(mapped) & mask)
+            } else {
+                matches!(ip, IpAddr::V6(ip) if network.contains(&ip))
+            }
+        }
+    })
 }
 
 fn resolve_trusted_proxy_headers(
@@ -622,7 +849,7 @@ mod tests {
         }
     }
 
-    /// Bind both listeners on ephemeral ports and probe `GET /key?v=39`
+    /// Bind both listeners on ephemeral ports and probe `GET /key?v=138`
     /// over plain HTTP. We don't drive a TLS client in-process — the
     /// docker harness does that — but we *do* assert the HTTPS
     /// listener accepts the rustls config without panicking.
@@ -660,7 +887,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let url = format!("http://{addr}/key?v=39");
+        let url = format!("http://{addr}/key?v=138");
         let resp = reqwest::get(&url).await.unwrap();
         assert!(resp.status().is_success());
         handle.abort();
@@ -998,7 +1225,7 @@ mod tests {
             .build()
             .unwrap();
         let control_resp = no_redirects
-            .get(format!("http://{acme_addr}/key?v=39"))
+            .get(format!("http://{acme_addr}/key?v=138"))
             .send()
             .await
             .unwrap();
@@ -1008,7 +1235,7 @@ mod tests {
                 .headers()
                 .get(axum::http::header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
-            Some("https://control.example/key?v=39")
+            Some("https://control.example/key?v=138")
         );
 
         handle.http.unwrap().abort();

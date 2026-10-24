@@ -1,0 +1,13 @@
+The optional native TLS 1.2 ECDSA signing adapter follows the digest-selection
+behavior in Go 1.26.9 crypto/tls/auth.go and crypto/tls/key_agreement.go.
+Copyright 2010, 2017 The Go Authors. All rights reserved.
+Original AWS-LC-RS licensing remains in LICENSE; Go BSD terms are in LICENSE-GO.
+The adapter delegates hashing and signing to the existing validated AWS-LC key
+and EVP signing implementation. It does not copy a cryptographic primitive.
+See UPSTREAM.md for exact source pins, opt-in scope and qualification limits.
+
+The same optional feature supplies the existing validated key's modulus bit
+count to the native TLS 1.3 RSA-PSS signing-failure alert classifier, following
+Go 1.26.9 crypto/tls/handshake_server_tls13.go. Existing AWS EVP wrappers and
+RSA signing operations remain unchanged. Go BSD terms remain in LICENSE-GO.
+Copyright 2017 The Go Authors. All rights reserved.

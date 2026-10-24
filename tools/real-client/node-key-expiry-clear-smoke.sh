@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
+REAL_CLIENT_WORKDIR="${REAL_CLIENT_WORKDIR:-target/real-client/node-key-expiry-clear-smoke}" \
+REAL_CLIENT_ONLINE_LASTSEEN_TARGET=rust \
+REAL_CLIENT_CLIENT_COUNT=2 \
+REAL_CLIENT_EXPECT_PEER_COUNT=1 \
+REAL_CLIENT_CLEAR_NODE_EXPIRY_AFTER_LOGIN=true \
+  tools/real-client/online-lastseen-common.sh

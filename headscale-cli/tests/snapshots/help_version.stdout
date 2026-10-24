@@ -1,0 +1,12 @@
+The version of headscale.
+
+Usage:
+  headscale version [flags]
+
+Flags:
+  -h, --help            help for version
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution

@@ -1,1 +1,1 @@
-Error: invalid static DERP configuration: derp.server.stun_listen_addr is required when derp.server.enabled=true
+<timestamp> FTL derp.server.stun_listen_addr must be set if derp.server.enabled is true

@@ -1,0 +1,20 @@
+{
+  "name": "v0295-unknown-group-nodeattrs",
+  "policy": {
+    "groups": {
+      "group:staff": ["alice@example.com", "ghost@example.com"]
+    },
+    "nodeAttrs": [
+      {"target": ["group:staff"], "attr": ["randomize-client-port"]}
+    ]
+  },
+  "users": [
+    {"id": 1, "name": "alice", "email": "alice@example.com"}
+  ],
+  "nodes": [
+    {"id": 1, "user_id": 1, "hostname": "alice-laptop", "ipv4": "100.64.0.1"}
+  ],
+  "node_attr_checks": [
+    {"name": "known-member-retains-nodeattr", "node_id": 1}
+  ]
+}

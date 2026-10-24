@@ -16,6 +16,16 @@ members = [
     "headscale-cli",
 ]
 exclude = [
+    "vendor/http",
+    "vendor/h2",
+    "vendor/hyper",
+    "vendor/hyper-rustls",
+    "vendor/hyper-util",
+    "vendor/rustls",
+    "vendor/aws-lc-rs",
+    "vendor/instant-acme",
+    "vendor/sqlx-core",
+    "vendor/sqlx-postgres",
     "headscale-core/fuzz",
     # Kept on disk but excluded from workspace-wide cargo commands.
     "headscale-core",
@@ -23,6 +33,18 @@ exclude = [
     "headscale-resources",
     "headscale-payments",
 ]
+
+[patch.crates-io]
+http = { path = "vendor/http" }
+h2 = { path = "vendor/h2" }
+hyper = { path = "vendor/hyper" }
+hyper-rustls = { path = "vendor/hyper-rustls" }
+hyper-util = { path = "vendor/hyper-util" }
+rustls = { path = "vendor/rustls" }
+aws-lc-rs = { path = "vendor/aws-lc-rs" }
+instant-acme = { path = "vendor/instant-acme" }
+sqlx-core = { path = "vendor/sqlx-core" }
+sqlx-postgres = { path = "vendor/sqlx-postgres" }
 
 [workspace.lints.clippy]
 # Mirrors octra/Cargo.toml + octra-foundry/Cargo.toml at the
@@ -93,7 +115,7 @@ async-trait = "0.1"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["serialize", "deserialize"] }
 
 # Crypto
 ed25519-dalek = "2.2"
@@ -145,4 +167,4 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 toml = "0.8"
 hostname = "0.3"
-local-ip-address = "0.6"
+if-addrs = "0.15"

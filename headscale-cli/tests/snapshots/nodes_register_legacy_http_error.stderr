@@ -1,2 +1,2 @@
-use 'headscale auth register --auth-id <id> --user <user>' instead
+Command "register" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead
 Error: node register requires the upstream gRPC transport

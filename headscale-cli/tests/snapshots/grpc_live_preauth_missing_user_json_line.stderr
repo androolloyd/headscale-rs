@@ -1,1 +1,1 @@
-{"error":"server error (500): user not found"}
+{"error":"creating preauthkey: rpc error: code = Unknown desc = user not found"}

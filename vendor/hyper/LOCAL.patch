@@ -1,0 +1,2058 @@
+--- a/vendor/hyper/Cargo.toml
++++ b/vendor/hyper/Cargo.toml
+@@ -18,7 +18,7 @@
+ build = false
+ include = [
+     "Cargo.toml",
+-    "LICENSE",
++    "LICENSE*",
+     "src/**/*",
+ ]
+ autolib = false
+@@ -40,7 +40,7 @@
+     "web-programming::http-client",
+     "web-programming::http-server",
+ ]
+-license = "MIT"
++license = "MIT AND BSD-3-Clause"
+ repository = "https://github.com/hyperium/hyper"
+ 
+ [package.metadata.docs.rs]
+@@ -67,6 +67,7 @@
+ from = "capi/include/hyper.h"
+ 
+ [features]
++go-client-idle = ["h2?/go-client-idle", "tokio/time"]
+ capi = []
+ client = [
+     "dep:want",
+@@ -74,6 +75,11 @@
+     "dep:smallvec",
+ ]
+ default = []
++go-server-lifecycle = [
++    "http2",
++    "server",
++    "h2/go-server-lifecycle",
++]
+ ffi = [
+     "dep:http-body-util",
+     "dep:futures-util",
+--- a/vendor/hyper/Cargo.toml.orig
++++ b/vendor/hyper/Cargo.toml.orig
+@@ -6,7 +6,7 @@
+ homepage = "https://hyper.rs"
+ documentation = "https://docs.rs/hyper"
+ repository = "https://github.com/hyperium/hyper"
+-license = "MIT"
++license = "MIT AND BSD-3-Clause"
+ authors = ["Sean McArthur <sean@seanmonstar.com>"]
+ keywords = ["http", "hyper", "hyperium"]
+ categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
+@@ -15,7 +15,7 @@
+ 
+ include = [
+   "Cargo.toml",
+-  "LICENSE",
++  "LICENSE*",
+   "src/**/*",
+ ]
+ 
+@@ -69,6 +69,8 @@
+ tokio-util = "0.7.10"
+ 
+ [features]
++go-client-idle = ["h2?/go-client-idle", "tokio/time"]
++go-server-lifecycle = ["http2", "server", "h2/go-server-lifecycle"]
+ # Nothing by default
+ default = []
+ 
+--- a/vendor/hyper/src/body/incoming.rs
++++ b/vendor/hyper/src/body/incoming.rs
+@@ -3,9 +3,12 @@
+ use std::task::{Context, Poll};
+ 
+ use bytes::Bytes;
+-#[cfg(all(
+-    any(feature = "http1", feature = "http2"),
+-    any(feature = "client", feature = "server")
++#[cfg(any(
++    all(
++        any(feature = "http1", feature = "http2"),
++        any(feature = "client", feature = "server")
++    ),
++    all(feature = "go-client-idle", feature = "client")
+ ))]
+ use futures_core::ready;
+ use http_body::{Body, Frame, SizeHint};
+@@ -37,7 +40,28 @@
+ /// ```
+ #[must_use = "streams do nothing unless polled"]
+ pub struct Incoming {
++    // Publish native early retirement before dropping the channel receiver.
++    // Rust drops fields in declaration order, including implicit Body drop.
++    #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++    go_h1: Option<super::go_h1::Consumer>,
+     kind: Kind,
++    #[cfg(all(feature = "go-client-idle", feature = "client"))]
++    go_read_pending: Bytes,
++    #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++    go_h1_read: Option<GoBodyRead>,
++}
++
++/// One caller-sized read by the native client transport.
++#[cfg(all(feature = "go-client-idle", feature = "client"))]
++#[doc(hidden)]
++#[derive(Debug)]
++pub struct GoBodyRead {
++    /// Data returned by this read, never exceeding the requested maximum.
++    pub data: Bytes,
++    /// A failure returned together with any data from the same read.
++    pub error: Option<crate::Error>,
++    /// The body has reached EOF.
++    pub eof: bool,
+ }
+ 
+ enum Kind {
+@@ -94,7 +118,215 @@
+     }
+ 
+     fn new(kind: Kind) -> Incoming {
+-        Incoming { kind }
++        Incoming {
++            kind,
++            #[cfg(all(feature = "go-client-idle", feature = "client"))]
++            go_read_pending: Bytes::new(),
++            #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++            go_h1: None,
++            #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++            go_h1_read: None,
++        }
++    }
++
++    #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++    pub(crate) fn go_h1_control(&mut self, control: super::go_h1::Consumer) {
++        self.go_h1 = Some(control);
++    }
++
++    /// Register a native pool-return acknowledgement before exposing this body.
++    #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++    #[doc(hidden)]
++    pub fn go_h1_pool_wait(&self) -> Option<super::GoH1PoolWait> {
++        self.go_h1.as_ref().map(super::go_h1::Consumer::pool_wait)
++    }
++
++    #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++    fn go_h1_finish_read(
++        &mut self,
++        cx: &Context<'_>,
++        mut read: GoBodyRead,
++        maximum: usize,
++    ) -> Poll<GoBodyRead> {
++        if let Some(control) = &self.go_h1 {
++            if read.eof {
++                control.verdict(super::go_h1::Verdict::Eof);
++                if control.poll_done(cx).is_pending() {
++                    self.go_h1_read = Some(read);
++                    return Poll::Pending;
++                }
++            } else if read.error.is_some() {
++                control.verdict(super::go_h1::Verdict::Early);
++            }
++        }
++        if read.data.len() > maximum {
++            let data = read.data.split_to(maximum);
++            self.go_h1_read = Some(read);
++            return Poll::Ready(GoBodyRead {
++                data,
++                error: None,
++                eof: false,
++            });
++        }
++        Poll::Ready(read)
++    }
++
++    /// Reads the selected native client body with the caller's exact demand.
++    #[cfg(all(feature = "go-client-idle", feature = "client"))]
++    #[doc(hidden)]
++    pub fn go_poll_read(&mut self, cx: &mut Context<'_>, maximum: usize) -> Poll<GoBodyRead> {
++        #[cfg(feature = "http1")]
++        if self.go_h1.is_some() && matches!(self.kind, Kind::Empty) {
++            return Poll::Ready(GoBodyRead {
++                data: Bytes::new(),
++                error: Some(crate::Error::new_body("http: read on closed response body")),
++                eof: false,
++            });
++        }
++        #[cfg(feature = "http1")]
++        if let Some(read) = self.go_h1_read.take() {
++            return self.go_h1_finish_read(cx, read, maximum);
++        }
++        #[cfg(feature = "http2")]
++        if let Kind::H2 {
++            recv,
++            content_length,
++            data_done,
++            ping,
++        } = &mut self.kind
++        {
++            let read = ready!(recv.go_poll_read(cx, maximum));
++            content_length.sub_if(read.data.len() as u64);
++            if !read.data.is_empty() {
++                ping.record_data(read.data.len());
++            }
++            if read.eof {
++                *data_done = true;
++                ping.record_non_data();
++            }
++            return Poll::Ready(GoBodyRead {
++                data: read.data,
++                error: read.error.map(crate::Error::new_body),
++                eof: read.eof,
++            });
++        }
++        // HTTP/1's existing channel is frame-oriented. Retain its unread tail
++        // without requesting the following channel chunk; the lower transport
++        // still determines HTTP/1 socket read and framing boundaries.
++        if maximum == 0 {
++            let read = GoBodyRead {
++                data: Bytes::new(),
++                error: None,
++                eof: self.go_read_pending.is_empty()
++                    && {
++                        #[cfg(feature = "http1")]
++                        {
++                            matches!(&self.kind, Kind::Chan { content_length, .. } if *content_length == DecodedLength::ZERO)
++                                || matches!(self.kind, Kind::Empty)
++                        }
++                        #[cfg(not(feature = "http1"))]
++                        {
++                            self.is_end_stream()
++                        }
++                    },
++            };
++            #[cfg(feature = "http1")]
++            return self.go_h1_finish_read(cx, read, 0);
++            #[cfg(not(feature = "http1"))]
++            return Poll::Ready(read);
++        }
++        loop {
++            if !self.go_read_pending.is_empty() {
++                let count = maximum.min(self.go_read_pending.len());
++                let data = self.go_read_pending.split_to(count);
++                #[cfg(feature = "http1")]
++                let eof = self.go_read_pending.is_empty()
++                    && matches!(&self.kind, Kind::Chan { content_length, .. } if *content_length == DecodedLength::ZERO);
++                #[cfg(not(feature = "http1"))]
++                let eof = false;
++                let read = GoBodyRead {
++                    data,
++                    error: None,
++                    eof,
++                };
++                #[cfg(feature = "http1")]
++                return self.go_h1_finish_read(cx, read, maximum);
++                #[cfg(not(feature = "http1"))]
++                return Poll::Ready(read);
++            }
++            match ready!(Pin::new(&mut *self).poll_frame_inner(cx)) {
++                Some(Ok(frame)) => {
++                    if let Ok(data) = frame.into_data() {
++                        self.go_read_pending = data;
++                    }
++                }
++                Some(Err(error)) => {
++                    let read = GoBodyRead {
++                        data: Bytes::new(),
++                        error: Some(error),
++                        eof: false,
++                    };
++                    #[cfg(feature = "http1")]
++                    return self.go_h1_finish_read(cx, read, maximum);
++                    #[cfg(not(feature = "http1"))]
++                    return Poll::Ready(read);
++                }
++                None => {
++                    let read = GoBodyRead {
++                        data: Bytes::new(),
++                        error: None,
++                        eof: true,
++                    };
++                    #[cfg(feature = "http1")]
++                    return self.go_h1_finish_read(cx, read, maximum);
++                    #[cfg(not(feature = "http1"))]
++                    return Poll::Ready(read);
++                }
++            }
++        }
++    }
++
++    /// Closes the selected native body, waiting for its receive-credit writer.
++    #[cfg(all(feature = "go-client-idle", feature = "client"))]
++    #[doc(hidden)]
++    pub fn go_poll_close(&mut self, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
++        #[cfg(feature = "http2")]
++        if let Kind::H2 {
++            recv, data_done, ..
++        } = &mut self.kind
++        {
++            let result = ready!(recv.go_poll_close(cx)).map_err(crate::Error::new_body);
++            *data_done = true;
++            return Poll::Ready(result);
++        }
++        #[cfg(feature = "http1")]
++        if let Some(control) = &self.go_h1 {
++            control.verdict(super::go_h1::Verdict::Early);
++            self.go_read_pending = Bytes::new();
++            self.go_h1_read = None;
++            self.kind = Kind::Empty;
++            ready!(control.poll_done(cx));
++            return Poll::Ready(Ok(()));
++        }
++        let _ = cx;
++        self.go_read_pending = Bytes::new();
++        self.kind = Kind::Empty;
++        Poll::Ready(Ok(()))
++    }
++
++    /// Whether Go's native response selects its transport-body/gzip branch.
++    #[cfg(all(feature = "go-client-idle", feature = "client"))]
++    #[doc(hidden)]
++    pub fn go_body_is_transport(&self) -> bool {
++        match &self.kind {
++            Kind::Empty => false,
++            #[cfg(feature = "http2")]
++            Kind::H2 { recv, .. } => recv.go_body_is_transport(),
++            #[cfg(feature = "http1")]
++            Kind::Chan { content_length, .. } => *content_length != DecodedLength::ZERO,
++            #[cfg(feature = "ffi")]
++            Kind::Ffi(..) => true,
++        }
+     }
+ 
+     #[allow(dead_code)]
+@@ -140,11 +372,8 @@
+     }
+ }
+ 
+-impl Body for Incoming {
+-    type Data = Bytes;
+-    type Error = crate::Error;
+-
+-    fn poll_frame(
++impl Incoming {
++    fn poll_frame_inner(
+         #[cfg_attr(
+             not(all(
+                 any(feature = "http1", feature = "http2"),
+@@ -161,7 +390,13 @@
+             allow(unused_variables)
+         )]
+         cx: &mut Context<'_>,
+-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
++    ) -> Poll<Option<Result<Frame<Bytes>, crate::Error>>> {
++        #[cfg(all(feature = "go-client-idle", feature = "client"))]
++        if !self.go_read_pending.is_empty() {
++            return Poll::Ready(Some(Ok(Frame::data(std::mem::take(
++                &mut self.go_read_pending,
++            )))));
++        }
+         match &mut self.kind {
+             Kind::Empty => Poll::Ready(None),
+             #[cfg(all(feature = "http1", any(feature = "client", feature = "server")))]
+@@ -230,8 +465,65 @@
+             Kind::Ffi(body) => body.poll_data(cx),
+         }
+     }
++}
++
++impl Body for Incoming {
++    type Data = Bytes;
++    type Error = crate::Error;
++
++    fn poll_frame(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++    ) -> Poll<Option<Result<Frame<Bytes>, crate::Error>>> {
++        #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++        if let Some(read) = self.go_h1_read.take() {
++            let read = ready!(self.go_h1_finish_read(cx, read, usize::MAX));
++            if !read.data.is_empty() {
++                return Poll::Ready(Some(Ok(Frame::data(read.data))));
++            }
++            if let Some(error) = read.error {
++                return Poll::Ready(Some(Err(error)));
++            }
++            if read.eof {
++                return Poll::Ready(None);
++            }
++        }
++        let result = self.as_mut().poll_frame_inner(cx);
++        #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++        if let Some(control) = &self.go_h1 {
++            match &result {
++                Poll::Ready(None) => {
++                    control.verdict(super::go_h1::Verdict::Eof);
++                    ready!(control.poll_done(cx));
++                }
++                Poll::Ready(Some(Err(_))) => control.verdict(super::go_h1::Verdict::Early),
++                _ => {}
++            }
++        }
++        result
++    }
+ 
+     fn is_end_stream(&self) -> bool {
++        #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++        if self
++            .go_h1_read
++            .as_ref()
++            .is_some_and(|read| !read.data.is_empty())
++        {
++            return false;
++        }
++        #[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++        if self
++            .go_h1
++            .as_ref()
++            .is_some_and(super::go_h1::Consumer::pending)
++        {
++            return false;
++        }
++        #[cfg(all(feature = "go-client-idle", feature = "client"))]
++        if !self.go_read_pending.is_empty() {
++            return false;
++        }
+         match &self.kind {
+             Kind::Empty => true,
+             #[cfg(all(feature = "http1", any(feature = "client", feature = "server")))]
+@@ -256,7 +548,7 @@
+             }
+         }
+ 
+-        match self.kind {
++        let hint = match self.kind {
+             Kind::Empty => SizeHint::with_exact(0),
+             #[cfg(all(feature = "http1", any(feature = "client", feature = "server")))]
+             Kind::Chan { content_length, .. } => opt_len(content_length),
+@@ -264,7 +556,18 @@
+             Kind::H2 { content_length, .. } => opt_len(content_length),
+             #[cfg(feature = "ffi")]
+             Kind::Ffi(..) => SizeHint::default(),
++        };
++        #[cfg(all(feature = "go-client-idle", feature = "client"))]
++        if !self.go_read_pending.is_empty() {
++            let extra = self.go_read_pending.len() as u64;
++            let mut with_pending = SizeHint::new();
++            with_pending.set_lower(hint.lower().saturating_add(extra));
++            if let Some(upper) = hint.upper().and_then(|upper| upper.checked_add(extra)) {
++                with_pending.set_upper(upper);
++            }
++            return with_pending;
+         }
++        hint
+     }
+ }
+ 
+--- a/vendor/hyper/src/body/mod.rs
++++ b/vendor/hyper/src/body/mod.rs
+@@ -69,6 +69,12 @@
+ pub use http_body::Frame;
+ pub use http_body::SizeHint;
+ 
++#[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++#[doc(hidden)]
++pub use self::go_h1::GoH1PoolWait;
++#[cfg(all(feature = "go-client-idle", feature = "client"))]
++#[doc(hidden)]
++pub use self::incoming::GoBodyRead;
+ pub use self::incoming::Incoming;
+ 
+ #[cfg(all(any(feature = "client", feature = "server"), feature = "http1"))]
+@@ -81,6 +87,8 @@
+ 
+ #[cfg(all(any(feature = "client", feature = "server"), feature = "http1"))]
+ mod chan;
++#[cfg(all(feature = "go-client-idle", feature = "client", feature = "http1"))]
++pub(crate) mod go_h1;
+ mod incoming;
+ #[cfg(all(
+     any(feature = "http1", feature = "http2"),
+--- a/vendor/hyper/src/client/conn/http1.rs
++++ b/vendor/hyper/src/client/conn/http1.rs
+@@ -126,6 +126,8 @@
+ /// are subject to change at any time.
+ #[derive(Clone, Debug)]
+ pub struct Builder {
++    #[cfg(feature = "go-client-idle")]
++    go_native_client: bool,
+     h09_responses: bool,
+     h1_parser_config: ParserConfig,
+     h1_writev: Option<bool>,
+@@ -347,6 +349,8 @@
+     #[inline]
+     pub fn new() -> Builder {
+         Builder {
++            #[cfg(feature = "go-client-idle")]
++            go_native_client: false,
+             h09_responses: false,
+             h1_writev: None,
+             h1_read_buf_exact_size: None,
+@@ -361,6 +365,14 @@
+         }
+     }
+ 
++    /// Select native Go response-body EOF and close synchronization.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_native_client(&mut self, enabled: bool) -> &mut Builder {
++        self.go_native_client = enabled;
++        self
++    }
++
+     /// Set whether HTTP/0.9 responses should be tolerated.
+     ///
+     /// Default is false.
+@@ -625,6 +637,8 @@
+             }
+             let cd = proto::h1::dispatch::Client::new(rx);
+             let proto = proto::h1::Dispatcher::new(cd, conn);
++            #[cfg(feature = "go-client-idle")]
++            let proto = proto.go_native_client(opts.go_native_client);
+ 
+             Ok((SendRequest { dispatch: tx }, Connection { inner: proto }))
+         }
+--- a/vendor/hyper/src/client/conn/http2.rs
++++ b/vendor/hyper/src/client/conn/http2.rs
+@@ -20,15 +20,27 @@
+ use crate::rt::bounds::Http2ClientConnExec;
+ use crate::rt::Timer;
+ 
++#[cfg(feature = "go-client-idle")]
++#[doc(hidden)]
++pub use h2::client::{GoAvailability, GoClosedState, GoConnectionState};
++
+ /// The sender side of an established connection.
+ pub struct SendRequest<B> {
+     dispatch: dispatch::UnboundedSender<Request<B>, Response<IncomingBody>>,
++    #[cfg(feature = "go-client-idle")]
++    go_idle_handle: Option<h2::client::GoIdleHandle>,
++    #[cfg(feature = "go-client-idle")]
++    go_idle_reservation: Option<h2::client::GoIdleReservation>,
+ }
+ 
+ impl<B> Clone for SendRequest<B> {
+     fn clone(&self) -> SendRequest<B> {
+         SendRequest {
+             dispatch: self.dispatch.clone(),
++            #[cfg(feature = "go-client-idle")]
++            go_idle_handle: self.go_idle_handle.clone(),
++            #[cfg(feature = "go-client-idle")]
++            go_idle_reservation: None,
+         }
+     }
+ }
+@@ -95,6 +107,81 @@
+ // ===== impl SendRequest
+ 
+ impl<B> SendRequest<B> {
++    /// Native capacity snapshot; a saturated connection remains open.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_availability(&self) -> Option<GoAvailability> {
++        self.go_idle_handle
++            .as_ref()
++            .map(|handle| handle.availability())
++    }
++
++    /// Atomically reserves a native slot, storing ownership on this checkout.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_try_reserve_idle(&mut self) -> Option<GoAvailability> {
++        if let Some(reservation) = self.go_idle_reservation.as_ref() {
++            if !reservation.is_unestablished()
++                && self
++                    .go_idle_handle
++                    .as_ref()
++                    .is_some_and(|handle| handle.availability() == GoAvailability::Unusable)
++            {
++                self.go_idle_reservation = None;
++                return Some(GoAvailability::Unusable);
++            }
++            return Some(GoAvailability::Available);
++        }
++        let handle = self.go_idle_handle.as_ref()?;
++        Some(match handle.try_reserve() {
++            Ok(reservation) => {
++                self.go_idle_reservation = Some(reservation);
++                GoAvailability::Available
++            }
++            Err(availability) => availability,
++        })
++    }
++
++    /// Returns a stable native lifecycle observer without reserving a slot.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_connection_state(&self) -> Option<GoConnectionState> {
++        self.go_idle_handle
++            .as_ref()
++            .map(|handle| handle.connection_state())
++    }
++
++    /// Reserves a native connection while checked out but not yet dispatched.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_reserve_idle(&mut self) {
++        let _ = self.go_try_reserve_idle();
++    }
++
++    /// Whether this connection owns its native stream-aware idle timer.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_uses_connection_idle_timer(&self) -> bool {
++        self.go_idle_handle.is_some()
++    }
++
++    #[cfg(feature = "go-client-idle")]
++    fn go_prepare_idle(&mut self, request: &mut Request<B>) -> Option<GoAvailability> {
++        self.go_idle_handle.as_ref()?;
++        // A retry may carry a reservation for another connection.
++        request
++            .extensions_mut()
++            .remove::<h2::client::GoIdleReservation>();
++        let available = self.go_try_reserve_idle().unwrap();
++        if available != GoAvailability::Available {
++            return Some(available);
++        }
++        if let Some(reservation) = self.go_idle_reservation.take() {
++            request.extensions_mut().insert(reservation);
++        }
++        None
++    }
++
+     /// Polls to determine whether this sender can be used yet for a request.
+     ///
+     /// If the associated connection is closed, this returns an Error.
+@@ -123,11 +210,43 @@
+     /// possible that even after checking this is ready, sending a request
+     /// may still fail because the connection was closed in the meantime.
+     pub fn is_ready(&self) -> bool {
++        #[cfg(feature = "go-client-idle")]
++        if self
++            .go_idle_reservation
++            .as_ref()
++            .is_some_and(|reservation| reservation.is_unestablished())
++        {
++            return true;
++        }
++        #[cfg(feature = "go-client-idle")]
++        if self
++            .go_idle_handle
++            .as_ref()
++            .is_some_and(|handle| handle.is_closed())
++        {
++            return false;
++        }
+         self.dispatch.is_ready()
+     }
+ 
+     /// Checks if the connection side has been closed.
+     pub fn is_closed(&self) -> bool {
++        #[cfg(feature = "go-client-idle")]
++        if self
++            .go_idle_reservation
++            .as_ref()
++            .is_some_and(|reservation| reservation.is_unestablished())
++        {
++            return false;
++        }
++        #[cfg(feature = "go-client-idle")]
++        if self
++            .go_idle_handle
++            .as_ref()
++            .is_some_and(|handle| handle.is_closed())
++        {
++            return true;
++        }
+         self.dispatch.is_closed()
+     }
+ }
+@@ -160,11 +279,30 @@
+     /// processing the request.
+     pub fn send_request(
+         &mut self,
+-        req: Request<B>,
++        #[allow(unused_mut)] mut req: Request<B>,
+     ) -> impl Future<Output = crate::Result<Response<IncomingBody>>> {
++        #[cfg(feature = "go-client-idle")]
++        let unavailable = self.go_prepare_idle(&mut req).is_some();
++        #[cfg(feature = "go-client-idle")]
++        let unestablished = req
++            .extensions()
++            .get::<h2::client::GoIdleReservation>()
++            .is_some_and(|reservation| reservation.is_unestablished());
++        #[cfg(feature = "go-client-idle")]
++        let sent = if unavailable || unestablished {
++            Err(req)
++        } else {
++            self.dispatch.send(req)
++        };
++        #[cfg(not(feature = "go-client-idle"))]
+         let sent = self.dispatch.send(req);
+ 
+         async move {
++            #[cfg(feature = "go-client-idle")]
++            if unestablished {
++                return Err(crate::Error::new_canceled().with("http2: client conn not established"));
++            }
++
+             match sent {
+                 Ok(rx) => match rx.await {
+                     Ok(Ok(resp)) => Ok(resp),
+@@ -192,10 +330,31 @@
+     #[allow(clippy::result_large_err)]
+     pub fn try_send_request(
+         &mut self,
+-        req: Request<B>,
++        #[allow(unused_mut)] mut req: Request<B>,
+     ) -> impl Future<Output = Result<Response<IncomingBody>, TrySendError<Request<B>>>> {
++        #[cfg(feature = "go-client-idle")]
++        let unavailable = self.go_prepare_idle(&mut req).is_some();
++        #[cfg(feature = "go-client-idle")]
++        let unestablished = req
++            .extensions()
++            .get::<h2::client::GoIdleReservation>()
++            .is_some_and(|reservation| reservation.is_unestablished());
++        #[cfg(feature = "go-client-idle")]
++        let sent = if unavailable || unestablished {
++            Err(req)
++        } else {
++            self.dispatch.try_send(req)
++        };
++        #[cfg(not(feature = "go-client-idle"))]
+         let sent = self.dispatch.try_send(req);
+         async move {
++            #[cfg(feature = "go-client-idle")]
++            if unestablished {
++                return Err(TrySendError {
++                    error: crate::Error::new_canceled().with("http2: client conn not established"),
++                    message: None,
++                });
++            }
+             match sent {
+                 Ok(rx) => match rx.await {
+                     Ok(Ok(res)) => Ok(res),
+@@ -513,6 +672,31 @@
+         self
+     }
+ 
++    /// Enables native client control/capacity behavior independently of idle TTL.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_native_client(&mut self, enabled: bool) -> &mut Self {
++        self.h2_builder.go_native_client = enabled;
++        self
++    }
++
++    /// Supplies native reset PING entropy without adding an RNG dependency.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_reset_ping_payload(&mut self, payload: fn() -> [u8; 8]) -> &mut Self {
++        self.h2_builder.go_reset_ping_payload = Some(payload);
++        self
++    }
++
++    /// Enables the selected Go stream-aware client idle lifecycle.
++    #[cfg(feature = "go-client-idle")]
++    #[doc(hidden)]
++    pub fn go_idle_timeout(&mut self, timeout: Duration) -> &mut Self {
++        self.h2_builder.go_idle_timeout = (!timeout.is_zero()).then_some(timeout);
++        self.h2_builder.go_native_client = true;
++        self
++    }
++
+     /// Configures the maximum number of local resets due to protocol errors made by the remote end.
+     ///
+     /// See the documentation of [`h2::client::Builder::max_local_error_reset_streams`] for more
+@@ -585,6 +769,10 @@
+             Ok((
+                 SendRequest {
+                     dispatch: tx.unbound(),
++                    #[cfg(feature = "go-client-idle")]
++                    go_idle_handle: h2.go_idle_handle(),
++                    #[cfg(feature = "go-client-idle")]
++                    go_idle_reservation: None,
+                 },
+                 Connection {
+                     inner: (PhantomData, h2),
+--- a/vendor/hyper/src/client/dispatch.rs
++++ b/vendor/hyper/src/client/dispatch.rs
+@@ -303,6 +303,16 @@
+             }
+         }
+     }
++
++    #[cfg(all(feature = "http2", feature = "go-client-idle"))]
++    fn go_send(mut self, val: Result<U, TrySendError<T>>) -> bool {
++        match self {
++            Callback::Retry(ref mut tx) => tx.take().unwrap().send(val).is_ok(),
++            Callback::NoRetry(ref mut tx) => {
++                tx.take().unwrap().send(val.map_err(|e| e.error)).is_ok()
++            }
++        }
++    }
+ }
+ 
+ impl<T> TrySendError<T> {
+@@ -362,8 +372,25 @@
+ 
+         let mut call_back = this.call_back.take().expect("polled after complete");
+ 
++        #[cfg(feature = "go-client-idle")]
++        let go_native = this.when.as_ref().get_ref().go_has_request_control();
++        #[cfg(feature = "go-client-idle")]
++        if go_native && call_back.is_canceled() {
++            this.when.as_mut().go_cancel_undelivered();
++            return Poll::Ready(());
++        }
++
+         match Pin::new(&mut this.when).poll(cx) {
+             Poll::Ready(Ok(res)) => {
++                #[cfg(feature = "go-client-idle")]
++                if go_native {
++                    if call_back.go_send(Ok(res)) {
++                        this.when.as_mut().go_response_delivered();
++                    } else {
++                        this.when.as_mut().go_cancel_undelivered();
++                    }
++                    return Poll::Ready(());
++                }
+                 call_back.send(Ok(res));
+                 Poll::Ready(())
+             }
+@@ -376,6 +403,11 @@
+                         this.call_back.set(Some(call_back));
+                         return Poll::Pending;
+                     }
++                };
++                #[cfg(feature = "go-client-idle")]
++                if go_native {
++                    this.when.as_mut().go_cancel_undelivered();
++                    return Poll::Ready(());
+                 }
+                 trace!("send_when canceled");
+                 // Tell pipe_task to reset the h2 stream so that
+@@ -384,6 +416,15 @@
+                 Poll::Ready(())
+             }
+             Poll::Ready(Err((error, message))) => {
++                #[cfg(feature = "go-client-idle")]
++                if go_native {
++                    if call_back.go_send(Err(TrySendError { error, message })) {
++                        this.when.as_mut().go_response_delivered();
++                    } else {
++                        this.when.as_mut().go_cancel_undelivered();
++                    }
++                    return Poll::Ready(());
++                }
+                 call_back.send(Err(TrySendError { error, message }));
+                 Poll::Ready(())
+             }
+--- a/vendor/hyper/src/proto/h1/conn.rs
++++ b/vendor/hyper/src/proto/h1/conn.rs
+@@ -173,6 +173,11 @@
+         self.state.is_read_closed()
+     }
+ 
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    pub(crate) fn go_can_reuse(&self) -> bool {
++        self.state.wants_keep_alive() && !self.is_read_closed() && !self.is_write_closed()
++    }
++
+     pub(crate) fn is_write_closed(&self) -> bool {
+         self.state.is_write_closed()
+     }
+@@ -528,7 +533,7 @@
+ 
+         match self.state.reading {
+             Reading::Continue(..) | Reading::Body(..) | Reading::KeepAlive | Reading::Closed => {
+-                return
++                return;
+             }
+             Reading::Init => (),
+         }
+--- a/vendor/hyper/src/proto/h1/dispatch.rs
++++ b/vendor/hyper/src/proto/h1/dispatch.rs
+@@ -25,6 +25,12 @@
+     body_tx: SenderDropGuard,
+     body_rx: Pin<Box<Option<Bs>>>,
+     is_closing: bool,
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    go_native_client: bool,
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    go_body: Option<crate::body::go_h1::Driver>,
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    go_write_wait: Option<Pin<Box<tokio::time::Sleep>>>,
+ }
+ 
+ pub(crate) trait Dispatch {
+@@ -40,6 +46,8 @@
+         -> crate::Result<()>;
+     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ()>>;
+     fn should_poll(&self) -> bool;
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    fn go_close(&mut self) {}
+ }
+ 
+ cfg_server! {
+@@ -84,6 +92,64 @@
+             body_tx: SenderDropGuard::none(),
+             body_rx: Box::pin(None),
+             is_closing: false,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_native_client: false,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_body: None,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_write_wait: None,
++        }
++    }
++
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    pub(crate) fn go_native_client(mut self, enabled: bool) -> Self {
++        self.go_native_client = enabled;
++        self
++    }
++
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    fn go_retire(&mut self) {
++        self.close();
++        self.dispatch.go_close();
++        // Go closes eofc at readLoop exit, before its deferred socket close.
++        if let Some(body) = &self.go_body {
++            body.complete();
++        }
++    }
++
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    fn go_finish_eof(&mut self, cx: &mut Context<'_>, flushed: bool) {
++        if self.go_body.as_ref().map(|body| body.verdict(cx))
++            != Some(crate::body::go_h1::Verdict::Eof)
++        {
++            return;
++        }
++        // Go short-circuits wroteRequest when the response already forbids
++        // reuse, including Connection: close and close-delimited responses.
++        if !self.conn.go_can_reuse() {
++            self.go_write_wait = None;
++            self.go_retire();
++            return;
++        }
++        if flushed
++            && self.body_rx.is_none()
++            && (self.conn.can_write_head() || self.conn.is_write_closed())
++        {
++            self.go_write_wait = None;
++            if self.conn.is_read_closed() || self.conn.is_write_closed() {
++                self.go_retire();
++                return;
++            }
++            self.go_body.take(); // Driver drop acknowledges this reuse decision.
++            cx.waker().wake_by_ref();
++        } else {
++            // Go's wroteRequest waits at most 50ms for the request writer.
++            let timer = self.go_write_wait.get_or_insert_with(|| {
++                Box::pin(tokio::time::sleep(std::time::Duration::from_millis(50)))
++            });
++            if timer.as_mut().poll(cx).is_ready() {
++                self.go_retire();
++            }
+         }
+     }
+ 
+@@ -126,6 +192,10 @@
+         should_shutdown: bool,
+     ) -> Poll<crate::Result<Dispatched>> {
+         Poll::Ready(ready!(self.poll_inner(cx, should_shutdown)).or_else(|e| {
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            if self.go_body.is_some() {
++                self.go_retire();
++            }
+             // Be sure to alert a streaming body of the failure with a
+             // more specific error than the drop guard would provide.
+             if let Some(mut body) = self.body_tx.take() {
+@@ -150,6 +220,10 @@
+         ready!(self.poll_loop(cx))?;
+ 
+         if self.is_done() {
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            if let Some(body) = &self.go_body {
++                body.complete();
++            }
+             if let Some(pending) = self.conn.pending_upgrade() {
+                 self.conn.take_error()?;
+                 return Poll::Ready(Ok(Dispatched::Upgrade(pending)));
+@@ -173,6 +247,8 @@
+             let _ = self.poll_read(cx)?;
+             let write_ready = self.poll_write(cx)?.is_ready();
+             let flush_ready = self.poll_flush(cx)?.is_ready();
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            self.go_finish_eof(cx, flush_ready);
+ 
+             // If we can write more body and the connection is ready, we should
+             // write again. If we return `Ready(Ok(())` here, we will yield
+@@ -212,7 +288,11 @@
+                     // until the peer gives up, since the wake-ups we then rely on are for
+                     // reads. Flush what was just buffered before yielding.
+                     if self.conn.has_buffered_write() {
+-                        let _ = self.poll_flush(cx)?;
++                        let flushed = self.poll_flush(cx)?;
++                        #[cfg(all(feature = "client", feature = "go-client-idle"))]
++                        self.go_finish_eof(cx, flushed.is_ready());
++                        #[cfg(not(all(feature = "client", feature = "go-client-idle")))]
++                        let _ = flushed;
+                     }
+                     return Poll::Ready(Ok(()));
+                 }
+@@ -224,6 +304,21 @@
+ 
+     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
+         loop {
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            if let Some(body) = &self.go_body {
++                if body.verdict(cx) == crate::body::go_h1::Verdict::Early {
++                    self.go_retire();
++                    return Poll::Ready(Ok(()));
++                }
++                if !self.conn.can_read_body() {
++                    // The decoder may already be done while unread bytes are
++                    // retained by Incoming. Do not expose an idle connection.
++                    // End the data/trailer channels so the consumer can itself
++                    // observe EOF and deliver the verdict we are awaiting.
++                    self.body_tx.take();
++                    return Poll::Pending;
++                }
++            }
+             if self.is_closing {
+                 return Poll::Ready(Ok(()));
+             } else if self.conn.can_read_head() {
+@@ -319,6 +414,17 @@
+                         rx
+                     }
+                 };
++                #[cfg(all(feature = "client", feature = "go-client-idle"))]
++                let mut body = body;
++                #[cfg(all(feature = "client", feature = "go-client-idle"))]
++                if self.go_native_client
++                    && body_len != DecodedLength::ZERO
++                    && !wants.contains(Wants::UPGRADE)
++                {
++                    let (driver, consumer) = crate::body::go_h1::channel();
++                    body.go_h1_control(consumer);
++                    self.go_body = Some(driver);
++                }
+                 if wants.contains(Wants::UPGRADE) {
+                     let upgrade = self.conn.on_upgrade();
+                     debug_assert!(!upgrade.is_none(), "empty upgrade");
+@@ -361,6 +467,10 @@
+                 && self.conn.can_write_head()
+                 && self.dispatch.should_poll()
+             {
++                #[cfg(all(feature = "client", feature = "go-client-idle"))]
++                if self.go_body.is_some() {
++                    return Poll::Pending;
++                }
+                 if let Some(msg) = ready!(Pin::new(&mut self.dispatch).poll_msg(cx)) {
+                     let (head, body) = msg.map_err(crate::Error::new_user_service)?;
+ 
+@@ -470,6 +580,10 @@
+         if self.is_closing {
+             return true;
+         }
++        #[cfg(all(feature = "client", feature = "go-client-idle"))]
++        if self.go_body.is_some() {
++            return false;
++        }
+ 
+         let read_done = self.conn.is_read_closed();
+ 
+@@ -764,6 +878,11 @@
+         fn should_poll(&self) -> bool {
+             self.callback.is_none()
+         }
++
++        #[cfg(feature = "go-client-idle")]
++        fn go_close(&mut self) {
++            self.rx.close();
++        }
+     }
+ }
+ 
+--- a/vendor/hyper/src/proto/h1/role.rs
++++ b/vendor/hyper/src/proto/h1/role.rs
+@@ -1039,15 +1039,27 @@
+ 
+         // Loop to skip information status code headers (100 Continue, etc).
+         loop {
++            // A native response can have Go's large byte budget without
++            // allocating millions of parser slots for an ordinary response.
++            // Every complete header occupies at least one received line;
++            // the extra slot covers an unfinished final line.
++            let header_capacity = ctx.h1_max_headers.map(|cap| {
++                cap.min(
++                    buf.iter()
++                        .filter(|byte| **byte == b'\n')
++                        .count()
++                        .saturating_add(1),
++                )
++            });
+             let mut headers_indices: SmallVec<[MaybeUninit<HeaderIndices>; DEFAULT_MAX_HEADERS]> =
+-                match ctx.h1_max_headers {
++                match header_capacity {
+                     Some(cap) => smallvec![MaybeUninit::uninit(); cap],
+                     None => smallvec_inline![MaybeUninit::uninit(); DEFAULT_MAX_HEADERS],
+                 };
+             let (len, status, reason, version, headers_len) = {
+                 let mut headers: SmallVec<
+                     [MaybeUninit<httparse::Header<'_>>; DEFAULT_MAX_HEADERS],
+-                > = match ctx.h1_max_headers {
++                > = match header_capacity {
+                     Some(cap) => smallvec![MaybeUninit::uninit(); cap],
+                     None => smallvec_inline![MaybeUninit::uninit(); DEFAULT_MAX_HEADERS],
+                 };
+@@ -1130,7 +1142,12 @@
+                 None
+             };
+ 
+-            headers.reserve(headers_len);
++            // HeaderMap has a smaller distinct-name representation than the
++            // wire byte budget. Grow incrementally and reject its ceiling
++            // safely, rather than reserving by repeated-field count or panic.
++            headers
++                .try_reserve(headers_len.min(DEFAULT_MAX_HEADERS))
++                .map_err(|_| Parse::TooLarge)?;
+             for header in &headers_indices[..headers_len] {
+                 // SAFETY: array is valid up to `headers_len`
+                 let header = unsafe { header.assume_init_ref() };
+@@ -1159,7 +1176,9 @@
+                     header_order.append(&name);
+                 }
+ 
+-                headers.append(name, value);
++                headers
++                    .try_append(name, value)
++                    .map_err(|_| Parse::TooLarge)?;
+             }
+ 
+             let mut extensions = http::Extensions::default();
+--- a/vendor/hyper/src/proto/h2/client.rs
++++ b/vendor/hyper/src/proto/h2/client.rs
+@@ -62,6 +62,12 @@
+ 
+ #[derive(Clone, Debug)]
+ pub(crate) struct Config {
++    #[cfg(feature = "go-client-idle")]
++    pub(crate) go_idle_timeout: Option<Duration>,
++    #[cfg(feature = "go-client-idle")]
++    pub(crate) go_native_client: bool,
++    #[cfg(feature = "go-client-idle")]
++    pub(crate) go_reset_ping_payload: Option<fn() -> [u8; 8]>,
+     pub(crate) adaptive_window: bool,
+     pub(crate) initial_conn_window_size: u32,
+     pub(crate) initial_stream_window_size: u32,
+@@ -83,6 +89,12 @@
+ impl Default for Config {
+     fn default() -> Config {
+         Config {
++            #[cfg(feature = "go-client-idle")]
++            go_idle_timeout: None,
++            #[cfg(feature = "go-client-idle")]
++            go_native_client: false,
++            #[cfg(feature = "go-client-idle")]
++            go_reset_ping_payload: None,
+             adaptive_window: false,
+             initial_conn_window_size: DEFAULT_CONN_WINDOW,
+             initial_stream_window_size: DEFAULT_STREAM_WINDOW,
+@@ -105,6 +117,17 @@
+ 
+ fn new_builder(config: &Config) -> Builder {
+     let mut builder = Builder::default();
++    #[cfg(feature = "go-client-idle")]
++    if let Some(timeout) = config.go_idle_timeout {
++        builder.go_idle_timeout(timeout);
++    }
++    #[cfg(feature = "go-client-idle")]
++    {
++        builder.go_native_client(config.go_native_client);
++        if let Some(payload) = config.go_reset_ping_payload {
++            builder.go_reset_ping_payload(payload);
++        }
++    }
+     builder
+         .initial_max_send_streams(config.initial_max_send_streams)
+         .initial_window_size(config.initial_stream_window_size)
+@@ -201,6 +224,12 @@
+         h2_tx,
+         req_rx,
+         fut_ctx: None,
++        #[cfg(feature = "go-client-idle")]
++        go_pending: std::collections::VecDeque::new(),
++        #[cfg(feature = "go-client-idle")]
++        go_cleanup: std::collections::VecDeque::new(),
++        #[cfg(feature = "go-client-idle")]
++        go_native_client: config.go_native_client,
+         marker: PhantomData,
+     })
+ }
+@@ -422,6 +451,47 @@
+ 
+ impl<B: Body> Unpin for FutCtx<B> {}
+ 
++#[cfg(feature = "go-client-idle")]
++struct GoPendingAdmission<B: Body> {
++    future: h2::client::GoSendRequest<SendBuf<B::Data>>,
++    body: B,
++    cb: Callback<Request<B>, Response<IncomingBody>>,
++    is_connect: bool,
++    eos: bool,
++}
++
++#[cfg(feature = "go-client-idle")]
++struct GoEmptyRequestSender<D: bytes::Buf> {
++    sender: SendStream<SendBuf<D>>,
++    waiting: bool,
++}
++
++#[cfg(feature = "go-client-idle")]
++struct GoRequestBodyOwner {
++    control: super::GoRequestBodyControl,
++    pending: bool,
++}
++
++#[cfg(feature = "go-client-idle")]
++impl Drop for GoRequestBodyOwner {
++    fn drop(&mut self) {
++        if self.pending {
++            self.control.cancel();
++        }
++    }
++}
++
++#[cfg(feature = "go-client-idle")]
++impl<D: bytes::Buf> Drop for GoEmptyRequestSender<D> {
++    fn drop(&mut self) {
++        if self.waiting {
++            // Dropping the undelivered NoBody response is request cancellation,
++            // unlike closing a NoBody response which was already returned.
++            self.sender.go_cancel_request_after_response();
++        }
++    }
++}
++
+ pub(crate) struct ClientTask<B, E, T>
+ where
+     B: Body,
+@@ -434,6 +504,12 @@
+     h2_tx: SendRequest<SendBuf<B::Data>>,
+     req_rx: ClientRx<B>,
+     fut_ctx: Option<FutCtx<B>>,
++    #[cfg(feature = "go-client-idle")]
++    go_pending: std::collections::VecDeque<GoPendingAdmission<B>>,
++    #[cfg(feature = "go-client-idle")]
++    go_cleanup: std::collections::VecDeque<GoPendingAdmission<B>>,
++    #[cfg(feature = "go-client-idle")]
++    go_native_client: bool,
+     marker: PhantomData<T>,
+ }
+ 
+@@ -444,6 +520,11 @@
+     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+     T: Read + Write + Unpin,
+ {
++    #[cfg(feature = "go-client-idle")]
++    pub(crate) fn go_idle_handle(&self) -> Option<h2::client::GoIdleHandle> {
++        self.h2_tx.go_idle_handle()
++    }
++
+     pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
+         self.h2_tx.is_extended_connect_protocol_enabled()
+     }
+@@ -523,9 +604,44 @@
+     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+     T: Read + Write + Unpin,
+ {
++    #[cfg(feature = "go-client-idle")]
++    fn poll_go_cleanup(&mut self, cx: &mut Context<'_>) {
++        // These requests released reqHeaderMu before waiting for wmu. Poll
++        // every independent waiter once; blocked cleanup must not hold the
++        // admission FIFO, and Pending alone must never self-wake a loop.
++        let pending = self.go_cleanup.len();
++        for _ in 0..pending {
++            let mut cleanup = self.go_cleanup.pop_front().unwrap();
++            if cleanup.cb.poll_canceled(cx).is_ready() {
++                continue;
++            }
++            match Pin::new(&mut cleanup.future).poll(cx) {
++                Poll::Pending => self.go_cleanup.push_back(cleanup),
++                Poll::Ready(Err((error, request))) => {
++                    let message = request.map(|request| {
++                        let (parts, ()) = request.into_parts();
++                        Request::from_parts(parts, cleanup.body)
++                    });
++                    cleanup.cb.send(Err(TrySendError {
++                        error: crate::Error::new_h2(error),
++                        message,
++                    }));
++                }
++                Poll::Ready(Ok(_)) => {
++                    unreachable!("failed native admission cannot become successful")
++                }
++            }
++        }
++    }
++
+     fn poll_pipe(&mut self, f: FutCtx<B>, cx: &mut Context<'_>) {
+         let ping = self.ping.clone();
+ 
++        #[cfg(feature = "go-client-idle")]
++        let go_control = (self.go_native_client && !f.is_connect && !f.eos)
++            .then(super::GoRequestBodyControl::default);
++        #[cfg(feature = "go-client-idle")]
++        let mut go_empty_request_sender = None;
+         // A one-shot channel so that send_task can tell pipe_task to
+         // reset the stream when the client cancels the request.
+         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+@@ -533,6 +649,10 @@
+         let send_stream = if !f.is_connect {
+             if !f.eos {
+                 let mut pipe = PipeToSendStream::new(f.body, f.body_tx);
++                #[cfg(feature = "go-client-idle")]
++                if let Some(control) = go_control.as_ref() {
++                    pipe.go_control(control.clone());
++                }
+ 
+                 // eagerly see if the body pipe is ready and
+                 // can thus skip allocating in the executor
+@@ -556,6 +676,14 @@
+                             .execute_h2_future(H2ClientFuture::Pipe { pipe });
+                     }
+                 }
++            } else {
++                #[cfg(feature = "go-client-idle")]
++                if self.go_native_client {
++                    go_empty_request_sender = Some(GoEmptyRequestSender {
++                        sender: f.body_tx,
++                        waiting: false,
++                    });
++                }
+             }
+ 
+             None
+@@ -570,6 +698,15 @@
+                     ping: Some(ping),
+                     send_stream: Some(send_stream),
+                     exec: self.executor.clone(),
++                    #[cfg(feature = "go-client-idle")]
++                    go_control: go_control.map(|control| GoRequestBodyOwner {
++                        control,
++                        pending: true,
++                    }),
++                    #[cfg(feature = "go-client-idle")]
++                    go_empty_request_sender,
++                    #[cfg(feature = "go-client-idle")]
++                    go_response: None,
+                     cancel_tx: Some(cancel_tx),
+                 },
+                 call_back: Some(f.cb),
+@@ -590,10 +727,41 @@
+         #[pin]
+         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
+         exec: E,
++        #[cfg(feature = "go-client-idle")]
++        go_control: Option<GoRequestBodyOwner>,
++        #[cfg(feature = "go-client-idle")]
++        go_empty_request_sender: Option<GoEmptyRequestSender<<B as Body>::Data>>,
++        #[cfg(feature = "go-client-idle")]
++        go_response: Option<Response<h2::RecvStream>>,
+         cancel_tx: Option<oneshot::Sender<()>>,
+     }
+ }
+ 
++#[cfg(feature = "go-client-idle")]
++impl<B: Body + 'static, E> ResponseFutMap<B, E> {
++    pub(crate) fn go_has_request_control(&self) -> bool {
++        self.go_control.is_some() || self.go_empty_request_sender.is_some()
++    }
++
++    pub(crate) fn go_cancel_undelivered(self: Pin<&mut Self>) {
++        let this = self.project();
++        if let Some(owner) = this.go_control.as_mut() {
++            owner.control.cancel();
++            owner.pending = false;
++        }
++        if let Some(sender) = this.go_empty_request_sender.as_mut() {
++            sender.sender.go_cancel_request_after_response();
++            sender.waiting = false;
++        }
++    }
++
++    pub(crate) fn go_response_delivered(self: Pin<&mut Self>) {
++        if let Some(owner) = self.project().go_control.as_mut() {
++            owner.pending = false;
++        }
++    }
++}
++
+ impl<B: Body + 'static, E> ResponseFutMap<B, E> {
+     /// Signal the `pipe_task` to reset the stream (e.g. on client cancellation).
+     pub(crate) fn cancel(self: Pin<&mut Self>) {
+@@ -613,8 +781,38 @@
+     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+         let mut this = self.as_mut().project();
+ 
++        #[cfg(feature = "go-client-idle")]
++        let result = if let Some(response) = this.go_response.take() {
++            Ok(response)
++        } else {
++            ready!(this.fut.poll(cx))
++        };
++        #[cfg(not(feature = "go-client-idle"))]
+         let result = ready!(this.fut.poll(cx));
+ 
++        #[cfg(feature = "go-client-idle")]
++        if let Ok(response) = &result {
++            if response.status().as_u16() > 299 {
++                if let Some(control) = this.go_control.as_ref() {
++                    control.control.stop();
++                }
++            }
++            if this.go_empty_request_sender.is_some() && response.body().go_body_is_no_body() {
++                if let Some(sender) = this.go_empty_request_sender.as_mut() {
++                    if sender.sender.go_poll_finish_request_body(cx).is_pending() {
++                        sender.waiting = true;
++                        // Go waits donec for noBody plus an actual empty request.
++                        // A MissingBody response remains observable immediately.
++                        *this.go_response = result.ok();
++                        return Poll::Pending;
++                    }
++                    // waitDone observes completion, not cleanup's abort error.
++                    sender.waiting = false;
++                    this.go_empty_request_sender.take();
++                }
++            }
++        }
++
+         let ping = this.ping.take().expect("Future polled twice");
+         let send_stream = this.send_stream.take().expect("Future polled twice");
+ 
+@@ -676,18 +874,88 @@
+     type Output = crate::Result<Dispatched>;
+ 
+     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
++        #[cfg(feature = "go-client-idle")]
++        if self.go_native_client {
++            self.poll_go_cleanup(cx);
++        }
++        #[cfg(feature = "go-client-idle")]
++        self.go_pending
++            .retain_mut(|pending| pending.cb.poll_canceled(cx).is_pending());
++        #[cfg(feature = "go-client-idle")]
++        let mut native_steps = 0;
+         loop {
+-            match ready!(self.h2_tx.poll_ready(cx)) {
+-                Ok(()) => (),
+-                Err(err) => {
+-                    self.ping.ensure_not_timed_out()?;
+-                    return if err.reason() == Some(::h2::Reason::NO_ERROR) {
+-                        trace!("connection gracefully shutdown");
+-                        Poll::Ready(Ok(Dispatched::Shutdown))
+-                    } else {
+-                        Poll::Ready(Err(crate::Error::new_h2(err)))
+-                    };
++            #[cfg(feature = "go-client-idle")]
++            if self.go_native_client {
++                if native_steps == 32 {
++                    cx.waker().wake_by_ref();
++                    return Poll::Pending;
+                 }
++                native_steps += 1;
++            }
++            #[cfg(feature = "go-client-idle")]
++            if let Some(mut pending) = self.go_pending.pop_front() {
++                if pending.cb.poll_canceled(cx).is_ready() {
++                    // Dropping an ID-free admission releases its header
++                    // queue/reservation and queues the final writer check;
++                    // no stream ID or RST is created.
++                    continue;
++                }
++                match Pin::new(&mut pending.future).poll(cx) {
++                    Poll::Pending => {
++                        if pending.future.go_waiting_cleanup() {
++                            // This waiter owns no header lock; retain its
++                            // original unsent error independently of admission.
++                            self.go_cleanup.push_back(pending);
++                            continue;
++                        }
++                        // Keep accepting/canceling ID-free requests while this
++                        // header lock is held, as Go's independent waiters do.
++                        self.go_pending.push_front(pending);
++                    }
++                    Poll::Ready(Ok((fut, body_tx))) => {
++                        self.poll_pipe(
++                            FutCtx {
++                                is_connect: pending.is_connect,
++                                eos: pending.eos,
++                                fut,
++                                body_tx,
++                                body: pending.body,
++                                cb: pending.cb,
++                            },
++                            cx,
++                        );
++                        continue;
++                    }
++                    Poll::Ready(Err((error, request))) => {
++                        let message = request.map(|request| {
++                            let (parts, ()) = request.into_parts();
++                            Request::from_parts(parts, pending.body)
++                        });
++                        pending.cb.send(Err(TrySendError {
++                            error: crate::Error::new_h2(error),
++                            message,
++                        }));
++                        continue;
++                    }
++                }
++            }
++            #[cfg(feature = "go-client-idle")]
++            let classic_ready = !self.go_native_client;
++            #[cfg(not(feature = "go-client-idle"))]
++            let classic_ready = true;
++            if classic_ready {
++                match ready!(self.h2_tx.poll_ready(cx)) {
++                    Ok(()) => (),
++                    Err(err) => {
++                        self.ping.ensure_not_timed_out()?;
++                        return if err.reason() == Some(::h2::Reason::NO_ERROR) {
++                            trace!("connection gracefully shutdown");
++                            Poll::Ready(Ok(Dispatched::Shutdown))
++                        } else {
++                            Poll::Ready(Err(crate::Error::new_h2(err)))
++                        };
++                    }
++                };
+             }
+ 
+             // If we were waiting on pending open
+@@ -701,6 +969,10 @@
+                 Poll::Ready(Some((req, cb))) => {
+                     // check that future hasn't been canceled already
+                     if cb.is_canceled() {
++                        #[cfg(feature = "go-client-idle")]
++                        if self.go_native_client {
++                            self.h2_tx.go_cancel_unsent_request(&req);
++                        }
+                         trace!("request callback is canceled");
+                         continue;
+                     }
+@@ -721,6 +993,10 @@
+                             .map_or(false, |len| len != 0)
+                     {
+                         debug!("h2 connect request with non-zero body not supported");
++                        #[cfg(feature = "go-client-idle")]
++                        if self.go_native_client {
++                            self.h2_tx.go_cancel_unsent_request(&req);
++                        }
+                         cb.send(Err(TrySendError {
+                             error: crate::Error::new_user_invalid_connect(),
+                             message: None,
+@@ -732,6 +1008,23 @@
+                         req.extensions_mut().insert(protocol.into_inner());
+                     }
+ 
++                    #[cfg(feature = "go-client-idle")]
++                    if self.go_native_client {
++                        let mut pending = GoPendingAdmission {
++                            future: self.h2_tx.go_send_request(req, !is_connect && eos),
++                            body,
++                            cb,
++                            is_connect,
++                            eos,
++                        };
++                        // Cancellation must wake this task even when another
++                        // request's header flight owns reqHeaderMu indefinitely.
++                        if pending.cb.poll_canceled(cx).is_pending() {
++                            self.go_pending.push_back(pending);
++                        }
++                        continue;
++                    }
++
+                     let (fut, body_tx) = match self.h2_tx.send_request(req, !is_connect && eos) {
+                         Ok(ok) => ok,
+                         Err(err) => {
+@@ -775,6 +1068,12 @@
+                 }
+ 
+                 Poll::Ready(None) => {
++                    #[cfg(feature = "go-client-idle")]
++                    if !self.go_pending.is_empty() || !self.go_cleanup.is_empty() {
++                        // An accepted request is still owned until admission or
++                        // cancellation even after every dispatch sender drops.
++                        return Poll::Pending;
++                    }
+                     trace!("client::dispatch::Sender dropped");
+                     return Poll::Ready(Ok(Dispatched::Shutdown));
+                 }
+@@ -785,6 +1084,12 @@
+                     #[allow(unused)]
+                     Ok(never) => match never {},
+                     Err(_conn_is_eof) => {
++                        #[cfg(feature = "go-client-idle")]
++                        if !self.go_cleanup.is_empty() {
++                            // Terminal connection cleanup completed these gates.
++                            // Deliver their retained original errors first.
++                            self.poll_go_cleanup(cx);
++                        }
+                         trace!("connection task is closed, closing dispatch task");
+                         return Poll::Ready(Ok(Dispatched::Shutdown));
+                     }
+--- a/vendor/hyper/src/proto/h2/mod.rs
++++ b/vendor/hyper/src/proto/h2/mod.rs
+@@ -91,6 +91,69 @@
+ 
+ // body adapters used by both Client and Server
+ 
++#[cfg(all(feature = "client", feature = "go-client-idle"))]
++#[derive(Clone, Default)]
++struct GoRequestBodyControl(std::sync::Arc<std::sync::Mutex<GoRequestBodyState>>);
++
++#[cfg(all(feature = "client", feature = "go-client-idle"))]
++#[derive(Default)]
++struct GoRequestBodyState {
++    stopped: bool,
++    canceled: bool,
++    task: Option<std::task::Waker>,
++}
++
++#[cfg(all(feature = "client", feature = "go-client-idle"))]
++#[derive(Clone, Copy)]
++enum GoRequestBodyAction {
++    Write,
++    Stop,
++    Cancel,
++}
++
++#[cfg(all(feature = "client", feature = "go-client-idle"))]
++impl GoRequestBodyControl {
++    fn stop(&self) {
++        let task = {
++            let mut state = self.0.lock().unwrap();
++            state.stopped = true;
++            state.task.take()
++        };
++        if let Some(task) = task {
++            task.wake();
++        }
++    }
++
++    fn cancel(&self) {
++        let task = {
++            let mut state = self.0.lock().unwrap();
++            state.canceled = true;
++            state.task.take()
++        };
++        if let Some(task) = task {
++            task.wake();
++        }
++    }
++
++    fn action(&self, cx: &Context<'_>) -> GoRequestBodyAction {
++        let mut state = self.0.lock().unwrap();
++        if state.canceled {
++            GoRequestBodyAction::Cancel
++        } else if state.stopped {
++            GoRequestBodyAction::Stop
++        } else {
++            if state
++                .task
++                .as_ref()
++                .map_or(true, |task| !task.will_wake(cx.waker()))
++            {
++                state.task = Some(cx.waker().clone());
++            }
++            GoRequestBodyAction::Write
++        }
++    }
++}
++
+ pin_project! {
+     pub(crate) struct PipeToSendStream<S>
+     where
+@@ -98,13 +161,19 @@
+     {
+         body_tx: SendStream<SendBuf<S::Data>>,
+         data_done: bool,
++        #[cfg(all(feature = "client", feature = "go-client-idle"))]
++        go_control: Option<GoRequestBodyControl>,
++        #[cfg(all(feature = "client", feature = "go-client-idle"))]
++        go_headers_ready: bool,
++        #[cfg(all(feature = "client", feature = "go-client-idle"))]
++        go_cancel_started: bool,
+         // A data chunk that has been polled from the body but is still waiting
+         // for stream-level capacity before it can be shipped. Stored here so
+         // it survives across `Poll::Pending` returns from `poll_capacity`; if
+         // we left the chunk in a local, it would be dropped on every repoll.
+         buffered_data: Option<Peeked<S::Data>>,
+         #[pin]
+-        stream: S,
++        stream: Option<S>,
+     }
+ }
+ 
+@@ -121,11 +190,22 @@
+         PipeToSendStream {
+             body_tx: tx,
+             data_done: false,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_control: None,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_headers_ready: false,
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            go_cancel_started: false,
+             buffered_data: None,
+-            stream,
++            stream: Some(stream),
+         }
+     }
+ 
++    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++    fn go_control(&mut self, control: GoRequestBodyControl) {
++        self.go_control = Some(control);
++    }
++
+     #[cfg(feature = "client")]
+     fn send_reset(self: Pin<&mut Self>, reason: h2::Reason) {
+         self.project().body_tx.send_reset(reason);
+@@ -142,6 +222,35 @@
+     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+         let mut me = self.project();
+         loop {
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            if let Some(control) = me.go_control.as_ref() {
++                let action = control.action(cx);
++                match action {
++                    GoRequestBodyAction::Write => {}
++                    GoRequestBodyAction::Stop | GoRequestBodyAction::Cancel => {
++                        me.stream.set(None);
++                        *me.buffered_data = None;
++                        if matches!(action, GoRequestBodyAction::Cancel) && !*me.go_cancel_started {
++                            // An undelivered callback's cancellation differs
++                            // from >299's successful body-stop heuristic.
++                            me.body_tx.go_cancel_request_after_response();
++                            *me.go_cancel_started = true;
++                        }
++                        // Keep the sender alive through captured CANCEL or
++                        // peer EOS plus successful NO_ERROR cleanup.
++                        return me
++                            .body_tx
++                            .go_poll_finish_request_body(cx)
++                            .map_err(crate::Error::new_body_write);
++                    }
++                }
++            }
++            #[cfg(all(feature = "client", feature = "go-client-idle"))]
++            if me.go_control.is_some() && !*me.go_headers_ready {
++                ready!(me.body_tx.go_poll_request_headers(cx))
++                    .map_err(crate::Error::new_body_write)?;
++                *me.go_headers_ready = true;
++            }
+             // Register for RST_STREAM notification while we wait for the next
+             // body chunk or for send capacity, so the task wakes up if the
+             // peer resets the stream.
+@@ -186,17 +295,18 @@
+                 continue;
+             }
+ 
+-            // Poll for the next body frame *before* reserving any connection
+-            // flow-control capacity. Reserving capacity speculatively (even a
+-            // single byte) pins that capacity on the connection-level window,
+-            // which can deadlock a second stream when talking to peers that
+-            // only emit WINDOW_UPDATE once their receive window is fully
+-            // exhausted. See #4003.
+-            match ready!(me.stream.as_mut().poll_frame(cx)) {
++            // Poll the body before reserving capacity, preserving upstream's
++            // fix for speculative window claims against a pending body.
++            let mut stream = me
++                .stream
++                .as_mut()
++                .as_pin_mut()
++                .expect("body pipe completed");
++            match ready!(stream.as_mut().poll_frame(cx)) {
+                 Some(Ok(frame)) => {
+                     if frame.is_data() {
+                         let chunk = frame.into_data().unwrap_or_else(|_| unreachable!());
+-                        let is_eos = me.stream.is_end_stream();
++                        let is_eos = stream.is_end_stream();
+                         let len = chunk.remaining();
+                         trace!("send body chunk: {} bytes, eos={}", len, is_eos);
+ 
+@@ -247,7 +357,28 @@
+                         // loop again
+                     }
+                 }
+-                Some(Err(e)) => return Poll::Ready(Err(me.body_tx.on_user_err(e))),
++                Some(Err(e)) => {
++                    #[cfg(all(feature = "client", feature = "go-client-idle"))]
++                    if me.go_control.is_some() {
++                        let error = crate::Error::new_user_body(e);
++                        if let Some(h2_error) = error
++                            .find_source::<h2::Error>()
++                            .filter(|error| error.is_reset())
++                        {
++                            if h2_error.is_remote() {
++                                me.body_tx.go_receive_request_body_error(h2_error);
++                            } else {
++                                me.body_tx.go_send_protocol_reset(
++                                    h2_error.reason().expect("reset reason"),
++                                );
++                            }
++                        } else {
++                            me.body_tx.go_send_request_body_error();
++                        }
++                        return Poll::Ready(Err(error));
++                    }
++                    return Poll::Ready(Err(me.body_tx.on_user_err(e)));
++                }
+                 None => {
+                     // no more frames means we're done here
+                     // but at this point, we haven't sent an EOS DATA, or
+--- a/vendor/hyper/src/proto/h2/server.rs
++++ b/vendor/hyper/src/proto/h2/server.rs
+@@ -56,6 +56,10 @@
+     pub(crate) header_table_size: Option<u32>,
+     pub(crate) max_header_list_size: u32,
+     pub(crate) date_header: bool,
++    #[cfg(feature = "go-server-lifecycle")]
++    pub(crate) go_native_server: Option<Option<Duration>>,
++    #[cfg(feature = "go-server-lifecycle")]
++    pub(crate) go_stream_timeouts: Option<(Option<Duration>, Option<Duration>)>,
+ }
+ 
+ impl Default for Config {
+@@ -75,6 +79,10 @@
+             max_send_buffer_size: DEFAULT_MAX_SEND_BUF_SIZE,
+             max_header_list_size: DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE,
+             date_header: true,
++            #[cfg(feature = "go-server-lifecycle")]
++            go_native_server: None,
++            #[cfg(feature = "go-server-lifecycle")]
++            go_stream_timeouts: None,
+         }
+     }
+ }
+@@ -133,6 +141,13 @@
+         timer: Time,
+     ) -> Server<T, S, B, E> {
+         let mut builder = h2::server::Builder::default();
++        #[cfg(feature = "go-server-lifecycle")]
++        if let Some(idle_timeout) = config.go_native_server {
++            builder.go_native_server(idle_timeout);
++            if let Some((read, write)) = config.go_stream_timeouts {
++                builder.go_stream_timeouts(read, write);
++            }
++        }
+         builder
+             .initial_window_size(config.initial_stream_window_size)
+             .initial_connection_window_size(config.initial_conn_window_size)
+@@ -486,7 +501,9 @@
+                             if headers::content_length_parse_all(res.headers())
+                                 .map_or(false, |len| len != 0)
+                             {
+-                                warn!("h2 successful response to CONNECT request with body not supported");
++                                warn!(
++                                    "h2 successful response to CONNECT request with body not supported"
++                                );
+                                 me.reply.send_reset(h2::Reason::INTERNAL_ERROR);
+                                 return Poll::Ready(Err(crate::Error::new_user_header()));
+                             }
+@@ -495,7 +512,9 @@
+                                 .remove(::http::header::CONTENT_LENGTH)
+                                 .is_some()
+                             {
+-                                warn!("successful response to CONNECT request disallows content-length header");
++                                warn!(
++                                    "successful response to CONNECT request disallows content-length header"
++                                );
+                             }
+                             let send_stream = reply!(me, res, false);
+                             let (h2_up, up_task) = super::upgrade::pair(
+--- a/vendor/hyper/src/server/conn/http2.rs
++++ b/vendor/hyper/src/server/conn/http2.rs
+@@ -280,6 +280,33 @@
+         self
+     }
+ 
++    /// Select the vendored Go server lifecycle for this connection only.
++    ///
++    /// `None` leaves native idle expiry disabled; it still enables native
++    /// graceful GOAWAY and the post-GOAWAY close delay. The default builder
++    /// keeps the upstream lifecycle, including for gRPC servers.
++    #[cfg(feature = "go-server-lifecycle")]
++    #[doc(hidden)]
++    pub fn go_native_server(&mut self, idle_timeout: Option<Duration>) -> &mut Self {
++        self.h2_builder.go_native_server = Some(idle_timeout);
++        self
++    }
++
++    /// Set per-stream deadlines for a selected native Go server.
++    ///
++    /// Each `None` disables that timeout. The upstream lifecycle is unchanged
++    /// unless `go_native_server` is also selected on this builder.
++    #[cfg(feature = "go-server-lifecycle")]
++    #[doc(hidden)]
++    pub fn go_stream_timeouts(
++        &mut self,
++        read: Option<Duration>,
++        write: Option<Duration>,
++    ) -> &mut Self {
++        self.h2_builder.go_stream_timeouts = Some((read, write));
++        self
++    }
++
+     /// Set the timer used in background tasks.
+     pub fn timer<M>(&mut self, timer: M) -> &mut Self
+     where
+--- /dev/null
++++ b/vendor/hyper/src/body/go_h1.rs
+@@ -0,0 +1,129 @@
++//! Native client response-body handshake, derived from Go 1.26.9
++//! net/http/transport.go bodyEOFSignal and persistConn.readLoop.
++//! See LICENSE-GO and LICENSE-GO-NOTICE for upstream attribution.
++
++use std::sync::{Arc, Mutex};
++use std::task::{Context, Poll, Waker};
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Verdict {
++    Pending,
++    Eof,
++    Early,
++}
++
++struct State {
++    verdict: Verdict,
++    done: bool,
++    pool_required: bool,
++    pool_done: bool,
++    driver: Option<Waker>,
++    consumer: Option<Waker>,
++}
++
++pub(crate) struct Consumer(Arc<Mutex<State>>);
++pub(crate) struct Driver(Arc<Mutex<State>>);
++
++/// Completes the native HTTP/1 pool-return decision when dropped.
++#[doc(hidden)]
++pub struct GoH1PoolWait(Arc<Mutex<State>>);
++
++impl std::fmt::Debug for GoH1PoolWait {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("GoH1PoolWait(..)")
++    }
++}
++
++pub(crate) fn channel() -> (Driver, Consumer) {
++    let state = Arc::new(Mutex::new(State {
++        verdict: Verdict::Pending,
++        done: false,
++        pool_required: false,
++        pool_done: false,
++        driver: None,
++        consumer: None,
++    }));
++    (Driver(state.clone()), Consumer(state))
++}
++
++impl Consumer {
++    pub(crate) fn pending(&self) -> bool {
++        self.0.lock().unwrap().verdict == Verdict::Pending
++    }
++
++    pub(crate) fn verdict(&self, verdict: Verdict) {
++        let task = {
++            let mut state = self.0.lock().unwrap();
++            if state.verdict != Verdict::Pending {
++                return;
++            }
++            state.verdict = verdict;
++            state.driver.take()
++        };
++        if let Some(task) = task {
++            task.wake();
++        }
++    }
++
++    pub(crate) fn poll_done(&self, cx: &Context<'_>) -> Poll<()> {
++        let mut state = self.0.lock().unwrap();
++        if state.done && (!state.pool_required || state.pool_done) {
++            Poll::Ready(())
++        } else {
++            state.consumer = Some(cx.waker().clone());
++            Poll::Pending
++        }
++    }
++
++    pub(crate) fn pool_wait(&self) -> GoH1PoolWait {
++        self.0.lock().unwrap().pool_required = true;
++        GoH1PoolWait(self.0.clone())
++    }
++}
++
++impl Drop for GoH1PoolWait {
++    fn drop(&mut self) {
++        let task = {
++            let mut state = self.0.lock().unwrap();
++            state.pool_done = true;
++            state.consumer.take()
++        };
++        if let Some(task) = task {
++            task.wake();
++        }
++    }
++}
++
++impl Drop for Consumer {
++    fn drop(&mut self) {
++        // Cancellation of Close/Read must not leave the connection waiting for
++        // a consumer that can no longer deliver its EOF decision.
++        self.verdict(Verdict::Early);
++    }
++}
++
++impl Driver {
++    pub(crate) fn verdict(&self, cx: &Context<'_>) -> Verdict {
++        let mut state = self.0.lock().unwrap();
++        state.driver = Some(cx.waker().clone());
++        state.verdict
++    }
++
++    pub(crate) fn complete(&self) {
++        let task = {
++            let mut state = self.0.lock().unwrap();
++            state.done = true;
++            state.consumer.take()
++        };
++        if let Some(task) = task {
++            task.wake();
++        }
++    }
++}
++
++impl Drop for Driver {
++    fn drop(&mut self) {
++        // Covers connection errors and cancellation of the connection future.
++        self.complete();
++    }
++}
+

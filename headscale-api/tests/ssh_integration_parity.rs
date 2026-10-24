@@ -443,13 +443,16 @@ fn test_ssh_one_user_to_one_check_mode_cli() {
     );
     assert_check(&user1_target.rules[0]);
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 2),
+        ssh_check_period_for(&doc, &nodes, 1, 2, "ssh-it-user"),
         Some(Duration::from_secs(12 * 60 * 60))
     );
     assert_eq!(user2_target.rules.len(), 1);
     assert_eq!(rule_ips(&user2_target.rules[0]), vec!["100.64.0.1"]);
     assert_check(&user2_target.rules[0]);
-    assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 1), None);
+    assert_eq!(
+        ssh_check_period_for(&doc, &nodes, 3, 1, "ssh-it-user"),
+        None
+    );
 }
 
 #[test]
@@ -500,10 +503,13 @@ fn test_ssh_check_mode_check_period_cli() {
 
     assert_check(&policy.rules[0]);
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 2),
+        ssh_check_period_for(&doc, &nodes, 1, 2, "ssh-it-user"),
         Some(Duration::from_secs(60))
     );
-    assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
+    assert_eq!(
+        ssh_check_period_for(&doc, &nodes, 3, 2, "ssh-it-user"),
+        None
+    );
 }
 
 #[test]
@@ -534,11 +540,11 @@ fn test_ssh_check_mode_check_period_always_and_zero_cli() {
     ];
 
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 3),
+        ssh_check_period_for(&doc, &nodes, 1, 3, "ssh-it-user"),
         Some(Duration::ZERO)
     );
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 2),
+        ssh_check_period_for(&doc, &nodes, 1, 2, "ssh-it-user"),
         Some(Duration::ZERO)
     );
 
@@ -563,14 +569,17 @@ async fn test_ssh_check_mode_negative_cli() {
     let nodes = check_nodes();
 
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 2),
+        ssh_check_period_for(&doc, &nodes, 1, 2, "ssh-it-user"),
         Some(Duration::from_secs(12 * 60 * 60))
     );
     assert_eq!(
-        ssh_check_period_for(&doc, &nodes, 1, 3),
+        ssh_check_period_for(&doc, &nodes, 1, 3, "ssh-it-user"),
         Some(Duration::from_secs(12 * 60 * 60))
     );
-    assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 1), None);
+    assert_eq!(
+        ssh_check_period_for(&doc, &nodes, 3, 1, "ssh-it-user"),
+        None
+    );
 
     let binding = SshCheckBinding {
         src_node_id: 1,

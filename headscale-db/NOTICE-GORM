@@ -1,0 +1,22 @@
+Gorm persistence callback and JSON serializer compatibility references
+
+Copyright (c) 2013-present Jinzhu <wosmvp@gmail.com>
+
+Native JSON nil-to-SQL-NULL and HTML-safe JSON behavior follows
+schema/serializer.go. Fresh captured belongs-to saves, ON CONFLICT DO NOTHING,
+auto timestamps and selected struct-update semantics follow
+callbacks/associations.go, callbacks/callbacks.go, callbacks/create.go and
+callbacks/update.go. Ordinary nullable bool zero-value scans follow
+schema/field.go and scan.go from gorm.io/gorm v1.31.1, used by the pinned headscale-go
+v0.29.5 persistence path. The implementation is maintained in Rust; no Gorm
+runtime dependency is introduced. The original MIT terms are retained in
+LICENSE-GORM.
+
+Source SHA-256:
+schema/serializer.go: 9dadcf607eccadd1f6cab29f72a95d8ff7c683e20dd412f585a5b5d15797a1a8
+callbacks/associations.go: 88df3bc6753ca10987882ff7faecb8fd0e6b7094f5980b6714be4e75b5ad0e48
+callbacks/callbacks.go: 09e83125a790236a8fba7691d3d1c69ebfa9e9bce1e9bb904950c56553c9ed3c
+callbacks/create.go: c3c21f80a84e79ef164ebefc3df5bd298edef6af04f4f3a0474d205749ad39d8
+callbacks/update.go: 2e3f126b3884faf20941fb4427e9b0949ba21c1e1604ccb1ab52495dcfcae717
+schema/field.go: ab4f07b8fb8911e3f1bb19c292f0f46b48ae0130af845eb4ba13523cb5c71f37
+scan.go: 4ab60fcb86fa7aed67195eeef1d9cc812f55c86c050355ca9d4e77489b0fd027

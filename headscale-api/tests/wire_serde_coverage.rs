@@ -30,6 +30,7 @@ use serde_json::Value;
 
 #[test]
 fn strip_key_prefix_returns_body_for_each_prefix() {
+    // Prefix stripping is textual and does not validate the key body.
     assert_eq!(strip_key_prefix("mkey:deadbeef"), Some("deadbeef"));
     assert_eq!(strip_key_prefix("nodekey:cafe"), Some("cafe"));
     assert_eq!(strip_key_prefix("discokey:0102"), Some("0102"));
@@ -314,9 +315,13 @@ fn hostinfo_round_trips_net_info_preferred_derp() {
 
 #[test]
 fn register_request_optional_fields_default_to_none() {
-    let j = r#"{"NodeKey":"nodekey:cafe"}"#;
+    let j =
+        r#"{"NodeKey":"nodekey:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"}"#;
     let r: RegisterRequest = serde_json::from_str(j).unwrap();
-    assert_eq!(r.node_key, "nodekey:cafe");
+    assert_eq!(
+        r.node_key,
+        "nodekey:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"
+    );
     assert!(r.auth.is_none());
     assert!(r.hostinfo.is_none());
     assert!(r.followup.is_none());
@@ -327,7 +332,7 @@ fn register_request_optional_fields_default_to_none() {
 #[test]
 fn register_request_accepts_ephemeral_and_expiry() {
     let j = r#"{
-        "NodeKey":"nodekey:cafe",
+        "NodeKey":"nodekey:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
         "Ephemeral": true,
         "Expiry": "2026-06-01T00:00:00Z",
         "NodeKeySignature": "bm9kZS1zaWduYXR1cmU=",
@@ -352,7 +357,7 @@ fn register_request_accepts_ephemeral_and_expiry() {
 #[test]
 fn register_request_accepts_null_node_key_signature() {
     let j = r#"{
-        "NodeKey":"nodekey:cafe",
+        "NodeKey":"nodekey:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
         "NodeKeySignature": null
     }"#;
     let r: RegisterRequest = serde_json::from_str(j).unwrap();
@@ -445,10 +450,10 @@ fn map_request_disco_key_round_trip() {
         keep_alive: true,
         hostinfo: None,
         omit_peers: false,
-        node_key: "nodekey:dead".into(),
+        node_key: "nodekey:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead".into(),
         map_session_handle: "session-1".into(),
         map_session_seq: 7,
-        disco_key: Some("discokey:beef".into()),
+        disco_key: Some("discokey:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".into()),
         hardware_attestation_key: Some(
             "hwattestpub:046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
                 .into(),
@@ -464,7 +469,9 @@ fn map_request_disco_key_round_trip() {
     };
     let j = serde_json::to_string(&r).unwrap();
     // PascalCase + explicit `DiscoKey` rename.
-    assert!(j.contains("\"DiscoKey\":\"discokey:beef\""));
+    assert!(j.contains(
+        "\"DiscoKey\":\"discokey:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef\""
+    ));
     assert!(j.contains("\"Endpoints\":[\"198.51.100.1:41641\"]"));
     assert!(j.contains("\"MapSessionHandle\":\"session-1\""));
     assert!(j.contains("\"EndpointTypes\":[1]"));
@@ -473,7 +480,10 @@ fn map_request_disco_key_round_trip() {
     assert!(j.contains("\"HardwareAttestationKeySignatureTimestamp\":\"2026-05-22T12:00:00Z\""));
     assert!(j.contains("\"ConnectionHandleForTest\":\"conn-test-1\""));
     let back: MapRequest = serde_json::from_str(&j).unwrap();
-    assert_eq!(back.disco_key.as_deref(), Some("discokey:beef"));
+    assert_eq!(
+        back.disco_key.as_deref(),
+        Some("discokey:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef")
+    );
     assert_eq!(back.endpoints.as_ref().unwrap().len(), 1);
     assert_eq!(back.endpoint_types, vec![1]);
     assert_eq!(back.map_session_seq, 7);
@@ -492,7 +502,7 @@ fn map_request_disco_key_skipped_when_none() {
         keep_alive: false,
         hostinfo: None,
         omit_peers: false,
-        node_key: "nodekey:dead".into(),
+        node_key: "nodekey:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead".into(),
         map_session_handle: String::new(),
         map_session_seq: 0,
         disco_key: None,
@@ -523,7 +533,7 @@ fn map_request_zero_value_omits_go_omitzero_fields() {
         keep_alive: false,
         hostinfo: None,
         omit_peers: false,
-        node_key: "nodekey:dead".into(),
+        node_key: "nodekey:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead".into(),
         map_session_handle: String::new(),
         map_session_seq: 0,
         disco_key: None,
@@ -540,7 +550,10 @@ fn map_request_zero_value_omits_go_omitzero_fields() {
 
     let v: Value = serde_json::to_value(&r).unwrap();
     assert_eq!(v["Version"], 39);
-    assert_eq!(v["NodeKey"], "nodekey:dead");
+    assert_eq!(
+        v["NodeKey"],
+        "nodekey:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+    );
     // Untagged upstream fields are still present when zero.
     assert!(v.get("Hostinfo").is_some());
     assert!(v["Hostinfo"].is_null());
@@ -569,7 +582,8 @@ fn map_request_zero_value_omits_go_omitzero_fields() {
 
 #[test]
 fn map_request_endpoints_defaults_to_none_when_absent() {
-    let j = r#"{"NodeKey":"nodekey:cafe"}"#;
+    let j =
+        r#"{"NodeKey":"nodekey:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"}"#;
     let r: MapRequest = serde_json::from_str(j).unwrap();
     assert!(r.endpoints.is_none());
     assert!(r.disco_key.is_none());
@@ -585,8 +599,10 @@ fn mk_node() -> MapNode {
         stable_id: "n7".into(),
         name: "h1.octra.test".into(),
         user: 42,
-        key: "nodekey:aa".into(),
-        machine: Some("mkey:bb".into()),
+        key: "nodekey:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        machine: Some(
+            "mkey:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        ),
         addresses: vec!["100.64.0.5/32".into()],
         allowed_ips: vec!["100.64.0.5/32".into()],
         primary_routes: Vec::new(),
@@ -602,7 +618,9 @@ fn mk_node() -> MapNode {
         cap_map: BTreeMap::new(),
         expired: false,
         home_derp: 0,
-        disco_key: Some("discokey:cc".into()),
+        disco_key: Some(
+            "discokey:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+        ),
         endpoints: vec!["198.51.100.1:41641".into()],
         ..MapNode::default()
     }
@@ -1028,9 +1046,13 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
             cap: 99,
             cap_map: peer_cap_map,
             endpoints: vec!["198.51.100.2:41641".into()],
-            key: Some("nodekey:bb".into()),
+            key: Some(
+                "nodekey:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            ),
             key_signature: "AQI=".into(),
-            disco_key: Some("discokey:cc".into()),
+            disco_key: Some(
+                "discokey:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            ),
             online: Some(false),
             last_seen: Some("2026-05-21T12:35:00Z".parse().unwrap()),
             key_expiry: Some("2026-06-21T12:35:00Z".parse().unwrap()),
@@ -1082,7 +1104,10 @@ fn map_response_delta_debug_and_control_fields_round_trip() {
     assert_eq!(v["PingRequest"]["URLIsNoise"], true);
     assert_eq!(v["PopBrowserURL"], "https://control.example/login");
     assert_eq!(v["PeersChangedPatch"][0]["NodeID"], 2);
-    assert_eq!(v["PeersChangedPatch"][0]["DiscoKey"], "discokey:cc");
+    assert_eq!(
+        v["PeersChangedPatch"][0]["DiscoKey"],
+        "discokey:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    );
     assert_eq!(
         v["PeersChangedPatch"][0]["CapMap"]["https://tailscale.com/cap/file-sharing"][0]["enabled"],
         true
@@ -1183,7 +1208,7 @@ fn ssh_event_notify_request_round_trips_recording_attempts() {
         event_type: 2,
         connection_id: "ssh-connection-1".into(),
         cap_version: 113,
-        node_key: "nodekey:0123456789abcdef".into(),
+        node_key: "nodekey:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
         src_node: 42,
         ssh_user: "ubuntu".into(),
         local_user: "alice".into(),
@@ -1198,7 +1223,10 @@ fn ssh_event_notify_request_round_trips_recording_attempts() {
     assert_eq!(v["ConnectionID"], "ssh-connection-1");
     assert!(v.get("ConnectionId").is_none());
     assert_eq!(v["CapVersion"], 113);
-    assert_eq!(v["NodeKey"], "nodekey:0123456789abcdef");
+    assert_eq!(
+        v["NodeKey"],
+        "nodekey:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
     assert_eq!(v["SrcNode"], 42);
     assert_eq!(v["SSHUser"], "ubuntu");
     assert!(v.get("SshUser").is_none());

@@ -1,10 +1,10 @@
 //! DERP source loading for upstream-shaped `derp:` config.
 //!
 //! Startup loading can fetch JSON URL maps and merge local YAML path maps into
-//! the wire `DerpMap`. Config validation uses the same local path-map parser
+//! the native DERP map. Config validation uses the same local path-map parser
 //! without fetching URLs; the CLI server owns the periodic auto-update worker.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -12,8 +12,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use crc::{CRC_64_GO_ISO, Crc};
-use headscale_api::tailscale_wire::{DerpMap, DerpRegion, DerpRegionNode};
+use headscale_api::tailscale_wire::native_derp::{NativeDerpMap, NativeDerpNode, NativeDerpRegion};
 use serde::{Deserialize, Serialize};
+
+mod native_json;
+mod native_yaml;
 
 const DERP_MAP_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -50,7 +53,7 @@ impl Default for DerpConfig {
 #[serde(default)]
 pub(crate) struct UpstreamDerpServerConfig {
     pub enabled: bool,
-    pub region_id: u16,
+    pub region_id: i64,
     pub region_code: String,
     pub region_name: String,
     pub verify_clients: bool,
@@ -82,25 +85,25 @@ impl Default for UpstreamDerpServerConfig {
 /// entries and values are JSON DERP map bytes.
 pub(crate) type UrlFixtureMap = BTreeMap<String, Vec<u8>>;
 
-pub(crate) fn load_static_derp_map(
+fn load_native_static_derp_map(
     config: &DerpConfig,
     url_fixtures: &UrlFixtureMap,
-) -> Result<DerpMap> {
-    let mut map = DerpMap::default();
+) -> Result<NativeDerpMap> {
+    let mut map = NativeDerpMap::default();
 
     for url in &config.urls {
         let Some(bytes) = url_fixtures.get(url) else {
             continue;
         };
-        let source: SourceDerpMap = serde_json::from_slice(bytes)
+        let source = native_json::parse(bytes)
+            .map_err(anyhow::Error::msg)
             .with_context(|| format!("parse DERP JSON fixture for {url}"))?;
         merge_derp_regions(&mut map, source);
     }
 
     for path in &config.paths {
         let source = load_derp_path_map(path)?;
-        apply_path_map(&mut map, source)
-            .with_context(|| format!("apply DERP YAML path map {}", path.display()))?;
+        merge_derp_regions(&mut map, source);
     }
 
     Ok(map)
@@ -110,12 +113,39 @@ pub(crate) fn validate_static_derp_config(config: &DerpConfig) -> Result<()> {
     validate_derp_flags(config)?;
 
     let fixtures = UrlFixtureMap::default();
-    load_static_derp_map(config, &fixtures).map(|_| ())
+    load_native_static_derp_map(config, &fixtures).map(|_| ())
+}
+
+/// Config loading parses URLs before Serve fetches any map, as derpConfig does.
+pub(crate) fn normalize_native_urls(config: &mut DerpConfig) -> Result<()> {
+    if config.server.enabled && config.server.stun_listen_addr.is_none() {
+        return Err(stun_listen_addr_required());
+    }
+    config.urls = config.urls.iter().filter_map(|url| {
+        match instant_acme::go_parse_url(url) {
+            Ok(url) => Some(url),
+            Err(error) => {
+                tracing::error!(caller = concat!(file!(), ":", line!()), url, %error, "Failed to parse url, ignoring...");
+                None
+            }
+        }
+    }).collect();
+    Ok(())
+}
+
+/// headscale-go's `derpConfig` terminates with this zerolog fatal line.
+fn stun_listen_addr_required() -> anyhow::Error {
+    crate::config::ConfigFatalError {
+        log_message: "derp.server.stun_listen_addr must be set if derp.server.enabled is true"
+            .into(),
+        before_log_config: false,
+    }
+    .into()
 }
 
 fn validate_derp_flags(config: &DerpConfig) -> Result<()> {
     if config.server.enabled && config.server.stun_listen_addr.is_none() {
-        bail!("derp.server.stun_listen_addr is required when derp.server.enabled=true");
+        return Err(stun_listen_addr_required());
     }
 
     if config.server.enabled
@@ -130,62 +160,65 @@ fn validate_derp_flags(config: &DerpConfig) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn load_derp_map(config: &DerpConfig, base_domain: &str) -> Result<DerpMap> {
+pub(crate) async fn load_native_derp_map(
+    config: &DerpConfig,
+    base_domain: &str,
+) -> Result<NativeDerpMap> {
     validate_derp_flags(config)?;
 
-    let mut map = DerpMap::default();
-    let client = reqwest::Client::builder()
-        .timeout(DERP_MAP_FETCH_TIMEOUT)
-        .build()
-        .context("build DERP JSON map HTTP client")?;
-
+    let mut map = NativeDerpMap::default();
     for url in &config.urls {
-        let response = client
-            .get(url)
-            .send()
+        let url = match instant_acme::go_parse_url(url) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::error!(caller = concat!(file!(), ":", line!()), url, %error, "Failed to parse url, ignoring...");
+                continue;
+            }
+        };
+        ensure_rustls_provider();
+        let bytes = instant_acme::go_http_get(&url, DERP_MAP_FETCH_TIMEOUT)
             .await
-            .with_context(|| format!("fetch DERP JSON map {url}"))?
-            .error_for_status()
             .with_context(|| format!("fetch DERP JSON map {url}"))?;
-        let bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("read DERP JSON map {url}"))?;
-        let source: SourceDerpMap =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse DERP JSON map {url}"))?;
+        // loadDERPMapFromURL decodes the body even for an error HTTP status.
+        let source = native_json::parse(&bytes)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("parse DERP JSON map {url}"))?;
         merge_derp_regions(&mut map, source);
     }
 
     for path in &config.paths {
         let source = load_derp_path_map(path)?;
-        apply_path_map(&mut map, source)
-            .with_context(|| format!("apply DERP YAML path map {}", path.display()))?;
+        merge_derp_regions(&mut map, source);
     }
 
-    shuffle_derp_map(&mut map, base_domain);
+    shuffle_native_derp_map(&mut map, base_domain);
 
     Ok(map)
 }
 
-fn load_derp_path_map(path: &Path) -> Result<DerpPathMap> {
-    let contents = std::fs::read_to_string(path)
+/// `go_http_get` builds its TLS connector from the process-default rustls
+/// provider. rustls only auto-selects one when exactly one provider feature is
+/// enabled across the whole build, so without this `serve` panics on the first
+/// `derp.urls` fetch. Installing is idempotent: a second install is ignored.
+fn ensure_rustls_provider() {
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+fn load_derp_path_map(path: &Path) -> Result<NativeDerpMap> {
+    let contents = std::fs::read(path)
         .with_context(|| format!("read DERP YAML path map {}", path.display()))?;
-    serde_yaml::from_str(&contents)
+    native_yaml::parse(&contents)
+        .map_err(anyhow::Error::msg)
         .with_context(|| format!("parse DERP YAML path map {}", path.display()))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct SourceDerpMap {
-    #[serde(default)]
-    regions: HashMap<u16, Option<DerpRegion>>,
-}
+type SourceDerpMap = NativeDerpMap;
 
-fn merge_derp_regions(dest: &mut DerpMap, source: SourceDerpMap) {
+fn merge_derp_regions(dest: &mut NativeDerpMap, source: SourceDerpMap) {
     for (region_id, region) in source.regions {
         match region {
             Some(region) => {
-                dest.regions.insert(region_id, region);
+                dest.regions.insert(region_id, Some(region));
             }
             None => {
                 dest.regions.remove(&region_id);
@@ -194,30 +227,28 @@ fn merge_derp_regions(dest: &mut DerpMap, source: SourceDerpMap) {
     }
 }
 
-pub(crate) fn shuffle_derp_map(map: &mut DerpMap, base_domain: &str) {
+fn shuffle_native_derp_map(map: &mut NativeDerpMap, base_domain: &str) {
     if map.regions.is_empty() {
         return;
     }
-
-    with_derp_random(base_domain, |rng| shuffle_derp_map_with_rng(map, rng));
+    with_derp_random(base_domain, |rng| {
+        shuffle_native_derp_map_with_rng(map, rng);
+    });
 }
 
-fn shuffle_derp_map_with_rng(map: &mut DerpMap, rng: &mut GoMathRand) {
-    let mut region_ids = map.regions.keys().copied().collect::<Vec<_>>();
-    region_ids.sort_unstable();
-
-    for region_id in region_ids {
-        let Some(region) = map.regions.get_mut(&region_id) else {
-            continue;
-        };
-        shuffle_slice(&mut region.nodes, rng);
+fn shuffle_native_derp_map_with_rng(map: &mut NativeDerpMap, rng: &mut GoMathRand) {
+    // BTreeMap preserves the selected Go signed-int sort order.
+    for region in map.regions.values_mut().flatten() {
+        if let Some(nodes) = &mut region.nodes {
+            shuffle_slice(nodes, rng);
+        }
     }
 }
 
 #[cfg(test)]
-fn shuffle_derp_map_with_seed(map: &mut DerpMap, base_domain: &str) {
+fn shuffle_native_derp_map_with_seed(map: &mut NativeDerpMap, base_domain: &str) {
     let mut rng = GoMathRand::new(derp_random_seed(base_domain));
-    shuffle_derp_map_with_rng(map, &mut rng);
+    shuffle_native_derp_map_with_rng(map, &mut rng);
 }
 
 fn shuffle_slice<T>(items: &mut [T], rng: &mut GoMathRand) {
@@ -473,124 +504,6 @@ const RNG_COOKED_LE_BASE64: &str = concat!(
     "LjiLx40E3uHX33rMllpTdDvwXnOboVd+xiXAMToKoDk=",
 );
 
-fn apply_path_map(dest: &mut DerpMap, source: DerpPathMap) -> Result<()> {
-    for (region_id, region) in source.regions {
-        match region {
-            None => {
-                dest.regions.remove(&region_id);
-            }
-            Some(region) => {
-                let region = region.into_wire(region_id)?;
-                dest.regions.insert(region_id, region);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct DerpPathMap {
-    #[serde(default)]
-    regions: BTreeMap<u16, Option<PathDerpRegion>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PathDerpRegion {
-    #[serde(alias = "RegionID", alias = "regionID")]
-    regionid: Option<u16>,
-    #[serde(default, alias = "RegionCode", alias = "regionCode")]
-    regioncode: String,
-    #[serde(default, alias = "RegionName", alias = "regionName")]
-    regionname: String,
-    #[serde(default, alias = "Latitude")]
-    latitude: f64,
-    #[serde(default, alias = "Longitude")]
-    longitude: f64,
-    #[serde(default, alias = "Avoid")]
-    avoid: bool,
-    #[serde(default, alias = "NoMeasureNoHome", alias = "noMeasureNoHome")]
-    no_measure_no_home: bool,
-    #[serde(default, alias = "Nodes")]
-    nodes: Vec<PathDerpNode>,
-}
-
-impl PathDerpRegion {
-    fn into_wire(self, map_region_id: u16) -> Result<DerpRegion> {
-        let region_id = self.regionid.unwrap_or(map_region_id);
-        if region_id != map_region_id {
-            bail!("DERP region key {map_region_id} does not match regionid {region_id}");
-        }
-        let mut nodes = Vec::with_capacity(self.nodes.len());
-        for node in self.nodes {
-            nodes.push(node.into_wire(region_id)?);
-        }
-        Ok(DerpRegion {
-            region_id,
-            region_code: self.regioncode,
-            region_name: self.regionname,
-            latitude: self.latitude,
-            longitude: self.longitude,
-            avoid: self.avoid,
-            no_measure_no_home: self.no_measure_no_home,
-            nodes,
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct PathDerpNode {
-    #[serde(alias = "Name")]
-    name: String,
-    #[serde(alias = "RegionID", alias = "regionID")]
-    regionid: Option<u16>,
-    #[serde(alias = "HostName", alias = "hostname")]
-    hostname: String,
-    #[serde(default, alias = "CertName", alias = "certName")]
-    certname: String,
-    #[serde(default, alias = "IPv4", alias = "ipv4")]
-    ipv4: String,
-    #[serde(default, alias = "IPv6", alias = "ipv6")]
-    ipv6: String,
-    #[serde(default, alias = "DERPPort", alias = "derpPort")]
-    derpport: u16,
-    #[serde(default, alias = "STUNPort", alias = "stunPort")]
-    stunport: i32,
-    #[serde(default, alias = "STUNOnly", alias = "stunOnly")]
-    stunonly: bool,
-    #[serde(default, alias = "InsecureForTests", alias = "insecureForTests")]
-    insecure_for_tests: bool,
-    #[serde(default, alias = "STUNTestIP", alias = "stunTestIP")]
-    stun_test_ip: String,
-    #[serde(default, alias = "CanPort80", alias = "canPort80")]
-    canport80: bool,
-}
-
-impl PathDerpNode {
-    fn into_wire(self, fallback_region_id: u16) -> Result<DerpRegionNode> {
-        let region_id = self.regionid.unwrap_or(fallback_region_id);
-        if region_id != fallback_region_id {
-            bail!(
-                "DERP node {} regionid {region_id} does not match region {fallback_region_id}",
-                self.name
-            );
-        }
-        Ok(DerpRegionNode {
-            name: self.name,
-            region_id,
-            host_name: self.hostname,
-            cert_name: self.certname,
-            ipv4: self.ipv4,
-            ipv6: self.ipv6,
-            derp_port: self.derpport,
-            stun_port: self.stunport,
-            stun_only: self.stunonly,
-            insecure_for_tests: self.insecure_for_tests,
-            stun_test_ip: self.stun_test_ip,
-            can_port80: self.canport80,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -653,21 +566,22 @@ regions:
             ..DerpConfig::default()
         };
 
-        let map = load_static_derp_map(&config, &fixtures).unwrap();
+        let map = load_native_static_derp_map(&config, &fixtures).unwrap();
         assert!(!map.omit_default_regions);
         assert!(map.home_params.is_none());
         assert!(!map.regions.contains_key(&1));
-        let region = map.regions.get(&900).unwrap();
+        let region = native_region(&map, 900);
         assert_eq!(region.region_name, "My region east");
-        assert_eq!(region.nodes[0].host_name, "derp900a.example.com");
-        assert_eq!(region.nodes[0].ipv4, "198.51.100.1");
-        assert!(region.nodes[0].can_port80);
+        let node = first_node(&map, 900);
+        assert_eq!(node.host_name, "derp900a.example.com");
+        assert_eq!(node.ipv4, "198.51.100.1");
+        assert!(node.can_port80);
     }
 
     #[test]
     fn missing_url_fixture_is_ignored_for_offline_static_loading() {
         let config = DerpConfig::default();
-        let map = load_static_derp_map(&config, &UrlFixtureMap::new()).unwrap();
+        let map = load_native_static_derp_map(&config, &UrlFixtureMap::new()).unwrap();
 
         assert!(map.regions.is_empty());
         assert!(!map.omit_default_regions);
@@ -728,10 +642,10 @@ regions:
             ..DerpConfig::default()
         };
 
-        let map = load_static_derp_map(&config, &fixtures).unwrap();
+        let map = load_native_static_derp_map(&config, &fixtures).unwrap();
 
         assert!(!map.regions.contains_key(&1));
-        assert_eq!(map.regions.get(&902).unwrap().region_code, "url");
+        assert_eq!(native_region(&map, 902).region_code, "url");
         assert!(!map.omit_default_regions);
         assert!(map.home_params.is_none());
     }
@@ -745,7 +659,7 @@ regions:
             vec!["1f", "1g", "1h", "1i"],
         )]);
 
-        shuffle_derp_map_with_seed(&mut map, "test1.example.com");
+        shuffle_native_derp_map_with_seed(&mut map, "test1.example.com");
 
         assert_eq!(
             node_names(&map, 1),
@@ -765,7 +679,7 @@ regions:
             (2, "sfo", "San Francisco", vec!["2d", "2e", "2f"]),
         ]);
 
-        shuffle_derp_map_with_seed(&mut map, "test2.example.com");
+        shuffle_native_derp_map_with_seed(&mut map, "test2.example.com");
 
         assert_eq!(
             node_names(&map, 2),
@@ -822,7 +736,7 @@ regions:
             let mut map =
                 derp_map_with_regions(vec![(4, "fra", "Frankfurt", vec!["4f", "4g", "4h", "4i"])]);
 
-            shuffle_derp_map_with_seed(&mut map, base_domain);
+            shuffle_native_derp_map_with_seed(&mut map, base_domain);
 
             assert_eq!(node_names(&map, 4), expected);
         }
@@ -830,18 +744,18 @@ regions:
 
     #[test]
     fn shuffle_derp_map_preserves_headscale_go_edge_cases() {
-        let mut empty_map = DerpMap::default();
-        shuffle_derp_map_with_seed(&mut empty_map, "edge.example.com");
+        let mut empty_map = NativeDerpMap::default();
+        shuffle_native_derp_map_with_seed(&mut empty_map, "edge.example.com");
         assert!(empty_map.regions.is_empty());
 
         let mut empty_region =
             derp_map_with_regions(vec![(1, "empty", "Empty Region", Vec::new())]);
-        shuffle_derp_map_with_seed(&mut empty_region, "edge.example.com");
+        shuffle_native_derp_map_with_seed(&mut empty_region, "edge.example.com");
         assert!(node_names(&empty_region, 1).is_empty());
 
         let mut single_node =
             derp_map_with_regions(vec![(1, "single", "Single Node Region", vec!["1a"])]);
-        shuffle_derp_map_with_seed(&mut single_node, "edge.example.com");
+        shuffle_native_derp_map_with_seed(&mut single_node, "edge.example.com");
         assert_eq!(node_names(&single_node, 1), vec!["1a".to_string()]);
     }
 
@@ -854,7 +768,7 @@ regions:
             vec!["1a", "1b", "1c", "1d"],
         )]);
 
-        shuffle_derp_map_with_seed(&mut map, "");
+        shuffle_native_derp_map_with_seed(&mut map, "");
 
         let mut shuffled = node_names(&map, 1);
         shuffled.sort();
@@ -899,23 +813,16 @@ regions:
             ..DerpConfig::default()
         };
 
-        let map = load_derp_map(&config, "tail.example.org").await.unwrap();
+        let map = load_native_derp_map(&config, "tail.example.org")
+            .await
+            .unwrap();
 
         mock.assert();
-        assert_eq!(
-            map.regions
-                .get(&902)
-                .unwrap()
-                .nodes
-                .first()
-                .unwrap()
-                .host_name,
-            "url.example.com"
-        );
+        assert_eq!(first_node(&map, 902).host_name, "url.example.com");
     }
 
     #[test]
-    fn rejects_region_id_mismatch_in_path_map() {
+    fn preserves_region_id_mismatch_in_path_map() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
@@ -934,8 +841,8 @@ regions:
             ..DerpConfig::default()
         };
 
-        let err = load_static_derp_map(&config, &UrlFixtureMap::new()).unwrap_err();
-        assert!(format!("{err:#}").contains("does not match"));
+        let map = load_native_static_derp_map(&config, &UrlFixtureMap::new()).unwrap();
+        assert_eq!(native_region(&map, 900).region_id, 901);
     }
 
     #[test]
@@ -946,58 +853,67 @@ regions:
 
         let err = validate_static_derp_config(&config).unwrap_err();
 
-        assert!(format!("{err:#}").contains("derp.server.stun_listen_addr is required"));
+        assert!(format!("{err:#}").contains("derp.server.stun_listen_addr must be set"));
     }
 
     fn derp_map_with_regions(
-        regions: Vec<(u16, &'static str, &'static str, Vec<&'static str>)>,
-    ) -> DerpMap {
-        DerpMap {
-            regions: regions
-                .into_iter()
-                .map(|(region_id, region_code, region_name, node_names)| {
-                    (
+        regions: Vec<(i64, &'static str, &'static str, Vec<&'static str>)>,
+    ) -> NativeDerpMap {
+        let mut map = NativeDerpMap::default();
+        map.regions.extend(regions.into_iter().map(
+            |(region_id, region_code, region_name, node_names)| {
+                (
+                    region_id,
+                    Some(NativeDerpRegion {
                         region_id,
-                        DerpRegion {
-                            region_id,
-                            region_code: region_code.to_string(),
-                            region_name: region_name.to_string(),
-                            latitude: 0.0,
-                            longitude: 0.0,
-                            avoid: false,
-                            no_measure_no_home: false,
-                            nodes: node_names
+                        region_code: region_code.to_string(),
+                        region_name: region_name.to_string(),
+                        nodes: Some(
+                            node_names
                                 .into_iter()
-                                .map(|name| DerpRegionNode {
-                                    name: name.to_string(),
-                                    region_id,
-                                    host_name: format!("derp{name}.tailscale.com"),
-                                    cert_name: String::new(),
-                                    ipv4: String::new(),
-                                    ipv6: String::new(),
-                                    derp_port: 0,
-                                    stun_port: 0,
-                                    stun_only: false,
-                                    insecure_for_tests: false,
-                                    stun_test_ip: String::new(),
-                                    can_port80: false,
+                                .map(|name| {
+                                    Some(NativeDerpNode {
+                                        name: name.to_string(),
+                                        region_id,
+                                        host_name: format!("derp{name}.tailscale.com"),
+                                        ..NativeDerpNode::default()
+                                    })
                                 })
                                 .collect(),
-                        },
-                    )
-                })
-                .collect(),
-            ..DerpMap::default()
-        }
+                        ),
+                        ..NativeDerpRegion::default()
+                    }),
+                )
+            },
+        ));
+        map
     }
 
-    fn node_names(map: &DerpMap, region_id: u16) -> Vec<String> {
+    fn native_region(map: &NativeDerpMap, region_id: i64) -> &NativeDerpRegion {
         map.regions
             .get(&region_id)
             .unwrap()
+            .as_ref()
+            .expect("region is present")
+    }
+
+    fn first_node(map: &NativeDerpMap, region_id: i64) -> &NativeDerpNode {
+        native_region(map, region_id)
+            .nodes
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap()
+            .as_ref()
+            .expect("node is present")
+    }
+
+    fn node_names(map: &NativeDerpMap, region_id: i64) -> Vec<String> {
+        native_region(map, region_id)
             .nodes
             .iter()
-            .map(|node| node.name.clone())
+            .flatten()
+            .map(|node| node.as_ref().expect("node is present").name.clone())
             .collect()
     }
 }

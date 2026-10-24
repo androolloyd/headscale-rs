@@ -38,5 +38,13 @@ pub enum DbError {
     General(String),
 }
 
+impl DbError {
+    /// Native Go-facing error text without Rust's diagnostic category prefix.
+    /// Driver/locale/version and non-database failures still need qualification.
+    pub fn headscale_go_message(&self) -> String {
+        crate::go_error::message(self)
+    }
+}
+
 /// Result type for database operations.
 pub type Result<T> = std::result::Result<T, DbError>;

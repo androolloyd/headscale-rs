@@ -1,0 +1,26 @@
+Go standard library JSON compatibility
+
+Copyright 2010 The Go Authors. All rights reserved.
+
+src/go_json.rs adapts encoding/json scanner.go and decode.go from Go 1.26.9.
+The original BSD license is retained in LICENSE-GO-STDLIB.
+
+Go netip prefix comparison semantics
+Copyright 2020 The Go Authors. All rights reserved.
+headscale_nodes.rs follows Go 1.26.9 netip.Prefix.Compare ordering.
+
+The JSON scanner has since moved to headscale-api-acl/src/go_json.rs;
+src/go_json.rs re-exports it for existing database/CLI callers.
+
+Go 1.26.9 encoding/base64/base64.go decodeQuantum is also adapted for the
+Go bcrypt padded salt decoder. Copyright 2009 The Go Authors. Source SHA-256:
+e6437c7716ecd1ae91c9d10037362cab186e5873a6365b713e2d8c57d8fc32fc.
+
+Go timestamp layout parsing and SQL scan diagnostics
+Copyright 2009 The Go Authors. All rights reserved.
+Private src/preauth_keys/timestamp/layout.rs and error.rs adapt Go1.26.9
+time/format.go and database/sql/convert.go for driver-compatible stored-time
+decoding and unsupported-scan causes. Source hashes are in UPSTREAM.md.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+The earlier Gorm setter/local-time fallback assumption was removed after
+auditing the actual normal model scan phase. No Go runtime is introduced.

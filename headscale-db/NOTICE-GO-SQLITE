@@ -1,0 +1,20 @@
+Go SQLite driver error-envelope reference
+
+Copyright (c) 2017 The Sqlite Authors. All rights reserved.
+
+src/go_error.rs follows conn.errstr in github.com/glebarez/go-sqlite
+v1.22.0, used by headscale-go v0.29.5 through github.com/glebarez/sqlite
+v1.11.0. The original BSD terms are retained in LICENSE-GO-SQLITE.
+No Go SQLite runtime dependency is introduced.
+Source sqlite.go SHA-256:
+e5b651b6a3e0357c0fdba2d500a75063cc858f2e113e0c435c84b481d6f8050a
+
+SQLite result-code labels follow the public-domain sqlite3ErrStr table.
+Reference: libsqlite3-sys 0.30.1 sqlite3/sqlite3.c SHA-256:
+c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d
+Driver/version/locale/resource and failure behavior remain unqualified.
+
+Credential timestamp parsing reference
+Private src/preauth_keys/timestamp.rs follows common parseTime and time.String
+forms from the same pinned go-sqlite v1.22.0 sqlite.go source above.
+Original BSD terms remain in LICENSE-GO-SQLITE.

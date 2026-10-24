@@ -38,7 +38,7 @@ async fn postgres_preauth_key_primitives_match_sqlite_contract() -> TestResult {
 
         assert!(created.plaintext.starts_with(TOKEN_PREFIX));
         assert_eq!(created.row.user_id, alice.id.to_string());
-        assert!(created.row.key.is_none());
+        assert_eq!(created.row.key.as_deref(), Some(""));
         assert!(created.row.key_hash.starts_with("$2"));
         assert!(!created.row.reusable);
         assert!(created.row.ephemeral);

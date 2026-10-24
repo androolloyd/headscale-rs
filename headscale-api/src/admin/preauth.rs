@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::tailscale_wire::{PreauthRedeemer, RedeemError, RedeemOk};
 
 use super::auth::now_unix;
+use super::users::UserRecord;
 
 /// Admin-side view of one preauth key. Stable JSON shape across
 /// implementations.
@@ -46,8 +48,13 @@ pub struct PreauthAdminKey {
     pub user: String,
     /// Unix-seconds creation timestamp.
     pub created_at: u64,
+    /// Original database timestamp, including fractional seconds.
+    #[serde(skip)]
+    pub created_at_precise: Option<DateTime<Utc>>,
     /// Unix-seconds expiry.
     pub expires_at: u64,
+    #[serde(skip)]
+    pub expires_at_precise: Option<DateTime<Utc>>,
     /// Whether the key can be redeemed more than once.
     pub reusable: bool,
     /// Whether the key is ephemeral (one-shot device, auto-cleaned).
@@ -59,10 +66,20 @@ pub struct PreauthAdminKey {
     /// machine record (not enforced by the wire layer in v0).
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Times the key has been redeemed. Reusable keys grow this;
-    /// non-reusable keys stop at 1 then disappear from the list.
+    /// Native adapters project Go's Used bit as zero or one. Custom
+    /// adapters may retain a redemption count; gRPC treats nonzero as used.
     #[serde(default)]
     pub redemptions: u64,
+}
+
+/// Native RPC projection, including independently loaded user and nullable
+/// timestamps. `key.key` is already the exact create/list display value.
+#[derive(Clone, Debug)]
+pub struct PreauthAdminKeyView {
+    pub key: PreauthAdminKey,
+    pub user: Option<UserRecord>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub expiration: Option<DateTime<Utc>>,
 }
 
 /// Parameters for minting a new preauth key from the admin panel.
@@ -84,6 +101,8 @@ pub enum PreauthAdminError {
     Unknown(String),
     #[error("invalid mint parameters: {0}")]
     Invalid(String),
+    #[error("{0}")]
+    Store(String),
 }
 
 /// Admin surface for the preauth-key store.
@@ -92,8 +111,39 @@ pub enum PreauthAdminError {
 /// impls are sync but adopt the signature trivially.
 #[async_trait]
 pub trait PreauthAdmin: Send + Sync {
+    /// Native state mint checks nil-owner/empty-tags after beginning its write
+    /// transaction. Other adapters retain the RPC's preliminary check.
+    fn checks_key_owner_in_storage(&self) -> bool {
+        false
+    }
+
     /// All known (live OR redeemed-but-not-pruned) keys.
     async fn list(&self) -> Vec<PreauthAdminKey>;
+
+    async fn list_checked(&self) -> Result<Vec<PreauthAdminKey>, PreauthAdminError> {
+        Ok(self.list().await)
+    }
+
+    /// Native stores retain nil associations/timestamps and legacy display
+    /// provenance. Other adapters keep the established key projection.
+    async fn list_with_associations(
+        &self,
+    ) -> Result<Option<Vec<PreauthAdminKeyView>>, PreauthAdminError> {
+        Ok(None)
+    }
+
+    /// Mint using the upstream numeric owner, without resolving its name a
+    /// second time, with an absolute expiration. The TTL field is unused.
+    /// Returning None selects the adapter's established mint path.
+    async fn mint_with_user_id(
+        &self,
+        user_id: Option<u64>,
+        req: PreauthMintRequest,
+        expiration: Option<DateTime<Utc>>,
+    ) -> Result<Option<PreauthAdminKeyView>, PreauthAdminError> {
+        let _ = (user_id, req, expiration);
+        Ok(None)
+    }
 
     /// Mint a fresh key.
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError>;
@@ -110,6 +160,15 @@ pub trait PreauthAdmin: Send + Sync {
     ) -> Result<PreauthAdminKey, PreauthAdminError> {
         let _ = expiration;
         self.mint(req).await
+    }
+
+    async fn mint_with_precise_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<DateTime<Utc>>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_with_expiration(req, expiration.map(|value| value.timestamp()))
+            .await
     }
 
     /// Expire — set `expires_at` to now, OR remove — a key identified
@@ -180,16 +239,30 @@ impl InMemoryPreauthAdmin {
 
     async fn mint_inner(
         &self,
-        req: PreauthMintRequest,
+        mut req: PreauthMintRequest,
         explicit_expiration: Option<i64>,
+        precise_expiration: Option<DateTime<Utc>>,
     ) -> Result<PreauthAdminKey, PreauthAdminError> {
         if req.user.trim().is_empty() && req.tags.is_empty() {
             return Err(PreauthAdminError::Invalid(
                 "user must be non-empty unless acl_tags are provided".to_string(),
             ));
         }
-        let expiration = expiration_for_mint(req.ttl_secs, explicit_expiration);
-        let now = now_unix();
+        req.tags.sort();
+        req.tags.dedup();
+        if let Some(tag) = req.tags.iter().find(|tag| !tag.starts_with("tag:")) {
+            return Err(PreauthAdminError::Invalid(format!(
+                "auth-key tag is invalid: '{tag}' did not begin with 'tag:'"
+            )));
+        }
+        let expiration = expiration_for_mint(
+            req.ttl_secs,
+            precise_expiration
+                .map(|value| value.timestamp())
+                .or(explicit_expiration),
+        );
+        let precise_now = Utc::now();
+        let now = precise_now.timestamp().max(0) as u64;
         let key = generate_preauth_key();
         let mut g = self.inner.lock();
         let id = g
@@ -203,7 +276,10 @@ impl InMemoryPreauthAdmin {
             key: key.clone(),
             user: req.user,
             created_at: now,
+            created_at_precise: Some(precise_now),
             expires_at: display_expires_at(expiration),
+            expires_at_precise: precise_expiration
+                .or_else(|| expiration.and_then(|secs| DateTime::from_timestamp(secs, 0))),
             reusable: req.reusable,
             ephemeral: req.ephemeral,
             tags: req.tags,
@@ -234,7 +310,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
     }
 
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
-        self.mint_inner(req, None).await
+        self.mint_inner(req, None, None).await
     }
 
     async fn mint_with_expiration(
@@ -242,7 +318,15 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         req: PreauthMintRequest,
         expiration: Option<i64>,
     ) -> Result<PreauthAdminKey, PreauthAdminError> {
-        self.mint_inner(req, expiration).await
+        self.mint_inner(req, expiration, None).await
+    }
+
+    async fn mint_with_precise_expiration(
+        &self,
+        req: PreauthMintRequest,
+        expiration: Option<DateTime<Utc>>,
+    ) -> Result<PreauthAdminKey, PreauthAdminError> {
+        self.mint_inner(req, None, expiration).await
     }
 
     async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError> {
@@ -258,7 +342,9 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         match target {
             Some(k) => {
                 if let Some(rec) = g.get_mut(&k) {
-                    rec.expires_at = now_unix();
+                    let now = Utc::now();
+                    rec.expires_at = now.timestamp().max(0) as u64;
+                    rec.expires_at_precise = Some(now);
                 }
                 Ok(())
             }
@@ -267,34 +353,18 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
     }
 
     async fn expire_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
-        if id == 0 {
-            return Err(PreauthAdminError::Invalid(
-                "id must be non-zero".to_string(),
-            ));
+        let mut keys = self.inner.lock();
+        if let Some(key) = keys.values_mut().find(|key| key.id == id) {
+            let now = Utc::now();
+            key.expires_at = now.timestamp().max(0) as u64;
+            key.expires_at_precise = Some(now);
         }
-        let mut g = self.inner.lock();
-        let Some(rec) = g.values_mut().find(|rec| rec.id == id) else {
-            return Err(PreauthAdminError::Unknown(id.to_string()));
-        };
-        rec.expires_at = now_unix();
         Ok(())
     }
 
     async fn delete_by_id(&self, id: u64) -> Result<(), PreauthAdminError> {
-        if id == 0 {
-            return Err(PreauthAdminError::Invalid(
-                "id must be non-zero".to_string(),
-            ));
-        }
-        let mut g = self.inner.lock();
-        let Some(key) = g
-            .iter()
-            .find(|(_, rec)| rec.id == id)
-            .map(|(key, _)| key.clone())
-        else {
-            return Err(PreauthAdminError::Unknown(id.to_string()));
-        };
-        g.remove(&key);
+        let mut keys = self.inner.lock();
+        keys.retain(|_, key| key.id != id);
         Ok(())
     }
 }
@@ -306,14 +376,19 @@ impl PreauthRedeemer for InMemoryPreauthAdmin {
         let Some(rec) = g.get_mut(key) else {
             return Err(RedeemError::Unknown);
         };
-        let now = now_unix();
-        if rec.expires_at != NEVER_EXPIRES_AT && rec.expires_at <= now {
+        let now = Utc::now();
+        if rec.expires_at_precise.map_or_else(
+            || rec.expires_at != NEVER_EXPIRES_AT && rec.expires_at < now.timestamp().max(0) as u64,
+            |expiry| expiry < now,
+        ) {
             return Err(RedeemError::Expired);
         }
         if !rec.reusable && rec.redemptions > 0 {
             return Err(RedeemError::AlreadyUsed);
         }
-        rec.redemptions = rec.redemptions.saturating_add(1);
+        if !rec.reusable {
+            rec.redemptions = rec.redemptions.saturating_add(1);
+        }
         Ok(in_memory_key_to_redeem_ok(rec))
     }
 
@@ -509,7 +584,7 @@ mod tests {
         assert!(block(a.redeem(&k.key)).is_ok());
         assert!(block(a.redeem(&k.key)).is_ok());
         let keys = block(a.list());
-        assert_eq!(keys[0].redemptions, 2);
+        assert_eq!(keys[0].redemptions, 0);
     }
 
     #[test]

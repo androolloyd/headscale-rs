@@ -1,0 +1,24 @@
+Headscale compatibility implementation
+
+Copyright (c) 2020, Juan Font
+All rights reserved.
+
+IP allocator seeding, address-pair locking, finite allocation scans, and random-start selection in src/server.rs.
+Behavior/source reference: github.com/juanfont/headscale v0.29.5,
+commit 0f7d1e536bed9f01dd7161f7637af19bb0908335.
+The original BSD 3-Clause terms are retained in LICENSE-HEADSCALE-GO.
+
+SIGHUP policy signal/error events in server.rs follow hscontrol/app.go
+at the same v0.29.5 pin.
+
+Deleted-address release under the allocator mutex without cursor rewind follows
+IPAllocator.FreeIPs in hscontrol/db/ip.go at the same v0.29.5 pin.
+
+TLS/server-URL scheme warning selection and messages in server.rs follow
+hscontrol/app.go getTLSSettings at the same v0.29.5 pin. Original BSD 3-Clause
+terms remain in LICENSE-HEADSCALE-GO; source scope is recorded in UPSTREAM.md.
+
+Grouped native DERP loading/config validation and startup/request/ACME failure
+event selection follow selected Headscale v0.29.5 hscontrol/derp/derp.go,
+types/config.go and app.go at the same pinned commit. The original Juan Font
+attribution above and BSD terms in LICENSE-HEADSCALE-GO remain intact.

@@ -1,0 +1,1586 @@
+--- a/vendor/hyper-util/Cargo.toml
++++ b/vendor/hyper-util/Cargo.toml
+@@ -35,7 +35,7 @@
+     "web-programming::http-client",
+     "web-programming::http-server",
+ ]
+-license = "MIT"
++license = "MIT AND BSD-3-Clause"
+ repository = "https://github.com/hyperium/hyper-util"
+ 
+ [package.metadata.docs.rs]
+@@ -46,6 +46,7 @@
+ ]
+ 
+ [features]
++go-native-client = ["hyper/go-client-idle"]
+ __internal_happy_eyeballs_tests = []
+ client = [
+     "hyper/client",
+--- a/vendor/hyper-util/Cargo.toml.orig
++++ b/vendor/hyper-util/Cargo.toml.orig
+@@ -6,7 +6,7 @@
+ homepage = "https://hyper.rs"
+ documentation = "https://docs.rs/hyper-util"
+ repository = "https://github.com/hyperium/hyper-util"
+-license = "MIT"
++license = "MIT AND BSD-3-Clause"
+ authors = ["Sean McArthur <sean@seanmonstar.com>"]
+ keywords = ["http", "hyper", "hyperium"]
+ categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
+@@ -58,6 +58,7 @@
+ windows-registry = { version = ">=0.3, <0.7", optional = true }
+ 
+ [features]
++go-native-client = ["hyper/go-client-idle"]
+ default = []
+ 
+ # Shorthand to enable all standard features (excluding temporary opt-ins).
+--- a/vendor/hyper-util/src/client/legacy/client.rs
++++ b/vendor/hyper-util/src/client/legacy/client.rs
+@@ -3,6 +3,8 @@
+ //! This `Client` will eventually be deconstructed into more composable parts.
+ //! For now, to enable people to use hyper 1.0 quicker, this `Client` exists
+ //! in much the same way it did in hyper 0.14.
++// Native opt-in gzip and pool identity logic follows Go 1.26.9 net/http.
++// Copyright 2009, 2011 The Go Authors. All rights reserved. See LICENSE-GO.
+ 
+ use std::error::Error as StdError;
+ use std::fmt;
+@@ -28,6 +30,8 @@
+ use crate::common::{Exec, Lazy, SyncWrapper, lazy as hyper_lazy, timer};
+ 
+ type BoxSendFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
++#[cfg(all(feature = "go-native-client", feature = "http2"))]
++mod go_h2;
+ 
+ /// A Client to make outgoing HTTP requests.
+ ///
+@@ -43,6 +47,8 @@
+     #[cfg(feature = "http2")]
+     h2_builder: hyper::client::conn::http2::Builder<Exec>,
+     pool: pool::Pool<PoolClient<B>, PoolKey>,
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    go_h2: std::sync::Arc<go_h2::Cache<B>>,
+ }
+ 
+ #[derive(Clone, Copy, Debug)]
+@@ -89,7 +95,250 @@
+ }
+ 
+ // We might change this... :shrug:
++#[cfg(not(feature = "go-native-client"))]
+ type PoolKey = (http::uri::Scheme, http::uri::Authority);
++
++/// Opt a native request into version-aware Go automatic gzip negotiation.
++#[cfg(feature = "go-native-client")]
++#[doc(hidden)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct GoAutoGzip;
++
++/// Select Go's default User-Agent after the actual connection protocol is known.
++#[cfg(feature = "go-native-client")]
++#[doc(hidden)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct GoAutoUserAgent;
++
++/// Whether automatic gzip was actually requested on this response's connection.
++#[cfg(feature = "go-native-client")]
++#[doc(hidden)]
++#[derive(Clone, Copy, Debug)]
++pub struct GoRequestedGzip(
++    /// The selected connection's automatic gzip decision.
++    pub bool,
++);
++
++/// Opaque native connection-pool identity, independent of the dial destination.
++#[cfg(feature = "go-native-client")]
++#[doc(hidden)]
++#[derive(Clone)]
++pub struct GoPoolIdentity(
++    /// Injectively encoded native identity; may contain proxy credentials.
++    pub Vec<u8>,
++);
++
++/// Go HTTP/2's canonical authority address, separate from the general key.
++#[cfg(feature = "go-native-client")]
++#[doc(hidden)]
++#[derive(Clone)]
++pub struct GoH2Identity(
++    /// Canonical native HTTP/2 authority address.
++    pub Vec<u8>,
++);
++
++#[cfg(feature = "go-native-client")]
++impl fmt::Debug for GoH2Identity {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("GoH2Identity(<opaque>)")
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++impl fmt::Debug for GoPoolIdentity {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("GoPoolIdentity(<opaque>)")
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++#[derive(Clone)]
++struct PoolKey {
++    destination: (http::uri::Scheme, http::uri::Authority),
++    native: Option<std::sync::Arc<[u8]>>,
++    #[cfg(feature = "http2")]
++    h2: Option<std::sync::Arc<[u8]>>,
++}
++
++#[cfg(feature = "go-native-client")]
++impl From<(http::uri::Scheme, http::uri::Authority)> for PoolKey {
++    fn from(destination: (http::uri::Scheme, http::uri::Authority)) -> Self {
++        Self {
++            destination,
++            native: None,
++            #[cfg(feature = "http2")]
++            h2: None,
++        }
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++impl PartialEq for PoolKey {
++    fn eq(&self, other: &Self) -> bool {
++        match (&self.native, &other.native) {
++            (Some(left), Some(right)) => left == right,
++            (None, None) => self.destination == other.destination,
++            _ => false,
++        }
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++impl Eq for PoolKey {}
++
++#[cfg(feature = "go-native-client")]
++impl std::hash::Hash for PoolKey {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        match &self.native {
++            Some(identity) => {
++                std::hash::Hash::hash(&1u8, state);
++                std::hash::Hash::hash(identity, state);
++            }
++            None => {
++                std::hash::Hash::hash(&0u8, state);
++                std::hash::Hash::hash(&self.destination, state);
++            }
++        }
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++impl fmt::Debug for PoolKey {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        // Native identities may include proxy credentials. Never trace them.
++        formatter
++            .debug_struct("PoolKey")
++            .field("destination", &self.destination)
++            .field("native", &self.native.as_ref().map(|_| "<opaque>"))
++            .finish()
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++#[derive(Clone)]
++struct GoOriginalAcceptEncoding(Vec<HeaderValue>);
++
++#[cfg(feature = "go-native-client")]
++#[derive(Clone)]
++struct GoOriginalUserAgent(Vec<HeaderValue>);
++
++#[cfg(feature = "go-native-client")]
++fn go_prepare_user_agent<B>(request: &mut Request<B>, http2: bool) {
++    use hyper::header::USER_AGENT;
++    if request.extensions().get::<GoAutoUserAgent>().is_none() {
++        return;
++    }
++    let original = match request.extensions().get::<GoOriginalUserAgent>() {
++        Some(original) => original.clone(),
++        None => {
++            let original = GoOriginalUserAgent(
++                request
++                    .headers()
++                    .get_all(USER_AGENT)
++                    .iter()
++                    .cloned()
++                    .collect(),
++            );
++            request.extensions_mut().insert(original.clone());
++            original
++        }
++    };
++    request.headers_mut().remove(USER_AGENT);
++    if original.0.is_empty() {
++        request.headers_mut().insert(
++            USER_AGENT,
++            HeaderValue::from_static(if http2 {
++                "Go-http-client/2.0"
++            } else {
++                "Go-http-client/1.1"
++            }),
++        );
++    } else {
++        // An explicitly empty first field suppresses Go's generated agent.
++        // Only the first User-Agent value is written by the Go transports.
++        if let Some(value) = original
++            .0
++            .into_iter()
++            .next()
++            .filter(|value| !value.is_empty())
++        {
++            if http2 {
++                request.headers_mut().insert(USER_AGENT, value);
++            } else {
++                let bytes = value.as_bytes();
++                if let Some(start) = bytes.iter().position(|byte| !matches!(byte, b' ' | b'\t')) {
++                    let end = bytes
++                        .iter()
++                        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
++                        .unwrap()
++                        + 1;
++                    // Trimming ASCII whitespace preserves HeaderValue validity.
++                    if let Ok(value) = HeaderValue::from_bytes(&bytes[start..end]) {
++                        request.headers_mut().insert(USER_AGENT, value);
++                    }
++                } else {
++                    // Go tests nonempty before trimming, so a whitespace-only
++                    // original field is written with an empty value.
++                    request
++                        .headers_mut()
++                        .insert(USER_AGENT, HeaderValue::from_static(""));
++                }
++            }
++        }
++    }
++}
++
++#[cfg(feature = "go-native-client")]
++fn go_prepare_gzip<B>(request: &mut Request<B>, http2: bool) -> Option<bool> {
++    use hyper::header::{ACCEPT_ENCODING, RANGE};
++    request.extensions().get::<GoAutoGzip>()?;
++    go_prepare_user_agent(request, http2);
++    let original = match request.extensions().get::<GoOriginalAcceptEncoding>() {
++        Some(original) => original.clone(),
++        None => {
++            let original = GoOriginalAcceptEncoding(
++                request
++                    .headers()
++                    .get_all(ACCEPT_ENCODING)
++                    .iter()
++                    .cloned()
++                    .collect(),
++            );
++            request.extensions_mut().insert(original.clone());
++            original
++        }
++    };
++    // A canceled internal attempt can be retried on a different protocol.
++    // Restore caller fields before applying that connection's gzip rule.
++    request.headers_mut().remove(ACCEPT_ENCODING);
++    for value in original.0 {
++        request.headers_mut().append(ACCEPT_ENCODING, value);
++    }
++    let requested = request.method() != Method::HEAD
++        && if http2 {
++            // HeaderMap cannot represent a present key with a zero-length vector;
++            // a present empty HeaderValue corresponds to Go's []string{""}.
++            !request.headers().contains_key(ACCEPT_ENCODING)
++                && !request.headers().contains_key(RANGE)
++        } else {
++            request
++                .headers()
++                .get(ACCEPT_ENCODING)
++                .is_none_or(|value| value.as_bytes().is_empty())
++                && request
++                    .headers()
++                    .get(RANGE)
++                    .is_none_or(|value| value.as_bytes().is_empty())
++        };
++    if requested {
++        // Go HTTP/1 writes its extra gzip field after caller fields, including
++        // an explicitly empty Accept-Encoding; do not replace that field.
++        request
++            .headers_mut()
++            .append(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
++    }
++    Some(requested)
++}
+ 
+ enum TrySendError<B> {
+     Retryable {
+@@ -234,6 +483,19 @@
+                 return ResponseFuture::new(future::err(err));
+             }
+         };
++        #[cfg(feature = "go-native-client")]
++        let pool_key = PoolKey {
++            native: req
++                .extensions()
++                .get::<GoPoolIdentity>()
++                .map(|identity| std::sync::Arc::from(identity.0.as_slice())),
++            #[cfg(feature = "http2")]
++            h2: req
++                .extensions()
++                .get::<GoH2Identity>()
++                .map(|identity| std::sync::Arc::from(identity.0.as_slice())),
++            ..pool_key
++        };
+ 
+         ResponseFuture::new(self.clone().send_request(req, pool_key))
+     }
+@@ -276,6 +538,8 @@
+         mut req: Request<B>,
+         pool_key: PoolKey,
+     ) -> Result<Response<hyper::body::Incoming>, TrySendError<B>> {
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        let go_h2_key = pool_key.h2.clone();
+         let mut pooled = self
+             .connection_for(pool_key)
+             .await
+@@ -286,6 +550,8 @@
+         if let Some(conn) = req.extensions_mut().get_mut::<CaptureConnectionExtension>() {
+             conn.set(&pooled.conn_info);
+         }
++        #[cfg(feature = "go-native-client")]
++        let go_requested_gzip = go_prepare_gzip(&mut req, pooled.is_http2());
+ 
+         if pooled.is_http1() {
+             if req.version() == Version::HTTP_2 {
+@@ -321,9 +587,24 @@
+             authority_form(req.uri_mut());
+         }
+ 
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        let go_h2_state = pooled.go_h2_state();
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        if let Some(state) = &go_h2_state {
++            state.mark_selected();
++        }
+         let mut res = match pooled.try_send_request(req).await {
+             Ok(res) => res,
+             Err(mut err) => {
++                #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                if let (Some(key), Some(state)) = (&go_h2_key, &go_h2_state) {
++                    if state
++                        .snapshot_closed()
++                        .is_some_and(|closed| closed.never_used && !closed.closed_on_idle)
++                    {
++                        self.go_h2.remove(key, state.identity());
++                    }
++                }
+                 return if let Some(req) = err.take_message() {
+                     Err(TrySendError::Retryable {
+                         connection_reused: pooled.is_reused(),
+@@ -339,11 +620,17 @@
+                 };
+             }
+         };
++        #[cfg(feature = "go-native-client")]
++        if let Some(requested) = go_requested_gzip {
++            res.extensions_mut().insert(GoRequestedGzip(requested));
++        }
+ 
+         // If the Connector included 'extra' info, add to Response...
+         if let Some(extra) = &pooled.conn_info.extra {
+             extra.set(res.extensions_mut());
+         }
++        #[cfg(all(feature = "go-native-client", feature = "http1"))]
++        let go_h1_pool_wait = res.body_mut().go_h1_pool_wait();
+ 
+         // If pooled is HTTP/2, we can toss this reference immediately.
+         //
+@@ -357,7 +644,16 @@
+         // It won't be ready if there is a body to stream.
+         if pooled.is_http2() || !pooled.is_pool_enabled() || pooled.is_ready() {
+             drop(pooled);
++            #[cfg(all(feature = "go-native-client", feature = "http1"))]
++            drop(go_h1_pool_wait);
+         } else {
++            #[cfg(all(feature = "go-native-client", feature = "http1"))]
++            let on_idle = async move {
++                let _ = poll_fn(|cx| pooled.poll_ready(cx)).await;
++                drop(pooled);
++                drop(go_h1_pool_wait);
++            };
++            #[cfg(not(all(feature = "go-native-client", feature = "http1")))]
+             let on_idle = poll_fn(move |cx| pooled.poll_ready(cx)).map(|_| ());
+             self.exec.execute(on_idle);
+         }
+@@ -370,6 +666,10 @@
+         pool_key: PoolKey,
+     ) -> Result<pool::Pooled<PoolClient<B>, PoolKey>, Error> {
+         loop {
++            #[cfg(all(feature = "go-native-client", feature = "http2"))]
++            if let Some(connection) = self.go_h2_connection_for(&pool_key).await? {
++                return Ok(connection);
++            }
+             match self.one_connection_for(pool_key.clone()).await {
+                 Ok(pooled) => return Ok(pooled),
+                 Err(ClientConnectError::Normal(err)) => return Err(err),
+@@ -385,6 +685,64 @@
+                     continue;
+                 }
+             };
++        }
++    }
++
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    async fn go_h2_connection_for(
++        &self,
++        pool_key: &PoolKey,
++    ) -> Result<Option<pool::Pooled<PoolClient<B>, PoolKey>>, Error> {
++        let Some(key) = &pool_key.h2 else {
++            return Ok(None);
++        };
++        loop {
++            match self.go_h2.checkout(key) {
++                go_h2::Lookup::Unknown => return Ok(None),
++                go_h2::Lookup::Available(connection) => {
++                    return Ok(Some(self.pool.go_shared(
++                        pool_key.clone(),
++                        connection,
++                        true,
++                    )));
++                }
++                go_h2::Lookup::Saturated => {}
++            }
++            match self.go_h2.begin_dial(key.clone()) {
++                go_h2::Dial::Wait(waiter) => match waiter.await {
++                    Ok(go_h2::Outcome::Failed(error)) => {
++                        return Err(e!(Connect, go_h2::SharedDialError(error)));
++                    }
++                    Ok(go_h2::Outcome::Retry) | Err(_) => continue,
++                },
++                go_h2::Dial::Owner(mut owner) => {
++                    // Recheck after taking ownership: a slot can become free
++                    // between the first scan and acquiring the dial token.
++                    if let go_h2::Lookup::Available(connection) = self.go_h2.checkout(key) {
++                        owner.finish(go_h2::Outcome::Retry);
++                        return Ok(Some(self.pool.go_shared(
++                            pool_key.clone(),
++                            connection,
++                            true,
++                        )));
++                    }
++                    match self.one_connection_for(pool_key.clone()).await {
++                        Ok(connection) => {
++                            owner.finish(go_h2::Outcome::Retry);
++                            return Ok(Some(connection));
++                        }
++                        Err(ClientConnectError::CheckoutIsClosed(_)) => {
++                            owner.finish(go_h2::Outcome::Retry);
++                            continue;
++                        }
++                        Err(ClientConnectError::Normal(error)) => {
++                            let error = std::sync::Arc::new(error);
++                            owner.finish(go_h2::Outcome::Failed(error.clone()));
++                            return Err(e!(Connect, go_h2::SharedDialError(error)));
++                        }
++                    }
++                }
++            }
+         }
+     }
+ 
+@@ -414,8 +772,10 @@
+         //   connection future is spawned into the runtime to complete,
+         //   and then be inserted into the pool as an idle connection.
+         let checkout = self.pool.checkout(pool_key.clone());
++        let is_ver_h2 = self.config.ver == Ver::Http2;
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        let is_ver_h2 = is_ver_h2 || pool_key.h2.is_some();
+         let connect = self.connect_to(pool_key);
+-        let is_ver_h2 = self.config.ver == Ver::Http2;
+ 
+         // The order of the `select` is depended on below...
+ 
+@@ -488,6 +848,10 @@
+     {
+         let executor = self.exec.clone();
+         let pool = self.pool.clone();
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        let go_h2_cache = self.go_h2.clone();
++        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++        let go_h2_key = pool_key.h2.clone();
+         #[cfg(feature = "http1")]
+         let h1_builder = self.h1_builder.clone();
+         #[cfg(feature = "http2")]
+@@ -510,13 +874,24 @@
+                     return Either::Right(future::err(canceled));
+                 }
+             };
+-            let dst = domain_as_uri(pool_key);
++            let dst = domain_as_uri(pool_key.clone());
+             Either::Left(
+                 connector
+                     .connect(super::connect::sealed::Internal, dst)
+                     .map_err(|src| e!(Connect, src))
+                     .and_then(move |io| {
+                         let connected = io.connected();
++                        // Go's ALPN addConnIfNeeded discards a redundant TLS
++                        // connection when the authority already has capacity,
++                        // before sending a second HTTP/2 preface.
++                        #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                        if is_ver_h2 || connected.alpn == Alpn::H2 {
++                            if let Some(key) = &go_h2_key {
++                                if let go_h2::Lookup::Available(reserved) = go_h2_cache.checkout(key) {
++                                    return Either::Right(future::ok(pool.go_shared(pool_key, reserved, true)));
++                                }
++                            }
++                        }
+                         // If ALPN is h2 and we aren't http2_only already,
+                         // then we need to convert our pool checkout into
+                         // a single HTTP2 one.
+@@ -556,7 +931,11 @@
+ 
+                                     // Wait for 'conn' to ready up before we
+                                     // declare this tx as usable
+-                                    tx.ready().await.map_err(Error::tx)?;
++                                    #[cfg(feature = "go-native-client")]
++                                    let native = tx.go_connection_state().is_some();
++                                    #[cfg(not(feature = "go-native-client"))]
++                                    let native = false;
++                                    if !native { tx.ready().await.map_err(Error::tx)?; }
+                                     PoolTx::Http2(tx)
+                                 }
+                                 #[cfg(not(feature = "http2"))]
+@@ -652,13 +1031,25 @@
+                                 }
+                             };
+ 
+-                            Ok(pool.pooled(
+-                                connecting,
+-                                PoolClient {
+-                                    conn_info: connected,
+-                                    tx,
+-                                },
+-                            ))
++                            #[allow(unused_mut)]
++                            let mut client = PoolClient { conn_info: connected, tx,
++                                #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                                go_h2_cached: false,
++                            };
++                            #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                            if go_h2_key.is_some() && client.go_h2_state().is_some() { client.go_h2_cached = true; }
++                            #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                            if let (Some(key), Some(copy)) = (go_h2_key, client.go_h2_copy()) {
++                                if copy.go_h2_state().is_some() {
++                                    go_h2_cache.insert(key.clone(), copy);
++                                    pool.go_keep_shared(connecting, client);
++                                    return match go_h2_cache.checkout(&key) {
++                                        go_h2::Lookup::Available(reserved) => Ok(pool.go_shared(pool_key, reserved, false)),
++                                        go_h2::Lookup::Unknown | go_h2::Lookup::Saturated => Err(e!(Canceled, "native HTTP/2 capacity changed")),
++                                    };
++                                }
++                            }
++                            Ok(pool.pooled(connecting, client))
+                         }))
+                     }),
+             )
+@@ -717,6 +1108,8 @@
+             h2_builder: self.h2_builder.clone(),
+             connector: self.connector.clone(),
+             pool: self.pool.clone(),
++            #[cfg(all(feature = "go-native-client", feature = "http2"))]
++            go_h2: self.go_h2.clone(),
+         }
+     }
+ }
+@@ -766,6 +1159,8 @@
+ struct PoolClient<B> {
+     conn_info: Connected,
+     tx: PoolTx<B>,
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    go_h2_cached: bool,
+ }
+ 
+ enum PoolTx<B> {
+@@ -776,6 +1171,49 @@
+ }
+ 
+ impl<B> PoolClient<B> {
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    fn go_h2_state(&self) -> Option<hyper::client::conn::http2::GoConnectionState> {
++        match &self.tx {
++            PoolTx::Http2(tx) => tx.go_connection_state(),
++            #[cfg(feature = "http1")]
++            PoolTx::Http1(_) => None,
++        }
++    }
++
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    fn go_h2_copy(&self) -> Option<Self> {
++        match &self.tx {
++            PoolTx::Http2(tx) => Some(Self {
++                conn_info: self.conn_info.clone(),
++                tx: PoolTx::Http2(tx.clone()),
++                go_h2_cached: self.go_h2_cached,
++            }),
++            #[cfg(feature = "http1")]
++            PoolTx::Http1(_) => None,
++        }
++    }
++
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    fn go_h2_reserve(
++        &self,
++    ) -> (
++        Option<hyper::client::conn::http2::GoAvailability>,
++        Option<Self>,
++    ) {
++        use hyper::client::conn::http2::GoAvailability;
++        let Some(mut copy) = self.go_h2_copy() else {
++            return (None, None);
++        };
++        let availability = match &mut copy.tx {
++            PoolTx::Http2(tx) => tx.go_try_reserve_idle(),
++            #[cfg(feature = "http1")]
++            PoolTx::Http1(_) => None,
++        };
++        match availability {
++            Some(GoAvailability::Available) => (availability, Some(copy)),
++            _ => (availability, None),
++        }
++    }
+     fn poll_ready(
+         &mut self,
+         #[allow(unused_variables)] cx: &mut task::Context<'_>,
+@@ -861,24 +1299,67 @@
+             PoolTx::Http1(tx) => pool::Reservation::Unique(PoolClient {
+                 conn_info: self.conn_info,
+                 tx: PoolTx::Http1(tx),
++                #[cfg(all(feature = "go-native-client", feature = "http2"))]
++                go_h2_cached: false,
+             }),
+             #[cfg(feature = "http2")]
+             PoolTx::Http2(tx) => {
+                 let b = PoolClient {
+                     conn_info: self.conn_info.clone(),
+                     tx: PoolTx::Http2(tx.clone()),
++                    #[cfg(feature = "go-native-client")]
++                    go_h2_cached: self.go_h2_cached,
+                 };
+-                let a = PoolClient {
++                #[allow(unused_mut)]
++                let mut a = PoolClient {
+                     conn_info: self.conn_info,
+                     tx: PoolTx::Http2(tx),
++                    #[cfg(feature = "go-native-client")]
++                    go_h2_cached: self.go_h2_cached,
+                 };
+-                pool::Reservation::Shared(a, b)
++                #[cfg(feature = "go-native-client")]
++                match a.tx {
++                    PoolTx::Http2(ref mut tx) => tx.go_reserve_idle(),
++                    #[cfg(feature = "http1")]
++                    PoolTx::Http1(_) => unreachable!(),
++                }
++                pool::Reservation::Shared(b, a)
+             }
+         }
+     }
+ 
+     fn can_share(&self) -> bool {
+         self.is_http2()
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_uses_connection_idle_timer(&self) -> bool {
++        match self.tx {
++            #[cfg(feature = "http1")]
++            PoolTx::Http1(_) => false,
++            #[cfg(feature = "http2")]
++            PoolTx::Http2(ref tx) => tx.go_uses_connection_idle_timer(),
++        }
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_separate_h2(&self) -> bool {
++        #[cfg(feature = "http2")]
++        {
++            return self.go_h2_cached;
++        }
++        #[cfg(not(feature = "http2"))]
++        false
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_connection_identity(&self) -> Option<usize> {
++        #[cfg(feature = "http2")]
++        {
++            return self.go_h2_state().map(|state| state.identity());
++        }
++        #[cfg(not(feature = "http2"))]
++        None
+     }
+ }
+ 
+@@ -933,7 +1414,7 @@
+ fn extract_domain(uri: &mut Uri, is_http_connect: bool) -> Result<PoolKey, Error> {
+     let uri_clone = uri.clone();
+     match (uri_clone.scheme(), uri_clone.authority()) {
+-        (Some(scheme), Some(auth)) => Ok((scheme.clone(), auth.clone())),
++        (Some(scheme), Some(auth)) => Ok((scheme.clone(), auth.clone()).into()),
+         (None, Some(auth)) if is_http_connect => {
+             let scheme = match auth.port_u16() {
+                 Some(443) => {
+@@ -945,7 +1426,7 @@
+                     Scheme::HTTP
+                 }
+             };
+-            Ok((scheme, auth.clone()))
++            Ok((scheme, auth.clone()).into())
+         }
+         _ => {
+             debug!("Client requires absolute-form URIs, received: {:?}", uri);
+@@ -954,7 +1435,11 @@
+     }
+ }
+ 
+-fn domain_as_uri((scheme, auth): PoolKey) -> Uri {
++fn domain_as_uri(key: PoolKey) -> Uri {
++    #[cfg(feature = "go-native-client")]
++    let (scheme, auth) = key.destination;
++    #[cfg(not(feature = "go-native-client"))]
++    let (scheme, auth) = key;
+     http::uri::Builder::new()
+         .scheme(scheme)
+         .authority(auth)
+@@ -1020,6 +1505,10 @@
+     h2_builder: hyper::client::conn::http2::Builder<Exec>,
+     pool_config: pool::Config,
+     pool_timer: Option<timer::Timer>,
++    #[cfg(feature = "go-native-client")]
++    go_max_idle_total: usize,
++    #[cfg(feature = "go-native-client")]
++    go_native_idle: bool,
+ }
+ 
+ impl Builder {
+@@ -1045,6 +1534,10 @@
+                 max_idle_per_host: usize::MAX,
+             },
+             pool_timer: None,
++            #[cfg(feature = "go-native-client")]
++            go_max_idle_total: 0,
++            #[cfg(feature = "go-native-client")]
++            go_native_idle: false,
+         }
+     }
+     /// Set an optional timeout for idle sockets being kept-alive.
+@@ -1092,6 +1585,39 @@
+     /// Default is `usize::MAX` (no limit).
+     pub fn pool_max_idle_per_host(&mut self, max_idle: usize) -> &mut Self {
+         self.pool_config.max_idle_per_host = max_idle;
++        self
++    }
++
++    /// Set a native global insertion-LRU limit; zero retains unlimited pooling.
++    #[cfg(feature = "go-native-client")]
++    #[doc(hidden)]
++    pub fn go_pool_max_idle_total(&mut self, maximum: usize) -> &mut Self {
++        self.go_max_idle_total = maximum;
++        self
++    }
++
++    /// Enables native HTTP/1 deadlines and stream-aware HTTP/2 idle closure.
++    #[cfg(feature = "go-native-client")]
++    #[doc(hidden)]
++    pub fn go_native_idle_timeout(&mut self, timeout: Duration) -> &mut Self {
++        self.go_native_idle = true;
++        self.pool_config.idle_timeout = Some(timeout);
++        #[cfg(feature = "http1")]
++        self.h1_builder.go_native_client(true);
++        #[cfg(feature = "http2")]
++        {
++            self.h2_builder
++                .go_native_client(true)
++                .go_idle_timeout(timeout);
++        }
++        self
++    }
++
++    /// Supplies native reset-PING randomness without changing default clients.
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    #[doc(hidden)]
++    pub fn go_reset_ping_payload(&mut self, payload: fn() -> [u8; 8]) -> &mut Self {
++        self.h2_builder.go_reset_ping_payload(payload);
+         self
+     }
+ 
+@@ -1632,6 +2158,12 @@
+     {
+         let exec = self.exec.clone();
+         let timer = self.pool_timer.clone();
++        let pool: pool::Pool<PoolClient<B>, PoolKey> =
++            pool::Pool::new(self.pool_config, exec.clone(), timer);
++        #[cfg(feature = "go-native-client")]
++        pool.go_set_max_idle_total(self.go_max_idle_total);
++        #[cfg(feature = "go-native-client")]
++        pool.go_set_native_idle(self.go_native_idle);
+         Client {
+             config: self.client_config,
+             exec: exec.clone(),
+@@ -1640,7 +2172,9 @@
+             #[cfg(feature = "http2")]
+             h2_builder: self.h2_builder.clone(),
+             connector,
+-            pool: pool::Pool::new(self.pool_config, exec, timer),
++            pool,
++            #[cfg(all(feature = "go-native-client", feature = "http2"))]
++            go_h2: std::sync::Arc::new(go_h2::Cache::new(exec, self.pool_timer.clone())),
+         }
+     }
+ }
+--- /dev/null
++++ b/vendor/hyper-util/src/client/legacy/client/go_h2.rs
+@@ -0,0 +1,217 @@
++// Copyright 2013 The Go Authors. All rights reserved.
++// Native connection-cache ordering and retirement follow Go 1.26.9
++// net/http/h2_bundle.go clientConnPool. See LICENSE-GO.
++
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex, Weak};
++
++use futures_channel::oneshot;
++use hyper::rt::Timer as _;
++
++use super::{Error, PoolClient};
++use crate::common::{Exec, timer::Timer};
++
++pub(super) enum Lookup<B> {
++    Unknown,
++    Available(PoolClient<B>),
++    Saturated,
++}
++
++pub(super) struct Cache<B> {
++    inner: Mutex<Inner<B>>,
++    exec: Exec,
++    timer: Option<Timer>,
++}
++
++struct Inner<B> {
++    connections: HashMap<Arc<[u8]>, Vec<PoolClient<B>>>,
++    dialing: HashMap<Arc<[u8]>, Dialing>,
++}
++
++struct Dialing {
++    generation: Arc<()>,
++    waiters: Vec<oneshot::Sender<Outcome>>,
++}
++
++#[derive(Clone)]
++pub(super) enum Outcome {
++    Retry,
++    Failed(Arc<Error>),
++}
++
++pub(super) enum Dial<B> {
++    Owner(DialGuard<B>),
++    Wait(oneshot::Receiver<Outcome>),
++}
++
++pub(super) struct DialGuard<B> {
++    cache: Weak<Cache<B>>,
++    key: Arc<[u8]>,
++    generation: Arc<()>,
++    finished: bool,
++}
++
++impl<B> DialGuard<B> {
++    pub(super) fn finish(&mut self, outcome: Outcome) {
++        self.finished = true;
++        let Some(cache) = self.cache.upgrade() else {
++            return;
++        };
++        let waiters = {
++            let mut inner = cache.inner.lock().unwrap();
++            if inner
++                .dialing
++                .get(&self.key)
++                .is_some_and(|dial| Arc::ptr_eq(&dial.generation, &self.generation))
++            {
++                inner.dialing.remove(&self.key).unwrap().waiters
++            } else {
++                Vec::new()
++            }
++        };
++        for waiter in waiters {
++            let _ = waiter.send(outcome.clone());
++        }
++    }
++}
++
++impl<B> Drop for DialGuard<B> {
++    fn drop(&mut self) {
++        if !self.finished {
++            // A canceled owner does not leave an immortal in-flight dial.
++            // Followers select a fresh owner using their own live request.
++            self.finish(Outcome::Retry);
++        }
++    }
++}
++
++impl<B> Cache<B> {
++    pub(super) fn new(exec: Exec, timer: Option<Timer>) -> Self {
++        Self {
++            inner: Mutex::new(Inner {
++                connections: HashMap::new(),
++                dialing: HashMap::new(),
++            }),
++            exec,
++            timer,
++        }
++    }
++
++    pub(super) fn begin_dial(self: &Arc<Self>, key: Arc<[u8]>) -> Dial<B> {
++        let mut inner = self.inner.lock().unwrap();
++        if let Some(dial) = inner.dialing.get_mut(&key) {
++            // Drop canceled receivers instead of retaining one entry for every
++            // abandoned waiter until a slow network dial eventually completes.
++            dial.waiters.retain(|waiter| !waiter.is_canceled());
++            let (sender, receiver) = oneshot::channel();
++            dial.waiters.push(sender);
++            return Dial::Wait(receiver);
++        }
++        let generation = Arc::new(());
++        inner.dialing.insert(
++            key.clone(),
++            Dialing {
++                generation: generation.clone(),
++                waiters: Vec::new(),
++            },
++        );
++        Dial::Owner(DialGuard {
++            cache: Arc::downgrade(self),
++            key,
++            generation,
++            finished: false,
++        })
++    }
++
++    pub(super) fn remove(&self, key: &[u8], identity: usize) {
++        let mut inner = self.inner.lock().unwrap();
++        if let Some(connections) = inner.connections.get_mut(key) {
++            connections.retain(|connection| {
++                connection
++                    .go_h2_state()
++                    .is_some_and(|state| state.identity() != identity)
++            });
++            if connections.is_empty() {
++                inner.connections.remove(key);
++            }
++        }
++    }
++}
++
++impl<B: Send + 'static> Cache<B> {
++    pub(super) fn checkout(&self, key: &[u8]) -> Lookup<B> {
++        use hyper::client::conn::http2::GoAvailability;
++        let mut inner = self.inner.lock().unwrap();
++        let Some(connections) = inner.connections.get_mut(key) else {
++            return Lookup::Unknown;
++        };
++        let mut index = 0;
++        while index < connections.len() {
++            let (availability, reserved) = connections[index].go_h2_reserve();
++            match availability {
++                Some(GoAvailability::Available) => {
++                    return Lookup::Available(
++                        reserved.expect("available checkout owns a reservation"),
++                    );
++                }
++                Some(GoAvailability::Saturated) => index += 1,
++                Some(GoAvailability::Unusable) | None => {
++                    connections.remove(index);
++                }
++            }
++        }
++        if connections.is_empty() {
++            inner.connections.remove(key);
++            Lookup::Unknown
++        } else {
++            Lookup::Saturated
++        }
++    }
++
++    pub(super) fn insert(self: &Arc<Self>, key: Arc<[u8]>, connection: PoolClient<B>) {
++        let Some(state) = connection.go_h2_state() else {
++            return;
++        };
++        let identity = state.identity();
++        {
++            let mut inner = self.inner.lock().unwrap();
++            let list = inner.connections.entry(key.clone()).or_default();
++            if list.iter().any(|existing| {
++                existing
++                    .go_h2_state()
++                    .is_some_and(|state| state.identity() == identity)
++            }) {
++                return;
++            }
++            list.push(connection);
++        }
++        let cache = Arc::downgrade(self);
++        let timer = self.timer.clone();
++        self.exec.execute(async move {
++            let closed = std::future::poll_fn(|cx| state.poll_closed(cx)).await;
++            // Go briefly retains a never-selected early failure so the first
++            // caller sees the connection error instead of silently redialing.
++            if let (Some(deadline), Some(timer)) = (closed.retain_until, timer) {
++                timer.sleep_until(deadline).await;
++            }
++            if let Some(cache) = cache.upgrade() {
++                cache.remove(&key, identity);
++            }
++        });
++    }
++}
++
++#[derive(Debug)]
++pub(super) struct SharedDialError(pub(super) Arc<Error>);
++
++impl std::fmt::Display for SharedDialError {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        std::fmt::Display::fmt(self.0.as_ref(), formatter)
++    }
++}
++
++impl std::error::Error for SharedDialError {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        Some(self.0.as_ref())
++    }
++}
+--- a/vendor/hyper-util/src/client/legacy/mod.rs
++++ b/vendor/hyper-util/src/client/legacy/mod.rs
+@@ -2,6 +2,12 @@
+ mod client;
+ #[cfg(any(feature = "http1", feature = "http2"))]
+ pub use client::{Builder, Client, Error, ResponseFuture};
++#[cfg(all(
++    feature = "go-native-client",
++    any(feature = "http1", feature = "http2")
++))]
++#[doc(hidden)]
++pub use client::{GoAutoGzip, GoAutoUserAgent, GoH2Identity, GoPoolIdentity, GoRequestedGzip};
+ 
+ pub mod connect;
+ #[doc(hidden)]
+--- a/vendor/hyper-util/src/client/legacy/pool.rs
++++ b/vendor/hyper-util/src/client/legacy/pool.rs
+@@ -1,5 +1,7 @@
+ #![allow(dead_code)]
+ 
++// Native opt-in insertion LRU follows Go 1.26.9 net/http/transport.go.
++// Copyright 2009, 2011 The Go Authors. All rights reserved. See LICENSE-GO.
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::convert::Infallible;
+ use std::error::Error as StdError;
+@@ -38,6 +40,24 @@
+     /// Allows for HTTP/2 to return a shared reservation.
+     fn reserve(self) -> Reservation<Self>;
+     fn can_share(&self) -> bool;
++
++    /// Whether a selected native connection owns its own idle timer.
++    /// Ordinary implementors retain pool-managed expiry.
++    #[cfg(feature = "go-native-client")]
++    fn go_uses_connection_idle_timer(&self) -> bool {
++        false
++    }
++
++    /// Native H2 senders are selected by the separate capacity-aware cache.
++    #[cfg(feature = "go-native-client")]
++    fn go_separate_h2(&self) -> bool {
++        false
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_connection_identity(&self) -> Option<usize> {
++        None
++    }
+ }
+ 
+ pub trait Key: Eq + Hash + Clone + Debug + Unpin + Send + 'static {}
+@@ -82,6 +102,12 @@
+     // state, waiting to receive a new Request to send on the socket.
+     idle: HashMap<K, Vec<Idle<T>>>,
+     max_idle_per_host: usize,
++    #[cfg(feature = "go-native-client")]
++    go_max_idle_total: usize,
++    #[cfg(feature = "go-native-client")]
++    go_idle_sequence: u64,
++    #[cfg(feature = "go-native-client")]
++    go_native_idle: bool,
+     // These are outstanding Checkouts that are waiting for a socket to be
+     // able to send a Request one. This is used when "racing" for a new
+     // connection.
+@@ -130,6 +156,12 @@
+                 idle: HashMap::new(),
+                 idle_interval_ref: None,
+                 max_idle_per_host: config.max_idle_per_host,
++                #[cfg(feature = "go-native-client")]
++                go_max_idle_total: 0,
++                #[cfg(feature = "go-native-client")]
++                go_idle_sequence: 0,
++                #[cfg(feature = "go-native-client")]
++                go_native_idle: false,
+                 waiters: HashMap::new(),
+                 exec,
+                 timer,
+@@ -146,6 +178,22 @@
+         self.inner.is_some()
+     }
+ 
++    // Kept outside the public Config struct to preserve existing literals.
++    // The builder installs this before the new pool is exposed to requests.
++    #[cfg(feature = "go-native-client")]
++    pub(crate) fn go_set_max_idle_total(&self, maximum: usize) {
++        if let Some(inner) = &self.inner {
++            inner.lock().unwrap().go_max_idle_total = maximum;
++        }
++    }
++
++    #[cfg(feature = "go-native-client")]
++    pub(crate) fn go_set_native_idle(&self, enabled: bool) {
++        if let Some(inner) = &self.inner {
++            inner.lock().unwrap().go_native_idle = enabled;
++        }
++    }
++
+     #[cfg(test)]
+     pub(super) fn no_timer(&self) {
+         // Prevent an actual interval from being created for this pool...
+@@ -159,6 +207,26 @@
+ }
+ 
+ impl<T: Poolable, K: Key> Pool<T, K> {
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    pub(crate) fn go_keep_shared(&self, mut connecting: Connecting<T, K>, value: T) {
++        if let Some(enabled) = &self.inner {
++            let mut inner = enabled.lock().unwrap();
++            inner.put(connecting.key.clone(), value, enabled);
++            inner.connected(&connecting.key);
++            connecting.pool = WeakOpt::none();
++        }
++    }
++    /// A checked-out native H2 sender is retained by its separate connection
++    /// cache, independently of the general idle-wrapper LRU.
++    #[cfg(all(feature = "go-native-client", feature = "http2"))]
++    pub(crate) fn go_shared(&self, key: K, value: T, reused: bool) -> Pooled<T, K> {
++        Pooled {
++            key,
++            is_reused: reused,
++            pool: WeakOpt::none(),
++            value: Some(value),
++        }
++    }
+     /// Returns a `Checkout` which is a future that resolves if an idle
+     /// connection becomes available.
+     pub fn checkout(&self, key: K) -> Checkout<T, K> {
+@@ -297,7 +365,14 @@
+ 
+ impl<'a, T: Poolable + 'a, K: Debug> IdlePopper<'a, T, K> {
+     fn pop(self, expiration: &Expiration, now: Instant) -> Option<Idle<T>> {
+-        while let Some(entry) = self.list.pop() {
++        let mut index = self.list.len();
++        while index > 0 {
++            index -= 1;
++            #[cfg(feature = "go-native-client")]
++            if self.list[index].value.go_separate_h2() {
++                continue;
++            }
++            let entry = self.list.remove(index);
+             // If the connection has been closed, or is older than our idle
+             // timeout, simply drop it and keep looking...
+             if !entry.value.is_open() {
+@@ -310,7 +385,10 @@
+             //
+             // In that case, we could just break out of the loop and drop the
+             // whole list...
+-            if expiration.expires(entry.idle_at, now) {
++            let expired = expiration.expires(entry.idle_at, now);
++            #[cfg(feature = "go-native-client")]
++            let expired = expired && !(expiration.1 && entry.value.go_uses_connection_idle_timer());
++            if expired {
+                 trace!("removing expired connection for {:?}", self.key);
+                 continue;
+             }
+@@ -318,9 +396,20 @@
+             let value = match entry.value.reserve() {
+                 #[cfg(feature = "http2")]
+                 Reservation::Shared(to_reinsert, to_checkout) => {
++                    #[cfg(feature = "go-native-client")]
++                    let shared_idle_at =
++                        if expiration.1 && to_reinsert.go_uses_connection_idle_timer() {
++                            entry.idle_at
++                        } else {
++                            now
++                        };
++                    #[cfg(not(feature = "go-native-client"))]
++                    let shared_idle_at = now;
+                     self.list.push(Idle {
+-                        idle_at: now,
++                        idle_at: shared_idle_at,
+                         value: to_reinsert,
++                        #[cfg(feature = "go-native-client")]
++                        go_sequence: entry.go_sequence,
+                     });
+                     to_checkout
+                 }
+@@ -330,6 +419,8 @@
+             return Some(Idle {
+                 idle_at: entry.idle_at,
+                 value,
++                #[cfg(feature = "go-native-client")]
++                go_sequence: entry.go_sequence,
+             });
+         }
+ 
+@@ -345,14 +436,28 @@
+     }
+ 
+     fn put(&mut self, key: K, value: T, __pool_ref: &Arc<Mutex<PoolInner<T, K>>>) {
+-        if value.can_share() && self.idle.contains_key(&key) {
++        #[cfg(feature = "go-native-client")]
++        let separate = value.go_separate_h2();
++        #[cfg(not(feature = "go-native-client"))]
++        let separate = false;
++        if value.can_share()
++            && self.idle.get(&key).is_some_and(|_list| {
++                #[cfg(feature = "go-native-client")]
++                if separate {
++                    return _list.iter().any(|entry| {
++                        entry.value.go_connection_identity() == value.go_connection_identity()
++                    });
++                }
++                true
++            })
++        {
+             trace!("put; existing idle HTTP/2 connection for {:?}", key);
+             return;
+         }
+         trace!("put; add idle connection for {:?}", key);
+         let mut remove_waiters = false;
+         let mut value = Some(value);
+-        if let Some(waiters) = self.waiters.get_mut(&key) {
++        if let Some(waiters) = self.waiters.get_mut(&key).filter(|_| !separate) {
+             while let Some(tx) = waiters.pop_front() {
+                 if !tx.is_canceled() {
+                     let reserved = value.take().expect("value already sent");
+@@ -391,6 +496,8 @@
+                 // borrow-check scope...
+                 {
+                     let now = self.now();
++                    #[cfg(feature = "go-native-client")]
++                    let go_sequence = self.go_next_idle_sequence();
+                     let idle_list = self.idle.entry(key.clone()).or_default();
+                     if self.max_idle_per_host <= idle_list.len() {
+                         trace!("max idle per host for {:?}, dropping connection", key);
+@@ -401,12 +508,79 @@
+                     idle_list.push(Idle {
+                         value,
+                         idle_at: now,
++                        #[cfg(feature = "go-native-client")]
++                        go_sequence,
+                     });
+                 }
+ 
++                #[cfg(feature = "go-native-client")]
++                self.go_evict_excess_idle();
++
+                 self.spawn_idle_interval(__pool_ref);
+             }
+             None => trace!("put; found waiter for {:?}", key),
++        }
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_next_idle_sequence(&mut self) -> u64 {
++        if self.go_max_idle_total == 0 {
++            return 0;
++        }
++        if self.go_idle_sequence == u64::MAX {
++            // Rebase without changing LRU order, even across timer ties.
++            let mut order: Vec<_> = self
++                .idle
++                .iter()
++                .flat_map(|(key, list)| {
++                    list.iter()
++                        .enumerate()
++                        .map(move |(index, entry)| (entry.go_sequence, key.clone(), index))
++                })
++                .collect();
++            order.sort_unstable_by_key(|entry| entry.0);
++            for (sequence, (_, key, index)) in order.iter().enumerate() {
++                self.idle.get_mut(key).expect("existing idle key")[*index].go_sequence =
++                    sequence as u64;
++            }
++            self.go_idle_sequence = order.len() as u64;
++        }
++        self.go_idle_sequence += 1;
++        self.go_idle_sequence
++    }
++
++    #[cfg(feature = "go-native-client")]
++    fn go_evict_excess_idle(&mut self) {
++        let maximum = self.go_max_idle_total;
++        if maximum == 0 {
++            return;
++        }
++        // Native defaults bound this scan to at most 101 entries. Sequence is
++        // insertion order, not last access: shared HTTP/2 checkouts remain in
++        // the idle list without promoting Go's persistConn wrapper in its LRU.
++        while self.idle.values().map(Vec::len).sum::<usize>() > maximum {
++            let oldest = self
++                .idle
++                .iter()
++                .flat_map(|(key, list)| {
++                    list.iter()
++                        .enumerate()
++                        .map(move |(index, entry)| (entry.go_sequence, key.clone(), index))
++                })
++                .min_by_key(|entry| entry.0);
++            let Some((_, key, index)) = oldest else {
++                break;
++            };
++            let empty = {
++                let list = self.idle.get_mut(&key).expect("existing idle key");
++                // Dropping the idle sender closes an unshared HTTP/1
++                // connection. Active shared HTTP/2 handles retain ownership.
++                list.remove(index);
++                list.is_empty()
++            };
++            if empty {
++                self.idle.remove(&key);
++            }
+         }
+     }
+ 
+@@ -444,6 +618,24 @@
+         // faster than this.
+         const MIN_CHECK: Duration = Duration::from_millis(90);
+ 
++        #[cfg(feature = "go-native-client")]
++        let go_deadline = if self.go_native_idle {
++            // HTTP/2 connections with their own stream-aware timer never
++            // expire merely because a pool checkout timestamp is old.
++            match self.go_next_idle_deadline() {
++                Some(deadline) => Some(deadline),
++                None => return,
++            }
++        } else {
++            None
++        };
++        #[cfg(feature = "go-native-client")]
++        let dur = if self.go_native_idle {
++            dur
++        } else {
++            dur.max(MIN_CHECK)
++        };
++        #[cfg(not(feature = "go-native-client"))]
+         let dur = dur.max(MIN_CHECK);
+ 
+         let (tx, rx) = oneshot::channel();
+@@ -454,6 +646,8 @@
+             duration: dur,
+             pool: WeakOpt::downgrade(pool_ref),
+             pool_drop_notifier: rx,
++            #[cfg(feature = "go-native-client")]
++            go_deadline,
+         };
+ 
+         self.exec.execute(interval.run());
+@@ -478,11 +672,24 @@
+ }
+ 
+ impl<T: Poolable, K: Key> PoolInner<T, K> {
++    #[cfg(feature = "go-native-client")]
++    fn go_next_idle_deadline(&self) -> Option<Instant> {
++        let timeout = self.timeout?;
++        self.idle
++            .values()
++            .flat_map(|values| values.iter())
++            .filter(|entry| !entry.value.go_uses_connection_idle_timer())
++            .filter_map(|entry| entry.idle_at.checked_add(timeout))
++            .min()
++    }
++
+     /// This should *only* be called by the IdleTask
+     fn clear_expired(&mut self) {
+         let dur = self.timeout.expect("interval assumes timeout");
+ 
+         let now = self.now();
++        #[cfg(feature = "go-native-client")]
++        let go_native_idle = self.go_native_idle;
+         //self.last_idle_check_at = now;
+ 
+         self.idle.retain(|key, values| {
+@@ -493,7 +700,15 @@
+                 }
+ 
+                 // Avoid `Instant::sub` to avoid issues like rust-lang/rust#86470.
+-                if now.saturating_duration_since(entry.idle_at) > dur {
++                #[cfg(feature = "go-native-client")]
++                let expired = go_native_idle
++                    && !dur.is_zero()
++                    && !entry.value.go_uses_connection_idle_timer()
++                    && now.saturating_duration_since(entry.idle_at) >= dur
++                    || !go_native_idle && now.saturating_duration_since(entry.idle_at) > dur;
++                #[cfg(not(feature = "go-native-client"))]
++                let expired = now.saturating_duration_since(entry.idle_at) > dur;
++                if expired {
+                     trace!("idle interval evicting expired for {:?}", key);
+                     return false;
+                 }
+@@ -587,6 +802,8 @@
+ struct Idle<T> {
+     idle_at: Instant,
+     value: T,
++    #[cfg(feature = "go-native-client")]
++    go_sequence: u64,
+ }
+ 
+ // FIXME: allow() required due to `impl Trait` leaking types to this lint
+@@ -642,6 +859,15 @@
+                     Poll::Pending
+                 }
+                 Poll::Ready(Err(_canceled)) => {
++                    #[cfg(feature = "go-native-client")]
++                    if self
++                        .pool
++                        .inner
++                        .as_ref()
++                        .is_some_and(|inner| inner.lock().unwrap().go_native_idle)
++                    {
++                        return Poll::Ready(Some(Err(Error::CheckedOutClosedValue)));
++                    }
+                     Poll::Ready(Some(Err(Error::CheckoutNoLongerWanted)))
+                 }
+             }
+@@ -654,23 +880,23 @@
+         let entry = {
+             let mut inner = self.pool.inner.as_ref()?.lock().unwrap();
+             let expiration = Expiration::new(inner.timeout);
++            #[cfg(feature = "go-native-client")]
++            let expiration = Expiration(expiration.0, inner.go_native_idle);
+             let now = inner.now();
+             let maybe_entry = inner.idle.get_mut(&self.key).and_then(|list| {
+                 trace!("take? {:?}: expiration = {:?}", self.key, expiration.0);
+-                // A block to end the mutable borrow on list,
+-                // so the map below can check is_empty()
+-                {
++                let entry = {
+                     let popper = IdlePopper {
+                         key: &self.key,
+                         list,
+                     };
+                     popper.pop(&expiration, now)
+-                }
+-                .map(|e| (e, list.is_empty()))
++                };
++                Some((entry, list.is_empty()))
+             });
+ 
+             let (entry, empty) = if let Some((e, empty)) = maybe_entry {
+-                (Some(e), empty)
++                (e, empty)
+             } else {
+                 // No entry found means nuke the list for sure.
+                 (None, true)
+@@ -761,17 +987,27 @@
+     }
+ }
+ 
+-struct Expiration(Option<Duration>);
++struct Expiration(Option<Duration>, #[cfg(feature = "go-native-client")] bool);
+ 
+ impl Expiration {
+     fn new(dur: Option<Duration>) -> Expiration {
+-        Expiration(dur)
++        Expiration(
++            dur,
++            #[cfg(feature = "go-native-client")]
++            false,
++        )
+     }
+ 
+     fn expires(&self, instant: Instant, now: Instant) -> bool {
+         match self.0 {
+             // Avoid `Instant::elapsed` to avoid issues like rust-lang/rust#86470.
+-            Some(timeout) => now.saturating_duration_since(instant) > timeout,
++            Some(timeout) => {
++                #[cfg(feature = "go-native-client")]
++                if self.1 {
++                    return !timeout.is_zero() && now.saturating_duration_since(instant) >= timeout;
++                }
++                now.saturating_duration_since(instant) > timeout
++            }
+             None => false,
+         }
+     }
+@@ -785,13 +1021,21 @@
+     // Pool is fully dropped, and shutdown. This channel is never sent on,
+     // but Err(Canceled) will be received when the Pool is dropped.
+     pool_drop_notifier: oneshot::Receiver<Infallible>,
++    #[cfg(feature = "go-native-client")]
++    go_deadline: Option<Instant>,
+ }
+ 
+ impl<T: Poolable + 'static, K: Key> IdleTask<T, K> {
+     async fn run(self) {
+         use futures_util::future;
+ 
+-        let mut sleep = self.timer.sleep_until(self.timer.now() + self.duration);
++        #[cfg(feature = "go-native-client")]
++        let deadline = self
++            .go_deadline
++            .unwrap_or_else(|| self.timer.now() + self.duration);
++        #[cfg(not(feature = "go-native-client"))]
++        let deadline = self.timer.now() + self.duration;
++        let mut sleep = self.timer.sleep_until(deadline);
+         let mut on_pool_drop = self.pool_drop_notifier;
+         loop {
+             match future::select(&mut on_pool_drop, &mut sleep).await {
+@@ -800,10 +1044,23 @@
+                     break;
+                 }
+                 future::Either::Right(((), _)) => {
++                    #[cfg(feature = "go-native-client")]
++                    let mut go_next = None;
+                     if let Some(inner) = self.pool.upgrade() {
+                         if let Ok(mut inner) = inner.lock() {
+                             trace!("idle interval checking for expired");
+                             inner.clear_expired();
++                            #[cfg(feature = "go-native-client")]
++                            if self.go_deadline.is_some() {
++                                go_next = inner.go_next_idle_deadline();
++                                if go_next.is_none() {
++                                    // Release ownership under the same mutex
++                                    // as insertion, so a later idle return
++                                    // starts a fresh exact-deadline worker.
++                                    inner.idle_interval_ref = None;
++                                    return;
++                                }
++                            }
+                             if inner.idle.is_empty() {
+                                 inner.idle_interval_ref = None;
+                                 trace!("pool empty, canceling idle interval");
+@@ -812,6 +1069,9 @@
+                         }
+                     }
+ 
++                    #[cfg(feature = "go-native-client")]
++                    let deadline = go_next.unwrap_or_else(|| self.timer.now() + self.duration);
++                    #[cfg(not(feature = "go-native-client"))]
+                     let deadline = self.timer.now() + self.duration;
+                     self.timer.reset(&mut sleep, deadline);
+                 }

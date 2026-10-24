@@ -1,0 +1,2 @@
+error: 'configuration error: loading configuration: oidc.client_id is required when oidc.issuer is set'
+

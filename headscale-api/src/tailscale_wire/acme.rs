@@ -257,7 +257,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=138")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -269,7 +269,7 @@ mod tests {
             resp.headers()
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
-            Some("https://control.example/key?v=39")
+            Some("https://control.example/key?v=138")
         );
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=138")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

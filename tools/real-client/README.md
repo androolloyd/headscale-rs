@@ -3,6 +3,34 @@
 This directory is for end-to-end parity tests that run stock `tailscaled`
 clients against both headscale-go and headscale-rs.
 
+For the pinned v0.29.5 `configtest` storage check, build the Rust binary and
+run `configtest-storage-v0295-smoke.py` with `HEADSCALE_GO_BIN` pointing to the
+pinned Go executable. It creates fresh files under `target/real-client/`,
+checks both primary SQLite schemas and Noise key formats, and has Go reopen
+the Rust files. The output includes a JSON report path.
+
+`configtest-postgres-v0295-smoke.py` checks the default Rust binary against
+pinned Go v0.29.5 on fresh Postgres databases, then runs Go `configtest` on
+Rust's database. It requires equal application columns and Go migration IDs
+before the reopen and checks that Go leaves the Rust application schema
+unchanged. Supplemental Rust indexes are reported but allowed. Set
+`HEADSCALE_GO_BIN` and
+`HEADSCALE_DB_POSTGRES_TEST_URL` to a local test server. The script creates
+and drops its temporary databases and writes a JSON report without key
+material.
+
+`postgres-api-key-session-restart-smoke.py` compares a live public-gateway
+API-key creation, authorization, expiration, and server restart under pinned
+Go v0.29.5 and Rust. The CLI enables `postgres-sqlx` by default; set
+`HEADSCALE_GO_BIN` and `HEADSCALE_DB_POSTGRES_TEST_URL` to a local test server.
+The script creates and drops separate temporary databases for the two runs.
+
+`noise-logtail-nodeattrs-v0295-smoke.py` uses the Noise follow-up helper's
+`map-once` mode to compare the initial full map on repeated client streams and
+after restart. It covers both `logtail.enabled` values and the presence or
+absence of the `data-plane-audit-logs` node attribute under production Go and
+Rust servers. Set `HEADSCALE_GO_BIN` to the pinned v0.29.5 executable.
+
 The first checked-in piece is a Rust wire-control harness:
 
 ```sh
@@ -114,7 +142,15 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | Database | `postgres-derp-native-restart` | `postgres-derp-native-restart-smoke.sh` | `postgres-derp-native-restart-headscale-go-smoke.sh` | Production Postgres native DERP stock clients reconnect, prove raw verify-client admissions, and relay after Rust server restart; headscale-go script is an explicit no-equivalent skip |
 | Database | `postgres-online-lastseen` | `postgres-online-lastseen-smoke.sh` | `postgres-online-lastseen-headscale-go-smoke.sh` | Production Postgres online transition and LastSeen after client disconnect |
 | Database | `postgres-ping-lifecycle` | `postgres-ping-lifecycle-smoke.sh` | `postgres-ping-lifecycle-headscale-go-smoke.sh` | Production Postgres debug PingRequest lifecycle and online/LastSeen |
+| Database | `postgres-full-map-ping-churn` | `postgres-full-map-ping-churn-smoke.sh` | `postgres-full-map-ping-churn-headscale-go-smoke.sh` | Four overlapping debug pings and unrelated user removals trigger full maps while one stock client keeps its identity and responds to every ping |
 | Database | `postgres-policy-churn` | `postgres-policy-churn-smoke.sh` | `postgres-policy-churn-headscale-go-smoke.sh` | Production Postgres auth-key registration plus database policy mutation wakes live peer maps |
+| Database | `postgres-policy-peer-removal-restart` | `postgres-policy-peer-removal-restart-smoke.sh` | `postgres-policy-peer-removal-restart-headscale-go-smoke.sh` | Live policy hides visible peers; each observer keeps its node ID and IP, and peers stay removed after server restart |
+| Database | `postgres-rejected-policy-filter` | `postgres-rejected-policy-filter-smoke.sh` | `postgres-rejected-policy-filter-headscale-go-smoke.sh` | A policy rejected by its failing reachability test leaves both stock clients' active packet filters, visible peers, and stored policy unchanged before and after server restart |
+| Database | `postgres-self-filter-user-rename` | `postgres-self-filter-user-rename-smoke.sh` | `postgres-self-filter-user-rename-headscale-go-smoke.sh` | Renaming x3 to u3 adds that user to a group with an `autogroup:self` ACL; the stock client's exact packet-filter rule updates live and persists after restart |
+| Database | `postgres-invalid-fqdn-peer-restart` | `postgres-invalid-fqdn-peer-restart-smoke.sh` | `postgres-invalid-fqdn-peer-restart-headscale-go-smoke.sh` | A persisted empty peer name is dropped from the surviving stock client's netmap after server restart without changing the observer's identity |
+| Database | `postgres-nextdns-nodeattrs-policy-reload` | `postgres-nextdns-nodeattrs-policy-reload-smoke.sh` | `postgres-nextdns-nodeattrs-policy-reload-headscale-go-smoke.sh` | A live policy nodeAttrs change switches the stock client's NextDNS resolver profile from `base` to `profile` over Postgres; MapResponse dumps assert an unrelated policy frame omits DNS and the profile arrives in a self/DNS change frame before the policy frame |
+| Database | `audit-log-nodeattrs` | `audit-log-nodeattrs-smoke.sh` | `audit-log-nodeattrs-headscale-go-smoke.sh` | Paired SQLite stock-client policy reloads grant `data-plane-audit-logs` with `logtail.enabled` false and true. With logtail disabled, the client persists `WantRunning=false` and reports the audit-log conflict; removing the attribute and running `tailscale up` restores `WantRunning=true` with the same node ID and IP. Enabled logtail leaves the client running. Tailscale can retain the old health warning after recovery, and `BackendState` can lag the stop preference. |
+| Database | `postgres-ephemeral-reconnect` | `postgres-ephemeral-reconnect-smoke.sh` | `postgres-ephemeral-reconnect-headscale-go-smoke.sh` | Two ephemeral-key stock clients register over Postgres; three rapid target restarts preserve both database identities and the observer's online peer map |
 | Database | `postgres-web-register-policy-churn` | `postgres-web-register-policy-churn-smoke.sh` | `postgres-web-register-policy-churn-headscale-go-smoke.sh` | Production Postgres web registration plus database policy mutation wakes live peer maps |
 | Database | `postgres-web-register-policy-churn-restart` | `postgres-web-register-policy-churn-restart-smoke.sh` | `postgres-web-register-policy-churn-restart-headscale-go-smoke.sh` | Production Postgres web-registration policy map churn survives server restart |
 | Database | `postgres-web-register-policy-config-map-churn-restart` | `postgres-web-register-policy-config-map-churn-restart-smoke.sh` | `postgres-web-register-policy-config-map-churn-restart-headscale-go-smoke.sh` | Production Postgres web-registration policy/config map churn, MagicDNS peer resolution, and restart persistence |
@@ -140,7 +176,7 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | Database | `postgres-web-register-tags` | `postgres-web-register-tags-smoke.sh` | `postgres-web-register-tags-headscale-go-smoke.sh` | Production Postgres web registration with owned requested tag |
 | Database | `postgres-web-register-unowned-tag` | `postgres-web-register-unowned-tag-smoke.sh` | `postgres-web-register-unowned-tag-headscale-go-smoke.sh` | Production Postgres web registration rejects unowned requested tag |
 | Database | `postgres-route-advertise` | `postgres-route-advertise-smoke.sh` | `postgres-route-advertise-headscale-go-smoke.sh` | Production Postgres route advertisement without approval |
-| Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen |
+| Database | `postgres-route-approve` | `postgres-route-approve-smoke.sh` | `postgres-route-approve-headscale-go-smoke.sh` | Production Postgres route advertisement/approval, live self-netmap `AllowedIPs`/`PrimaryRoutes` update, server restart, and offline LastSeen preservation across a second restart |
 | Database | `postgres-route-primary` | `postgres-route-primary-smoke.sh` | `postgres-route-primary-headscale-go-smoke.sh` | Production Postgres primary route selection |
 | Database | `postgres-route-primary-restart` | `postgres-route-primary-restart-smoke.sh` | `postgres-route-primary-restart-headscale-go-smoke.sh` | Production Postgres primary route owner survives server restart |
 | Database | `postgres-route-primary-failover` | `postgres-route-primary-failover-smoke.sh` | `postgres-route-primary-failover-headscale-go-smoke.sh` | Production Postgres primary route failover after unapproval |
@@ -158,6 +194,7 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | Database | `postgres-ssh-oidc-check` | `postgres-ssh-oidc-check-smoke.sh` | `postgres-ssh-oidc-check-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `check` approval |
 | Database | `postgres-ssh-cli-check` | `postgres-ssh-cli-check-smoke.sh` | `postgres-ssh-cli-check-headscale-go-smoke.sh` | Production Postgres CLI-approved Tailscale SSH `check` approval |
 | Database | `postgres-ssh-oidc-check-period-cache` | `postgres-ssh-oidc-check-period-cache-smoke.sh` | `postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache with exact cached replay status/stdout/stderr |
+| Database | `postgres-ssh-oidc-revocation` | `postgres-ssh-oidc-revocation-smoke.sh` | `postgres-ssh-oidc-revocation-headscale-go-smoke.sh` | Cached SSH approval is denied after live policy revocation reaches the target netmap; a fresh code with consumed OIDC callback state returns 410 |
 | Database | `postgres-ssh-oidc-check-period-local-user` | `postgres-ssh-oidc-check-period-local-user-smoke.sh` | `postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh` | Production Postgres OIDC-backed Tailscale SSH `checkPeriod` cache exactness and `local_user` scoping |
 | Database | `postgres-ssh-oidc-policy-restart` | `postgres-ssh-oidc-policy-restart-smoke.sh` | `postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh` | Production Postgres OIDC SSH policy mutation survives server restart |
 | Database | `postgres-ssh-oidc-check-wrong-user` | `postgres-ssh-oidc-check-wrong-user-smoke.sh` | `postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh` | Production Postgres wrong-user OIDC-backed Tailscale SSH `check` denial |
@@ -214,6 +251,8 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | Registration | `web-register-route-approve` | `web-register-route-approve-smoke.sh` | `web-register-route-approve-headscale-go-smoke.sh` | Web registration with route advertisement/approval |
 | Lifecycle | `web-register-route-approve-restart` | `web-register-route-approve-restart-smoke.sh` | `web-register-route-approve-restart-headscale-go-smoke.sh` | Production web/CLI registration route approval survives server restart |
 | Registration | `oidc` | `oidc-smoke.sh` | `oidc-headscale-go-smoke.sh` | OIDC callback, node row, and user profile |
+| Registration | `noise-oidc-register-response` | `noise-oidc-register-response-smoke.py` | Same script runs both | Real TS2021/Noise OIDC follow-up compares register response owner, login, authorization, fractional creation time, and signature fields after separate mock IdP callbacks. It also checks the 303 callback redirect, reloadable confirmation page, cookie-less GET rejection, and `/health`, `/ts2021`, and inner `/machine/register` HTTP metrics. `NOISE_OIDC_DATABASE=postgres` uses temporary Postgres databases, `NOISE_OIDC_WEBSOCKET=1` uses the browser/WASM GET upgrade, `NOISE_OIDC_TLS=1` uses a trusted local certificate over WSS, and `NOISE_OIDC_DELETE_STREAM=1` verifies deleted-node stream closure and the expired self-node retry frame |
+| Registration | `noise-tagged-retag` | `noise-tagged-retag-smoke.py` | Same script runs both | TS2021 registration with a tagged preauth key, an admin tag override, same-key reauthentication, and different-key retagging; SQLite and Postgres rows assert stable node ID/IP, rotated node keys, database tag history, null tagged user ownership, and changed auth-key ID only for the different key |
 | Registration | `oidc-policy-churn` | `oidc-policy-churn-smoke.sh` | `oidc-policy-churn-headscale-go-smoke.sh` | OIDC policy reload exposes a newly visible OIDC peer/profile to a stock-client viewer |
 | Lifecycle | `oidc-policy-churn-restart` | `oidc-policy-churn-restart-smoke.sh` | `oidc-policy-churn-restart-headscale-go-smoke.sh` | Production OIDC policy reload peer/profile map churn survives server restart |
 | SSH | `ssh-oidc-check` | `ssh-oidc-check-smoke.sh` | `ssh-oidc-check-headscale-go-smoke.sh` | OIDC-backed Tailscale SSH `check` approval |
@@ -299,6 +338,102 @@ tools/real-client/dns-live-resolver-harness-check.sh
 | SSH | `ssh-accept-env` | `ssh-accept-env-smoke.sh` | `ssh-accept-env-headscale-go-smoke.sh` | Current-head Tailscale SSH `acceptEnv` forwards accepted `LANG` and `LC_*` environment variables with exact success status/stdout/stderr |
 
 ## Local and CI Execution
+
+The admin CLI comparison uses deterministic protobuf replies from a local Unix
+gRPC fixture compiled against headscale-go v0.29.5. It compares exit status,
+stdout, stderr, and captured RPC requests for populated and empty list cases
+across human, JSON, JSON-line, and YAML output:
+
+```sh
+cargo build --locked -p headscale-cli --bin headscale
+HEADSCALE_GO_BIN=/path/to/pinned-v0.29.5/headscale \
+  python3 tools/real-client/cli-admin-output-diff.py
+```
+
+The corpus covers users, nodes, routes, preauth keys, API keys, policy, health,
+auth approval/rejection/registration, and debug node creation. Replies contain
+fixed timestamps, secrets, Unicode display names, tagged and untagged nodes,
+and multiline table cells. Output is compared without normalization. Expiry
+instants minted by duration-based flags are validated against the command's
+invocation time before comparing the remaining request fields. Reports and
+request captures are written under `target/real-client/cli-admin-output-diff-*`.
+The real-client workflow runs this comparison in addition to its paired server
+and stock-client rows. The fixture proves CLI behavior; server mutation and
+restart behavior still require those production process rows.
+
+`startup-policy-oidc-smoke.py` uses both production servers on isolated SQLite
+and Postgres databases. It checks ambiguous user aliases in groups, tag owners,
+route/exit auto-approvers, ACLs, and SSH rules; rejected policy writes must leave
+the stored policy intact. It also checks file/database policy startup,
+malformed stored policy rejection, provider-ID precedence, tolerant missing
+users, empty stored policies, and OIDC discovery with required, optional,
+unavailable, and mismatched providers. Policy command output is compared
+exactly. OIDC provider error wording and malformed-policy diagnostics are
+retained as evidence but only their discovery/startup behavior is compared.
+
+```sh
+HEADSCALE_GO_BIN=/path/to/pinned-v0.29.5/headscale \
+HEADSCALE_DB_POSTGRES_TEST_URL=postgresql://headscale@127.0.0.1:5432/postgres \
+  python3 tools/real-client/startup-policy-oidc-smoke.py
+```
+
+`oidc-startup-deadline-smoke.py` runs eight additional paired startup cases
+against a local provider that stalls before headers or during its JSON body.
+It checks the 30-second discovery deadline for `configtest` and `serve`, with
+provider availability both required and optional. Each of the 16 processes
+has isolated SQLite storage. The cases run concurrently and take about 30
+seconds; the script verifies discovery was attempted and checks elapsed time,
+required-provider rejection, and optional-provider fallback. Diagnostic text
+is retained, not compared exactly. CI runs this after the startup corpus.
+
+```sh
+HEADSCALE_GO_BIN=/path/to/pinned-v0.29.5/headscale \
+  python3 tools/real-client/oidc-startup-deadline-smoke.py
+```
+
+The standalone `sqlite-v0295-release-upgrade-smoke.sh` checks historical
+v0.28.0 and v0.29.x migration fixtures through production processes. It starts
+pinned Go v0.29.5 and Rust independently on copies of the populated v0.28.0
+auth-key and RequestTags fixtures plus the null-tags owner recovery and
+tagged-expiry and zero-time-expiry fixtures. The zero-time SQL is byte-for-byte
+the pinned Go v0.29.5 migration test dump (SHA-256
+`959a9e3b95abc7c73314b15d80e27040474ddf49a924436fda4cc4023110ba9c`).
+It compares the resulting node and key rows and
+cross-starts each implementation on the other's upgraded file. Set
+`HEADSCALE_GO_BIN` to an
+existing pinned binary to avoid downloading it:
+
+```sh
+HEADSCALE_GO_BIN=/path/to/headscale-v0.29.5 \
+  tools/real-client/sqlite-v0295-release-upgrade-smoke.sh
+```
+
+`noise-followup-machine-binding-smoke.sh` starts production Rust and pinned Go
+v0.29.5 servers on separate disposable SQLite files. A small Tailscale
+TS2021 client starts web registration, then polls the follow-up URL under the
+original or a different Noise machine key while the CLI approves it. The row
+checks the owner response and machine-key mismatch without sharing one Go
+verdict between competing pollers.
+
+```sh
+HEADSCALE_GO_BIN=/path/to/headscale-v0.29.5 \
+  tools/real-client/noise-followup-machine-binding-smoke.sh
+```
+
+`postgres-v0295-release-upgrade-smoke.sh` builds its starting schema with
+pinned Go, seeds pre-fix null-tags owner and tagged-expiry rows, and clones the
+database. Go and Rust upgrade separate copies, compare node state, then
+cross-start on each other's upgraded database. It requires a disposable local
+Postgres admin URL in `HEADSCALE_DB_POSTGRES_TEST_URL` and creates three
+temporary databases.
+
+`postgres-v028-zero-time-upgrade-smoke.py` first creates the schema under a
+real pinned Go v0.28.0 process, inserts zero-time, future, and past expiry
+rows, then upgrades cloned databases under pinned Go v0.29.5 and Rust. Both
+implementations cross-start on the other's upgraded database and must retain
+the same UTC expiry years and v0.29.5 migration marker. Set
+`HEADSCALE_GO_V028_BIN`, `HEADSCALE_GO_BIN`, and
+`HEADSCALE_DB_POSTGRES_TEST_URL`; build Rust with `postgres-sqlx` first.
 
 The real-client smokes require a Docker daemon that supports
 `--add-host host.docker.internal:host-gateway`, plus `cargo`, `curl`, and
@@ -604,6 +739,16 @@ tools/real-client/tagged-preauth-headscale-go-smoke.sh
 Both scripts load a minimal tag-owner policy when tags are requested. The
 headscale-go smoke uses the upstream `headscale preauthkeys create --tags`
 command; the Rust smoke uses the harness-only preauth mint route.
+
+`noise-tagged-retag-smoke.py` compares production Rust and pinned Go TS2021
+registration over SQLite or Postgres. It checks same-key admin-tag retention,
+new-key retagging, interactive tag re-advertisement, and interactive untagging
+through `auth register`. The checks include stable node ID/IP, direct database
+ownership and auth-key references, and CLI-visible tags. Set
+`HEADSCALE_GO_BIN` to the pinned v0.29.5 executable; set
+`NOISE_TAGGED_DATABASE=postgres` and `HEADSCALE_DB_POSTGRES_TEST_URL` for
+Postgres. Each run writes `cli-node-json-shape-diff.json`; the five-stage
+corpus currently differs only in Go's fractional timestamp `nanos` fields.
 
 Useful knobs:
 
@@ -1467,3 +1612,24 @@ Useful knobs:
   so the parked `tailscale ssh` exits nonzero after the auth URL is emitted;
   the wrapper defaults to status `124`, empty stdout, the stable first auth
   prompt line, and an auth-prompt stderr regex.
+
+## Qualification packet identity — source implementation 2026-10-18
+
+`evidence_manifest.py` records the selected source tree, named Rust/Go and harness
+binary hashes, executable Headscale binaries found under the report tree,
+toolchain versions, configured feature/backend labels, platform, Git identity
+and report hashes. It does not include configuration, database or report
+contents. Features/backends are labels, not an observed Cargo dependency graph.
+The source inventory also hashes the root Docker ignore file, both container
+recipes, either Rust toolchain filename and local Cargo build configuration when
+present. Deployment runtime configuration and credentials are excluded.
+
+The real-client workflow now captures initial/final manifests around the
+qualification steps, rejects changed source identity, and uploads them with the
+reports. Both push and PR filters include every `vendor/**` package. The final
+manifest is a packet inventory at capture time, not a per-row execution receipt;
+binary replacement during a row or an external binary outside the inventory
+needs separate evidence. Local/direct reports need their own matching packet.
+Historical reports do not qualify the current source changes. This script and
+workflow edit have not been executed or validated during the implementation
+batch; testing remains paused.

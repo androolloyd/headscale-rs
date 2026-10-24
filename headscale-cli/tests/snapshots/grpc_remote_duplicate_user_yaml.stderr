@@ -1,2 +1,2 @@
-error: 'server error (500): creating user: creating user: constraint failed: UNIQUE constraint failed: users.name (2067)'
+error: 'creating user: rpc error: code = Internal desc = creating user: creating user: constraint failed: UNIQUE constraint failed: users.name (2067)'
 

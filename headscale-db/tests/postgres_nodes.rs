@@ -29,9 +29,18 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         )
         .await?;
 
-        assert_eq!(node.machine_key, "mkey:abc");
-        assert_eq!(node.node_key, "nodekey:abc");
-        assert_eq!(node.disco_key, "discokey:abc");
+        assert_eq!(
+            node.machine_key,
+            "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            node.node_key,
+            "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            node.disco_key,
+            "discokey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
         assert_eq!(node.endpoint_list(), vec!["203.0.113.5:41641"]);
         assert_eq!(node.host_info_value()["OS"], "linux");
         assert_eq!(node.ipv4.as_deref(), Some("100.64.0.1"));
@@ -51,7 +60,7 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         assert_eq!(
             headscale_nodes::get_postgres_by_node_key_on_connection(
                 &mut schema.conn,
-                "nodekey:abc",
+                "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a",
             )
             .await?
             .id,
@@ -60,7 +69,7 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         assert_eq!(
             headscale_nodes::get_postgres_by_machine_key_and_user_on_connection(
                 &mut schema.conn,
-                "mkey:abc",
+                "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a",
                 alice.id,
             )
             .await?
@@ -122,9 +131,12 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         assert!(untagged.user_id.is_none());
 
         let mut replacement = node_params(alice.id, auth_key_id);
-        replacement.machine_key = "mkey:def".into();
-        replacement.node_key = "nodekey:def".into();
-        replacement.disco_key = "discokey:def".into();
+        replacement.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        replacement.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        replacement.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         replacement.endpoints = vec!["198.51.100.10:41641".into()];
         replacement.given_name = "alice-new".into();
         replacement.tags = Vec::new();
@@ -135,7 +147,10 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
             replacement,
         )
         .await?;
-        assert_eq!(updated.machine_key, "mkey:def");
+        assert_eq!(
+            updated.machine_key,
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c"
+        );
         assert_eq!(updated.user_id, Some(alice.id));
         assert!(updated.tag_list().is_empty());
         assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
@@ -161,6 +176,23 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
             .await?
             .last_seen,
             Some(last_seen)
+        );
+        let precise_disconnect = chrono::DateTime::from_timestamp(last_seen + 1, 123_456_000)
+            .expect("precise disconnect timestamp");
+        headscale_nodes::persist_postgres_last_seen_at_on_connection(
+            &mut schema.conn,
+            node.id,
+            &precise_disconnect,
+        )
+        .await?;
+        let expected_disconnect =
+            precise_disconnect.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        assert_eq!(
+            headscale_nodes::get_postgres_by_id_on_connection(&mut schema.conn, node.id)
+                .await?
+                .last_seen_text
+                .as_deref(),
+            Some(expected_disconnect.as_str())
         );
         let addressed = headscale_nodes::set_postgres_ip_addresses_on_connection(
             &mut schema.conn,
@@ -215,9 +247,12 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         .await?;
 
         let mut duplicate_name = node_params(alice.id, auth_key_id);
-        duplicate_name.machine_key = "mkey:other".into();
-        duplicate_name.node_key = "nodekey:other".into();
-        duplicate_name.disco_key = "discokey:other".into();
+        duplicate_name.machine_key =
+            "mkey:55763a9e6ec62fc5cacdcea3c58b095d95555eb1283f31cd85d8ca911a229154".into();
+        duplicate_name.node_key =
+            "nodekey:55763a9e6ec62fc5cacdcea3c58b095d95555eb1283f31cd85d8ca911a229154".into();
+        duplicate_name.disco_key =
+            "discokey:55763a9e6ec62fc5cacdcea3c58b095d95555eb1283f31cd85d8ca911a229154".into();
         duplicate_name.ipv4 = Some("100.64.0.10".into());
         duplicate_name.ipv6 = Some("fd7a:115c:a1e0::10".into());
         assert!(matches!(
@@ -228,9 +263,12 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         ));
 
         let mut duplicate_ipv4 = node_params(alice.id, auth_key_id);
-        duplicate_ipv4.machine_key = "mkey:ipv4".into();
-        duplicate_ipv4.node_key = "nodekey:ipv4".into();
-        duplicate_ipv4.disco_key = "discokey:ipv4".into();
+        duplicate_ipv4.machine_key =
+            "mkey:5de5749c50499e066e2cfefa843e332554c43c7a11df3c8dc58f98295ae220b3".into();
+        duplicate_ipv4.node_key =
+            "nodekey:5de5749c50499e066e2cfefa843e332554c43c7a11df3c8dc58f98295ae220b3".into();
+        duplicate_ipv4.disco_key =
+            "discokey:5de5749c50499e066e2cfefa843e332554c43c7a11df3c8dc58f98295ae220b3".into();
         duplicate_ipv4.given_name = "node-ipv4".into();
         duplicate_ipv4.ipv6 = Some("fd7a:115c:a1e0::11".into());
         assert!(matches!(
@@ -241,8 +279,10 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         ));
 
         let mut duplicate_node_key = node_params(alice.id, auth_key_id);
-        duplicate_node_key.machine_key = "mkey:node-key".into();
-        duplicate_node_key.disco_key = "discokey:node-key".into();
+        duplicate_node_key.machine_key =
+            "mkey:f140da8b6291401b16c67cc17f0734c8750338d12edb60ed95368d0ff1d2dc8b".into();
+        duplicate_node_key.disco_key =
+            "discokey:f140da8b6291401b16c67cc17f0734c8750338d12edb60ed95368d0ff1d2dc8b".into();
         duplicate_node_key.hostname = "node-key".into();
         duplicate_node_key.given_name = "node-key".into();
         duplicate_node_key.ipv4 = Some("100.64.0.12".into());
@@ -254,9 +294,12 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
         assert_eq!(duplicate_node_key.node_key, node.node_key);
 
         let mut second_params = node_params(alice.id, auth_key_id);
-        second_params.machine_key = "mkey:second".into();
-        second_params.node_key = "nodekey:second".into();
-        second_params.disco_key = "discokey:second".into();
+        second_params.machine_key =
+            "mkey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.node_key =
+            "nodekey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.disco_key =
+            "discokey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
         second_params.hostname = "second".into();
         second_params.given_name = "second".into();
         second_params.ipv4 = Some("100.64.0.13".into());
@@ -265,8 +308,10 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
             headscale_nodes::create_postgres_on_connection(&mut schema.conn, second_params).await?;
 
         let mut duplicate_update = node_params(alice.id, auth_key_id);
-        duplicate_update.machine_key = "mkey:second".into();
-        duplicate_update.disco_key = "discokey:duplicate-update".into();
+        duplicate_update.machine_key =
+            "mkey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        duplicate_update.disco_key =
+            "discokey:2135ab5c0db910735396983ff2c47c74d043094e5938d2868847607bde512d61".into();
         duplicate_update.hostname = "duplicate-update".into();
         duplicate_update.given_name = "duplicate-update".into();
         duplicate_update.ipv4 = Some("100.64.0.14".into());
@@ -364,9 +409,12 @@ async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
         .await?;
 
         let mut second_params = node_params(alice.id, auth_key_id);
-        second_params.machine_key = "mkey:second".into();
-        second_params.node_key = "nodekey:second".into();
-        second_params.disco_key = "discokey:second".into();
+        second_params.machine_key =
+            "mkey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.node_key =
+            "nodekey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.disco_key =
+            "discokey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
         second_params.hostname = "alice-phone".into();
         second_params.given_name = "alice-phone".into();
         second_params.ipv4 = Some("100.64.0.2".into());
@@ -377,9 +425,12 @@ async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
         let ephemeral_key_id =
             seed_auth_key_with_ephemeral(&mut schema.conn, alice.id, true).await?;
         let mut ephemeral_params = node_params(alice.id, ephemeral_key_id);
-        ephemeral_params.machine_key = "mkey:ephemeral".into();
-        ephemeral_params.node_key = "nodekey:ephemeral".into();
-        ephemeral_params.disco_key = "discokey:ephemeral".into();
+        ephemeral_params.machine_key =
+            "mkey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
+        ephemeral_params.node_key =
+            "nodekey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
+        ephemeral_params.disco_key =
+            "discokey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
         ephemeral_params.hostname = "ephemeral".into();
         ephemeral_params.given_name = "ephemeral".into();
         ephemeral_params.ipv4 = Some("100.64.0.3".into());
@@ -479,9 +530,10 @@ async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
 
 fn node_params(user_id: i64, auth_key_id: i64) -> headscale_nodes::CreateParams {
     headscale_nodes::CreateParams {
-        machine_key: "mkey:abc".into(),
-        node_key: "nodekey:abc".into(),
-        disco_key: "discokey:abc".into(),
+        machine_key: "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a".into(),
+        node_key: "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a".into(),
+        disco_key: "discokey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+            .into(),
         endpoints: vec!["203.0.113.5:41641".into()],
         host_info: json!({
             "OS": "linux",
@@ -496,7 +548,9 @@ fn node_params(user_id: i64, auth_key_id: i64) -> headscale_nodes::CreateParams 
         tags: Vec::new(),
         auth_key_id: Some(auth_key_id),
         expiry: None,
+        expiry_precise: None,
         last_seen: Some(temporary_timestamp()),
+        last_seen_precise: None,
         approved_routes: vec!["10.0.0.0/24".into()],
     }
 }

@@ -120,8 +120,9 @@ async fn discover_endpoints(wg_port: u16) -> Vec<String> {
     let mut endpoints = Vec::new();
 
     // Try to get local IP addresses
-    if let Ok(interfaces) = local_ip_address::list_afinet_netifas() {
-        for (_, ip) in interfaces {
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            let ip = interface.addr.ip();
             // Skip loopback
             if ip.is_loopback() {
                 continue;

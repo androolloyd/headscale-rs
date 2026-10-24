@@ -17,21 +17,22 @@
 //!     with `#[command(subcommand)]` and the same `users list /
 //!     nodes show / preauthkeys create …` tree appears verbatim.
 //!   * [`dispatch`] — the async entry-point. Takes the parsed
-//!     [`admin::ConnectArgs`] + an [`AdminCmd`] and returns the same
-//!     process exit code the standalone `headscale` binary would.
-//!     Stable contract: 0 success / 3 connection / 4 auth / 5 not
-//!     found / 6 server-side (see `admin::ExitCode`).
+//!     [`admin::ConnectArgs`] + an [`AdminCmd`]. Direct embedders retain the
+//!     typed exit contract: 0 success / 3 connection / 4 auth / 5 not found /
+//!     6 server-side (see `admin::ExitCode`). Enable
+//!     `ConnectArgs::wrap_grpc_connect_error` for the standalone binary's
+//!     Go-compatible operation/status messages and runtime error exit 1.
 //!
-//! The embedded contract is the same as the standalone `headscale`
-//! admin surface. Downstream-specific commands and policy layers stay
-//! outside this crate; this module only exposes the shared headscale-go
-//! compatibility surface.
+//! The embedded command tree and transports share the standalone implementation.
+//! Error formatting follows the caller's compatibility setting above.
+//! Downstream-specific commands and policy layers stay outside this crate.
 
 // Keep compatibility with downstream toolchains that predate
 // Duration::from_mins/from_hours while newer clippy versions prefer them.
 #![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 pub mod admin;
+pub mod yaml;
 
 use clap::Subcommand;
 

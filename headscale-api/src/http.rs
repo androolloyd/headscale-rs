@@ -33,11 +33,23 @@ pub fn build_router(
     ledger: Arc<Ledger>,
     resources: Arc<ResourceRegistry>,
 ) -> Router {
+    build_router_with_nonce_store(mesh, ledger, resources, Arc::new(NonceStore::new()))
+}
+
+/// Reuse the replay cache when rebuilding a router around the same ledger.
+/// A durable ledger must additionally persist replay/idempotency state
+/// transactionally with transfers across process restarts.
+pub fn build_router_with_nonce_store(
+    mesh: Arc<MeshCoordinator>,
+    ledger: Arc<Ledger>,
+    resources: Arc<ResourceRegistry>,
+    node_nonces: Arc<NonceStore>,
+) -> Router {
     let state = AppState {
         mesh,
         ledger,
         _resources: resources,
-        node_nonces: Arc::new(NonceStore::new()),
+        node_nonces,
     };
 
     Router::new()

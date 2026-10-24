@@ -10,7 +10,18 @@ use serde::Serialize;
 use super::AdminError;
 use super::client::AdminClient;
 use super::grpc_client::GrpcAdminClient;
-use super::output::{OutputFormat, print_structured, print_table};
+use super::output::{OutputFormat, print_structured, print_table, print_upstream_table};
+use super::proto_output::{impl_go_yaml, print_proto, print_proto_list};
+
+impl_go_yaml!(PreauthOutput {
+    user => "user", id => "id", key => "key", reusable => "reusable", ephemeral => "ephemeral",
+    used => "used", expiration => "expiration", created_at => "createdat", acl_tags => "acltags",
+});
+impl_go_yaml!(UserOutput {
+    id => "id", name => "name", created_at => "createdat", display_name => "displayname",
+    email => "email", provider_id => "providerid", provider => "provider", profile_pic_url => "profilepicurl",
+});
+impl_go_yaml!(TimestampOutput { seconds => "seconds", nanos => "nanos" });
 
 #[derive(Debug, Serialize)]
 struct EmptyResponse {}
@@ -51,19 +62,37 @@ pub async fn create_grpc(
     expires_in_secs: u64,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
+    create_grpc_with_expiration(
+        client,
+        user,
+        reusable,
+        ephemeral,
+        tags,
+        expiration_timestamp(expires_in_secs),
+        fmt,
+    )
+    .await
+}
+
+/// Explicit timestamp path used by the v0.29.5 CLI expiration parser. The
+/// existing whole-second helper retains its embedding contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_grpc_with_expiration(
+    client: &mut GrpcAdminClient,
+    user: u64,
+    reusable: bool,
+    ephemeral: bool,
+    tags: Vec<String>,
+    expiration: Option<prost_types::Timestamp>,
+    fmt: OutputFormat,
+) -> Result<(), AdminError> {
     let key = PreauthOutput::from(
         client
-            .create_pre_auth_key(
-                user,
-                reusable,
-                ephemeral,
-                expiration_unix(expires_in_secs),
-                tags,
-            )
+            .create_pre_auth_key(user, reusable, ephemeral, expiration, tags)
             .await?,
     );
     if fmt.is_structured() {
-        print_structured(fmt, &key)?;
+        print_proto(fmt, &key)?;
     } else {
         println!("{}", key.key);
     }
@@ -95,7 +124,7 @@ pub async fn list_grpc(client: &mut GrpcAdminClient, fmt: OutputFormat) -> Resul
         })
         .collect();
     if fmt.is_structured() {
-        print_structured(fmt, &keys)?;
+        print_proto_list(fmt, &keys)?;
     } else {
         render_grpc_keys(&keys);
     }
@@ -197,7 +226,7 @@ fn render_keys(keys: &[PreauthAdminKey]) {
 
 fn render_grpc_keys(keys: &[PreauthOutput]) {
     if keys.is_empty() {
-        print_table(
+        print_upstream_table(
             &[
                 "ID",
                 "Key/Prefix",
@@ -227,7 +256,7 @@ fn render_grpc_keys(keys: &[PreauthOutput]) {
             ]
         })
         .collect();
-    print_table(
+    print_upstream_table(
         &[
             "ID",
             "Key/Prefix",
@@ -242,15 +271,16 @@ fn render_grpc_keys(keys: &[PreauthOutput]) {
     );
 }
 
-fn expiration_unix(ttl_secs: u64) -> Option<i64> {
+fn expiration_timestamp(ttl_secs: u64) -> Option<prost_types::Timestamp> {
     if ttl_secs == 0 {
         return None;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let expires_at = now.saturating_add(ttl_secs);
-    i64::try_from(expires_at).ok()
+    let duration = chrono::Duration::seconds(i64::try_from(ttl_secs).ok()?);
+    let expires_at = Utc::now().checked_add_signed(duration)?;
+    Some(prost_types::Timestamp {
+        seconds: expires_at.timestamp(),
+        nanos: expires_at.timestamp_subsec_nanos() as i32,
+    })
 }
 
 fn timestamp_display_proto(ts: Option<&prost_types::Timestamp>) -> String {

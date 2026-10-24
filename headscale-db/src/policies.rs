@@ -5,6 +5,7 @@
 //! update appends a new row; reads return the newest non-deleted row.
 
 use crate::{DbError, Result};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 #[cfg(feature = "postgres-sqlx")]
@@ -23,6 +24,7 @@ const POLICY_COLUMNS: &str = r"
             WHEN typeof(updated_at) = 'integer' THEN updated_at
             ELSE unixepoch(updated_at)
         END AS updated_at,
+        CAST(updated_at AS TEXT) AS updated_at_text,
         CASE
             WHEN deleted_at IS NULL THEN NULL
             WHEN typeof(deleted_at) = 'integer' THEN deleted_at
@@ -35,13 +37,14 @@ fn policy_select(suffix: &str) -> String {
 }
 
 #[cfg(feature = "postgres-sqlx")]
-const POSTGRES_POLICY_COLUMNS: &str = r"
+const POSTGRES_POLICY_COLUMNS: &str = r#"
         id,
         COALESCE(data, '') AS data,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
+        to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_text,
         FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
-";
+"#;
 
 #[cfg(feature = "postgres-sqlx")]
 fn postgres_policy_select(suffix: &str) -> String {
@@ -57,33 +60,63 @@ pub struct PolicyRow {
     pub deleted_at: Option<i64>,
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+/// Precise native timestamp projection without changing PolicyRow's public
+/// fields. Legacy consumers can continue using whole Unix seconds.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TimedPolicyRow {
+    #[sqlx(flatten)]
+    pub row: PolicyRow,
+    pub updated_at_text: Option<String>,
+}
+
+impl TimedPolicyRow {
+    pub fn updated_at_datetime(&self) -> Option<DateTime<Utc>> {
+        let Some(raw) = self.updated_at_text.as_deref() else {
+            // Scanning SQL NULL into Go's non-pointer time.Time leaves zero.
+            return DateTime::from_timestamp(-62_135_596_800, 0);
+        };
+        DateTime::parse_from_rfc3339(raw)
+            .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z"))
+            .map(|value| value.with_timezone(&Utc))
+            .ok()
+            .or_else(|| {
+                NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                    .ok()
+                    .map(|value| value.and_utc())
+            })
+            .or_else(|| DateTime::from_timestamp(self.row.updated_at, 0))
+    }
 }
 
 pub async fn set(pool: &SqlitePool, data: &str) -> Result<PolicyRow> {
-    let now = now_unix();
-    let id: i64 = sqlx::query_scalar(
-        "
-        INSERT INTO policies (data, created_at, updated_at, deleted_at)
-        VALUES (?, datetime(?, 'unixepoch'), datetime(?, 'unixepoch'), NULL)
-        RETURNING id
-        ",
-    )
-    .bind(data)
-    .bind(now)
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
+    set_with_timestamp(pool, data).await.map(|value| value.row)
+}
 
-    get_by_id(pool, id).await
+pub async fn set_with_timestamp(pool: &SqlitePool, data: &str) -> Result<TimedPolicyRow> {
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    // Gorm Create(... RETURNING *) returns the inserted row directly. Do not
+    // add a later lookup that can observe deletion or an external row edit.
+    let query = format!(
+        "INSERT INTO policies (data, created_at, updated_at, deleted_at) VALUES (?, ?, ?, NULL) RETURNING {POLICY_COLUMNS}"
+    );
+    sqlx::query_as::<_, TimedPolicyRow>(&query)
+        .bind(data)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::from)
 }
 
 pub async fn get_latest(pool: &SqlitePool) -> Result<Option<PolicyRow>> {
+    get_latest_with_timestamp(pool)
+        .await
+        .map(|value| value.map(|value| value.row))
+}
+
+pub async fn get_latest_with_timestamp(pool: &SqlitePool) -> Result<Option<TimedPolicyRow>> {
     let query = policy_select("WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 1");
-    sqlx::query_as::<_, PolicyRow>(&query)
+    sqlx::query_as::<_, TimedPolicyRow>(&query)
         .fetch_optional(pool)
         .await
         .map_err(DbError::from)
@@ -103,44 +136,50 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PolicyRow> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn set_postgres(pool: &PgPool, data: &str) -> Result<PolicyRow> {
-    let now = now_unix();
-    let id: i64 = sqlx::query_scalar(
-        "
-        INSERT INTO policies (data, created_at, updated_at, deleted_at)
-        VALUES ($1, to_timestamp($2), to_timestamp($2), NULL)
-        RETURNING id
-        ",
-    )
-    .bind(data)
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
+    set_postgres_with_timestamp(pool, data)
+        .await
+        .map(|value| value.row)
+}
 
-    get_postgres_by_id(pool, id).await
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_with_timestamp(pool: &PgPool, data: &str) -> Result<TimedPolicyRow> {
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let query = format!(
+        "INSERT INTO policies (data, created_at, updated_at, deleted_at) VALUES ($1, $2::TIMESTAMPTZ, $2::TIMESTAMPTZ, NULL) RETURNING {POSTGRES_POLICY_COLUMNS}"
+    );
+    sqlx::query_as::<_, TimedPolicyRow>(&query)
+        .bind(data)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::from)
 }
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn set_postgres_on_connection(conn: &mut PgConnection, data: &str) -> Result<PolicyRow> {
-    let now = now_unix();
-    let id: i64 = sqlx::query_scalar(
-        "
-        INSERT INTO policies (data, created_at, updated_at, deleted_at)
-        VALUES ($1, to_timestamp($2), to_timestamp($2), NULL)
-        RETURNING id
-        ",
-    )
-    .bind(data)
-    .bind(now)
-    .fetch_one(&mut *conn)
-    .await?;
-
-    get_postgres_by_id_on_connection(conn, id).await
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let query = format!(
+        "INSERT INTO policies (data, created_at, updated_at, deleted_at) VALUES ($1, $2::TIMESTAMPTZ, $2::TIMESTAMPTZ, NULL) RETURNING {POSTGRES_POLICY_COLUMNS}"
+    );
+    sqlx::query_as::<_, PolicyRow>(&query)
+        .bind(data)
+        .bind(&now)
+        .fetch_one(conn)
+        .await
+        .map_err(DbError::from)
 }
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn get_latest_postgres(pool: &PgPool) -> Result<Option<PolicyRow>> {
+    get_latest_postgres_with_timestamp(pool)
+        .await
+        .map(|value| value.map(|value| value.row))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_latest_postgres_with_timestamp(pool: &PgPool) -> Result<Option<TimedPolicyRow>> {
     let query = postgres_policy_select("WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 1");
-    sqlx::query_as::<_, PolicyRow>(&query)
+    sqlx::query_as::<_, TimedPolicyRow>(&query)
         .fetch_optional(pool)
         .await
         .map_err(DbError::from)

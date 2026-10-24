@@ -1,0 +1,49 @@
+Copyright 2014 The Go Authors. All rights reserved.
+
+Native server behavior adapts selected Go net/http HTTP/2 and x/net/http2:
+first SETTINGS admission and raw SETTINGS validation; current-ID GOAWAY;
+independent preface/input/output progress; pending controls; connection and
+stream deadlines and body timeout behavior.
+
+Source pins and scope are recorded in UPSTREAM.md. The original h2 source
+retains its MIT license in LICENSE. Go-derived adaptations retain the original
+BSD terms in LICENSE-GO. The container LICENSE* glob includes both notices.
+
+Native HTTP/2 client idle lifecycle follow-up
+Copyright 2009, 2011, 2014 The Go Authors. All rights reserved.
+Default-off, per-builder native client idle timers follow selected Go1.26.9
+net/http/h2_bundle.go initial flush, reservation, admission, stream closure and
+silent idle-close phases. Original MIT terms and Go BSD terms remain intact.
+Source pins, exact implementation scope and unqualified boundaries are in
+UPSTREAM.md. This notice does not establish runtime or client parity.
+
+Native client capacity, reset, receive-control and lifecycle follow-up
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go provides the native capacity/reservation,
+pending-reset PING, lifecycle retention, SETTINGS/PONG/refund flush ordering and
+receive-credit threshold phases. Adaptations are per-builder and default-off.
+Original MIT and Go BSD terms remain intact; UPSTREAM.md records the source
+revision and remaining unqualified implementation/runtime boundaries.
+
+Native client writer flights and sticky failures follow-up
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go provides buffered client startup, writer
+mutex flight boundaries, header-start and cancellation/reset ownership, cached
+writer errors and reader-side SETTINGS/PONG/refund error phases. Native codec
+receipts and reset flights are an adaptation of those phases. Original MIT
+and Go BSD terms remain intact; UPSTREAM.md records pins and qualification.
+
+Native caller-sized response reads and delayed stream admission
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go supplies reqHeaderMu admission,
+caller-sized pipe reads, content-length read errors, paired read-credit writes,
+body close/refund/request-cleanup phases and special noBody/missingBody behavior.
+The native hidden APIs adapt these phases; default behavior remains selected
+separately. Original MIT and Go BSD terms remain intact. See UPSTREAM.md.
+
+Native protocol reset and request-body phase follow-up
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Selected Go1.26.9 net/http/h2_bundle.go supplies exact local reset/peer-no-echo
+cleanup, pipe-error versus final-done phases, terminal-EOS suppression, request
+header/body ordering and successful stopped-upload NO_ERROR cleanup. Original
+h2 MIT and Go BSD terms remain intact. See UPSTREAM.md for pins and scope.

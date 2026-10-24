@@ -12,11 +12,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The fix is feature-gated so downstream callers of `--features full`
     // (the headscale-cli, the gateway, etc.) keep their generated code.
     if std::env::var_os("CARGO_FEATURE_FULL").is_some() {
+        let output = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
         tonic_prost_build::configure()
             .build_server(true)
             .build_client(true)
-            .out_dir("src/generated")
-            .file_descriptor_set_path("src/generated/headscale_descriptor.bin")
+            .out_dir(&output)
+            .file_descriptor_set_path(output.join("headscale_descriptor.bin"))
             .compile_protos(
                 &[
                     "proto/common.proto",

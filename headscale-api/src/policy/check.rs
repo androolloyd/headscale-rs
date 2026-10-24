@@ -1,16 +1,22 @@
+// Copyright (c) 2020, Juan Font
+// SPDX-License-Identifier: BSD-3-Clause
+
 //! Semantic evaluation for upstream policy `tests`.
 //!
 //! Parsing and shape validation live in `headscale-api-acl`. This
 //! module owns the live-node pass used by gRPC `CheckPolicy` and
 //! `SetPolicy`.
 
-use std::collections::BTreeSet;
-use std::net::IpAddr;
-
-use headscale_api_acl::{
-    AclAction, AclDoc as PolicyDoc, NodeView, PolicyTest, PortRef, SshPolicyTest, parse_cidr,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
 };
-use ipnet::IpNet;
+
+use super::{PacketFilterNode, filter, matcher::IpSet, ssh::SshPolicyNode};
+use crate::tailscale_wire::wire::{FilterRule, SshPolicy};
+use headscale_api_acl::{
+    AclDoc as PolicyDoc, NodeView, PolicyTest, SshPolicyTest, go_policy_shape, go_strconv,
+};
 
 /// Live node facts needed to evaluate policy tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,181 +29,486 @@ pub struct PolicyCheckNode {
     pub tags: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-struct Endpoint {
-    id: Option<u64>,
-    label: String,
-    addr: String,
-    user_id: Option<u64>,
-    user: Option<String>,
-    tags: Vec<String>,
-}
-
-impl Endpoint {
-    fn view(&self) -> NodeView<'_> {
-        let view = NodeView::new(&self.addr).with_tags(&self.tags);
-        if let Some(user) = self.user.as_deref() {
-            view.with_user(user)
-        } else {
-            view
+impl PolicyCheckNode {
+    /// Borrow all address families and the stored ownership for policy checks.
+    pub fn as_view(&self) -> NodeView<'_> {
+        NodeView {
+            addr: self.addrs.first().map(String::as_str),
+            addrs: &self.addrs,
+            user: self.user.as_deref(),
+            user_id: self.user_id,
+            tags: &self.tags,
         }
     }
 }
 
-/// Evaluate all currently supported policy semantic checks.
-pub fn check_policy_semantics(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Result<(), String> {
-    let mut errors = Vec::new();
-    errors.extend(run_policy_tests(doc, nodes));
-    errors.extend(run_ssh_policy_tests(doc, nodes));
+/// One node and its route facts from the same policy-input snapshot. The
+/// legacy PolicyCheckNode fields stay unchanged for downstream callers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyCheckNodeSnapshot {
+    pub node: PolicyCheckNode,
+    pub advertised_routes: Vec<String>,
+    pub approved_routes: Vec<String>,
+}
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("test(s) failed:\n{}", errors.join("\n")))
+impl PolicyCheckNodeSnapshot {
+    /// Read identity, typed addresses and routes from one retained registry
+    /// snapshot, including native association/zero-address metadata.
+    pub fn from_registry(
+        registry: &crate::tailscale_wire::MachineRegistry,
+    ) -> Result<Vec<Self>, String> {
+        let snapshot = registry.snapshot_with_metadata();
+        let mut seen = BTreeSet::new();
+        let mut nodes = Vec::with_capacity(snapshot.len());
+        for (key, record) in &snapshot {
+            let id = record.stable_node_id_for_key(key);
+            if !seen.insert(id) {
+                return Err("duplicate live node ID in policy snapshot".to_owned());
+            }
+            let (user_id, user) = snapshot.policy_identity(record);
+            nodes.push(Self {
+                node: PolicyCheckNode {
+                    id,
+                    user_id,
+                    user,
+                    name: record.hostname.clone(),
+                    addrs: snapshot.policy_addresses(record),
+                    tags: record.forced_tags.clone(),
+                },
+                advertised_routes: record.available_routes.clone(),
+                approved_routes: record.approved_routes.clone(),
+            });
+        }
+        nodes.sort_by_key(|snapshot| snapshot.node.id);
+        Ok(nodes)
+    }
+
+    fn active_routes(&self) -> Vec<String> {
+        // Go iterates announcements and tests typed-prefix membership in
+        // approvals. Preserve announcement order and multiplicity.
+        self.advertised_routes
+            .iter()
+            .filter(|route| self.approved_routes.contains(route))
+            .cloned()
+            .collect()
     }
 }
 
-fn run_policy_tests(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Vec<String> {
+/// Compile an isolated candidate using the same retained node and route facts
+/// as policy checks. This runs constructor compilation without evaluating
+/// policy tests or emitting their boot warnings.
+pub fn compile_policy_for_snapshot(
+    doc: &PolicyDoc,
+    raw: &str,
+    snapshots: &[PolicyCheckNodeSnapshot],
+) -> Result<(), String> {
+    super::PolicyStore::from_initial_inputs(
+        Some((doc.clone(), raw.to_owned(), super::now_unix())),
+        doc.users.clone(),
+        snapshots
+            .iter()
+            .map(super::lifecycle::NodeInput::from_policy_check_snapshot)
+            .collect(),
+    )
+    .map(|_| ())
+}
+
+/// Evaluate all currently supported policy semantic checks.
+pub fn check_policy_semantics(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Result<(), String> {
+    check_policy_semantics_inner(doc, None, nodes, None)
+}
+
+/// Evaluate a native candidate with its original ACL rows and nil-filter
+/// default. Source metadata is used only for a matching public projection.
+pub fn check_policy_semantics_for_source(
+    doc: &PolicyDoc,
+    raw: &str,
+    nodes: &[PolicyCheckNode],
+) -> Result<(), String> {
+    check_policy_semantics_inner(doc, Some(raw), nodes, None)
+}
+
+/// Evaluate a native candidate using identity/address/route facts captured
+/// together, without extending the legacy public node representation.
+pub fn check_policy_semantics_for_snapshot(
+    doc: &PolicyDoc,
+    raw: &str,
+    snapshots: &[PolicyCheckNodeSnapshot],
+) -> Result<(), String> {
+    let nodes = snapshots
+        .iter()
+        .map(|snapshot| snapshot.node.clone())
+        .collect::<Vec<_>>();
+    check_policy_semantics_inner(doc, Some(raw), &nodes, Some(snapshots))
+}
+
+fn check_policy_semantics_inner(
+    doc: &PolicyDoc,
+    raw: Option<&str>,
+    nodes: &[PolicyCheckNode],
+    snapshots: Option<&[PolicyCheckNodeSnapshot]>,
+) -> Result<(), String> {
+    let (acl_errors, ssh_errors) = policy_test_failures(doc, raw, nodes, snapshots);
+    let errors = std::iter::once(acl_errors)
+        .chain(std::iter::once(ssh_errors))
+        .filter(|errors| !errors.is_empty())
+        .map(|errors| format!("test(s) failed:\n{}", errors.join("\n")))
+        .collect::<Vec<_>>();
+    match errors.len() {
+        0 => Ok(()),
+        1 => Err(errors.into_iter().next().unwrap()),
+        // tailscale.com/util/multierr prefixes each complete error with a tab;
+        // it does not indent the embedded newlines inside that error.
+        _ => Err(format!("multiple errors:\n\t{}", errors.join("\n\t"))),
+    }
+}
+
+/// Return ACL and SSH failures separately for the boot warning boundary.
+/// Boot callers can report failures without rejecting a stored policy, while
+/// user-write/check callers retain the combined hard-failure boundary above.
+fn policy_test_failures(
+    doc: &PolicyDoc,
+    raw: Option<&str>,
+    nodes: &[PolicyCheckNode],
+    snapshots: Option<&[PolicyCheckNodeSnapshot]>,
+) -> (Vec<String>, Vec<String>) {
+    (
+        run_policy_tests(doc, raw, nodes, snapshots),
+        run_ssh_policy_tests(doc, nodes),
+    )
+}
+
+/// Report both classes of stored-policy test failures without rejecting boot.
+/// Callers validate policy structure and user references before this point.
+pub fn warn_policy_tests_at_boot(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) {
+    warn_policy_tests_at_boot_inner(doc, None, nodes, None);
+}
+
+/// Boot warnings use the same source-aware sandbox as the write boundary.
+pub fn warn_policy_tests_at_boot_for_source(doc: &PolicyDoc, raw: &str, nodes: &[PolicyCheckNode]) {
+    warn_policy_tests_at_boot_inner(doc, Some(raw), nodes, None);
+}
+
+/// Warn on stored policy failures using a retained native route snapshot.
+pub fn warn_policy_tests_at_boot_for_snapshot(
+    doc: &PolicyDoc,
+    raw: &str,
+    snapshots: &[PolicyCheckNodeSnapshot],
+) {
+    let nodes = snapshots
+        .iter()
+        .map(|snapshot| snapshot.node.clone())
+        .collect::<Vec<_>>();
+    warn_policy_tests_at_boot_inner(doc, Some(raw), &nodes, Some(snapshots));
+}
+
+fn warn_policy_tests_at_boot_inner(
+    doc: &PolicyDoc,
+    raw: Option<&str>,
+    nodes: &[PolicyCheckNode],
+    snapshots: Option<&[PolicyCheckNodeSnapshot]>,
+) {
+    let (acl_errors, ssh_errors) = policy_test_failures(doc, raw, nodes, snapshots);
+    if !acl_errors.is_empty() {
+        tracing::warn!(error = %format!("test(s) failed:\n{}", acl_errors.join("\n")),
+            "policy tests failed at boot; server starting anyway, fix the policy and reload");
+    }
+    if !ssh_errors.is_empty() {
+        tracing::warn!(error = %format!("test(s) failed:\n{}", ssh_errors.join("\n")),
+            "policy sshTests failed at boot; server starting anyway, fix the policy and reload");
+    }
+}
+
+fn run_policy_tests(
+    doc: &PolicyDoc,
+    raw: Option<&str>,
+    nodes: &[PolicyCheckNode],
+    snapshots: Option<&[PolicyCheckNodeSnapshot]>,
+) -> Vec<String> {
+    if doc.tests.is_empty() {
+        return Vec::new();
+    }
+    let nodes = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| PacketFilterNode {
+            id: node.id,
+            user_id: node.user_id,
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+            // Snapshot entrypoints clone these nodes in the same order.
+            // Keep route facts paired by entry, without an ID-map overwrite.
+            routes: snapshots
+                .and_then(|snapshots| snapshots.get(index))
+                .map(PolicyCheckNodeSnapshot::active_routes)
+                .unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    let raw = raw.filter(|raw| go_policy_shape::policy_container_shape(raw, doc).is_some());
+    let rules = if let Some(raw) = raw {
+        if go_policy_shape::packet_filter_default_allow(raw) {
+            filter::allow_all_filter_rules()
+        } else {
+            let acls =
+                go_policy_shape::original_acl_rules(raw, doc).unwrap_or_else(|| doc.rules.clone());
+            let compiled = match go_policy_shape::packet_filter_document(doc, &acls) {
+                Ok(compiled) => compiled,
+                Err(error) => return vec![format!("compiling policy tests: {error}")],
+            };
+            filter::acl_to_global_filter_rules_with_apps(
+                &compiled,
+                &nodes,
+                &go_policy_shape::grant_app_shapes(raw),
+            )
+        }
+    } else {
+        filter::acl_to_global_filter_rules(doc, &nodes)
+    };
     let mut errors = Vec::new();
-    for (index, test) in doc.tests.iter().enumerate() {
-        errors.extend(run_policy_test(index, test, doc, nodes));
+    for test in &doc.tests {
+        errors.extend(run_policy_test(test, doc, &nodes, &rules));
     }
     errors
 }
 
 fn run_policy_test(
-    index: usize,
     test: &PolicyTest,
     doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
+    nodes: &[PacketFilterNode],
+    rules: &[FilterRule],
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    let srcs = resolve_alias(doc, nodes, &test.src, None);
+    let proto_suffix = if test.proto.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", test.proto)
+    };
+    let label = format!("{}{proto_suffix}", test.src);
+    let srcs = match resolve_test_source(doc, nodes, &test.src) {
+        Ok(prefixes) => prefixes,
+        Err(error) => {
+            return vec![format!(
+                "{label}: failed to resolve source {}: {error}",
+                go_strconv::quote(&test.src)
+            )];
+        }
+    };
     if srcs.is_empty() {
         return vec![format!(
-            "test {index}: source {:?} resolved to no live node addresses",
-            test.src
+            "{label}: source {} resolved to no IP addresses",
+            go_strconv::quote(&test.src)
         )];
     }
-
+    let mut accept_failures = Vec::new();
+    let mut deny_failures = Vec::new();
     for dst in &test.accept {
-        match test_allows(doc, nodes, test, &srcs, dst) {
+        match test_allows(doc, nodes, test, &srcs, dst, rules) {
             Ok(true) => {}
-            Ok(false) => errors.push(format!(
-                "test {index}: source {:?} cannot reach accept destination {dst:?}",
-                test.src
+            Ok(false) => accept_failures.push(format!(
+                "{} -> {dst}{proto_suffix}: expected ALLOWED, got DENIED",
+                test.src,
             )),
-            Err(err) => errors.push(format!("test {index}: destination {dst:?}: {err}")),
+            Err(err) => errors.push(format!(
+                "{label}: error testing {}: {err}",
+                go_strconv::quote(dst)
+            )),
         }
     }
 
     for dst in &test.deny {
-        match test_allows(doc, nodes, test, &srcs, dst) {
+        match test_allows(doc, nodes, test, &srcs, dst, rules) {
             Ok(false) => {}
-            Ok(true) => errors.push(format!(
-                "test {index}: source {:?} can reach deny destination {dst:?}",
-                test.src
+            Ok(true) => deny_failures.push(format!(
+                "{} -> {dst}{proto_suffix}: expected DENIED, got ALLOWED",
+                test.src,
             )),
-            Err(err) => errors.push(format!("test {index}: destination {dst:?}: {err}")),
+            Err(err) => errors.push(format!(
+                "{label}: error testing {}: {err}",
+                go_strconv::quote(dst)
+            )),
         }
     }
 
+    errors.extend(accept_failures);
+    errors.extend(deny_failures);
     errors
 }
 
 fn run_ssh_policy_tests(doc: &PolicyDoc, nodes: &[PolicyCheckNode]) -> Vec<String> {
+    if doc.ssh_tests.is_empty() {
+        return Vec::new();
+    }
+    let packet_nodes = nodes
+        .iter()
+        .map(|node| PacketFilterNode {
+            id: node.id,
+            user_id: node.user_id,
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+            routes: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let ssh_nodes = nodes
+        .iter()
+        .map(|node| SshPolicyNode {
+            id: node.id,
+            user_id: node.user_id,
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+        })
+        .collect::<Vec<_>>();
+    // Go caches one compiled destination policy for the entire SSH test pass.
+    let mut cache = BTreeMap::new();
     let mut errors = Vec::new();
-    for (index, test) in doc.ssh_tests.iter().enumerate() {
-        errors.extend(run_ssh_policy_test(index, test, doc, nodes));
+    for test in &doc.ssh_tests {
+        errors.extend(run_ssh_policy_test(
+            test,
+            doc,
+            nodes,
+            &packet_nodes,
+            &ssh_nodes,
+            &mut cache,
+        ));
     }
     errors
 }
 
 fn run_ssh_policy_test(
-    _index: usize,
     test: &SshPolicyTest,
     doc: &PolicyDoc,
     nodes: &[PolicyCheckNode],
+    packet_nodes: &[PacketFilterNode],
+    ssh_nodes: &[SshPolicyNode],
+    cache: &mut BTreeMap<u64, Option<SshPolicy>>,
 ) -> Vec<String> {
-    let mut errors = Vec::new();
-    let src_label = test.src.as_str();
-    let srcs = resolve_alias(doc, nodes, &test.src, None);
-    if srcs.is_empty() {
+    // The native SSH-test decoder represents an empty source as a nil Alias.
+    let src_prefixes = if test.src.is_empty() {
+        Vec::new()
+    } else {
+        match resolve_test_source(doc, packet_nodes, &test.src) {
+            Ok(prefixes) => prefixes,
+            Err(error) => {
+                return vec![format!(
+                    "{}: failed to resolve source {}: {error}",
+                    test.src,
+                    go_strconv::quote(&test.src)
+                )];
+            }
+        }
+    };
+    if src_prefixes.is_empty() {
         return vec![format!(
-            "{src_label}: source {:?} resolved to no IP addresses",
-            test.src
+            "{}: source {} resolved to no IP addresses",
+            test.src,
+            go_strconv::quote(&test.src)
         )];
     }
     if test.accept.is_empty() && test.deny.is_empty() && test.check.is_empty() {
-        errors.push(format!(
-            "{src_label}: no accept, deny, or check assertions specified"
-        ));
+        return vec![format!(
+            "{}: no accept, deny, or check assertions specified",
+            test.src
+        )];
     }
-
-    let mut dst_nodes = Vec::new();
-    for dst in &test.dst {
-        let resolved = resolve_ssh_test_dst_nodes(doc, nodes, test, &srcs, dst);
-        if resolved.is_empty() {
-            errors.push(format!(
-                "{src_label}: dst alias {dst:?} resolved to no nodes"
-            ));
-            continue;
+    let (destinations, empty) = match resolve_ssh_test_destinations(doc, nodes, packet_nodes, test)
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return vec![format!(
+                "{}: failed to resolve destinations: {error}",
+                test.src
+            )];
         }
-        for node in resolved {
-            if !dst_nodes
-                .iter()
-                .any(|existing: &&PolicyCheckNode| existing.id == node.id)
-            {
-                dst_nodes.push(node);
+    };
+    let mut errors = empty
+        .into_iter()
+        .map(|dst| {
+            format!(
+                "{}: dst alias {} resolved to no nodes",
+                test.src,
+                go_strconv::quote(&dst)
+            )
+        })
+        .collect::<Vec<_>>();
+    let sources = IpSet::from_strings(src_prefixes.iter().map(String::as_str));
+    let mut accept_ok: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut accept_fail: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut deny_fail: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut check_fail: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (kind, users) in [(0, &test.accept), (1, &test.deny), (2, &test.check)] {
+        for user in users {
+            for &index in &destinations {
+                let dst = &nodes[index];
+                let policy = cache.entry(dst.id).or_insert_with(|| {
+                    super::ssh::compile_ssh_policy_for_target(doc, ssh_nodes, &ssh_nodes[index], "")
+                });
+                let (accepted, checked) = ssh_reachable_sources(policy.as_ref(), user);
+                let failure = match kind {
+                    0 => {
+                        let failed = sources.first_not_in(&accepted).is_some();
+                        if !failed {
+                            accept_ok
+                                .entry(user.clone())
+                                .or_default()
+                                .insert(dst.name.clone());
+                        }
+                        failed
+                    }
+                    1 => sources.intersects(&accepted),
+                    _ => {
+                        if let Some(first_missing) = sources.first_not_in(&checked) {
+                            if accepted.contains_ip(&first_missing) {
+                                accept_ok
+                                    .entry(user.clone())
+                                    .or_default()
+                                    .insert(dst.name.clone());
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if failure {
+                    let failures = match kind {
+                        0 => &mut accept_fail,
+                        1 => &mut deny_fail,
+                        _ => &mut check_fail,
+                    };
+                    failures
+                        .entry(user.clone())
+                        .or_default()
+                        .push(dst.name.clone());
+                }
             }
         }
     }
-
-    for user in &test.accept {
-        for dst in &dst_nodes {
-            if !srcs
-                .iter()
-                .all(|src| ssh_reachability(doc, nodes, src, dst, user).0)
-            {
+    // Results render sorted usernames but retain destination order and repeated
+    // failures. Check reasons consult the final AcceptOK map across assertions.
+    for (kind, failures) in [(0, accept_fail), (1, deny_fail), (2, check_fail)] {
+        for (user, destinations) in failures {
+            for dst in destinations {
+                let outcome = match kind {
+                    0 => "expected ALLOWED, got DENIED",
+                    1 => "expected DENIED, got ALLOWED",
+                    _ if accept_ok
+                        .get(&user)
+                        .is_some_and(|names| names.contains(&dst)) =>
+                    {
+                        "expected ALLOWED via check, got ALLOWED via accept"
+                    }
+                    _ => "expected ALLOWED via check, got DENIED",
+                };
                 errors.push(format!(
-                    "{}/{} -> {}: expected ALLOWED, got DENIED",
+                    "{}/{} -> {dst}: {outcome}",
                     test.src,
-                    display_ssh_test_user(user),
-                    dst.name
+                    display_ssh_test_user(&user)
                 ));
             }
         }
     }
-
-    for user in &test.deny {
-        for dst in &dst_nodes {
-            if srcs
-                .iter()
-                .any(|src| ssh_reachability(doc, nodes, src, dst, user).0)
-            {
-                errors.push(format!(
-                    "{}/{} -> {}: expected DENIED, got ALLOWED",
-                    test.src,
-                    display_ssh_test_user(user),
-                    dst.name
-                ));
-            }
-        }
-    }
-
-    for user in &test.check {
-        for dst in &dst_nodes {
-            if let Some(reason) = ssh_check_failure_reason(doc, nodes, &srcs, dst, user) {
-                errors.push(format!(
-                    "{}/{} -> {}: expected ALLOWED via check, got {reason}",
-                    test.src,
-                    display_ssh_test_user(user),
-                    dst.name
-                ));
-            }
-        }
-    }
-
     errors
 }
 
@@ -205,535 +516,197 @@ fn display_ssh_test_user(user: &str) -> &str {
     if user.is_empty() { "\"\"" } else { user }
 }
 
-fn ssh_check_failure_reason(
+fn resolve_ssh_test_destinations(
     doc: &PolicyDoc,
     nodes: &[PolicyCheckNode],
-    srcs: &[Endpoint],
-    dst: &PolicyCheckNode,
-    user: &str,
-) -> Option<&'static str> {
-    for src in srcs {
-        let (accept, check) = ssh_reachability(doc, nodes, src, dst, user);
-        if !check {
-            return Some(if accept {
-                "ALLOWED via accept"
+    packet_nodes: &[PacketFilterNode],
+    test: &SshPolicyTest,
+) -> Result<(Vec<usize>, Vec<String>), String> {
+    let username_source =
+        go_policy_shape::alias_kind(&test.src) == Some(go_policy_shape::AliasKind::Username);
+    let source_user_id = username_source
+        .then(|| doc.resolve_user(&test.src))
+        .flatten()
+        .filter(|id| *id != 0);
+    let mut seen = BTreeSet::new();
+    let mut destinations = Vec::new();
+    let mut empty = Vec::new();
+    for dst in &test.dst {
+        let ips = if dst == "autogroup:self" {
+            None
+        } else {
+            let ips = super::resolution::alias(doc, dst, packet_nodes)
+                .checked()
+                .map_err(|error| {
+                    format!("resolving destination {}: {error}", go_strconv::quote(dst))
+                })?;
+            Some(IpSet::from_strings(ips.iter().map(String::as_str)))
+        };
+        let mut matched = false;
+        for (index, node) in nodes.iter().enumerate() {
+            let matches = if let Some(ips) = &ips {
+                ips.contains_view(&node.as_view())
+            } else if !node.tags.is_empty() || !username_source {
+                false
+            } else if doc.users.is_some() {
+                source_user_id.is_some() && node.user_id == source_user_id
             } else {
-                "DENIED"
-            });
+                // Source-less embedding retains its legacy login projection;
+                // native snapshots always carry the loaded user directory.
+                doc.user_matches(&test.src, node.user_id, node.user.as_deref())
+            };
+            if matches {
+                matched = true;
+                if seen.insert(node.id) {
+                    destinations.push(index);
+                }
+            }
+        }
+        if !matched {
+            empty.push(dst.clone());
         }
     }
-    None
+    Ok((destinations, empty))
+}
+
+fn ssh_reachable_sources(policy: Option<&SshPolicy>, user: &str) -> (IpSet, IpSet) {
+    let mut accepted = Vec::new();
+    let mut checked = Vec::new();
+    if let Some(policy) = policy {
+        for rule in &policy.rules {
+            if !ssh_user_map_allows(&rule.ssh_users, user) {
+                continue;
+            }
+            for principal in &rule.principals {
+                let Ok((ip, zone)) = headscale_api_acl::go_netip::parse_addr(&principal.node_ip)
+                else {
+                    continue;
+                };
+                // IPSet iteration yields unzoned addresses; Go Addr equality
+                // cannot match a zoned principal to any source in that set.
+                if zone.is_some() {
+                    continue;
+                }
+                accepted.push(ip.to_string());
+                if !rule.action.hold_and_delegate.is_empty() {
+                    checked.push(ip.to_string());
+                }
+            }
+        }
+    }
+    (
+        IpSet::from_strings(accepted.iter().map(String::as_str)),
+        IpSet::from_strings(checked.iter().map(String::as_str)),
+    )
+}
+
+fn ssh_user_map_allows(users: &BTreeMap<String, String>, user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    if let Some(value) = users.get(user) {
+        return !value.is_empty();
+    }
+    user != "root" && users.get("*").is_some_and(|value| !value.is_empty())
+}
+
+fn resolve_test_source(
+    doc: &PolicyDoc,
+    nodes: &[PacketFilterNode],
+    source: &str,
+) -> Result<Vec<String>, String> {
+    let alias = go_policy_shape::canonical_alias(source)
+        .map_err(|error| format!("invalid alias: {error}"))?;
+    if go_policy_shape::alias_kind(&alias) == Some(go_policy_shape::AliasKind::Username)
+        && let Some(users) = &doc.users
+    {
+        let token = alias.strip_suffix('@').unwrap_or(&alias);
+        let provider = users
+            .iter()
+            .any(|user| user.provider_identifier.as_deref() == Some(token));
+        if !provider {
+            let matching = users
+                .iter()
+                .filter(|user| user.name == token || user.email == token)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(format!(
+                    "resolving: user not found: token {}",
+                    go_strconv::quote(&alias)
+                ));
+            }
+            if matching.len() > 1 {
+                // resolveUser fails before Alias.Resolve can inspect the zero
+                // user's nodes or append address-builder errors.
+                let found = matching.iter().fold(String::new(), |mut found, user| {
+                    let _ = write!(found, "{}: {}, ", user.id, user.name);
+                    found
+                });
+                return Err(format!(
+                    "resolving: multiple users found: token {} found: [ {found} ]",
+                    go_strconv::quote(&alias)
+                ));
+            }
+        }
+    }
+    super::resolution::alias(doc, &alias, nodes)
+        .checked()
+        .map(|ips| IpSet::from_strings(ips.iter().map(String::as_str)).prefixes())
+        .map_err(|error| format!("resolving: {error}"))
 }
 
 fn test_allows(
     doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
+    nodes: &[PacketFilterNode],
     test: &PolicyTest,
-    srcs: &[Endpoint],
+    srcs: &[String],
     dst: &str,
+    rules: &[FilterRule],
 ) -> Result<bool, String> {
-    let (alias, port) = split_test_destination(dst)?;
-    let port = parse_test_port(port)?;
-    let protos = test_protocols(&test.proto);
-
-    for src in srcs {
-        let dsts = resolve_alias(doc, nodes, alias, None);
-        if dsts.is_empty() {
-            return Err(format!("alias {alias:?} resolved to no addresses"));
-        }
-        let src_view = src.view();
-        let src_allowed = dsts.iter().any(|dst| {
-            let dst_view = dst.view();
-            protos.iter().any(|proto| {
-                doc.evaluate_with(&src_view, &dst_view, PortRef::new(proto, port))
-                    == AclAction::Accept
-            })
-        });
-        if !src_allowed {
-            return Ok(false);
-        }
+    let destination = go_policy_shape::parse_test_destination(dst)
+        .map_err(|error| format!("invalid destination {}: {error}", go_strconv::quote(dst)))?;
+    let dst_ips = super::resolution::alias(doc, &destination.alias, nodes)
+        .checked()
+        .map_err(|error| format!("resolving destination: {error}"))?;
+    let dsts = IpSet::from_strings(dst_ips.iter().map(String::as_str)).prefixes();
+    if dsts.is_empty() {
+        return Err(format!(
+            "destination resolved to no IP addresses: {}",
+            go_strconv::quote(dst)
+        ));
     }
-
-    Ok(true)
+    let protocols = test_protocols(&test.proto);
+    // Go tests require every merged source prefix to overlap an allowing
+    // global rule. CapGrant destinations do not admit packet traffic here.
+    Ok(srcs.iter().all(|source| {
+        rules.iter().any(|rule| {
+            rule.src_ips.iter().any(|raw| {
+                IpSet::from_filter_string(raw).is_some_and(|set| set.overlaps_prefix(source))
+            }) && (rule.ip_proto.is_empty()
+                || rule
+                    .ip_proto
+                    .iter()
+                    .any(|protocol| protocols.contains(protocol)))
+                && rule.dst_ports.iter().any(|allowed| {
+                    IpSet::from_filter_string(&allowed.ip)
+                        .is_some_and(|set| dsts.iter().any(|prefix| set.overlaps_prefix(prefix)))
+                        && (destination.ports.is_empty()
+                            || destination.ports.iter().any(|&(first, last)| {
+                                first >= allowed.ports.first && last <= allowed.ports.last
+                            }))
+                })
+        })
+    }))
 }
 
-fn resolve_ssh_test_dst_nodes<'a>(
-    doc: &PolicyDoc,
-    nodes: &'a [PolicyCheckNode],
-    test: &SshPolicyTest,
-    srcs: &[Endpoint],
-    dst: &str,
-) -> Vec<&'a PolicyCheckNode> {
-    if dst == "autogroup:self" && !test.src.contains('@') {
-        return Vec::new();
-    }
-    let src = srcs.first();
-    let endpoints = resolve_alias(doc, nodes, dst, src);
-    let mut out = Vec::new();
-    for endpoint in endpoints {
-        for node in nodes
-            .iter()
-            .filter(|node| endpoint_matches_node(&endpoint, node))
-        {
-            if !out
-                .iter()
-                .any(|existing: &&PolicyCheckNode| existing.id == node.id)
-            {
-                out.push(node);
-            }
-        }
-    }
-    out
-}
-
-fn ssh_reachability(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    src: &Endpoint,
-    dst: &PolicyCheckNode,
-    user: &str,
-) -> (bool, bool) {
-    if user.is_empty() {
-        return (false, false);
-    }
-
-    let mut accept = false;
-    let mut check = false;
-    for rule in &doc.ssh {
-        let source_endpoints = resolve_ssh_rule_sources(doc, nodes, &rule.src);
-        if !source_endpoints
-            .iter()
-            .any(|candidate| endpoint_matches_endpoint(candidate, src))
-        {
-            continue;
-        }
-
-        let destination_matches = rule
-            .dst
-            .iter()
-            .any(|token| ssh_destination_matches(doc, nodes, token, src, dst));
-        let localpart_self_access =
-            ssh_localpart_self_access_matches(&rule.users, &source_endpoints, src, dst);
-        if !destination_matches && !localpart_self_access {
-            continue;
-        }
-
-        let users_allow = if localpart_self_access && !dst.tags.is_empty() {
-            ssh_base_users_allow(&rule.users, user)
-        } else {
-            ssh_users_allow(&rule.users, user, src.user.as_deref())
-        };
-        if !users_allow {
-            continue;
-        }
-
-        accept = true;
-        if rule.action == "check" {
-            check = true;
-        }
-        if accept && check {
-            break;
-        }
-    }
-    (accept, check)
-}
-
-fn resolve_ssh_rule_sources(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    tokens: &[String],
-) -> Vec<Endpoint> {
-    let mut out = Vec::new();
-    for token in tokens {
-        out.extend(resolve_alias(doc, nodes, token, None));
-    }
-    out
-}
-
-fn ssh_destination_matches(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    token: &str,
-    src: &Endpoint,
-    dst: &PolicyCheckNode,
-) -> bool {
-    resolve_alias(doc, nodes, token, Some(src))
-        .iter()
-        .any(|candidate| endpoint_matches_node(candidate, dst))
-}
-
-fn ssh_localpart_self_access_matches(
-    users: &[String],
-    source_endpoints: &[Endpoint],
-    src: &Endpoint,
-    dst: &PolicyCheckNode,
-) -> bool {
-    if !users_have_canonical_localpart(users)
-        || !source_endpoints
-            .iter()
-            .any(|candidate| endpoint_matches_node(candidate, dst))
-    {
-        return false;
-    }
-
-    if dst.tags.is_empty() {
-        return source_endpoints
-            .iter()
-            .any(|candidate| endpoint_matches_endpoint(candidate, src))
-            && same_user_untagged_endpoint_node(src, dst);
-    }
-
-    endpoint_matches_node(src, dst)
-}
-
-fn ssh_users_allow(users: &[String], user: &str, src_user: Option<&str>) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    for candidate in users {
-        if let Some(domain) = canonical_localpart_domain(candidate) {
-            let Some(src_user) = src_user else {
-                continue;
-            };
-            if localpart_for_user(src_user, domain).as_deref() == Some(user) {
-                return true;
-            }
-            continue;
-        }
-        if candidate == user {
-            return true;
-        }
-    }
-    if users.iter().any(|candidate| candidate == "*") {
-        return true;
-    }
-    if user != "root"
-        && users
-            .iter()
-            .any(|candidate| candidate == "autogroup:nonroot")
-    {
-        return true;
-    }
-    false
-}
-
-fn ssh_base_users_allow(users: &[String], user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    if user == "root" {
-        return users.iter().any(|candidate| candidate == "root");
-    }
-    if users
-        .iter()
-        .any(|candidate| candidate == "autogroup:nonroot")
-    {
-        return true;
-    }
-    users
-        .iter()
-        .filter(|candidate| canonical_localpart_domain(candidate).is_none())
-        .any(|candidate| candidate == user)
-}
-
-fn users_have_canonical_localpart(users: &[String]) -> bool {
-    users
-        .iter()
-        .any(|user| canonical_localpart_domain(user).is_some())
-}
-
-fn canonical_localpart_domain(user: &str) -> Option<&str> {
-    let pattern = user.strip_prefix("localpart:")?;
-    let (localpart, domain) = pattern.rsplit_once('@')?;
-    if localpart == "*" && !domain.is_empty() {
-        Some(domain)
-    } else {
-        None
-    }
-}
-
-fn localpart_for_user(user: &str, domain: &str) -> Option<String> {
-    let (localpart, candidate_domain) = user.rsplit_once('@')?;
-    if candidate_domain.eq_ignore_ascii_case(domain) {
-        Some(localpart.to_string())
-    } else {
-        None
-    }
-}
-
-fn endpoint_matches_endpoint(candidate: &Endpoint, expected: &Endpoint) -> bool {
-    if candidate.id.is_some() && candidate.id == expected.id {
-        return true;
-    }
-    candidate.addr == expected.addr
-}
-
-fn endpoint_matches_node(candidate: &Endpoint, node: &PolicyCheckNode) -> bool {
-    if candidate.id == Some(node.id) {
-        return true;
-    }
-    node.addrs.iter().any(|addr| addr == &candidate.addr)
-}
-
-fn test_protocols(proto: &str) -> Vec<&'static str> {
-    match proto.trim().to_ascii_lowercase().as_str() {
-        "tcp" | "6" => vec!["tcp"],
-        "udp" | "17" => vec!["udp"],
-        "sctp" | "132" => vec!["sctp"],
-        "" => vec!["tcp", "udp", "icmp", "ipv6-icmp"],
+fn test_protocols(proto: &str) -> Vec<i32> {
+    match proto {
+        "tcp" | "6" => vec![6],
+        "udp" | "17" => vec![17],
+        "sctp" | "132" => vec![132],
+        "" => vec![6, 17, 1, 58],
         _ => Vec::new(),
     }
-}
-
-fn resolve_alias(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    token: &str,
-    src: Option<&Endpoint>,
-) -> Vec<Endpoint> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    resolve_alias_inner(doc, nodes, token.trim(), src, &mut seen, &mut out);
-    out.sort_by(|a, b| a.label.cmp(&b.label).then(a.addr.cmp(&b.addr)));
-    out.dedup_by(|a, b| {
-        a.addr == b.addr && a.user_id == b.user_id && a.user == b.user && a.tags == b.tags
-    });
-    out
-}
-
-fn resolve_alias_inner(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    token: &str,
-    src: Option<&Endpoint>,
-    seen_groups: &mut BTreeSet<String>,
-    out: &mut Vec<Endpoint>,
-) {
-    if token == "*" {
-        push_all_node_addrs(nodes, out);
-        return;
-    }
-    if token.contains('@') {
-        for node in nodes.iter().filter(|node| {
-            is_untagged_user_owned(node)
-                && node
-                    .user
-                    .as_deref()
-                    .is_some_and(|user| user_matches(token, user))
-        }) {
-            push_node_addrs(node, out);
-        }
-        return;
-    }
-    if let Some(group) = token.strip_prefix("group:") {
-        if !seen_groups.insert(token.to_string()) {
-            return;
-        }
-        if let Some(members) = doc.groups.get(token).or_else(|| doc.groups.get(group)) {
-            for member in members {
-                resolve_alias_inner(doc, nodes, member, src, seen_groups, out);
-            }
-        }
-        seen_groups.remove(token);
-        return;
-    }
-    if let Some(tag) = token.strip_prefix("tag:") {
-        for node in nodes
-            .iter()
-            .filter(|node| node.tags.iter().any(|node_tag| tag_matches(node_tag, tag)))
-        {
-            push_node_addrs(node, out);
-        }
-        return;
-    }
-    if let Some(kind) = token.strip_prefix("autogroup:") {
-        match kind {
-            "member" => {
-                for node in nodes.iter().filter(|node| is_untagged_user_owned(node)) {
-                    push_node_addrs(node, out);
-                }
-            }
-            "tagged" => {
-                for node in nodes.iter().filter(|node| !node.tags.is_empty()) {
-                    push_node_addrs(node, out);
-                }
-            }
-            "self" => {
-                if let Some(src) = src {
-                    for node in nodes
-                        .iter()
-                        .filter(|node| same_user_untagged_endpoint_node(src, node))
-                    {
-                        push_node_addrs(node, out);
-                    }
-                }
-            }
-            _ => {}
-        }
-        return;
-    }
-    if let Some(host) = token.strip_prefix("host:") {
-        resolve_host_or_prefix(doc, nodes, token, host, out);
-        return;
-    }
-    resolve_host_or_prefix(doc, nodes, token, token, out);
-}
-
-fn resolve_host_or_prefix(
-    doc: &PolicyDoc,
-    nodes: &[PolicyCheckNode],
-    label: &str,
-    host_or_prefix: &str,
-    out: &mut Vec<Endpoint>,
-) {
-    if let Some(prefix) = doc.hosts.get(host_or_prefix) {
-        resolve_prefix(nodes, prefix, out);
-        if !contains_label(out, label) {
-            push_synthetic_prefix(label, prefix, out);
-        }
-        return;
-    }
-    if parse_cidr(host_or_prefix).is_some() {
-        resolve_prefix(nodes, host_or_prefix, out);
-        if !contains_label(out, label) {
-            push_synthetic_prefix(label, host_or_prefix, out);
-        }
-    }
-}
-
-fn resolve_prefix(nodes: &[PolicyCheckNode], prefix: &str, out: &mut Vec<Endpoint>) {
-    let Some(net) = parse_cidr(prefix) else {
-        return;
-    };
-    for node in nodes {
-        if node.addrs.iter().any(|addr| net_contains_addr(&net, addr)) {
-            push_node_addrs(node, out);
-        }
-    }
-}
-
-fn push_all_node_addrs(nodes: &[PolicyCheckNode], out: &mut Vec<Endpoint>) {
-    for node in nodes {
-        push_node_addrs(node, out);
-    }
-}
-
-fn push_node_addrs(node: &PolicyCheckNode, out: &mut Vec<Endpoint>) {
-    for addr in &node.addrs {
-        out.push(Endpoint {
-            id: Some(node.id),
-            label: node.name.clone(),
-            addr: addr.clone(),
-            user_id: node.user_id,
-            user: node.user.clone(),
-            tags: node.tags.clone(),
-        });
-    }
-}
-
-fn push_synthetic_prefix(label: &str, prefix: &str, out: &mut Vec<Endpoint>) {
-    let Some(net) = parse_cidr(prefix) else {
-        return;
-    };
-    out.push(Endpoint {
-        id: None,
-        label: label.to_string(),
-        addr: net.addr().to_string(),
-        user_id: None,
-        user: None,
-        tags: Vec::new(),
-    });
-}
-
-fn contains_label(out: &[Endpoint], label: &str) -> bool {
-    out.iter().any(|endpoint| endpoint.label == label)
-}
-
-fn net_contains_addr(net: &IpNet, addr: &str) -> bool {
-    let Ok(addr) = addr.parse::<IpAddr>() else {
-        return false;
-    };
-    match (net, addr) {
-        (IpNet::V4(net), IpAddr::V4(addr)) => net.contains(&addr),
-        (IpNet::V6(net), IpAddr::V6(addr)) => net.contains(&addr),
-        _ => false,
-    }
-}
-
-fn split_test_destination(dst: &str) -> Result<(&str, &str), String> {
-    let Some((alias, port)) = dst.rsplit_once(':') else {
-        return Err("tests destination must include one explicit port".to_string());
-    };
-    if alias.is_empty() || alias.ends_with(':') || is_namespaced_alias_without_port(dst) {
-        return Err("tests destination must include one explicit port".to_string());
-    }
-    Ok((alias, port))
-}
-
-fn is_namespaced_alias_without_port(dst: &str) -> bool {
-    ["tag:", "group:", "autogroup:", "host:"]
-        .iter()
-        .any(|prefix| dst.starts_with(prefix) && !dst[prefix.len()..].contains(':'))
-}
-
-fn parse_test_port(port: &str) -> Result<u16, String> {
-    let parsed = port
-        .parse::<u16>()
-        .map_err(|_| "tests destination port must be a single number".to_string())?;
-    if parsed == 0 {
-        Err("tests destination port must be greater than zero".to_string())
-    } else {
-        Ok(parsed)
-    }
-}
-
-fn is_untagged_user_owned(node: &PolicyCheckNode) -> bool {
-    node.tags.is_empty() && node_owner_key(node).is_some()
-}
-
-fn same_user_untagged_endpoint_node(src: &Endpoint, dst: &PolicyCheckNode) -> bool {
-    if !src.tags.is_empty() || !dst.tags.is_empty() {
-        return false;
-    }
-
-    match (endpoint_owner_key(src), node_owner_key(dst)) {
-        (Some(src_owner), Some(dst_owner)) => src_owner == dst_owner,
-        _ => false,
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum NodeOwnerKey<'a> {
-    Id(u64),
-    User(&'a str),
-}
-
-fn endpoint_owner_key(endpoint: &Endpoint) -> Option<NodeOwnerKey<'_>> {
-    endpoint.user_id.map(NodeOwnerKey::Id).or_else(|| {
-        endpoint
-            .user
-            .as_deref()
-            .filter(|user| !user.is_empty())
-            .map(NodeOwnerKey::User)
-    })
-}
-
-fn node_owner_key(node: &PolicyCheckNode) -> Option<NodeOwnerKey<'_>> {
-    node.user_id.map(NodeOwnerKey::Id).or_else(|| {
-        node.user
-            .as_deref()
-            .filter(|user| !user.is_empty())
-            .map(NodeOwnerKey::User)
-    })
-}
-
-fn user_matches(entry: &str, user: &str) -> bool {
-    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
-}
-
-fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
-    node_tag == policy_tag_without_prefix
-        || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
 }
 
 #[cfg(test)]
@@ -807,6 +780,23 @@ mod tests {
     }
 
     #[test]
+    fn policy_tests_accept_bracketed_ipv6_literal_destination() {
+        let doc = parse_hujson_policy(
+            r#"{
+                "tagOwners": {"tag:client": ["alice@"]},
+                "grants": [{"src": ["tag:client"], "dst": ["fd7a:115c:a1e0::10"], "ip": ["tcp:22"]}],
+                "tests": [{"src": "tag:client", "accept": ["[fd7a:115c:a1e0::10]:22"]}]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            node(1, "client", "alice", "fd7a:115c:a1e0::11", &["tag:client"]),
+            node(2, "server", "bob", "fd7a:115c:a1e0::10", &[]),
+        ];
+        check_policy_semantics(&doc, &nodes).unwrap();
+    }
+
+    #[test]
     fn policy_tests_accept_numeric_tcp_proto() {
         let doc = parse_hujson_policy(
             r#"{
@@ -844,7 +834,13 @@ mod tests {
         ];
 
         let err = check_policy_semantics(&doc, &nodes).unwrap_err();
-        assert!(err.contains("cannot reach accept destination"));
+        // headscale-go v0.29.5 policy/v2/test.go PolicyTestResults.Errors():
+        // "test(s) failed:\n<src> -> <dst>: expected ALLOWED, got DENIED"
+        // (confirmed against a live Go server's CheckPolicy).
+        assert_eq!(
+            err, "test(s) failed:\nalice@ -> 100.64.0.2:22: expected ALLOWED, got DENIED",
+            "{err}"
+        );
     }
 
     #[test]
@@ -867,8 +863,16 @@ mod tests {
         ];
 
         let err = check_policy_semantics(&doc, &nodes).unwrap_err();
-        assert!(err.contains("autogroup:self"));
-        assert!(err.contains("resolved to no addresses"));
+        // headscale-go v0.29.5 evalReachability: AliasWithPorts.Resolve for
+        // autogroup:self returns ErrAutogroupSelfRequiresPerNodeResolution,
+        // wrapped as `error testing "<dst>": resolving destination: ...`
+        // (confirmed against a live Go server's CheckPolicy).
+        assert_eq!(
+            err,
+            "test(s) failed:\nalice@: error testing \"autogroup:self:22\": resolving destination: \
+             autogroup:self requires per-node resolution and cannot be resolved in this context",
+            "{err}"
+        );
     }
 
     #[test]

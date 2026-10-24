@@ -1,0 +1,51 @@
+{
+  "name": "policy-v0294-metadata-fields",
+  "policy": {
+    "#ha-meta": { "version": 1 },
+    "tagOwners": {
+      "tag:server": ["alice@"]
+    },
+    "grants": [
+      {
+        "src": ["alice@"],
+        "dst": ["tag:server"],
+        "ip": ["tcp:80"],
+        "app": {
+          "example.com/cap/web": [
+            { "#note": "preserved capability payload", "domain": ["example.com"] }
+          ]
+        },
+        "#ha-meta": { "name": "web" }
+      }
+    ],
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["alice@"],
+        "dst": ["tag:server"],
+        "users": ["root"],
+        "#ha-meta": { "name": "admins" }
+      }
+    ],
+    "nodeAttrs": [
+      {
+        "target": ["tag:server"],
+        "attr": ["randomize-client-port"],
+        "#ha-meta": { "name": "all servers" }
+      }
+    ]
+  },
+  "users": [
+    { "id": 1, "name": "alice" }
+  ],
+  "nodes": [
+    { "id": 1, "user_id": 1, "hostname": "alice-laptop", "ipv4": "100.64.0.1" },
+    { "id": 2, "user_id": 1, "hostname": "server", "ipv4": "100.64.0.2", "tags": ["tag:server"] }
+  ],
+  "node_attr_checks": [
+    { "name": "server-attrs", "node_id": 2 }
+  ],
+  "ssh_checks": [
+    { "name": "server-ssh", "node_id": 2 }
+  ]
+}

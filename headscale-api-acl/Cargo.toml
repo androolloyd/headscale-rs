@@ -3,7 +3,7 @@ name = "headscale-api-acl"
 description = "Canonical tailnet ACL document, parser, canonicalisation, and evaluator"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
 
 # ## Why this crate exists (2026-05-20)
 #
@@ -30,8 +30,14 @@ license.workspace = true
 #     └─ downstream embedders (optional signed-policy wrappers)
 
 [dependencies]
+base64 = { workspace = true }
+# Fixed-size public P-256 coordinate validation; the same release is already
+# used by the API's public-key/certificate parser. No private-key operations.
+num-bigint = "0.4.6"
 serde = { workspace = true }
-serde_json = { workspace = true }
+# RawMessage capability numbers can exceed binary64; preserve their tokens.
+# Native policy Values use our token builder to keep ordinary objects opaque.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 thiserror = { workspace = true }
 # Policy v2: CIDR / IPNet parsing for `hosts` and
 # `auto_approvers.routes` prefix matching. Same version as `headscale-api`.

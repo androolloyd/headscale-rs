@@ -1254,6 +1254,26 @@ assert_dns_debug_resolve() {
   local expected_value="$4"
   local output_path="$5"
   local raw_path="${output_path}.raw"
+  if [[ "${REAL_CLIENT_DNS_QUERY_INTERNAL:-false}" == "true" ]]; then
+    local qtype="a"
+    [[ "${network}" == "ip6" ]] && qtype="aaaa"
+    docker exec "${resolver_client}" tailscale dns query "${expected_name}" "${qtype}" \
+      >"${raw_path}" 2>"${output_path}.err" &&
+      ruby -rjson -e '
+        text = File.read(ARGV.fetch(0))
+        name = ARGV.fetch(1).sub(/\.\z/, "")
+        qtype = ARGV.fetch(2).upcase
+        expected = ARGV.fetch(3)
+        abort("internal DNS query failed: #{text}") unless text.include?("Response code: RCodeSuccess")
+        answers = text.lines.map do |line|
+          fields = line.split
+          fields.last if fields.length >= 5 && fields.first.sub(/\.\z/, "") == name && fields[-2] == "Type#{qtype}"
+        end.compact
+        abort("expected #{name} #{qtype} resolution #{expected.inspect}, got #{answers.inspect}: #{text}") unless answers == [expected]
+        puts JSON.pretty_generate({"Name" => name, "Network" => qtype, "Resolved" => answers})
+      ' "${raw_path}" "${expected_name}" "${qtype}" "${expected_value}" >"${output_path}"
+    return
+  fi
   docker exec "${resolver_client}" tailscale debug resolve "--net=${network}" "${expected_name}" \
     >"${raw_path}" 2>"${output_path}.err" &&
     ruby -rjson -e '
@@ -2163,6 +2183,9 @@ ruby -rjson -e '
     expected_user = expected_user_by_host.fetch(machine["hostname"]) {
       abort("unexpected machine hostname #{machine["hostname"].inspect}; expected one of #{expected_names.inspect}")
     }
+    # Upstream tagged nodes have no owning user even when their tagged
+    # preauth key was created by a user. The CLI projects tagged-devices.
+    expected_user = "" unless Array(machine["forced_tags"]).empty?
     abort("expected user #{expected_user.inspect}, got #{machine["user"].inspect}") unless machine["user"] == expected_user
     abort("expected hostname prefix #{expected_hostname_prefix.inspect}, got #{machine["hostname"].inspect}") unless machine["hostname"].start_with?(expected_hostname_prefix)
     expected_routes = expected_routes_by_host.fetch(machine["hostname"], []) || []

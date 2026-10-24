@@ -1,0 +1,18 @@
+Tailscale control request schema compatibility
+
+Copyright (c) 2020 Tailscale Inc & contributors.
+
+src/tailscale_wire/request_json.rs adapts RegisterRequest, RegisterResponseAuth,
+Oauth2Token and MapRequest schemas from tailscale.com v1.98.3 tailcfg/tailcfg.go.
+Shared Hostinfo/key decoding lives in headscale-api-acl. Service Proto/Port zero
+serialization in wire.rs follows tailcfg.Service's non-optional fields.
+The original BSD 3-Clause terms are retained in LICENSE-TAILSCALE.
+
+Private map Hostinfo response emission follows tailcfg.Node's Hostinfo omitzero
+and HostinfoView.Valid/MarshalJSON in tailcfg/tailcfg_view.go at the same pin.
+
+Native owned DERP map/region/node schema and nil/wide integer projection follow
+tailscale.com v1.101.0-pre tailcfg/derpmap.go, selected by Headscale v0.29.5.
+Copyright (c) Tailscale Inc & contributors. Existing BSD terms remain in
+LICENSE-TAILSCALE. Canonical values are retained independently of the original
+public compatibility structs. UPSTREAM.md records sources and limits.

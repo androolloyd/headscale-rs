@@ -130,6 +130,26 @@ def main() -> int:
 
         require_snippet(text, "pull_request:", "pull_request trigger")
         require_snippet(text, "schedule:", "scheduled trigger")
+        if text.count('      - "vendor/**"') != 2:
+            raise CheckError("push and pull_request filters must cover every local vendor patch")
+        require_snippet(text, "--output target/real-client/evidence-before.json", "initial source identity")
+        require_snippet(text, "--output target/real-client/evidence-after.json", "final source/binary identity")
+        require_snippet(text, "--compare-source target/real-client/evidence-before.json", "unchanged qualification source")
+        require_snippet(
+            text,
+            "python3 tools/real-client/cli-admin-output-diff.py",
+            "deterministic admin CLI output and request comparison",
+        )
+        require_snippet(
+            text,
+            "python3 tools/real-client/startup-policy-oidc-smoke.py",
+            "paired SQLite/Postgres policy and OIDC startup gate",
+        )
+        require_snippet(
+            text,
+            "python3 tools/real-client/oidc-startup-deadline-smoke.py",
+            "paired production OIDC discovery deadline gate",
+        )
         require_snippet(
             text,
             "python3 scripts/check_headscale_go_refs.py --remote",

@@ -1,0 +1,103 @@
+The optional native ACME retry/status/authorization helpers follow selected golang.org/x/crypto v0.53.0 acme and autocert source.
+References: acme/http.go, acme/acme.go, acme/rfc8555.go, acme/autocert/autocert.go, and Go 1.26.9 encoding/pem/pem.go.
+Copyright 2009, 2018, 2019 The Go Authors. All rights reserved.
+Copyright 2015 The Go Authors. All rights reserved.
+Copyright 2016 The Go Authors. All rights reserved.
+Original instant-acme Apache terms are preserved; adapted Go BSD terms are in LICENSE-GO.
+See UPSTREAM.md for source pins and scope.
+
+Native JSON framing, quoting and HTTP-date parsing
+Copyright 2009, 2010, 2011, 2013, 2022 The Go Authors. All rights reserved.
+Private go_native/json_prefix.rs adapts Go encoding/json/scanner.go and
+stream.go first-value framing. quote.rs and quote/unicode.rs retain selected
+strconv.Quote and IsPrint behavior. http_date.rs and its private Local/TZif/
+POSIX helpers adapt net/http/header.go and time/{format,zoneinfo,zoneinfo_unix,
+zoneinfo_read,zoneinfo_goroot}.go. Original Go BSD terms remain in LICENSE-GO.
+The copied IANA archive is covered by LICENSE-TZDATA-NOTICE. See UPSTREAM.md.
+
+Native account/JWS and finite response decoding
+Copyright 2010, 2013, 2015, 2017, 2018 The Go Authors. All rights reserved.
+Private account_key.rs/account_client.rs follow selected x/crypto/acme jws.go,
+acme.go, http.go and rfc8555.go; native account cache ordering follows autocert.
+legacy_json.rs, legacy_json/scanner.rs and resource_decode.rs adapt selected
+Go encoding/json scanner/decode/fold assignment and stream syntax phases.
+json_time.rs follows time.Time.UnmarshalJSON and selected RFC3339 parsing.
+response_error.rs follows x/crypto/acme responseError/partial JSON assignment.
+Original Go BSD terms remain in LICENSE-GO. See UPSTREAM.md for exact scope.
+
+Native EC account-key schema parsing
+Copyright 2009, 2011, 2012 The Go Authors. All rights reserved.
+Private account_key/ec_der.rs follows Go 1.26.9 crypto/x509/sec1.go,
+crypto/x509/pkcs8.go and encoding/asn1/asn1.go field/framing semantics before
+provider scalar validation. Finite diagnostic type names also follow selected
+Go cmd/compile/internal/types/fmt.go. Original BSD terms remain in LICENSE-GO.
+
+Native HTTP URL and redirect phases
+Copyright 2009, 2011 The Go Authors. All rights reserved.
+Private go_native/transport.rs and transport/url.rs follow selected Go1.26.9
+net/http/client.go, request.go, transport.go and net/url/url.go. Private URL
+IDNA profile/trie/NFC/bidi/Punycode/static modules copy the maintained Go15 port
+from the API, following x/net0.56.0 idna and x/text0.38.0 Unicode15 sources.
+Copyright 2011, 2016 The Go Authors. All rights reserved.
+Original BSD terms remain in LICENSE-GO. Source pins and scope are in UPSTREAM.md.
+
+Native gzip, DEFLATE and environment proxy transport
+Copyright 2009, 2010, 2011, 2012, 2014, 2016, 2017 The Go Authors. All rights reserved.
+Private transport/gzip.rs and gzip/inflate.rs adapt selected Go compress/gzip
+and compress/flate stream/dictionary semantics. transport/proxy modules follow
+Go net/http transport, socks_bundle, response/transfer and toolchain-vendored
+x/net/http/httpproxy, plus net/ip CIDR and net/dial timing semantics. The copied
+private Unicode helper retains Go unicode/letter.go and tables.go attribution.
+Original Go BSD terms remain in LICENSE-GO. Exact source pins and unvalidated
+scope are in UPSTREAM.md. Existing instant-acme license terms remain intact.
+
+Native byte URL/environment and CONNECT parsing follow-up
+Copyright 2009, 2010, 2011, 2017 The Go Authors. All rights reserved.
+The byte-preserving private URL/environment helpers follow net/url parsing,
+net/http client redaction/Referer and strings/UTF-8 mapping phases. CONNECT
+status/MIME/transfer validation follows net/http response.go and transfer.go,
+net/textproto/reader.go and bufio/bufio.go. Go BSD terms remain in LICENSE-GO.
+See UPSTREAM.md for exact selected source pins and remaining representation,
+I/O timing, platform and runtime qualification boundaries.
+
+Native dynamic debug-setting and shared default transport follow-up
+Copyright 2009, 2011, 2018, 2021, 2023 The Go Authors. All rights reserved.
+Private godebug.rs follows selected internal/godebug and internal/bisect parse
+and unconditional/constant-matcher setting phases. Native URL/CONNECT settings
+follow net/url and net/http/transfer.go. Default native account transport sharing
+follows x/crypto/acme/http.go nil-HTTPClient behavior, using runtime-scoped Rust
+pool ownership with explicit process-wide/runtime boundaries. Original Go BSD
+terms remain in LICENSE-GO; exact scope and pins are in UPSTREAM.md.
+
+Native HTTP/2 authority identity and reset-PING entropy follow-up
+Copyright 2009, 2011, 2013, 2016 The Go Authors. All rights reserved.
+Native authority identity follows selected Go1.26.9 net/http/h2_bundle.go
+authorityAddr, net.SplitHostPort and toolchain-vendored x/net/idna Punycode
+zero-option processing, distinct from the Lookup profile used for dialing.
+The native HTTP client supplies reset-PING randomness from its installed TLS
+provider. Go BSD terms remain intact; source pins and scope are in UPSTREAM.md.
+
+Native caller-sized body consumption and close
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+Native Raw/gzip consumers and private gzip/read_size.rs adapt selected Go1.26.9
+io/io.go ReadAll/CopyN, encoding/json/stream.go, bufio/bufio.go, runtime/msize.go
+and internal/runtime/gc/sizeclasses.go byte-buffer demand and allocation sizing.
+Response close and gzip body-kind selection follow net/http/h2_bundle.go and
+x/crypto/acme callers. Existing SDK terms and Go BSD terms remain intact.
+UPSTREAM.md records exact scope and pending qualification.
+
+Native response profile and request-error observation
+Copyright 2009, 2010, 2011 The Go Authors. All rights reserved.
+The selected response header profile and body read/restore phases follow
+Go1.26.9 net/http and io. Native error/status observation follows selected
+Headscale v0.29.5 hscontrol/app.go. Copyright (c) 2020, Juan Font. All rights
+reserved. Original Headscale BSD terms are in LICENSE-HEADSCALE-GO; original
+SDK terms and Go terms in LICENSE-GO remain intact. See UPSTREAM.md.
+
+Native DERP HTTP GET and pre-request failure observation
+Copyright 2009, 2011 The Go Authors. All rights reserved.
+Selected GET/ReadAll/ignored Close and total timeout use the existing native
+transport. The default-off request marker delegates protocol-selected user-agent
+selection to HyperUtil. Parsed backend URI failures notify the observer before
+URL wrapping; URL parse failures remain pre-transport. Existing SDK, Go and
+Headscale terms remain intact. See UPSTREAM.md.

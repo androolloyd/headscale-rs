@@ -152,6 +152,7 @@ pub struct NativeDerpRuntime {
     keepalive_jitter: Duration,
     connection_sequence: Arc<AtomicU64>,
     health_problem: Arc<Mutex<Option<String>>>,
+    pending_handshakes: Arc<tokio::sync::Semaphore>,
 }
 
 impl fmt::Debug for NativeDerpRuntime {
@@ -171,7 +172,7 @@ impl fmt::Debug for NativeDerpRuntime {
                 &self.connection_sequence.load(Ordering::Relaxed),
             )
             .field("health_problem", &self.health_problem)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -191,6 +192,8 @@ impl NativeDerpRuntime {
         match fs::read_to_string(path) {
             Ok(contents) => parse_derp_private_key(path, &contents),
             Err(err) if err.kind() == ErrorKind::NotFound => {
+                // Same line headscale-go logs when it creates the DERP key.
+                tracing::info!(path = %path.display(), "no private key file at path, creating...");
                 if let Some(parent) = path.parent()
                     && !parent.as_os_str().is_empty()
                 {
@@ -221,6 +224,7 @@ impl NativeDerpRuntime {
     /// Create a runtime from explicit protocol pieces.
     pub fn new(server_key: DerpNodeKeyPair, relay: NativeDerpRelay) -> Self {
         Self {
+            pending_handshakes: Arc::new(tokio::sync::Semaphore::new(1024)),
             server_key: Arc::new(server_key),
             relay,
             client_verifier: None,
@@ -495,6 +499,7 @@ pub async fn handle_derp(State(state): State<WireState>, req: Request) -> Respon
             .unwrap();
     }
 
+    let request_event = super::request_log::defer(&req);
     let on_upgrade = match req.extensions().get::<hyper::upgrade::OnUpgrade>() {
         Some(_) => req
             .into_parts()
@@ -515,6 +520,7 @@ pub async fn handle_derp(State(state): State<WireState>, req: Request) -> Respon
     let public_key_header = format!("nodekey:{}", hex::encode(runtime.public_key()));
 
     tokio::spawn(async move {
+        let _request_event = request_event;
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
@@ -548,6 +554,7 @@ async fn handle_derp_websocket_upgrade(
     runtime: Arc<NativeDerpRuntime>,
     req: Request,
 ) -> Response<Body> {
+    let request_event = super::request_log::defer(&req);
     let (mut parts, _body) = req.into_parts();
     let websocket = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
         Ok(websocket) => websocket,
@@ -560,6 +567,7 @@ async fn handle_derp_websocket_upgrade(
             tracing::warn!(target = "tailscale_wire::derp", error = %err, "native DERP websocket upgrade failed");
         })
         .on_upgrade(move |socket| async move {
+            let _request_event = request_event;
             if let Err(e) = drive_native_derp_websocket(runtime, socket).await {
                 tracing::warn!(target = "tailscale_wire::derp", error = %e, "native DERP websocket connection ended with error");
             }
@@ -573,20 +581,31 @@ where
 {
     let (mut reader, mut writer) = tokio::io::split(io);
 
-    let server_key = encode_server_key_frame(&runtime.server_key)
-        .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    writer.write_all(&server_key).await?;
-    writer.flush().await?;
-
+    let pending_handshake = Arc::clone(&runtime.pending_handshakes)
+        .try_acquire_owned()
+        .map_err(|_| WireError::Internal("too many pending DERP handshakes".into()))?;
+    let deadline = tokio::time::Instant::now() + super::noise::CONTROL_HANDSHAKE_TIMEOUT;
     let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
-    let first = read_next_frame(&mut reader, &mut decoder).await?;
-    let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
-        .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    if !runtime.verify_client_for_transport(NativeDerpTransport::Raw, &client_public) {
-        return Err(WireError::Internal(
-            "DERP client was not admitted by verifier".into(),
-        ));
-    }
+    let client_public = tokio::time::timeout_at(deadline, async {
+        let server_key = encode_server_key_frame(&runtime.server_key)
+            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        writer.write_all(&server_key).await?;
+        writer.flush().await?;
+
+        let first = read_next_frame(&mut reader, &mut decoder).await?;
+        let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
+            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        if !runtime.verify_client_for_transport(NativeDerpTransport::Raw, &client_public) {
+            return Err(WireError::Internal(
+                "DERP client was not admitted by verifier".into(),
+            ));
+        }
+
+        Ok::<_, WireError>(client_public)
+    })
+    .await
+    .map_err(|_| WireError::Internal("DERP handshake timed out".into()))??;
+    drop(pending_handshake);
 
     let session = runtime.relay.connect(client_public).await;
     let session_id = session.session_id();
@@ -631,19 +650,30 @@ where
     R: Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
-    let server_key = encode_server_key_frame(&runtime.server_key)
-        .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    send_websocket_binary(&mut writer, server_key).await?;
-
+    let pending_handshake = Arc::clone(&runtime.pending_handshakes)
+        .try_acquire_owned()
+        .map_err(|_| WireError::Internal("too many pending DERP handshakes".into()))?;
+    let deadline = tokio::time::Instant::now() + super::noise::CONTROL_HANDSHAKE_TIMEOUT;
     let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
-    let first = read_next_websocket_frame(&mut reader, &mut decoder).await?;
-    let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
-        .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    if !runtime.verify_client_for_transport(NativeDerpTransport::WebSocket, &client_public) {
-        return Err(WireError::Internal(
-            "DERP client was not admitted by verifier".into(),
-        ));
-    }
+    let client_public = tokio::time::timeout_at(deadline, async {
+        let server_key = encode_server_key_frame(&runtime.server_key)
+            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        send_websocket_binary(&mut writer, server_key).await?;
+
+        let first = read_next_websocket_frame(&mut reader, &mut decoder).await?;
+        let (client_public, _client_info) = open_client_info(&runtime.server_key, &first)
+            .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        if !runtime.verify_client_for_transport(NativeDerpTransport::WebSocket, &client_public) {
+            return Err(WireError::Internal(
+                "DERP client was not admitted by verifier".into(),
+            ));
+        }
+
+        Ok::<_, WireError>(client_public)
+    })
+    .await
+    .map_err(|_| WireError::Internal("DERP handshake timed out".into()))??;
+    drop(pending_handshake);
 
     let session = runtime.relay.connect(client_public).await;
     let session_id = session.session_id();

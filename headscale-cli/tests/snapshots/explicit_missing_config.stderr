@@ -1,1 +1,1 @@
-Error: Failed to load config file: No such file or directory (os error 2)
+<timestamp> FTL <caller> > error loading config file <missing> error="fatal error reading config file: open <missing>: no such file or directory"

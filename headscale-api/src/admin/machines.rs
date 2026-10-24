@@ -1,28 +1,11 @@
 //! Admin-side machine surface.
 //!
-//! The wire-layer [`crate::tailscale_wire::MachineRegistry`] is
-//! intentionally read-only from outside the wire crate's own
-//! `register` handler. The admin panel needs `expire` + `delete` too,
-//! and we don't want to expand the wire registry's API (it's frozen
-//! while Wall 6 / Gateway WIP land in parallel branches).
-//!
-//! So this module defines a parallel trait — [`MachineAdmin`] — which
-//! the embedding host implements on whatever registry it owns. For
-//! v0 the admin panel ships with a default adapter
-//! [`WireMachineAdmin`] that wraps `MachineRegistry` and stores
-//! "expired" / "deleted" decisions in a sidecar set. The sidecar
-//! doesn't try to remove records from the wire registry (that would
-//! need a write-API change); it just hides them from the admin views
-//! and records the operator intent so a future migration that adds
-//! `MachineRegistry::remove` can drain it.
-//!
-//! ## What we render
-//!
-//! `MachineAdminRecord` carries everything the wire `MachineRecord`
-//! exposes (id = node_key_hex, name from hostname, user, ipv4, OS
-//! placeholders) plus admin-only fields (`expired`, `last_seen`,
-//! `version`) that v0 stubs out — they'll be populated once the
-//! NodeMetrics subagent lands.
+//! [`MachineAdmin`] separates the admin surface from registry and database
+//! implementations. [`WireMachineAdmin`] uses the live wire registry as its
+//! authority; expiry and deletion have the same visibility in admin and map
+//! views. Attached persistent adapters use the live registry for native admin
+//! reads/mutations and save the selected cached columns. Headless adapters use
+//! database rows; registration and deletion retain their own durable boundaries.
 //!
 //! ## P1 lifecycle parity
 //!
@@ -37,32 +20,35 @@
 //! | `headscale nodes delete`                    | [`MachineAdmin::delete`] |
 //! | `headscale nodes tag`                       | [`MachineAdmin::set_tags`] |
 //!
-//! The default [`WireMachineAdmin`] adapter writes through to the
-//! wire-layer [`crate::tailscale_wire::MachineRegistry`] — the
-//! sidecar-only behaviour from the original v0 design is retained for
-//! `expire` (so a never-cleared expiry intent stays visible after a
-//! restart that drops the wire registry), but the new verbs all mutate
-//! the registry directly.
+//! Existing-node wire mutations share registration's per-machine locks and resolve the
+//! selected stable node again after waiting, including across node-key rotation.
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+mod native_snapshot;
+pub(crate) use native_snapshot::{NativeAuthKey, NativeNodeAssociations, NativeNodePersistence};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 #[cfg(feature = "postgres-sqlx")]
 use sqlx::PgPool;
 use sqlx::SqlitePool;
 
-use crate::policy::{PolicyStore, validate_requested_tags_for_node};
+use crate::policy::{
+    PolicyCheckNode, PolicyCheckNodeSnapshot, PolicyStore, validate_requested_tags_for_auth_path,
+};
 use crate::tailscale_wire::{
     AuthRequestKind, IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
-    PersistedMachineRegistration, RegistrationCache,
-    routes::auto_approved_routes_for_node,
-    wire::{HostInfo, is_auto_derived_given_name, valid_given_name_label},
+    MachineSnapshot, PersistedMachineRegistration, RegistrationCache,
+    routes::{auto_approval_changed, auto_approved_routes_with_snapshot},
+    wire::{HostInfo, ZERO_DISCO_KEY, is_auto_derived_given_name},
 };
 
 use super::auth::now_unix;
@@ -79,19 +65,24 @@ struct UserIdentity {
     login_name: String,
     display_name: String,
     profile_pic_url: String,
+    provider: String,
+    created_at: Option<DateTime<Utc>>,
+    #[allow(clippy::option_option)] // tri-state: unset / explicit nil Go association / loaded user
+    association: Option<Option<UserRecord>>,
 }
 
 /// Admin-side view of one registered machine.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineAdminRecord {
     /// Upstream numeric node ID. Persistent stores populate this from
-    /// `nodes.id`; volatile wire-only adapters leave it at zero and
-    /// gRPC falls back to the deterministic legacy node-key hash.
+    /// `nodes.id`; legacy volatile records may leave it at zero and
+    /// gRPC then falls back to the deterministic node-key hash.
     #[serde(default)]
     pub node_id: u64,
     /// `node_key_hex` from the wire registry. Used as the URL slug.
     pub id: String,
-    /// Hostname the client advertised (may be empty).
+    /// Server-managed DNS label (`nodes.given_name`). The raw client name
+    /// is available separately through MachineAdmin::raw_hostname.
     pub name: String,
     pub user: String,
     /// Upstream numeric owner ID. Persistent stores populate this from
@@ -117,26 +108,30 @@ pub struct MachineAdminRecord {
     /// Unix-seconds, best-effort. v0 stubs to `created_at` for any
     /// record we have a stamp for (none today); fills 0 otherwise.
     pub last_seen: u64,
+    #[serde(skip)]
+    pub last_seen_precise: Option<DateTime<Utc>>,
     /// Unix-seconds node creation timestamp.
     #[serde(default)]
     pub created_at: u64,
+    #[serde(skip)]
+    pub created_at_precise: Option<DateTime<Utc>>,
     /// Unix-seconds node expiry timestamp. `None` means never expires.
     #[serde(default)]
     pub expiry: Option<u64>,
+    #[serde(skip)]
+    pub expiry_precise: Option<DateTime<Utc>>,
     /// Hex machine key bound to the node's Noise identity.
     pub machine_key_hex: String,
     /// Tailscale discovery key as an upstream `discokey:` string.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub disco_key: String,
-    /// OS placeholder. The wire `MachineRecord` doesn't carry OS today
-    /// (HostInfo is only used inside the register handler); v0 shows
-    /// "unknown" and the field exists for the JSON contract.
+    /// Client OS, rendered as "unknown" when the stored value is empty.
     pub os: String,
-    /// Client version placeholder. Same story as `os`.
+    /// Client version, rendered as "unknown" when empty.
     pub version: String,
-    /// Tags placeholder. Wired through preauth on a follow-up.
+    /// Current tag ownership, including preauth and administrative changes.
     pub tags: Vec<String>,
-    /// Routes the node advertises. Empty in v0.
+    /// Routes the node advertises.
     pub routes: Vec<String>,
     /// Routes approved by operator/policy and emitted in `AllowedIPs`.
     #[serde(default)]
@@ -144,8 +139,76 @@ pub struct MachineAdminRecord {
     /// Upstream `RegisterMethod` enum numeric value.
     #[serde(default)]
     pub register_method: i32,
-    /// Whether an admin marked this machine "expired".
+    /// Whether the node's stored expiry has passed.
     pub expired: bool,
+}
+
+/// One admin response retains its node fields and loaded associations. Native
+/// adapters construct it from a NodeStore/SQL projection before releasing the
+/// operation's guards. Custom adapters can use the ordinary record fallback.
+#[derive(Clone)]
+pub struct MachineAdminView {
+    pub record: MachineAdminRecord,
+    pub raw_hostname: String,
+    // Only the gRPC node renderer (`full`) reads the retained associations.
+    #[cfg(feature = "full")]
+    pub(crate) associations: NativeNodeAssociations,
+}
+
+impl MachineAdminView {
+    pub fn from_record(record: MachineAdminRecord) -> Self {
+        Self {
+            raw_hostname: record.name.clone(),
+            record,
+            #[cfg(feature = "full")]
+            associations: NativeNodeAssociations::default(),
+        }
+    }
+
+    pub(crate) fn from_wire(
+        key: &str,
+        wire: &MachineRecord,
+        native: Option<&NativeNodePersistence>,
+        online: bool,
+    ) -> Self {
+        let mut record = machine_admin_record_from_wire(wire);
+        record.node_id = wire.stable_node_id_for_key(key);
+        record.online = online && !record.expired;
+        if let Some(native) = native {
+            record.last_seen_precise = native.last_seen(wire);
+            record.last_seen = record
+                .last_seen_precise
+                .map_or(0, |time| time.timestamp().max(0) as u64);
+        }
+        #[cfg(feature = "full")]
+        let associations = native
+            .map(|native| NativeNodeAssociations {
+                user: native
+                    .user_association(wire)
+                    .map(Option::<&UserRecord>::cloned),
+                auth_key: native
+                    .auth_key_association(wire)
+                    .map(Option::<&NativeAuthKey>::cloned),
+            })
+            .unwrap_or_default();
+        Self {
+            record,
+            raw_hostname: wire.raw_hostname.clone(),
+            #[cfg(feature = "full")]
+            associations,
+        }
+    }
+}
+
+/// Administrative edit whose result can retain the native response view.
+/// Expiry(None) disables expiry; callers expiring now pass Some(Utc::now()).
+#[derive(Clone)]
+pub enum MachineAdminMutation {
+    Expiry(Option<DateTime<Utc>>),
+    Rename(String),
+    Tags(Vec<String>),
+    ApprovedRoutes(Vec<String>),
+    AvailableRoutes(Vec<String>),
 }
 
 /// Errors the admin trait can surface.
@@ -155,6 +218,21 @@ pub enum MachineAdminError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Policy(String),
+    #[error("{0}")]
+    Storage(String),
+}
+
+impl From<crate::tailscale_wire::RegistryMutationError> for MachineAdminError {
+    fn from(error: crate::tailscale_wire::RegistryMutationError) -> Self {
+        match error {
+            crate::tailscale_wire::RegistryMutationError::Invalid(message) => {
+                Self::BadRequest(message.into_owned())
+            }
+            crate::tailscale_wire::RegistryMutationError::Policy(message) => Self::Policy(message),
+        }
+    }
 }
 
 /// Admin surface for machine management. Async to match
@@ -166,7 +244,97 @@ pub enum MachineAdminError {
 #[async_trait]
 pub trait MachineAdmin: Send + Sync {
     async fn list(&self) -> Vec<MachineAdminRecord>;
+    /// Mutation paths must distinguish an unavailable store from an empty one.
+    /// Legacy custom adapters retain their existing infallible list contract.
+    async fn list_checked(&self) -> Result<Vec<MachineAdminRecord>, MachineAdminError> {
+        Ok(self.list().await)
+    }
+    /// Native/wire implementations coordinate the complete snapshot and live
+    /// publication before persistence. Custom adapters keep the batch fallback.
+    /// The caller publishes the policy change after successful persistence.
+    async fn auto_approve_routes(&self, policy: &PolicyStore) -> Result<usize, MachineAdminError> {
+        let plan = policy_auto_approval_plan(policy, self.list_checked().await?)?;
+        let updates = plan
+            .into_iter()
+            .map(|(node, routes)| (self.mutation_selector(&node), routes))
+            .collect();
+        self.set_approved_routes_batch(updates).await
+    }
     async fn get(&self, id: &str) -> Option<MachineAdminRecord>;
+
+    /// Checked response projections. Native adapters retain loaded pointers;
+    /// the defaults preserve the existing custom-adapter record contract.
+    async fn get_view(&self, id: &str) -> Result<Option<MachineAdminView>, MachineAdminError> {
+        let Some(record) = self.get(id).await else {
+            return Ok(None);
+        };
+        let mut view = MachineAdminView::from_record(record);
+        if let Some(hostname) = self.raw_hostname(id).await {
+            view.raw_hostname = hostname;
+        }
+        Ok(Some(view))
+    }
+
+    async fn list_views(&self) -> Result<Vec<MachineAdminView>, MachineAdminError> {
+        let records = self.list_checked().await?;
+        let mut views = Vec::with_capacity(records.len());
+        for record in records {
+            let hostname = self.raw_hostname(&record.id).await;
+            let mut view = MachineAdminView::from_record(record);
+            if let Some(hostname) = hostname {
+                view.raw_hostname = hostname;
+            }
+            views.push(view);
+        }
+        Ok(views)
+    }
+
+    async fn mutate_with_view(
+        &self,
+        id: &str,
+        mutation: MachineAdminMutation,
+    ) -> Result<MachineAdminView, MachineAdminError> {
+        mutate_with_fallback_view(self, id, mutation).await
+    }
+    /// Raw client node hostname (`nodes.hostname`), distinct from the admin
+    /// DNS label exposed by MachineAdminRecord.name. Legacy stores may use
+    /// the same value for both names.
+    async fn raw_hostname(&self, id: &str) -> Option<String> {
+        self.get(id).await.map(|record| record.name)
+    }
+    /// Prepare a record for publication into the supplied registry. The caller
+    /// retains the machine registration guard through the subsequent upsert.
+    /// Native stores preserve nullable database values here; ordinary reads
+    /// through wire_record never change that persistence baseline.
+    async fn wire_record_for_publication(
+        &self,
+        id: &str,
+        _registry: Option<&MachineRegistry>,
+    ) -> Result<Option<MachineRecord>, MachineAdminError> {
+        self.wire_record(id).await
+    }
+
+    /// Canonical wire projection after a durable registration write. Backends
+    /// without a richer node representation can retain the caller's payload.
+    async fn wire_record(&self, _id: &str) -> Result<Option<MachineRecord>, MachineAdminError> {
+        Ok(None)
+    }
+    /// Serialize an auth completion through its persistence/publication step.
+    /// Callers hold the guard; complete_registration must not reacquire it.
+    async fn registration_guard(
+        &self,
+        _machine_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        None
+    }
+    /// Serialize competing machines claiming the same node key. Acquire after
+    /// registration_guard and retain both through persistence/publication.
+    async fn node_key_registration_guard(
+        &self,
+        _node_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        None
+    }
     /// Return the node that an auth/web/CLI registration would update
     /// instead of creating, if one exists.
     async fn existing_auth_path_record(
@@ -174,6 +342,43 @@ pub trait MachineAdmin: Send + Sync {
         _record: &MachineAdminRecord,
     ) -> Option<MachineAdminRecord> {
         None
+    }
+    /// Fallible selection before allocating a fresh node's addresses. Native
+    /// stores propagate lookup/ownership errors instead of treating them as a miss.
+    async fn existing_auth_path_record_checked(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<MachineAdminRecord>, MachineAdminError> {
+        Ok(self.existing_auth_path_record(record).await)
+    }
+    /// Stored node ownership/address snapshot used to resolve tag-owner IPs.
+    /// Native stores propagate database errors; custom stores retain list's
+    /// existing contract unless they override this fallible method.
+    async fn policy_nodes_for_registration(
+        &self,
+    ) -> Result<Vec<PolicyCheckNode>, MachineAdminError> {
+        Ok(self
+            .list()
+            .await
+            .iter()
+            .map(policy_check_node_from_machine)
+            .collect())
+    }
+    /// Identity/address/route facts captured together for native policy tests.
+    /// Custom adapters can override this fallible record-list projection.
+    async fn policy_nodes_for_check(
+        &self,
+    ) -> Result<Vec<PolicyCheckNodeSnapshot>, MachineAdminError> {
+        Ok(self
+            .list_checked()
+            .await?
+            .into_iter()
+            .map(|record| PolicyCheckNodeSnapshot {
+                node: policy_check_node_from_machine(&record),
+                advertised_routes: record.routes,
+                approved_routes: record.approved_routes,
+            })
+            .collect())
     }
     /// Insert a synthetic/admin-created machine record. Used by
     /// upstream debug/register gRPC paths and by future DB-backed node
@@ -201,6 +406,40 @@ pub trait MachineAdmin: Send + Sync {
             replaced_node_key_hex: None,
         })
     }
+
+    async fn complete_registration_with_hostinfo(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        _hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.complete_registration(record, policy, wire_record)
+            .await
+    }
+
+    /// Keep the user captured by the accepting RPC through native Save.
+    async fn complete_registration_with_user_snapshot(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+        _user: super::users::UserRegistrationSnapshot,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.complete_registration_with_hostinfo(record, policy, wire_record, hostinfo)
+            .await
+    }
+    /// Select a mutation independently of node-key rotation. Generic adapters
+    /// retain key selectors; native adapters opt into their stable numeric ID.
+    fn mutation_selector(&self, record: &MachineAdminRecord) -> String {
+        record.id.clone()
+    }
+
+    fn numeric_mutation_selector(&self, _node_id: u64) -> Option<String> {
+        None
+    }
+
     /// Mark a machine expired. `expiry = None` ⇒ expire immediately
     /// (`Utc::now()`); `Some(t)` ⇒ schedule expiry for `t`. Mirrors
     /// upstream `db.SetExpiry`.
@@ -217,14 +456,13 @@ pub trait MachineAdmin: Send + Sync {
     async fn expire(&self, id: &str) -> Result<(), MachineAdminError> {
         self.expire_at(id, None).await
     }
-    /// Logout a machine — clear Noise/disco keys + stamp expiry=now.
-    /// Mirrors `db.NodeLogout`.
+    /// Apply the administrative logout operation to the backing node store.
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError>;
     /// Rename a machine. Empty hostname returns
     /// `MachineAdminError::BadRequest`. Mirrors `db.NodeRenameNode`.
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError>;
-    /// Replace the operator-forced tag list. Empty list clears the
-    /// override. Mirrors `db.SetTags`.
+    /// Replace the tag list. Empty lists are rejected, matching Go's rule
+    /// that tagged nodes retain at least one tag.
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError>;
     /// Replace approved routes. Empty list clears the approval.
     async fn set_approved_routes(
@@ -271,13 +509,81 @@ pub trait MachineAdmin: Send + Sync {
     fn notify_user_removed_full_update(&self) -> bool {
         false
     }
-    /// Mark a machine deleted. Same sidecar story as `expire`. The
-    /// record disappears from `list()` once flagged.
+    /// Delete a machine from its backing store and live registry.
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError>;
+}
+
+async fn mutate_with_fallback_view<A: MachineAdmin + ?Sized>(
+    administrator: &A,
+    id: &str,
+    mutation: MachineAdminMutation,
+) -> Result<MachineAdminView, MachineAdminError> {
+    match mutation {
+        MachineAdminMutation::Expiry(Some(expiry)) => {
+            administrator.expire_at(id, Some(expiry)).await?;
+        }
+        MachineAdminMutation::Expiry(None) => administrator.disable_expiry(id).await?,
+        MachineAdminMutation::Rename(name) => administrator.rename(id, &name).await?,
+        MachineAdminMutation::Tags(tags) => administrator.set_tags(id, tags).await?,
+        MachineAdminMutation::ApprovedRoutes(routes) => {
+            administrator.set_approved_routes(id, routes).await?;
+        }
+        MachineAdminMutation::AvailableRoutes(routes) => {
+            administrator.set_routes(id, routes).await?;
+        }
+    }
+    administrator
+        .get_view(id)
+        .await?
+        .ok_or_else(|| MachineAdminError::NotFound(id.into()))
+}
+
+fn admin_view_from_native_row(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    wire: &MachineRecord,
+    associations: NativeNodeAssociations,
+) -> Result<MachineAdminView, MachineAdminError> {
+    let mut native = NativeNodePersistence::capture(row, wire)?;
+    native.set_associations(associations);
+    let mut view = MachineAdminView::from_wire(&wire.node_key_hex, wire, Some(&native), false);
+    view.record.node_id = native_row_id(row)?;
+    view.record.ipv4 = row.ipv4.clone().unwrap_or_default();
+    view.record.ipv6 = row.ipv6.clone().filter(|value| !value.is_empty());
+    // A NULL non-pointer Go CreatedAt scans as time.Time's zero value.
+    if row.created_at_text.is_empty() {
+        view.record.created_at = 0;
+        view.record.created_at_precise = DateTime::from_timestamp(-62_135_596_800, 0);
+    }
+    Ok(view)
 }
 
 /// Re-run policy auto-approvers for every visible machine.
 ///
+/// Shared live-node projection for gRPC and legacy admin policy checks.
+pub(crate) fn policy_check_node_from_machine(
+    machine: &MachineAdminRecord,
+) -> crate::policy::PolicyCheckNode {
+    let mut addrs = Vec::with_capacity(1 + usize::from(machine.ipv6.is_some()));
+    if !machine.ipv4.is_empty() {
+        addrs.push(machine.ipv4.clone());
+    }
+    if let Some(ipv6) = machine.ipv6.as_ref().filter(|ipv6| !ipv6.is_empty()) {
+        addrs.push(ipv6.clone());
+    }
+    crate::policy::PolicyCheckNode {
+        id: if machine.node_id == 0 {
+            crate::tailscale_wire::wire::stable_id_from_key(&machine.id)
+        } else {
+            machine.node_id
+        },
+        user_id: machine.user_id,
+        name: machine.name.clone(),
+        user: (!machine.user.is_empty()).then(|| machine.user.clone()),
+        addrs,
+        tags: machine.tags.clone(),
+    }
+}
+
 /// Existing approved routes are preserved; newly advertised routes are
 /// approved only when the loaded policy allows the node to advertise
 /// them. This mirrors headscale-go policy reload behaviour.
@@ -285,13 +591,70 @@ pub(crate) async fn apply_policy_auto_approvals(
     policy: &PolicyStore,
     machines: &dyn MachineAdmin,
 ) -> Result<usize, MachineAdminError> {
+    machines.auto_approve_routes(policy).await
+}
+
+/// Go `State.AutoApproveRoutes` for one node: the gRPC `RegisterNode` handler
+/// (grpcv1.go), the pre-auth-key register path (auth.go) and the OIDC callback
+/// run it right after the node has been persisted and added to the policy
+/// manager. Returns the new approved set only when it differs from the
+/// node's current one.
+pub(crate) fn policy_route_approval_for_node(
+    policy: &PolicyStore,
+    node: &MachineAdminRecord,
+) -> Result<Option<Vec<String>>, MachineAdminError> {
+    Ok(policy_auto_approval_plan(policy, vec![node.clone()])?
+        .into_iter()
+        .next()
+        .map(|(_, approved)| approved))
+}
+
+/// Apply Go `State.AutoApproveRoutes` to a node that registration has just
+/// persisted: compute the approved set against the loaded policy and, only
+/// when it changed, store it through the machine admin (NodeStore, database
+/// row and the `change.PolicyChange()` that follows the registration's own
+/// change; `State.SetApprovedRoutes`). The caller must have released the
+/// registration guards, as Go's `HandleNodeFromAuthPath` does on return.
+///
+/// An embedder may attach the live registry to the registration handler only;
+/// a machine admin that already owns it has projected the approval itself.
+pub(crate) async fn auto_approve_registered_node(
+    machines: &dyn MachineAdmin,
+    policy: &PolicyStore,
+    wire_registry: Option<&MachineRegistry>,
+    node: &MachineAdminRecord,
+) -> Result<(), MachineAdminError> {
+    let Some(approved) = policy_route_approval_for_node(policy, node)? else {
+        return Ok(());
+    };
+    machines
+        .set_approved_routes(&node.id, approved.clone())
+        .await?;
+    if let Some(registry) = wire_registry
+        && registry
+            .get(&node.id)
+            .is_some_and(|live| live.approved_routes != approved)
+    {
+        registry
+            .try_set_approved_routes(&node.id, approved)
+            .map_err(MachineAdminError::Policy)?;
+    }
+    Ok(())
+}
+
+fn policy_auto_approval_plan(
+    policy: &PolicyStore,
+    nodes: Vec<MachineAdminRecord>,
+) -> Result<Vec<(MachineAdminRecord, Vec<String>)>, MachineAdminError> {
+    let approvers = policy.route_approval_snapshot();
     let mut updates = Vec::new();
-    for node in machines.list().await {
+    for node in nodes {
         let user = (!node.user.is_empty()).then_some(node.user.as_str());
-        let approved = auto_approved_routes_for_node(
-            policy,
-            &node.ipv4,
+        let approved = auto_approved_routes_with_snapshot(
+            &approvers,
+            &admin_node_addresses(&node),
             user,
+            node.user_id,
             &node.tags,
             &node.approved_routes,
             &node.routes,
@@ -302,33 +665,954 @@ pub(crate) async fn apply_policy_auto_approvals(
                 node.id
             ))
         })?;
-        if approved != node.approved_routes {
-            updates.push((node.id, approved));
+        if auto_approval_changed(&node.approved_routes, &approved)
+            .map_err(MachineAdminError::BadRequest)?
+        {
+            updates.push((node, approved));
         }
     }
-    machines.set_approved_routes_batch(updates).await
+    Ok(updates)
+}
+
+fn native_row_id(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+) -> Result<u64, MachineAdminError> {
+    u64::try_from(row.id)
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| MachineAdminError::BadRequest("invalid persisted node identity".into()))
+}
+
+fn stage_native_row(
+    registry: &MachineRegistry,
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    record: &MachineRecord,
+    associations: NativeNodeAssociations,
+) -> Result<(), MachineAdminError> {
+    let id = native_row_id(row)?;
+    let mut native = NativeNodePersistence::capture(row, record)?;
+    native.set_associations(associations);
+    if let Some(snapshot) = registry.take_native_registration_hostinfo(id, record) {
+        native.replace_hostinfo_snapshot(snapshot);
+    }
+    registry.stage_native_row(record.clone(), native);
+    Ok(())
+}
+
+// Reuse the native planning representation without reading node authority
+// from SQL. These are projections of the current NodeStore, not fetched rows;
+// UpdatedAt/DeletedAt are not registration inputs or selected save columns.
+fn registration_rows_from_cache(
+    registry: &MachineRegistry,
+    machine_key: &str,
+) -> Result<Vec<headscale_db::headscale_nodes::HeadscaleNodeRow>, MachineAdminError> {
+    let records = registry.snapshot_with_metadata();
+    let mut rows = Vec::new();
+    for (key, record) in records
+        .iter()
+        .filter(|(_, record)| record.machine_key_hex == machine_key)
+    {
+        let id = record.stable_node_id_for_key(key);
+        let native = records.native_persistence(id);
+        let snapshot = NativeNodePersistence::snapshot(id, record, native.as_ref())?;
+        let hostinfo = records
+            .map_hostinfo_value(record)
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        let json = |value: Value| {
+            serde_json::to_string(&value)
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))
+        };
+        rows.push(headscale_db::headscale_nodes::HeadscaleNodeRow {
+            id: snapshot.id,
+            machine_key: snapshot.machine_key,
+            node_key: snapshot.node_key,
+            disco_key: snapshot.disco_key,
+            endpoints: json(
+                serde_json::to_value(snapshot.endpoints)
+                    .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?,
+            )?,
+            host_info: json(hostinfo)?,
+            ipv4: snapshot.ipv4,
+            ipv6: snapshot.ipv6,
+            hostname: snapshot.hostname,
+            given_name: snapshot.given_name,
+            user_id: snapshot.user_id,
+            register_method: snapshot.register_method,
+            tags: json(
+                serde_json::to_value(snapshot.tags)
+                    .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?,
+            )?,
+            auth_key_id: record.auth_key_id,
+            expiry: record.expiry.map(|time| time.timestamp()),
+            expiry_text: record
+                .expiry
+                .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            last_seen: snapshot.last_seen.map(|time| time.timestamp()),
+            last_seen_text: snapshot
+                .last_seen
+                .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            approved_routes: json(
+                serde_json::to_value(snapshot.approved_routes)
+                    .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?,
+            )?,
+            created_at: record.created_at.timestamp(),
+            created_at_text: record
+                .created_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            updated_at: 0,
+            deleted_at: None,
+        });
+    }
+    rows.sort_by_key(|row| row.id);
+    Ok(rows)
+}
+
+#[derive(Clone)]
+enum NativeNodeStore {
+    Volatile,
+    Sqlite(SqlitePool),
+    #[cfg(feature = "postgres-sqlx")]
+    Postgres(PgPool),
+}
+
+pub(crate) fn native_save_error(error: MachineAdminError) -> MachineAdminError {
+    let message = match error {
+        MachineAdminError::BadRequest(message)
+        | MachineAdminError::Storage(message)
+        | MachineAdminError::Policy(message) => message,
+        error @ MachineAdminError::NotFound(_) => error.to_string(),
+    };
+    MachineAdminError::Storage(format!("saving node: {message}"))
+}
+
+impl NativeNodeStore {
+    async fn save_snapshot(
+        &self,
+        id: u64,
+        record: &MachineRecord,
+        native: Option<&NativeNodePersistence>,
+    ) -> Result<Option<NativeNodePersistence>, MachineAdminError> {
+        if matches!(self, Self::Volatile) {
+            return Ok(None);
+        }
+        let snapshot =
+            NativeNodePersistence::snapshot(id, record, native).map_err(native_save_error)?;
+        let saved_native = NativeNodePersistence::from_snapshot(record, &snapshot, native);
+        self.save_selected_snapshot(snapshot).await?;
+        Ok(Some(saved_native))
+    }
+
+    async fn save_selected_snapshot(
+        &self,
+        snapshot: headscale_db::headscale_nodes::CachedNodeSnapshot,
+    ) -> Result<(), MachineAdminError> {
+        let result = match self {
+            Self::Volatile => return Ok(()),
+            Self::Sqlite(pool) => {
+                headscale_db::headscale_nodes::save_cached_node_snapshot(pool, snapshot).await
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(pool) => {
+                headscale_db::headscale_nodes::save_postgres_cached_node_snapshot(pool, snapshot)
+                    .await
+            }
+        };
+        result.map_err(|error| {
+            MachineAdminError::Storage(format!("saving node: {}", error.headscale_go_message()))
+        })
+    }
+
+    async fn save_expiry(
+        &self,
+        id: u64,
+        expiry: Option<DateTime<Utc>>,
+    ) -> Result<(), MachineAdminError> {
+        if matches!(self, Self::Volatile) {
+            return Ok(());
+        }
+        let id = i64::try_from(id)
+            .map_err(|_| MachineAdminError::BadRequest("invalid cached node identity".into()))?;
+        let result = match self {
+            Self::Volatile => return Ok(()),
+            Self::Sqlite(pool) => {
+                headscale_db::headscale_nodes::save_cached_node_expiry(pool, id, expiry).await
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(pool) => {
+                headscale_db::headscale_nodes::save_postgres_cached_node_expiry(pool, id, expiry)
+                    .await
+            }
+        };
+        result.map_err(|error| {
+            MachineAdminError::Storage(format!(
+                "setting node expiry in database: {}",
+                error.headscale_go_message()
+            ))
+        })
+    }
+
+    async fn destroy(&self, id: u64) -> Result<(), MachineAdminError> {
+        if matches!(self, Self::Volatile) {
+            return Ok(());
+        }
+        let id = i64::try_from(id)
+            .map_err(|_| MachineAdminError::BadRequest("invalid cached node identity".into()))?;
+        let result = match self {
+            Self::Volatile => return Ok(()),
+            Self::Sqlite(pool) => {
+                headscale_db::headscale_nodes::destroy_cached_node(pool, id).await
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(pool) => {
+                headscale_db::headscale_nodes::destroy_postgres_cached_node(pool, id).await
+            }
+        };
+        result.map_err(|error| MachineAdminError::Storage(error.headscale_go_message()))
+    }
+
+    // Headless adapters have no NodeStore to supply Go's full cached snapshot.
+    // Keep their unrelated durable fields rather than inventing a wire view.
+    async fn save(&self, id: u64, routes: &[String]) -> Result<(), MachineAdminError> {
+        if matches!(self, Self::Volatile) {
+            return Ok(());
+        }
+        let id = i64::try_from(id).map_err(|_| {
+            MachineAdminError::BadRequest("invalid node ID in policy route batch".into())
+        })?;
+        let result = match self {
+            Self::Volatile => return Ok(()),
+            Self::Sqlite(pool) => {
+                headscale_db::headscale_nodes::save_policy_approved_routes(pool, id, routes).await
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            Self::Postgres(pool) => {
+                headscale_db::headscale_nodes::save_postgres_policy_approved_routes(
+                    pool, id, routes,
+                )
+                .await
+            }
+        };
+        result.map_err(|error| db_error_to_machine(error, &id.to_string()))
+    }
+}
+
+type NativeNodeMutation = MachineAdminMutation;
+
+async fn mutate_live_native_node(
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+    id: &str,
+    mutation: NativeNodeMutation,
+) -> Result<(), MachineAdminError> {
+    mutate_live_native_node_with_view(registry, store, id, mutation)
+        .await
+        .map(|_| ())
+}
+
+async fn mutate_live_native_node_with_view(
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+    id: &str,
+    mutation: NativeNodeMutation,
+) -> Result<MachineAdminView, MachineAdminError> {
+    let id = id.to_owned();
+    crate::tailscale_wire::complete_state_mutation(async move {
+        complete_live_native_node_mutation(registry, store, &id, mutation).await
+    })
+    .await
+    .map_err(|error| MachineAdminError::BadRequest(format!("finishing node mutation: {error}")))?
+}
+
+async fn complete_live_native_node_mutation(
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+    id: &str,
+    mut mutation: NativeNodeMutation,
+) -> Result<MachineAdminView, MachineAdminError> {
+    match &mut mutation {
+        NativeNodeMutation::Rename(name) => {
+            registry
+                .validate_given_name(name)
+                .map_err(MachineAdminError::BadRequest)?;
+        }
+        NativeNodeMutation::Tags(tags) => {
+            if tags.is_empty() {
+                return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
+            }
+            tags.sort();
+            tags.dedup();
+        }
+        NativeNodeMutation::ApprovedRoutes(routes) => {
+            *routes = crate::tailscale_wire::routes::normalize_routes(&*routes)
+                .map_err(MachineAdminError::BadRequest)?;
+        }
+        NativeNodeMutation::AvailableRoutes(routes) => {
+            *routes = crate::tailscale_wire::routes::normalize_advertised_routes(&*routes)
+                .map_err(MachineAdminError::BadRequest)?;
+        }
+        NativeNodeMutation::Expiry(_) => {}
+    }
+    let selector = key_without_prefix("nodekey:", id);
+    let adapter = WireMachineAdmin::new(registry.clone());
+    let (guards, key) = adapter.lock_existing_node(&selector).await?;
+    let selected = registry
+        .get(&key)
+        .ok_or_else(|| MachineAdminError::NotFound(id.into()))?;
+    let node_id = selected.stable_node_id_for_key(&key);
+    crate::tailscale_wire::complete_state_mutation(async move {
+        let _guards = guards;
+        let name = match &mutation {
+            NativeNodeMutation::Rename(name) => Some(name.clone()),
+            _ => None,
+        };
+        let change = mutation.clone();
+        let mut metadata = match &mutation {
+            NativeNodeMutation::Expiry(_) => None,
+            NativeNodeMutation::Tags(_) => Some(NativeNodeMetadataEdit {
+                nil_user: true,
+                nil_routes: false,
+                require_native: false,
+            }),
+            NativeNodeMutation::ApprovedRoutes(routes) => Some(NativeNodeMetadataEdit {
+                nil_user: false,
+                nil_routes: routes.is_empty(),
+                require_native: false,
+            }),
+            _ => Some(NativeNodeMetadataEdit::default()),
+        };
+        if let Some(metadata) = &mut metadata {
+            metadata.require_native = matches!(&store, NativeNodeStore::Volatile);
+        }
+        let online_changed = Arc::new(AtomicBool::new(false));
+        let expiry_online_changed = online_changed.clone();
+        let online_registry = registry.clone();
+        let applied = registry
+            .mutate_native_node_with_view(node_id, name, metadata, move |record| {
+                let check_routes = matches!(
+                    &change,
+                    NativeNodeMutation::ApprovedRoutes(_) | NativeNodeMutation::AvailableRoutes(_)
+                );
+                match change {
+                    NativeNodeMutation::Expiry(expiry) => {
+                        record.expiry = expiry;
+                        expiry_online_changed.store(
+                            online_registry.update_online_for_expiry(node_id, record),
+                            Ordering::SeqCst,
+                        );
+                    }
+                    NativeNodeMutation::Rename(name) => record.hostname = name,
+                    NativeNodeMutation::Tags(tags) => {
+                        record.forced_tags = tags;
+                        record.clear_user_identity();
+                    }
+                    NativeNodeMutation::ApprovedRoutes(routes) => record.approved_routes = routes,
+                    NativeNodeMutation::AvailableRoutes(routes) => record.available_routes = routes,
+                }
+                check_routes
+                    && crate::tailscale_wire::routes::active_approved_routes(
+                        &record.available_routes,
+                        &record.approved_routes,
+                    )
+                    .is_empty()
+            })
+            .map_err(|message| match &mutation {
+                NativeNodeMutation::Rename(name)
+                    if message == "given name already in use by another node" =>
+                {
+                    MachineAdminError::BadRequest(format!("node name is not unique: {name}"))
+                }
+                _ => MachineAdminError::BadRequest(message),
+            })?;
+        let mut update_view = applied.ok_or_else(|| {
+            MachineAdminError::Storage(format!("node no longer exists in NodeStore: {node_id}"))
+        })?;
+        update_view.record.online = registry
+            .online_states()
+            .get(&node_id)
+            .copied()
+            .unwrap_or(false)
+            && !update_view.record.expired;
+
+        // Hold the same save lock as policy auto-approval while re-reading and
+        // writing the current cache. A database error keeps the quiet live edit.
+        let _persist = registry.lock_native_persistence().await;
+        let current = registry.snapshot_with_metadata();
+        let record = {
+            let mut matches = current
+                .iter()
+                .filter(|(key, record)| record.stable_node_id_for_key(key) == node_id);
+            let (_, record) = matches.next().ok_or_else(|| {
+                MachineAdminError::Storage(format!("node no longer exists in NodeStore: {node_id}"))
+            })?;
+            if matches.next().is_some() {
+                return Err(MachineAdminError::BadRequest(
+                    "ambiguous node identity".into(),
+                ));
+            }
+            record.clone()
+        };
+        let response_view = if matches!(&mutation, NativeNodeMutation::Expiry(_)) {
+            update_view
+        } else {
+            view_from_snapshot(
+                &current,
+                &record.node_key_hex,
+                &record,
+                registry
+                    .online_states()
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(false),
+            )
+        };
+        if !matches!(&store, NativeNodeStore::Volatile) {
+            if let NativeNodeMutation::Expiry(_) = &mutation {
+                store
+                    .save_expiry(node_id, response_view.record.expiry_precise)
+                    .await?;
+            } else {
+                let native = current.native_persistence(node_id);
+                let snapshot = NativeNodePersistence::snapshot(node_id, &record, native.as_ref())
+                    .map_err(native_save_error)?;
+                store.save_selected_snapshot(snapshot).await?;
+            }
+        }
+        let policy_changed = registry
+            .try_refresh_policy_node_inputs()
+            .map_err(|error| {
+                MachineAdminError::Policy(format!(
+                    "{}: {error}",
+                    if matches!(&mutation, NativeNodeMutation::Expiry(_)) {
+                        "updating policy manager after setting expiry"
+                    } else {
+                        "updating policy manager after node save"
+                    }
+                ))
+            })?
+            .unwrap_or(matches!(
+                mutation,
+                NativeNodeMutation::Tags(_)
+                    | NativeNodeMutation::ApprovedRoutes(_)
+                    | NativeNodeMutation::AvailableRoutes(_)
+            ));
+        if matches!(mutation, NativeNodeMutation::Expiry(_)) {
+            registry.wake_node_expiry_change(
+                node_id,
+                policy_changed,
+                online_changed.load(Ordering::SeqCst),
+            );
+            return Ok(response_view);
+        }
+        if policy_changed || matches!(mutation, NativeNodeMutation::ApprovedRoutes(_)) {
+            // SetNodeTags adds its origin to the policy change. Ordinary
+            // rename/route policy changes have no synthetic origin node.
+            registry.wake_policy_change(
+                matches!(mutation, NativeNodeMutation::Tags(_)).then_some(node_id),
+            );
+        } else {
+            registry.wake_node_change(crate::tailscale_wire::MapChangeReason::NodeAdded, node_id);
+        }
+        Ok(response_view)
+    })
+    .await
+    .map_err(|error| MachineAdminError::BadRequest(format!("finishing node mutation: {error}")))?
+}
+
+fn requested_live_node_id(
+    registry: &MachineRegistry,
+    requested: &MachineRecord,
+) -> Result<u64, String> {
+    requested
+        .node_id
+        .or_else(|| {
+            registry
+                .get(&requested.node_key_hex)
+                .map(|record| record.stable_node_id_for_key(&requested.node_key_hex))
+        })
+        .ok_or_else(|| "node no longer exists in NodeStore".to_string())
+}
+
+// The caller already applied State.SetNodeExpiry's quiet live edit and owns
+// its original online transition. Persist that current cached expiry without
+// repeating the live mutation or acquiring the same machine guard again.
+async fn persist_live_logout_expiry(
+    registry: &MachineRegistry,
+    store: NativeNodeStore,
+    requested: &MachineRecord,
+    _at: DateTime<Utc>,
+) -> Result<(), String> {
+    let id = requested_live_node_id(registry, requested)?;
+    let _persist = registry.lock_native_persistence().await;
+    let expiry = {
+        let current = registry.snapshot();
+        let mut records = current
+            .iter()
+            .filter(|(key, record)| record.stable_node_id_for_key(key) == id);
+        let (_, record) = records
+            .next()
+            .ok_or_else(|| format!("node no longer exists in NodeStore: {id}"))?;
+        if records.next().is_some() {
+            return Err("ambiguous node identity".into());
+        }
+        record.expiry
+    };
+    store
+        .save_expiry(id, expiry)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+// The map caller already holds the machine guard and has updated NodeStore.
+// Re-read only by stable ID under the same save mutex as native admin writes;
+// SQL rows are not the authority for ownership, names, tags or client fields.
+async fn persist_live_runtime_node(
+    registry: &MachineRegistry,
+    store: NativeNodeStore,
+    requested: &MachineRecord,
+) -> Result<PersistedMachineRegistration, String> {
+    let id = requested_live_node_id(registry, requested)?;
+    persist_live_runtime_node_by_id(registry, store, id).await
+}
+
+// Disconnect owns a stable node ID, including across a key rotation. The
+// supplied old timestamp is not a new write: LastSeen already changed in the
+// NodeStore writer, and persistNode re-reads its latest full selected snapshot.
+async fn persist_live_runtime_node_by_id(
+    registry: &MachineRegistry,
+    store: NativeNodeStore,
+    id: u64,
+) -> Result<PersistedMachineRegistration, String> {
+    let _persist = registry.lock_native_persistence().await;
+    let current = registry.snapshot_with_metadata();
+    let record = {
+        let mut records = current
+            .iter()
+            .filter(|(key, record)| record.stable_node_id_for_key(key) == id);
+        let (_, record) = records
+            .next()
+            .ok_or_else(|| format!("node no longer exists in NodeStore: {id}"))?;
+        if records.next().is_some() {
+            return Err("ambiguous node identity".into());
+        }
+        record.clone()
+    };
+    let native = current.native_persistence(id);
+    let mut snapshot = NativeNodePersistence::snapshot(id, &record, native.as_ref())
+        .map_err(|error| error.to_string())?;
+    if native.is_none() {
+        // An embedding may attach a native store after publishing a wire-only
+        // node. Its map snapshot still owns shapes hidden by the projection.
+        let value = current
+            .map_hostinfo_value(&record)
+            .map_err(|error| error.to_string())?;
+        snapshot.host_info = (!value.is_null()).then_some(value);
+    }
+    // These shapes now describe the live cache even if the following SQL save
+    // fails. Keep a later same-value edit from reviving an older nil shape.
+    registry.remember_native_persistence(
+        id,
+        &current,
+        NativeNodePersistence::from_snapshot(&record, &snapshot, native.as_ref()),
+    );
+    store
+        .save_selected_snapshot(snapshot)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(PersistedMachineRegistration {
+        record,
+        replaced_node_key_hex: None,
+    })
+}
+
+async fn delete_live_native_node(
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+    id: &str,
+) -> Result<(), MachineAdminError> {
+    let id = id.to_owned();
+    crate::tailscale_wire::complete_state_mutation(async move {
+        complete_live_native_node_deletion(registry, store, &id).await
+    })
+    .await
+    .map_err(|error| MachineAdminError::BadRequest(format!("finishing node deletion: {error}")))?
+}
+
+async fn complete_live_native_node_deletion(
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+    id: &str,
+) -> Result<(), MachineAdminError> {
+    let selector = key_without_prefix("nodekey:", id);
+    let adapter = WireMachineAdmin::new(registry.clone());
+    let (guards, key) = adapter.lock_existing_node(&selector).await?;
+    let selected = registry
+        .get(&key)
+        .ok_or_else(|| MachineAdminError::NotFound(id.into()))?;
+    let node_id = selected.stable_node_id_for_key(&key);
+    crate::tailscale_wire::complete_state_mutation(async move {
+        let _guards = guards;
+        complete_guarded_native_node_deletion(&registry, store, node_id, &key).await
+    })
+    .await
+    .map_err(|error| MachineAdminError::BadRequest(format!("finishing node deletion: {error}")))?
+}
+
+// The caller already owns the machine guard (admin, wire logout or GC).
+async fn complete_guarded_native_node_deletion(
+    registry: &MachineRegistry,
+    store: NativeNodeStore,
+    node_id: u64,
+    key: &str,
+) -> Result<(), MachineAdminError> {
+    let persist = registry.lock_native_persistence().await;
+    store.destroy(node_id).await?;
+    let removed = registry.remove_node_quiet(key);
+    drop(persist);
+    if let Some(removed) = removed {
+        let node_id = removed.id;
+        registry.release_removed_node_addresses(removed);
+        registry
+            .finish_node_removal(node_id)
+            .map_err(MachineAdminError::Policy)?;
+    }
+    Ok(())
+}
+
+struct LockedPolicyNodes {
+    guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    records: Vec<MachineAdminRecord>,
+}
+
+fn view_from_snapshot(
+    snapshot: &MachineSnapshot,
+    key: &str,
+    wire: &MachineRecord,
+    online: bool,
+) -> MachineAdminView {
+    let native = snapshot.native_persistence(wire.stable_node_id_for_key(key));
+    MachineAdminView::from_wire(key, wire, native.as_ref(), online)
+}
+
+fn checked_live_views(
+    registry: &MachineRegistry,
+) -> Result<Vec<MachineAdminView>, MachineAdminError> {
+    let online = registry.online_states();
+    let snapshot = registry.snapshot_with_metadata();
+    let mut seen = BTreeSet::new();
+    let mut views = Vec::with_capacity(snapshot.len());
+    for (key, record) in &snapshot {
+        let id = record.stable_node_id_for_key(key);
+        if !seen.insert(id) {
+            return Err(MachineAdminError::BadRequest(
+                "duplicate live node ID in admin snapshot".into(),
+            ));
+        }
+        views.push(view_from_snapshot(
+            &snapshot,
+            key,
+            record,
+            online.get(&id).copied().unwrap_or(false),
+        ));
+    }
+    views.sort_by_key(|view| view.record.node_id);
+    Ok(views)
+}
+
+fn checked_live_view(
+    registry: &MachineRegistry,
+    id: &str,
+) -> Result<Option<MachineAdminView>, MachineAdminError> {
+    let id = key_without_prefix("nodekey:", id);
+    let online = registry.online_states();
+    let snapshot = registry.snapshot_with_metadata();
+    let selected = if let Ok(node_id) = id.parse::<u64>()
+        && node_id > 0
+        && node_id.to_string() == id
+    {
+        let mut matches = snapshot
+            .iter()
+            .filter(|(key, record)| record.stable_node_id_for_key(key) == node_id);
+        let selected = matches.next();
+        if matches.next().is_some() {
+            return Err(MachineAdminError::BadRequest(
+                "ambiguous live node identity".into(),
+            ));
+        }
+        selected
+    } else {
+        snapshot.get_key_value(&id)
+    };
+    Ok(selected.map(|(key, record)| {
+        let online = online
+            .get(&record.stable_node_id_for_key(key))
+            .copied()
+            .unwrap_or(false);
+        view_from_snapshot(&snapshot, key, record, online)
+    }))
+}
+
+fn checked_live_records(
+    registry: &MachineRegistry,
+) -> Result<Vec<MachineAdminRecord>, MachineAdminError> {
+    checked_live_views(registry).map(|views| views.into_iter().map(|view| view.record).collect())
+}
+
+fn checked_live_policy_nodes(
+    registry: &MachineRegistry,
+) -> Result<Vec<PolicyCheckNode>, MachineAdminError> {
+    Ok(checked_live_policy_check_snapshot(registry)?
+        .into_iter()
+        .map(|snapshot| snapshot.node)
+        .collect())
+}
+
+fn checked_live_policy_check_snapshot(
+    registry: &MachineRegistry,
+) -> Result<Vec<PolicyCheckNodeSnapshot>, MachineAdminError> {
+    PolicyCheckNodeSnapshot::from_registry(registry).map_err(MachineAdminError::BadRequest)
+}
+
+fn policy_node_from_native_row(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    record: &MachineRecord,
+    association: NativeNodeAssociations,
+) -> Result<PolicyCheckNode, MachineAdminError> {
+    let mut node = policy_check_node_from_machine(&machine_admin_record_from_wire(record));
+    node.addrs = NativeNodePersistence::capture(row, record)?
+        .policy_owner_and_addresses(record)
+        .1;
+    if let Some(user) = association.user {
+        node.user_id = user.as_ref().map(|user| user.id);
+        if user.is_none() {
+            node.user = None;
+        }
+    }
+    Ok(node)
+}
+
+async fn locked_policy_nodes(
+    registry: &Arc<MachineRegistry>,
+) -> Result<LockedPolicyNodes, MachineAdminError> {
+    let snapshot = registry.snapshot();
+    let mut selected_ids = BTreeSet::new();
+    let mut machines = BTreeSet::new();
+    for (key, record) in snapshot.iter() {
+        if !selected_ids.insert(record.stable_node_id_for_key(key)) {
+            return Err(MachineAdminError::BadRequest(
+                "duplicate live node ID in policy snapshot".into(),
+            ));
+        }
+        machines.insert(record.machine_key_hex.clone());
+    }
+    drop(snapshot);
+    let mut guards = Vec::with_capacity(machines.len());
+    for machine in &machines {
+        guards.push(registry.lock_registration(machine).await);
+    }
+    let current = registry.snapshot_with_metadata();
+    let mut seen = BTreeSet::new();
+    let mut records = Vec::new();
+    for (key, record) in &current {
+        let id = record.stable_node_id_for_key(key);
+        if selected_ids.contains(&id) && machines.contains(&record.machine_key_hex) {
+            if !seen.insert(id) {
+                return Err(MachineAdminError::BadRequest(
+                    "duplicate live node ID in policy snapshot".into(),
+                ));
+            }
+            let mut node = machine_admin_record_from_wire(record);
+            node.node_id = id;
+            let (user_id, user) = current.policy_identity(record);
+            node.user_id = user_id;
+            node.user = user.unwrap_or_default();
+            let addresses = current.policy_addresses(record);
+            node.ipv4 = addresses
+                .iter()
+                .find(|addr| !addr.contains(':'))
+                .cloned()
+                .unwrap_or_default();
+            node.ipv6 = addresses.iter().find(|addr| addr.contains(':')).cloned();
+            records.push(node);
+        }
+    }
+    records.sort_by_key(|record| record.node_id);
+    Ok(LockedPolicyNodes { guards, records })
+}
+
+async fn auto_approve_live_registry(
+    policy: &PolicyStore,
+    registry: Arc<MachineRegistry>,
+    store: NativeNodeStore,
+) -> Result<usize, MachineAdminError> {
+    let locked = locked_policy_nodes(&registry).await?;
+    let plan = policy_auto_approval_plan(policy, locked.records)?;
+    if plan.is_empty() {
+        return Ok(0);
+    }
+    let updates = plan
+        .into_iter()
+        .map(|(record, routes)| (record.node_id, routes))
+        .collect();
+    crate::tailscale_wire::complete_state_mutation(async move {
+        let _guards = locked.guards;
+        // Go updates all live routes first, then saves each still-present ID.
+        // A database error can leave the full live batch with partial durable
+        // progress; there is deliberately no rollback of that live snapshot.
+        let ids = registry
+            .apply_policy_route_approvals(updates)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let snapshot = registry.snapshot();
+        let keys = snapshot
+            .iter()
+            .filter_map(|(key, record)| {
+                let id = record.stable_node_id_for_key(key);
+                ids.contains(&id).then(|| (id, key.clone()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        drop(snapshot);
+        let mut saved = 0;
+        for id in ids {
+            // Go persistNode serializes a fresh NodeStore read and its SQL
+            // update. Never save the earlier plan or recreate an absent ID.
+            let _persist = registry.lock_native_persistence().await;
+            let current = registry.snapshot_with_metadata();
+            let record = keys
+                .get(&id)
+                .and_then(|key| {
+                    current
+                        .get(key)
+                        .filter(|record| record.stable_node_id_for_key(key) == id)
+                })
+                .or_else(|| {
+                    current.iter().find_map(|(key, record)| {
+                        (record.stable_node_id_for_key(key) == id).then_some(record)
+                    })
+                })
+                .cloned();
+            let native = current.native_persistence(id);
+            let Some(record) = record else {
+                continue;
+            };
+            if let Some(saved_native) = store.save_snapshot(id, &record, native.as_ref()).await? {
+                registry.remember_native_persistence(id, &current, saved_native);
+            }
+            saved += 1;
+        }
+        registry
+            .try_refresh_policy_node_inputs()
+            .map_err(MachineAdminError::Policy)?;
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| {
+        MachineAdminError::BadRequest(format!("finishing policy route approvals: {error}"))
+    })?
+}
+
+async fn auto_approve_without_registry(
+    policy: &PolicyStore,
+    nodes: Vec<MachineAdminRecord>,
+    store: NativeNodeStore,
+) -> Result<usize, MachineAdminError> {
+    let plan = policy_auto_approval_plan(policy, nodes)?;
+    crate::tailscale_wire::complete_state_mutation(async move {
+        for (record, routes) in &plan {
+            store.save(record.node_id, routes).await?;
+        }
+        Ok(plan.len())
+    })
+    .await
+    .map_err(|error| {
+        MachineAdminError::BadRequest(format!("finishing policy route approvals: {error}"))
+    })?
 }
 
 /// Default impl: adapts [`MachineRegistry`] for the admin panel.
 ///
-/// The wire registry exposes `all()` + `get(node_key)`; we layer two
-/// in-memory sets on top for the "expired" / "deleted" admin decisions.
-/// Both sets are cleared on process restart — same volatile-by-design
-/// model the rest of the admin v0 uses.
+/// The wire registry owns expiry/deletion and remains volatile by design.
+/// Existing-node admin mutations share its registration locks; no sidecar flags can hide a
+/// later registration or turn a scheduled future expiry into immediate expiry.
 #[derive(Clone)]
 pub struct WireMachineAdmin {
     registry: Arc<MachineRegistry>,
-    expired: Arc<RwLock<BTreeSet<String>>>,
-    deleted: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl WireMachineAdmin {
     pub fn new(registry: Arc<MachineRegistry>) -> Self {
-        Self {
-            registry,
-            expired: Arc::new(RwLock::new(BTreeSet::new())),
-            deleted: Arc::new(RwLock::new(BTreeSet::new())),
+        Self { registry }
+    }
+
+    fn selected_record(&self, id: &str) -> Option<(String, MachineRecord)> {
+        if let Ok(node_id) = id.parse::<u64>()
+            && node_id > 0
+            && node_id.to_string() == id
+        {
+            let snapshot = self.registry.snapshot();
+            let mut matches = snapshot
+                .iter()
+                .filter(|(key, record)| record.stable_node_id_for_key(key) == node_id);
+            let (key, record) = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            return Some((key.clone(), record.clone()));
         }
+        self.registry.get(id).map(|record| (id.to_owned(), record))
+    }
+
+    async fn lock_existing_nodes(
+        &self,
+        ids: &[String],
+    ) -> Result<(Vec<tokio::sync::OwnedMutexGuard<()>>, Vec<String>), MachineAdminError> {
+        let originals = ids
+            .iter()
+            .map(|id| {
+                self.selected_record(id)
+                    .ok_or_else(|| MachineAdminError::NotFound(id.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let machine_keys = originals
+            .iter()
+            .map(|(_, record)| record.machine_key_hex.clone())
+            .collect::<BTreeSet<_>>();
+        // Deduplicate and order locks for policy route batches containing
+        // multiple nodes on one machine or overlapping batches.
+        let mut guards = Vec::with_capacity(machine_keys.len());
+        for machine_key in machine_keys {
+            guards.push(self.registry.lock_registration(&machine_key).await);
+        }
+        let snapshot = self.registry.snapshot();
+        let mut current_keys = Vec::with_capacity(originals.len());
+        for (id, original) in originals {
+            let node_id = original.stable_node_id_for_key(&id);
+            let mut matches = snapshot.iter().filter(|(key, record)| {
+                record.stable_node_id_for_key(key) == node_id
+                    && record.machine_key_hex == original.machine_key_hex
+                    && record.created_at == original.created_at
+            });
+            let Some((key, _)) = matches.next() else {
+                return Err(MachineAdminError::NotFound(id));
+            };
+            if matches.next().is_some() {
+                return Err(MachineAdminError::BadRequest(
+                    "ambiguous node identity".into(),
+                ));
+            }
+            current_keys.push(key.clone());
+        }
+        Ok((guards, current_keys))
+    }
+
+    async fn lock_existing_node(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<tokio::sync::OwnedMutexGuard<()>>, String), MachineAdminError> {
+        let (guards, mut keys) = self.lock_existing_nodes(&[id.to_owned()]).await?;
+        let key = keys
+            .pop()
+            .ok_or_else(|| MachineAdminError::NotFound(id.into()))?;
+        Ok((guards, key))
     }
 
     /// Render a borrowed `(id, rec)` pair into the admin DTO without
@@ -339,24 +1623,13 @@ impl WireMachineAdmin {
     fn render(
         id: &str,
         rec: &crate::tailscale_wire::MachineRecord,
-        sidecar_expired: bool,
         online: bool,
     ) -> MachineAdminRecord {
-        // P1 lifecycle: the wire registry now carries `expiry` itself.
-        // A machine is "expired" if the sidecar flag is set OR the
-        // wire record's expiry has elapsed against wall-clock. The
-        // sidecar survives across `set_expiry(None)` calls so the
-        // admin's intent stays visible until an explicit "unexpire".
         let now = Utc::now();
-        let wire_expired = rec.is_expired_at(now);
-        let is_expired = sidecar_expired || wire_expired;
-        // last_seen on the wire is the authoritative value; fall back
-        // to `now_unix` only when zero (record was inserted by tests
-        // that didn't stamp it).
+        let is_expired = rec.is_expired_at(now);
+        // Expiry changes authorization, not the durable last-seen history.
         let last_seen = rec.last_seen.timestamp().max(0) as u64;
-        let last_seen = if is_expired {
-            0
-        } else if last_seen == 0 {
+        let last_seen = if last_seen == 0 {
             now_unix()
         } else {
             last_seen
@@ -372,8 +1645,11 @@ impl WireMachineAdmin {
             ipv6: rec.ipv6.map(|addr| addr.to_string()),
             online: online && !is_expired,
             last_seen,
+            last_seen_precise: Some(rec.last_seen),
             created_at: rec.created_at.timestamp().max(0) as u64,
+            created_at_precise: Some(rec.created_at),
             expiry: rec.expiry.map(|t| t.timestamp().max(0) as u64),
+            expiry_precise: rec.expiry,
             machine_key_hex: rec.machine_key_hex.clone(),
             disco_key: rec.disco_key.clone().unwrap_or_default(),
             os: nonempty_or_unknown(&rec.os),
@@ -385,6 +1661,38 @@ impl WireMachineAdmin {
             expired: is_expired,
         }
     }
+}
+
+fn precise_stored_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z"))
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|value| value.and_utc())
+        })
+        .or_else(|| {
+            raw.parse::<i64>()
+                .ok()
+                .and_then(|secs| DateTime::from_timestamp(secs, 0))
+        })
+}
+
+fn stored_node_created_at(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+) -> Option<DateTime<Utc>> {
+    if row.created_at_text.is_empty() {
+        DateTime::from_timestamp(-62_135_596_800, 0)
+    } else {
+        precise_stored_timestamp(&row.created_at_text)
+            .or_else(|| DateTime::from_timestamp(row.created_at, 0))
+    }
+}
+
+fn node_expiry_is_elapsed(expiry: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    (expiry.timestamp() != -62_135_596_800 || expiry.timestamp_subsec_nanos() != 0) && expiry < now
 }
 
 fn nonempty_or_unknown(value: &str) -> String {
@@ -428,18 +1736,116 @@ fn require_any_address(
     Ok(())
 }
 
-fn primary_admin_addr(record: &MachineAdminRecord) -> String {
-    if record.ipv4.trim().is_empty() {
-        record
-            .ipv6
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string()
-    } else {
-        record.ipv4.trim().to_string()
+fn admin_node_addresses(record: &MachineAdminRecord) -> Vec<String> {
+    let mut addresses = Vec::with_capacity(2);
+    if !record.ipv4.is_empty() {
+        addresses.push(record.ipv4.clone());
     }
+    if let Some(address) = record.ipv6.as_ref().filter(|address| !address.is_empty()) {
+        addresses.push(address.clone());
+    }
+    addresses
+}
+
+async fn lock_backfill_nodes(
+    registry: Option<&Arc<MachineRegistry>>,
+    rows: &[headscale_db::headscale_nodes::HeadscaleNodeRow],
+) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let Some(registry) = registry else {
+        return Vec::new();
+    };
+    let machine_keys = rows
+        .iter()
+        .map(|row| key_without_prefix("mkey:", &row.machine_key))
+        .collect::<BTreeSet<_>>();
+    let mut guards = Vec::with_capacity(machine_keys.len());
+    for machine_key in machine_keys {
+        guards.push(registry.lock_registration(&machine_key).await);
+    }
+    guards
+}
+
+fn prepare_ip_backfill(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    allocator: &dyn IpAllocator,
+) -> Result<(headscale_db::headscale_nodes::IpAddressUpdate, Vec<String>), MachineAdminError> {
+    let mut ipv4 = row.ipv4.clone();
+    let mut ipv6 = row.ipv6.clone();
+    let mut changes = Vec::new();
+    let key = key_without_prefix("nodekey:", &row.node_key);
+    let key = if key.is_empty() {
+        row.id.to_string()
+    } else {
+        key
+    };
+    let name = headscale_api_acl::go_strconv::quote(&row.hostname);
+    if allocator.ipv4_enabled() && ipv4.is_none() {
+        let address = allocator
+            .allocate(&key)
+            .map_err(|error| {
+                MachineAdminError::BadRequest(format!(
+                    "allocating IPv4 for node({}): {error}",
+                    row.id
+                ))
+            })?
+            .to_string();
+        changes.push(format!(
+            "assigned IPv4 {} to Node({}) {name}",
+            headscale_api_acl::go_strconv::quote(&address),
+            row.id
+        ));
+        ipv4 = Some(address);
+    }
+    if allocator.ipv6_enabled()
+        && ipv6.is_none()
+        && let Some(address) = allocator.allocate_ipv6(&key).map_err(|error| {
+            MachineAdminError::BadRequest(format!("allocating IPv6 for node({}): {error}", row.id))
+        })?
+    {
+        let address = address.to_string();
+        changes.push(format!(
+            "assigned IPv6 {} to Node({}) {name}",
+            headscale_api_acl::go_strconv::quote(&address),
+            row.id
+        ));
+        ipv6 = Some(address);
+    }
+    if !allocator.ipv4_enabled()
+        && let Some(address) = ipv4.take()
+    {
+        let address = if address.is_empty() {
+            "invalid IP"
+        } else {
+            &address
+        };
+        changes.push(format!(
+            "removing IPv4 {} from Node({}) {name}",
+            headscale_api_acl::go_strconv::quote(address),
+            row.id
+        ));
+    }
+    if !allocator.ipv6_enabled()
+        && let Some(address) = ipv6.take()
+    {
+        let address = if address.is_empty() {
+            "invalid IP"
+        } else {
+            &address
+        };
+        changes.push(format!(
+            "removing IPv6 {} from Node({}) {name}",
+            headscale_api_acl::go_strconv::quote(address),
+            row.id
+        ));
+    }
+    Ok((
+        headscale_db::headscale_nodes::IpAddressUpdate {
+            node_id: row.id,
+            ipv4,
+            ipv6,
+        },
+        changes,
+    ))
 }
 
 fn optional_ipv4_string(value: &str) -> Option<String> {
@@ -481,6 +1887,7 @@ pub struct PersistentOidcRegistrationHandler {
     machines: Arc<PersistentMachineAdmin>,
     policy: Arc<PolicyStore>,
     wire_registry: Option<Arc<MachineRegistry>>,
+    ip_allocator: Option<Arc<dyn IpAllocator>>,
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -490,6 +1897,96 @@ pub struct PersistentPostgresOidcRegistrationHandler {
     machines: Arc<PersistentPostgresMachineAdmin>,
     policy: Arc<PolicyStore>,
     wire_registry: Option<Arc<MachineRegistry>>,
+    ip_allocator: Option<Arc<dyn IpAllocator>>,
+}
+
+/// Reauthentication keeps the selected node's addresses. Pending registrations
+/// carry no reservation; a fresh node receives its addresses at approval time.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AuthPathAddressError {
+    #[error("{0}")]
+    Selection(#[from] MachineAdminError),
+    #[error("{0}")]
+    Tags(String),
+    #[error("{0}")]
+    Allocation(String),
+}
+
+// Only the gRPC test helper `apply_requested_tags` (`full`) calls this.
+#[cfg(all(test, feature = "full"))]
+pub(crate) fn validate_auth_path_tags(
+    policy: &PolicyStore,
+    record: &mut MachineAdminRecord,
+) -> Result<(), String> {
+    validate_auth_path_tags_with_nodes(policy, record, None, &[])
+}
+
+fn validate_auth_path_tags_with_nodes(
+    policy: &PolicyStore,
+    record: &mut MachineAdminRecord,
+    existing: Option<&MachineAdminRecord>,
+    nodes: &[PolicyCheckNode],
+) -> Result<(), String> {
+    let fallback = existing.map(policy_check_node_from_machine);
+    let existing = fallback.as_ref().map(|node| {
+        nodes
+            .iter()
+            .find(|loaded| loaded.id == node.id)
+            .unwrap_or(node)
+    });
+    let existing_view = existing.map(PolicyCheckNode::as_view);
+    let nodes = nodes
+        .iter()
+        .map(PolicyCheckNode::as_view)
+        .collect::<Vec<_>>();
+    if validate_requested_tags_for_auth_path(
+        policy,
+        existing_view.as_ref(),
+        &nodes,
+        &record.user,
+        record.user_id,
+        &mut record.tags,
+    )? {
+        record.expiry = None;
+        record.expiry_precise = None;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prepare_auth_path_addresses(
+    machines: &dyn MachineAdmin,
+    allocator: Option<&dyn IpAllocator>,
+    policy: &PolicyStore,
+    record: &mut MachineAdminRecord,
+) -> Result<(), AuthPathAddressError> {
+    let existing = machines.existing_auth_path_record_checked(record).await?;
+    let reauthentication = existing.is_some();
+    if let Some(existing) = &existing {
+        record.ipv4.clone_from(&existing.ipv4);
+        record.ipv6.clone_from(&existing.ipv6);
+    }
+    let nodes = if record.tags.is_empty() {
+        Vec::new()
+    } else {
+        machines.policy_nodes_for_registration().await?
+    };
+    validate_auth_path_tags_with_nodes(policy, record, existing.as_ref(), &nodes)
+        .map_err(AuthPathAddressError::Tags)?;
+    if reauthentication {
+        return Ok(());
+    }
+    let Some(allocator) = allocator else {
+        if record.ipv4.is_empty() && record.ipv6.is_none() {
+            record.ipv4 = crate::tailscale_wire::legacy_registration_ipv4(&record.id).to_string();
+        }
+        return Ok(());
+    };
+    let (ipv4, ipv6) =
+        crate::tailscale_wire::allocate_registration_addresses(allocator, &record.id)
+            .map_err(AuthPathAddressError::Allocation)?;
+    record.ipv4 = ipv4.map(|ip| ip.to_string()).unwrap_or_default();
+    record.ipv6 = ipv6.map(|ip| ip.to_string());
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -497,6 +1994,590 @@ pub struct AuthPathRegistrationResult {
     pub record: MachineAdminRecord,
     pub new_node: bool,
     pub replaced_node_key_hex: Option<String>,
+}
+
+struct PreparedAuthPathRegistration {
+    existing: Option<headscale_db::headscale_nodes::HeadscaleNodeRow>,
+    params: headscale_db::headscale_nodes::CreateParams,
+    associations: NativeNodeAssociations,
+    user_write: Option<headscale_db::users::UserWriteSnapshot>,
+}
+
+fn new_native_registration(
+    params: &headscale_db::headscale_nodes::CreateParams,
+) -> Result<headscale_db::headscale_nodes::NewNodeRegistration, MachineAdminError> {
+    let tagged = !params.tags.is_empty();
+    let expiry = if tagged {
+        None
+    } else if let Some(precise) = params.expiry_precise {
+        Some(precise)
+    } else {
+        params
+            .expiry
+            .map(|seconds| {
+                DateTime::from_timestamp(seconds, 0)
+                    .ok_or_else(|| MachineAdminError::BadRequest("invalid new node expiry".into()))
+            })
+            .transpose()?
+    };
+    let last_seen = if let Some(precise) = params.last_seen_precise {
+        precise
+    } else if let Some(seconds) = params.last_seen {
+        DateTime::from_timestamp(seconds, 0)
+            .ok_or_else(|| MachineAdminError::BadRequest("invalid new node last seen".into()))?
+    } else {
+        Utc::now()
+    };
+    Ok(headscale_db::headscale_nodes::NewNodeRegistration {
+        machine_key: params.machine_key.clone(),
+        node_key: params.node_key.clone(),
+        disco_key: params.disco_key.clone(),
+        endpoints: (!params.endpoints.is_empty()).then(|| params.endpoints.clone()),
+        host_info: Some(params.host_info.clone()),
+        ipv4: params.ipv4.clone(),
+        ipv6: params.ipv6.clone(),
+        hostname: params.hostname.clone(),
+        given_name: crate::tailscale_wire::wire::sanitize_hostname_for_given_name(&params.hostname),
+        user_id: if tagged { None } else { params.user_id },
+        register_method: params.register_method.clone(),
+        tags: tagged.then(|| params.tags.clone()),
+        auth_key_id: params.auth_key_id,
+        expiry,
+        last_seen: Some(last_seen),
+        approved_routes: None,
+    })
+}
+
+fn apply_new_association_projection(
+    associations: &mut NativeNodeAssociations,
+    node: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    saved: &headscale_db::headscale_nodes::NewNodeAssociations,
+) -> Result<(), MachineAdminError> {
+    use headscale_db::headscale_nodes::NewNodeAssociations;
+    match saved {
+        NewNodeAssociations::None => {}
+        NewNodeAssociations::User(user) => {
+            associations.user = Some(Some(
+                super::users::PersistentUserAdmin::row_to_association_record(user.row.clone()),
+            ));
+        }
+        NewNodeAssociations::AuthKey(key) => {
+            let user = key.user.as_ref().map(|user| {
+                super::users::PersistentUserAdmin::row_to_association_record(user.row.clone())
+            });
+            associations.auth_key =
+                Some(Some(NativeAuthKey::from_row(&key.key, Some(user.clone()))?));
+            associations.user = Some(if node.user_id.is_some() { user } else { None });
+        }
+    }
+    Ok(())
+}
+
+fn finish_new_native_registration(
+    registry: Option<&MachineRegistry>,
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    mut record: MachineRecord,
+    auth_key: bool,
+    associations: NativeNodeAssociations,
+) -> Result<MachineRecord, MachineAdminError> {
+    let id = native_row_id(row)?;
+    record.node_id = Some(id);
+    record.node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+    record.machine_key_hex = key_without_prefix("mkey:", &row.machine_key);
+    record.auth_key_id = row.auth_key_id;
+    record.user_id = row
+        .user_id
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| MachineAdminError::BadRequest("invalid new user identity".into()))?;
+    record.ipv4 = optional_ipv4(row.ipv4.as_deref().unwrap_or_default())?;
+    record.ipv6 = optional_ipv6(row.ipv6.as_deref())?;
+    record.hostname.clone_from(&row.given_name);
+    record.replace_host_info(host_info_from_row(row)?);
+    record.raw_hostname.clone_from(&row.hostname);
+    record.disco_key = (!row.disco_key.is_empty()).then(|| row.disco_key.clone());
+    record.endpoints = row
+        .try_endpoint_list()
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    record.forced_tags = row
+        .try_tag_list()
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    record.approved_routes = row
+        .try_approved_route_list()
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    record.created_at = precise_stored_timestamp(&row.created_at_text)
+        .ok_or_else(|| MachineAdminError::BadRequest("invalid new node creation time".into()))?;
+    record.last_seen = row
+        .last_seen_text
+        .as_deref()
+        .and_then(precise_stored_timestamp)
+        .ok_or_else(|| MachineAdminError::BadRequest("invalid new node last seen".into()))?;
+    record.expiry = row
+        .expiry_text
+        .as_deref()
+        .map(|value| {
+            precise_stored_timestamp(value)
+                .ok_or_else(|| MachineAdminError::BadRequest("invalid new node expiry".into()))
+        })
+        .transpose()?;
+    record.register_method = register_method_from_db(&row.register_method);
+    if !auth_key {
+        record.ephemeral = false;
+    }
+    if record.is_tagged() {
+        record.clear_user_identity();
+    } else {
+        apply_loaded_user_identity(&mut record, associations.user.as_ref());
+    }
+    if auth_key && let Some(Some(key)) = &associations.auth_key {
+        key.consume();
+        record.ephemeral = key.ephemeral;
+    }
+    let Some(registry) = registry else {
+        // Keep the database's original sanitized seed. A detached adapter has
+        // no retained NodeStore collision authority, but the empty-label
+        // fallback in its returned model is still the same as Go's PutNode.
+        if record.hostname.is_empty() {
+            record.hostname = "node".into();
+        }
+        return Ok(record);
+    };
+    let mut native = NativeNodePersistence::capture(row, &record)?;
+    native.set_associations(associations);
+    let hostinfo = row
+        .try_host_info_value()
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    let record = registry
+        .put_new_native_registration(record, hostinfo, native)
+        .map_err(MachineAdminError::BadRequest)?;
+    Ok(record)
+}
+
+/// Explicit nil assignments that the public Vec/Option projection cannot
+/// distinguish from preserving a previous native value.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NativeNodeMetadataEdit {
+    pub(crate) nil_user: bool,
+    pub(crate) nil_routes: bool,
+    pub(crate) require_native: bool,
+}
+
+pub(crate) struct PreparedNativeRegistration {
+    pub(crate) record: MachineRecord,
+    pub(crate) native: NativeNodePersistence,
+    pub(crate) registration: headscale_db::headscale_nodes::CachedNodeRegistration,
+}
+
+struct LiveRegistrationSave {
+    update: crate::tailscale_wire::NativeRegistrationUpdate,
+    registration: headscale_db::headscale_nodes::CachedNodeRegistration,
+    auth_key_to_consume: Option<NativeAuthKey>,
+}
+
+fn prepare_cached_auth_registration(
+    id: u64,
+    before: &MachineRecord,
+    prior_native: Option<&NativeNodePersistence>,
+    params: &headscale_db::headscale_nodes::CreateParams,
+    wire: Option<&MachineRecord>,
+    auth_key: bool,
+    mut associations: NativeNodeAssociations,
+) -> Result<PreparedNativeRegistration, MachineAdminError> {
+    use headscale_db::headscale_nodes::{CachedNodeRegistration, RegistrationAuthKey};
+    let mut proposed = before.clone();
+    proposed.node_key_hex = key_without_prefix("nodekey:", &params.node_key);
+    proposed.replace_host_info(host_info_from_value(&params.host_info)?);
+    proposed.raw_hostname.clone_from(&params.hostname);
+    if !auth_key {
+        proposed.disco_key = Some(params.disco_key.clone());
+        if !params.endpoints.is_empty() {
+            proposed.endpoints.clone_from(&params.endpoints);
+        }
+    }
+    proposed.forced_tags.clone_from(&params.tags);
+    proposed.user_id = params
+        .user_id
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| MachineAdminError::BadRequest("invalid user identity".into()))?;
+    if proposed.is_tagged() {
+        proposed.clear_user_identity();
+    } else if let Some(wire) = wire.as_ref()
+        && !auth_key
+    {
+        proposed.set_user_identity(
+            proposed.user_id,
+            wire.user.clone(),
+            wire.user_display_name.clone(),
+            wire.user_profile_pic_url.clone(),
+        );
+        proposed.set_user_account_metadata(
+            wire.user_provider.clone(),
+            wire.user_created_at.or_else(|| {
+                (wire.user_id == before.user_id)
+                    .then_some(before.user_created_at)
+                    .flatten()
+            }),
+        );
+    }
+    proposed.auth_key_id = if auth_key {
+        if params.auth_key_id.is_some_and(|id| id < 0) {
+            return Err(MachineAdminError::BadRequest(
+                "invalid auth key identity".into(),
+            ));
+        }
+        params.auth_key_id
+    } else if before.is_tagged() && !proposed.is_tagged() {
+        None
+    } else {
+        before.auth_key_id
+    };
+    if auth_key {
+        if let Some(key) = &associations.auth_key {
+            proposed.ephemeral = key.as_ref().is_some_and(|key| key.ephemeral);
+        } else if let Some(wire) = wire.as_ref() {
+            proposed.ephemeral = wire.ephemeral;
+        }
+        if proposed.is_tagged() {
+            associations.user = Some(None);
+        } else if !before.is_tagged() {
+            associations.user = prior_native
+                .and_then(|native| native.user_association(before))
+                .map(Option::<&UserRecord>::cloned)
+                .or(associations.user);
+        }
+    }
+    if !auth_key {
+        if before.is_tagged() && !proposed.is_tagged() {
+            proposed.ephemeral = false;
+        }
+        if !proposed.is_tagged() {
+            apply_loaded_user_identity(&mut proposed, associations.user.as_ref());
+        }
+    }
+    proposed.register_method = register_method_from_db(&params.register_method);
+    proposed.expiry = params.expiry_precise.or_else(|| {
+        params
+            .expiry
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+    });
+    if !before.is_tagged() && proposed.is_tagged() {
+        proposed.expiry = None;
+    }
+    if auth_key && let Some(Some(key)) = &associations.auth_key {
+        proposed.forced_tags.clone_from(&before.forced_tags);
+        proposed.user_id = before.user_id;
+        proposed.user.clone_from(&before.user);
+        proposed
+            .user_display_name
+            .clone_from(&before.user_display_name);
+        proposed
+            .user_profile_pic_url
+            .clone_from(&before.user_profile_pic_url);
+        proposed.user_provider.clone_from(&before.user_provider);
+        proposed.user_created_at = before.user_created_at;
+        let key_id = i64::try_from(key.id)
+            .map_err(|_| MachineAdminError::BadRequest("invalid auth key identity".into()))?;
+        proposed.auth_key_id = Some(key_id);
+        if !key.tags.is_empty() && (!before.is_tagged() || before.auth_key_id != Some(key_id)) {
+            proposed.forced_tags.clone_from(&key.tags);
+            proposed.clear_user_identity();
+        }
+        if proposed.is_tagged() {
+            associations.user = Some(None);
+            proposed.expiry = if !before.is_tagged() || before.is_expired_at(Utc::now()) {
+                None
+            } else {
+                before.expiry
+            };
+        } else {
+            associations.user = prior_native
+                .and_then(|native| native.user_association(before))
+                .map(Option::<&UserRecord>::cloned)
+                .or(associations.user);
+        }
+    }
+    proposed.last_seen = Utc::now();
+    // Registration callbacks do not auto-approve routes or replace IPs,
+    // CreatedAt, online state, or GivenName on an existing node.
+    proposed.approved_routes.clone_from(&before.approved_routes);
+    let mut node = NativeNodePersistence::snapshot(id, &proposed, prior_native)?;
+    node.host_info = Some(params.host_info.clone());
+    node.last_seen = Some(proposed.last_seen);
+    if proposed.is_tagged() {
+        node.user_id = None;
+    }
+    if before.is_tagged() && !proposed.is_tagged() {
+        node.tags = None;
+    }
+    let mut native = NativeNodePersistence::from_snapshot(&proposed, &node, prior_native);
+    native.set_associations(associations);
+    let registration = CachedNodeRegistration {
+        node,
+        expiry: proposed.expiry,
+        auth_key: if auth_key {
+            RegistrationAuthKey::Set(proposed.auth_key_id)
+        } else if proposed.auth_key_id.is_none() {
+            RegistrationAuthKey::Set(None)
+        } else {
+            RegistrationAuthKey::Preserve
+        },
+    };
+    Ok(PreparedNativeRegistration {
+        record: proposed,
+        native,
+        registration,
+    })
+}
+
+impl LiveRegistrationSave {
+    fn begin(
+        registry: &MachineRegistry,
+        prior: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+        params: &headscale_db::headscale_nodes::CreateParams,
+        wire: Option<&MachineRecord>,
+        auth_key: bool,
+        associations: NativeNodeAssociations,
+    ) -> Result<Self, MachineAdminError> {
+        let id = native_row_id(prior)?;
+        let params = params.clone();
+        let wire = wire.cloned();
+        let auth_key_to_consume = if auth_key {
+            associations.auth_key.as_ref().and_then(Clone::clone)
+        } else {
+            None
+        };
+        let (update, registration) =
+            registry.begin_native_registration(id, move |before, prior_native| {
+                prepare_cached_auth_registration(
+                    id,
+                    before,
+                    prior_native,
+                    &params,
+                    wire.as_ref(),
+                    auth_key,
+                    associations,
+                )
+            })?;
+        Ok(Self {
+            update,
+            registration,
+            auth_key_to_consume,
+        })
+    }
+
+    fn rollback(&self, registry: &MachineRegistry) -> Result<(), MachineAdminError> {
+        registry
+            .rollback_native_registration(&self.update)
+            .map_err(MachineAdminError::BadRequest)?;
+        Ok(())
+    }
+
+    fn finish(self, registry: &MachineRegistry) -> MachineRecord {
+        if let Some(key) = &self.auth_key_to_consume {
+            key.consume();
+        }
+        let record = self.update.after.clone();
+        registry.defer_native_registration_publication(self.update);
+        record
+    }
+}
+
+fn apply_registration_hostinfo(
+    params: &mut headscale_db::headscale_nodes::CreateParams,
+    requested: Option<&Value>,
+) -> Result<(), MachineAdminError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let projection = host_info_from_value(&params.host_info)?;
+    let preserved_netinfo = params.host_info.get("NetInfo").cloned();
+    params.host_info = crate::tailscale_wire::hostinfo::registration_value(
+        requested,
+        &projection,
+        preserved_netinfo.as_ref(),
+    )
+    .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    Ok(())
+}
+
+fn finalize_auth_path_clock(
+    params: &mut headscale_db::headscale_nodes::CreateParams,
+    registry: Option<&MachineRegistry>,
+) {
+    let now = Utc::now();
+    params.last_seen = Some(now.timestamp());
+    params.last_seen_precise = Some(now);
+    let Some(registry) = registry else {
+        return;
+    };
+    let expiry = match (params.expiry_precise, params.expiry) {
+        (Some(expiry), _) => Some(expiry),
+        (None, Some(seconds)) => {
+            let Some(expiry) = DateTime::from_timestamp(seconds, 0) else {
+                // An invalid supplied timestamp must not become a default.
+                return;
+            };
+            Some(expiry)
+        }
+        (None, None) => None,
+    };
+    let expiry = registry.registration_expiry(expiry, !params.tags.is_empty(), now);
+    params.expiry = expiry.map(|value| value.timestamp());
+    params.expiry_precise = expiry;
+}
+
+/// Match the pinned Go machine/user index without promoting a cached wire ID
+/// or an arbitrary first row into authority to replace another user's node.
+fn select_auth_path_node(
+    rows: Vec<headscale_db::headscale_nodes::HeadscaleNodeRow>,
+    user_id: Option<i64>,
+    allow_unscoped_owner: bool,
+    auth_key_path: bool,
+    tagged_registration: bool,
+) -> Result<Option<headscale_db::headscale_nodes::HeadscaleNodeRow>, MachineAdminError> {
+    if auth_key_path && user_id.is_none() && !tagged_registration && !allow_unscoped_owner {
+        return Ok(None);
+    }
+    let mut same_owner = None;
+    let mut tagged = None;
+    let mut user_owned = Vec::new();
+    for row in rows {
+        if row
+            .try_tag_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+            .is_empty()
+        {
+            if row.user_id.is_some_and(|id| id != 0)
+                || (row.user_id.is_none() && allow_unscoped_owner)
+            {
+                user_owned.push(row.clone());
+            }
+            if row.user_id == user_id
+                && (user_id.is_some() || allow_unscoped_owner)
+                && same_owner.replace(row).is_some()
+            {
+                return Err(MachineAdminError::BadRequest(
+                    "machine key maps to ambiguous node ownership".into(),
+                ));
+            }
+        } else if tagged.replace(row).is_some() {
+            return Err(MachineAdminError::BadRequest(
+                "machine key maps to ambiguous node ownership".into(),
+            ));
+        }
+    }
+    if !auth_key_path && tagged.is_some() && !user_owned.is_empty() {
+        return Err(MachineAdminError::BadRequest(
+            "machine key maps to ambiguous node ownership".into(),
+        ));
+    }
+    if let Some(node) = same_owner.or(tagged) {
+        return Ok(Some(node));
+    }
+    if auth_key_path && tagged_registration && user_id.is_none() {
+        if user_owned.len() > 1 {
+            return Err(MachineAdminError::BadRequest(
+                "machine key maps to ambiguous node ownership".into(),
+            ));
+        }
+        return Ok(user_owned.pop());
+    }
+    Ok(None)
+}
+
+async fn resolve_record_owner(
+    users: Option<&dyn UserAdmin>,
+    record: &MachineAdminRecord,
+) -> Result<Option<i64>, MachineAdminError> {
+    if let Some(id) = record.user_id {
+        let numeric = i64::try_from(id)
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| MachineAdminError::BadRequest("user id out of range".into()))?;
+        if let Some(users) = users
+            && users
+                .get_by_id(id)
+                .await
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+                .is_none()
+        {
+            return Err(MachineAdminError::BadRequest("user not found".into()));
+        }
+        return Ok(Some(numeric));
+    }
+    if record.user.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(users) = users else {
+        return Ok(record.user.parse::<i64>().ok());
+    };
+    let user = users
+        .get(&record.user)
+        .await
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+        .ok_or_else(|| MachineAdminError::BadRequest("user not found".into()))?;
+    i64::try_from(user.id)
+        .map(Some)
+        .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))
+}
+
+fn auth_key_owner_override(record: &MachineRecord) -> Result<Option<i64>, MachineAdminError> {
+    record
+        .user_id
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))
+}
+
+fn atomic_registration_error(
+    error: headscale_db::auth_key_registration::Error,
+) -> crate::tailscale_wire::AuthKeyRegistrationError {
+    match error {
+        headscale_db::auth_key_registration::Error::Credential(error) => {
+            crate::tailscale_wire::AuthKeyRegistrationError::Credential(
+                super::preauth_persistent::use_error_to_redeem(error),
+            )
+        }
+        error => {
+            crate::tailscale_wire::AuthKeyRegistrationError::Storage(error.headscale_go_message())
+        }
+    }
+}
+
+// Preserve Go's operation context for storage failures while credential errors
+// retain their leaf message for the register handler's PAKError response.
+fn captured_registration_error(
+    error: headscale_db::auth_key_registration::Error,
+    context: &'static str,
+) -> crate::tailscale_wire::AuthKeyRegistrationError {
+    match atomic_registration_error(error) {
+        crate::tailscale_wire::AuthKeyRegistrationError::Storage(error) => {
+            crate::tailscale_wire::AuthKeyRegistrationError::Storage(format!("{context}: {error}"))
+        }
+        error @ crate::tailscale_wire::AuthKeyRegistrationError::Credential(_) => error,
+    }
+}
+
+fn captured_auth_key(
+    credential: Option<&NativeAuthKey>,
+) -> Result<
+    Option<headscale_db::auth_key_registration::CapturedAuthKey>,
+    crate::tailscale_wire::AuthKeyRegistrationError,
+> {
+    credential
+        .map(|key| {
+            Ok(headscale_db::auth_key_registration::CapturedAuthKey {
+                id: i64::try_from(key.id).map_err(|_| {
+                    crate::tailscale_wire::AuthKeyRegistrationError::Storage(
+                        "auth key id out of range".into(),
+                    )
+                })?,
+                reusable: key.reusable,
+                used: key.used_flag(),
+            })
+        })
+        .transpose()
 }
 
 impl PersistentOidcRegistrationHandler {
@@ -510,11 +2591,17 @@ impl PersistentOidcRegistrationHandler {
             machines,
             policy,
             wire_registry: None,
+            ip_allocator: None,
         }
     }
 
     pub fn with_wire_registry(mut self, wire_registry: Arc<MachineRegistry>) -> Self {
         self.wire_registry = Some(wire_registry);
+        self
+    }
+
+    pub fn with_ip_allocator(mut self, ip_allocator: Arc<dyn IpAllocator>) -> Self {
+        self.ip_allocator = Some(ip_allocator);
         self
     }
 }
@@ -531,6 +2618,7 @@ impl PersistentPostgresOidcRegistrationHandler {
             machines,
             policy,
             wire_registry: None,
+            ip_allocator: None,
         }
     }
 
@@ -538,9 +2626,38 @@ impl PersistentPostgresOidcRegistrationHandler {
         self.wire_registry = Some(wire_registry);
         self
     }
+
+    pub fn with_ip_allocator(mut self, ip_allocator: Arc<dyn IpAllocator>) -> Self {
+        self.ip_allocator = Some(ip_allocator);
+        self
+    }
 }
 
 impl PersistentMachineAdmin {
+    async fn lock_existing_node(
+        &self,
+        id: &str,
+    ) -> Result<
+        (
+            Option<tokio::sync::OwnedMutexGuard<()>>,
+            headscale_db::headscale_nodes::HeadscaleNodeRow,
+        ),
+        MachineAdminError,
+    > {
+        let row = self.row_by_slug(id).await?;
+        let Some(registry) = &self.wire_registry else {
+            return Ok((None, row));
+        };
+        let machine_key = key_without_prefix("mkey:", &row.machine_key);
+        let guard = registry.lock_registration(&machine_key).await;
+        // Resolve by stable database ID again: the node key may have rotated
+        // while this operation waited behind registration.
+        let row = headscale_db::headscale_nodes::get_by_id(&self.pool, row.id)
+            .await
+            .map_err(|error| db_error_to_machine(error, id))?;
+        Ok((Some(guard), row))
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
@@ -555,6 +2672,7 @@ impl PersistentMachineAdmin {
     }
 
     pub fn with_wire_registry(mut self, registry: Arc<MachineRegistry>) -> Self {
+        registry.require_native_policy_persistence();
         self.wire_registry = Some(registry);
         self
     }
@@ -563,16 +2681,85 @@ impl PersistentMachineAdmin {
         &self.pool
     }
 
-    async fn auth_key_ephemeral(
+    async fn registration_user_association(
         &self,
-        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
-    ) -> Result<bool, MachineAdminError> {
-        let Some(auth_key_id) = row.auth_key_id else {
-            return Ok(false);
+        raw_id: Option<i64>,
+        captured: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<RegistrationUserAssociation, MachineAdminError> {
+        let Some(id) = raw_id else {
+            return Ok((Some(None), None));
         };
-        headscale_db::preauth_keys::is_ephemeral_by_id(&self.pool, auth_key_id)
+        if let Some(user) = captured {
+            return Ok((Some(Some(user.user.clone())), user.write.clone()));
+        }
+        let write = headscale_db::users::get_for_registration(&self.pool, id)
             .await
-            .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
+            .map_err(|error| {
+                let message = match error {
+                    headscale_db::DbError::NotFound(_) => "user not found".to_string(),
+                    error => error.headscale_go_message(),
+                };
+                MachineAdminError::Storage(format!("finding user: {message}"))
+            })?;
+        let user = super::users::PersistentUserAdmin::row_to_association_record(write.row.clone());
+        Ok((Some(Some(user)), Some(write)))
+    }
+
+    async fn loaded_user_association(
+        &self,
+        raw_id: Option<i64>,
+    ) -> Result<Option<UserRecord>, MachineAdminError> {
+        let Some(id) = raw_id else {
+            return Ok(None);
+        };
+        if id < 0 {
+            return Err(MachineAdminError::Storage(
+                "invalid stored user identity".into(),
+            ));
+        }
+        match headscale_db::users::get_by_id(&self.pool, id).await {
+            Ok(row) => Ok(Some(
+                super::users::PersistentUserAdmin::row_to_association_record(row),
+            )),
+            Err(headscale_db::DbError::NotFound(_)) => Ok(None),
+            Err(error) => Err(MachineAdminError::Storage(format!(
+                "loading node user association: {}",
+                error.headscale_go_message(),
+            ))),
+        }
+    }
+
+    async fn auth_key_association(
+        &self,
+        auth_key_id: Option<i64>,
+    ) -> Result<Option<NativeAuthKey>, MachineAdminError> {
+        let Some(id) = auth_key_id else {
+            return Ok(None);
+        };
+        if id < 0 {
+            return Err(MachineAdminError::Storage(
+                "invalid stored preauth key identity".into(),
+            ));
+        }
+        let row = match headscale_db::preauth_keys::get_by_id(&self.pool, id).await {
+            Ok(row) => row,
+            Err(headscale_db::DbError::NotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(MachineAdminError::Storage(format!(
+                    "loading node preauth key: {}",
+                    error.headscale_go_message()
+                )));
+            }
+        };
+        let user_id = if row.user_id.is_empty() {
+            None
+        } else {
+            Some(row.user_id.parse::<i64>().map_err(|_| {
+                MachineAdminError::Storage("invalid stored preauth key user identity".into())
+            })?)
+        };
+        let user = self.loaded_user_association(user_id).await?;
+        NativeAuthKey::from_row(&row, Some(user)).map(Some)
     }
 
     pub async fn hydrate_wire_registry(
@@ -581,10 +2768,11 @@ impl PersistentMachineAdmin {
     ) -> Result<usize, MachineAdminError> {
         let rows = headscale_db::headscale_nodes::list(&self.pool)
             .await
-            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+            .map_err(|error| MachineAdminError::Storage(error.headscale_go_message()))?;
         let mut hydrated = 0usize;
         for row in rows {
-            let wire = self.row_to_wire_record(row).await?;
+            let (wire, association) = self.row_to_wire_record_with_association(&row).await?;
+            stage_native_row(registry, &row, &wire, association)?;
             registry.upsert(wire.node_key_hex.clone(), wire);
             hydrated += 1;
         }
@@ -613,7 +2801,7 @@ impl PersistentMachineAdmin {
             record,
             policy,
             auth_key_id,
-            None,
+            auth_key_owner_override(&wire_record)?,
             false,
             Some(&wire_record),
         )
@@ -622,13 +2810,186 @@ impl PersistentMachineAdmin {
 
     async fn create_or_update_auth_path_inner(
         &self,
-        mut record: MachineAdminRecord,
+        record: MachineAdminRecord,
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
         user_id_override: Option<i64>,
         validate_requested_tags: bool,
         wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_hostinfo(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_path_with_hostinfo(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_user_snapshot(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            hostinfo,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_path_with_user_snapshot(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        hostinfo: Option<Value>,
+        captured_user: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let subject = record.id.clone();
+        let mut plan = self
+            .prepare_auth_path_registration(
+                record,
+                policy,
+                auth_key_id,
+                user_id_override,
+                validate_requested_tags,
+                wire_record,
+                None,
+                captured_user,
+            )
+            .await?;
+        apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())?;
+        if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
+            let _persist = registry.lock_native_persistence().await;
+            let live = LiveRegistrationSave::begin(
+                registry,
+                prior,
+                &plan.params,
+                wire_record,
+                !validate_requested_tags,
+                plan.associations.clone(),
+            )?;
+            if let Err(error) = headscale_db::headscale_nodes::save_cached_registration(
+                &self.pool,
+                live.registration.clone(),
+            )
+            .await
+            {
+                if !validate_requested_tags {
+                    live.rollback(registry)?;
+                }
+                return Err(db_error_to_machine(error, &subject));
+            }
+            let previous_key = live.update.before.node_key_hex.clone();
+            let record = live.finish(registry);
+            return Ok(AuthPathRegistrationResult {
+                new_node: false,
+                replaced_node_key_hex: (previous_key != record.node_key_hex)
+                    .then_some(previous_key),
+                record: machine_admin_record_from_wire(&record),
+            });
+        }
+        if let Some(prior) = plan.existing.as_ref() {
+            let prepared = self
+                .prepare_headless_registration(
+                    prior,
+                    &plan.params,
+                    wire_record,
+                    !validate_requested_tags,
+                    plan.associations.clone(),
+                )
+                .await?;
+            headscale_db::headscale_nodes::save_cached_registration(
+                &self.pool,
+                prepared.registration,
+            )
+            .await
+            .map_err(|error| {
+                MachineAdminError::Storage(format!(
+                    "writing node to database: saving node: {}",
+                    error.headscale_go_message(),
+                ))
+            })?;
+            let record = machine_admin_record_from_wire(&prepared.record);
+            let previous_key = key_without_prefix("nodekey:", &prior.node_key);
+            return Ok(AuthPathRegistrationResult {
+                replaced_node_key_hex: (previous_key != record.id).then_some(previous_key),
+                record,
+                new_node: false,
+            });
+        }
+        let node = new_native_registration(&plan.params)?;
+        let material = plan
+            .user_write
+            .take()
+            .map(|user| headscale_db::headscale_nodes::NewNodeAssociations::User(Box::new(user)))
+            .unwrap_or_default();
+        let saved = headscale_db::headscale_nodes::create_new_registration_with_associations(
+            &self.pool, node, material,
+        )
+        .await
+        .map_err(|error| {
+            MachineAdminError::Storage(format!(
+                "creating new node: {}",
+                error.headscale_go_message()
+            ))
+        })?;
+        apply_new_association_projection(&mut plan.associations, &saved.node, &saved.associations)?;
+        let row = saved.node;
+        let record = match wire_record {
+            Some(record) => record.clone(),
+            None => {
+                self.row_to_wire_record_using_associations(&row, Some(&plan.associations))
+                    .await?
+                    .0
+            }
+        };
+        let record = finish_new_native_registration(
+            self.wire_registry.as_deref(),
+            &row,
+            record,
+            !validate_requested_tags,
+            plan.associations.clone(),
+        )?;
+        Ok(AuthPathRegistrationResult {
+            record: machine_admin_record_from_wire(&record),
+            new_node: true,
+            replaced_node_key_hex: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_auth_path_registration(
+        &self,
+        mut record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        credential: Option<&NativeAuthKey>,
+        captured_user: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<PreparedAuthPathRegistration, MachineAdminError> {
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -637,192 +2998,242 @@ impl PersistentMachineAdmin {
         let ipv4 = optional_ipv4(&record.ipv4)?;
         let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
         require_any_address(ipv4, ipv6)?;
-        let user_id = match user_id_override {
-            Some(user_id) => Some(user_id),
-            None => self.user_id_for_record(&record).await?,
-        };
-        if validate_requested_tags
-            && validate_requested_tags_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                record.user.as_str(),
-                &mut record.tags,
+        let user_id = if let Some(credential) = credential {
+            credential
+                .user
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|user| i64::try_from(user.id))
+                .transpose()
+                .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))?
+        } else if let Some(user) = captured_user {
+            Some(
+                i64::try_from(user.user.id)
+                    .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))?,
             )
-            .map_err(MachineAdminError::BadRequest)?
-        {
-            record.expiry = None;
+        } else {
+            match user_id_override {
+                Some(user_id) => Some(user_id),
+                None => self.user_id_for_record(&record).await?,
+            }
+        };
+        if let Some(registry) = &self.wire_registry {
+            registry
+                .validate_registration_node_key(&record.id, &record.machine_key_hex)
+                .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
         }
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
-
-        let existing_for_user = match user_id {
-            Some(user_id) => match headscale_db::headscale_nodes::get_by_machine_key_and_user(
-                &self.pool,
-                &machine_key,
-                user_id,
-            )
-            .await
-            {
-                Ok(row) => Some(row),
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            },
-            None => None,
+        let candidates = if let Some(registry) = &self.wire_registry {
+            registration_rows_from_cache(registry, &record.machine_key_hex)?
+        } else {
+            headscale_db::headscale_nodes::list_by_machine_key(&self.pool, &machine_key)
+                .await
+                .map_err(|error| db_error_to_machine(error, &record.id))?
         };
-        let existing_for_machine =
-            match headscale_db::headscale_nodes::get_by_machine_key(&self.pool, &machine_key).await
-            {
-                Ok(row) => Some(row),
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            };
-        // The same node key re-registering from the same machine is the
-        // same node — `tailscale up` after a control-plane restart, or a
-        // `--reset` — whatever its tag state. Without this rule a
-        // row persisted without a user id (no users store attached) could
-        // only be matched by the tagged-machine rule, so an untagged node's
-        // re-registration fell into `create` and was rejected with
-        // "IPv4 address … already in use" — by its own row.
-        let node_key = key_with_prefix("nodekey:", &record.id);
-        let existing_for_node =
-            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
-                // …but a different user is a different node (upstream parity:
-                // the same key registering under another user gets a new row).
-                Ok(row) => {
-                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
-                }
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            };
-        // With no users store attached, `user_id` is NULL on both sides and
-        // the (machine key, user) lookup above cannot match. The machine
-        // key alone is then the device's identity, so a re-registration
-        // under a rotated node key — what a stock client does on every
-        // re-auth — must reuse its row instead of leaving a second one
-        // behind, which would show up as a duplicate peer in every netmap.
-        // With a users store, `existing_for_user` is authoritative and this
-        // never fires.
-        let existing_for_unscoped_machine = user_id.is_none().then(|| {
-            existing_for_machine
-                .as_ref()
-                .filter(|row| row.user_id.is_none())
+        // A different user's node on the same machine is a fresh identity.
+        // Go carries only its NetInfo into that new node when the request
+        // omitted it; ownership, addresses and routes must not carry over.
+        let previous_net_info = if let Some(node) = candidates.iter().find(|node| {
+            node.tag_list().is_empty() && node.user_id.is_some() && node.user_id != user_id
+        }) {
+            node.try_host_info_value()
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+                .get("NetInfo")
                 .cloned()
-        });
-        let existing = existing_for_user
-            .or(existing_for_node)
-            .or_else(|| existing_for_unscoped_machine.flatten())
-            .or_else(|| {
-                existing_for_machine
-                    .as_ref()
-                    .filter(|row| !row.tag_list().is_empty())
-                    .cloned()
-            });
+        } else {
+            None
+        };
+        let existing = select_auth_path_node(
+            candidates,
+            user_id,
+            self.users.is_none() && credential.is_none(),
+            !validate_requested_tags,
+            !record.tags.is_empty(),
+        )?;
+
+        if validate_requested_tags && !record.tags.is_empty() {
+            record.user_id = user_id.and_then(|id| u64::try_from(id).ok());
+            let existing_record = match &existing {
+                Some(existing) => Some(self.row_to_record(existing.clone()).await),
+                None => None,
+            };
+            let nodes = self.policy_nodes_for_registration().await?;
+            validate_auth_path_tags_with_nodes(
+                policy,
+                &mut record,
+                existing_record.as_ref(),
+                &nodes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+        }
 
         if let Some(existing) = existing {
-            let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
             if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv4.clone_from(ipv4);
             }
             if let Some(ipv6) = existing.ipv6.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv6 = Some(ipv6.clone());
             }
-            self.reject_duplicate_addresses(Some(existing.id), &record)
-                .await?;
-            let mut approved = existing.approved_route_list();
-            approved.extend(record.approved_routes.clone());
-            record.approved_routes = auto_approved_routes_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                Some(&record.user),
-                &record.tags,
-                &approved,
-                &record.routes,
-            )
-            .map_err(MachineAdminError::BadRequest)?;
+            record.approved_routes = existing
+                .try_approved_route_list()
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
 
-            let row = headscale_db::headscale_nodes::update_from_auth_path(
-                &self.pool,
-                existing.id,
-                create_params_for_auth_path(
-                    &record,
-                    wire_record,
-                    user_id,
-                    auth_key_id,
-                    Some(&existing),
-                ),
-            )
-            .await
-            .map_err(|e| db_error_to_machine(e, &record.id))?;
-            let record = self.row_to_record(row).await;
-            Ok(AuthPathRegistrationResult {
-                replaced_node_key_hex: (replaced_node_key_hex != record.id)
-                    .then_some(replaced_node_key_hex),
-                record,
-                new_node: false,
+            let mut params = create_params_for_auth_path(
+                &record,
+                wire_record,
+                user_id,
+                auth_key_id,
+                Some(&existing),
+            )?;
+            finalize_auth_path_clock(&mut params, self.wire_registry.as_deref());
+            let mut associations = if let Some(key) = credential {
+                if params.auth_key_id.and_then(|id| u64::try_from(id).ok()) != Some(key.id) {
+                    return Err(MachineAdminError::BadRequest(
+                        "preauth key identity changed during registration".into(),
+                    ));
+                }
+                NativeNodeAssociations {
+                    user: Some(None),
+                    auth_key: Some(Some(key.clone())),
+                }
+            } else {
+                NativeNodeAssociations {
+                    user: self
+                        .registration_user_association(params.user_id, captured_user)
+                        .await?
+                        .0,
+                    auth_key: if validate_requested_tags {
+                        None
+                    } else {
+                        Some(self.auth_key_association(params.auth_key_id).await?)
+                    },
+                }
+            };
+            if params.user_id.is_some()
+                && let Some(Some(key)) = &associations.auth_key
+            {
+                associations.user.clone_from(&key.user);
+            }
+            Ok(PreparedAuthPathRegistration {
+                associations,
+                params,
+                existing: Some(existing),
+                user_write: None,
             })
         } else {
-            record.approved_routes = auto_approved_routes_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                Some(&record.user),
-                &record.tags,
-                &record.approved_routes,
-                &record.routes,
-            )
-            .map_err(MachineAdminError::BadRequest)?;
-            self.reject_duplicate_addresses(None, &record).await?;
-            let row = headscale_db::headscale_nodes::create(
-                &self.pool,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None),
-            )
-            .await
-            .map_err(|e| db_error_to_machine(e, &record.id))?;
-            let record = self.row_to_record(row).await;
-            Ok(AuthPathRegistrationResult {
-                record,
-                new_node: true,
-                replaced_node_key_hex: None,
+            record.approved_routes.clear();
+            let mut params =
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None)?;
+            if let Some(net_info) = previous_net_info
+                && params.host_info.get("NetInfo").is_none_or(Value::is_null)
+            {
+                params.host_info["NetInfo"] = net_info;
+            }
+            finalize_auth_path_clock(&mut params, self.wire_registry.as_deref());
+            let (user, user_write) = if credential.is_some() {
+                (Some(None), None)
+            } else {
+                self.registration_user_association(params.user_id, captured_user)
+                    .await?
+            };
+            let mut associations = if let Some(key) = credential {
+                if params.auth_key_id.and_then(|id| u64::try_from(id).ok()) != Some(key.id) {
+                    return Err(MachineAdminError::BadRequest(
+                        "preauth key identity changed during registration".into(),
+                    ));
+                }
+                NativeNodeAssociations {
+                    user: Some(None),
+                    auth_key: Some(Some(key.clone())),
+                }
+            } else {
+                NativeNodeAssociations {
+                    user,
+                    auth_key: if validate_requested_tags {
+                        None
+                    } else {
+                        Some(self.auth_key_association(params.auth_key_id).await?)
+                    },
+                }
+            };
+            if params.user_id.is_some()
+                && let Some(Some(key)) = &associations.auth_key
+            {
+                associations.user.clone_from(&key.user);
+            }
+            Ok(PreparedAuthPathRegistration {
+                associations,
+                params,
+                existing: None,
+                user_write,
             })
         }
+    }
+
+    async fn prepare_headless_registration(
+        &self,
+        prior: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+        params: &headscale_db::headscale_nodes::CreateParams,
+        wire: Option<&MachineRecord>,
+        auth_key: bool,
+        associations: NativeNodeAssociations,
+    ) -> Result<PreparedNativeRegistration, MachineAdminError> {
+        let (before, loaded) = self.row_to_wire_record_with_association(prior).await?;
+        let mut native = NativeNodePersistence::capture(prior, &before)?;
+        native.set_associations(loaded);
+        prepare_cached_auth_registration(
+            native_row_id(prior)?,
+            &before,
+            Some(&native),
+            params,
+            wire,
+            auth_key,
+            associations,
+        )
     }
 
     async fn row_by_slug(
         &self,
         id: &str,
     ) -> Result<headscale_db::headscale_nodes::HeadscaleNodeRow, MachineAdminError> {
-        let node_key = key_with_prefix("nodekey:", id);
-        match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
-            Ok(row) => Ok(row),
-            Err(headscale_db::DbError::NotFound(_)) => {
-                if let Ok(node_id) = id.parse::<i64>() {
-                    headscale_db::headscale_nodes::get_by_id(&self.pool, node_id)
-                        .await
-                        .map_err(|e| db_error_to_machine(e, id))
-                } else {
-                    Err(MachineAdminError::NotFound(id.to_string()))
-                }
-            }
-            Err(e) => Err(db_error_to_machine(e, id)),
+        // Only canonical decimal strings are numeric selectors. A stale hex
+        // key such as 000...001 must never fall back to database node ID 1.
+        if let Ok(node_id) = id.parse::<i64>()
+            && node_id > 0
+            && node_id.to_string() == id
+        {
+            return headscale_db::headscale_nodes::get_by_id(&self.pool, node_id)
+                .await
+                .map_err(|error| db_error_to_machine(error, id));
         }
+        let node_key = headscale_api_acl::go_key::PublicKeyKind::Node
+            .parse_text(&key_with_prefix("nodekey:", id))
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        // The loaded node-key index already uses typed canonical identities.
+        // Resolve it to the primary key before reading SQL; imported uppercase
+        // hex must not turn every map write into a normalized text scan.
+        if let Some(registry) = &self.wire_registry
+            && let Some(existing) = registry.get(&key_without_prefix("nodekey:", &node_key))
+            && let Some(node_id) = existing.node_id.and_then(|id| i64::try_from(id).ok())
+        {
+            let row = headscale_db::headscale_nodes::get_by_id(&self.pool, node_id)
+                .await
+                .map_err(|error| db_error_to_machine(error, id))?;
+            if row.node_key != node_key {
+                return Err(MachineAdminError::NotFound(id.into()));
+            }
+            return Ok(row);
+        }
+        headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|error| db_error_to_machine(error, id))
     }
 
     async fn user_id_for_record(
         &self,
         record: &MachineAdminRecord,
     ) -> Result<Option<i64>, MachineAdminError> {
-        if record.user.trim().is_empty() {
-            return Ok(None);
-        }
-        let Some(users) = &self.users else {
-            return Ok(record.user.parse::<i64>().ok());
-        };
-        let user = users
-            .get(&record.user)
-            .await
-            .map_err(|e| MachineAdminError::BadRequest(e.to_string()))?
-            .ok_or_else(|| MachineAdminError::BadRequest("user not found".to_string()))?;
-        i64::try_from(user.id)
-            .map(Some)
-            .map_err(|_| MachineAdminError::BadRequest("user id out of range".to_string()))
+        resolve_record_owner(self.users.as_deref(), record).await
     }
 
     async fn reject_duplicate_addresses(
@@ -869,50 +3280,52 @@ impl PersistentMachineAdmin {
         &self,
         row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> UserIdentity {
-        let Some(user_id) = row.user_id else {
-            return UserIdentity::default();
-        };
-        let fallback_id = u64::try_from(user_id).ok();
-        let Some(users) = &self.users else {
-            let id = user_id.to_string();
-            return UserIdentity {
-                id: fallback_id,
-                login_name: id.clone(),
-                display_name: id,
-                profile_pic_url: String::new(),
-            };
-        };
-        match fallback_id.map(|id| users.get_by_id(id)) {
-            Some(fut) => {
-                if let Ok(Some(user)) = fut.await {
-                    user_identity_from_record(&user)
-                } else {
-                    let id = user_id.to_string();
-                    UserIdentity {
-                        id: fallback_id,
-                        login_name: id.clone(),
-                        display_name: id,
-                        profile_pic_url: String::new(),
-                    }
-                }
+        match self.user_identity_for_row_checked(row).await {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::error!(%error, "loading node user association");
+                let mut identity = unloaded_user_identity(row.user_id);
+                identity.association = Some(None);
+                identity.login_name.clear();
+                identity.display_name.clear();
+                identity
             }
-            None => UserIdentity::default(),
         }
+    }
+
+    async fn user_identity_for_row_checked(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<UserIdentity, MachineAdminError> {
+        let loaded = self.loaded_user_association(row.user_id).await?;
+        Ok(identity_from_loaded_user(row.user_id, loaded.as_ref()))
     }
 
     async fn row_to_record(
         &self,
         row: headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> MachineAdminRecord {
+        self.row_to_record_using_associations(row, None).await
+    }
+
+    async fn row_to_record_using_associations(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+        captured: Option<&NativeNodeAssociations>,
+    ) -> MachineAdminRecord {
         let host_info = row.host_info_value();
         let routes = routes_from_host_info(&host_info);
-        let now = now_unix() as i64;
-        let expired = row.expiry.is_some_and(|expiry| expiry <= now);
-        let name = if row.given_name.is_empty() {
-            row.hostname.clone()
-        } else {
-            row.given_name.clone()
-        };
+        let now = Utc::now();
+        let expired = row
+            .expiry_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or_else(|| {
+                row.expiry
+                    .and_then(|expiry| DateTime::from_timestamp(expiry, 0))
+            })
+            .is_some_and(|expiry| node_expiry_is_elapsed(expiry, now));
+        let name = row.given_name.clone();
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         let live = self.wire_registry.as_ref().and_then(|registry| {
             let record = registry.get(&node_key_hex)?;
@@ -921,25 +3334,44 @@ impl PersistentMachineAdmin {
                 .get(&record.stable_node_id())
                 .copied()
                 .unwrap_or(false);
-            Some((online, record.last_seen.timestamp().max(0) as u64))
+            Some((online, record.last_seen))
         });
-        let user_identity = self.user_identity_for_row(&row).await;
+        let user_identity = match captured.and_then(|associations| associations.user.as_ref()) {
+            Some(user) => identity_from_loaded_user(row.user_id, user.as_ref()),
+            None => self.user_identity_for_row(&row).await,
+        };
         MachineAdminRecord {
             node_id: u64::try_from(row.id).unwrap_or_default(),
-            id: node_key_hex,
+            id: node_key_hex.clone(),
             name,
             user: user_identity.login_name,
             user_id: user_identity.id,
             auth_key_id: row.auth_key_id,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
-            online: live.map_or(!expired, |(online, _)| online && !expired),
-            last_seen: live.map_or_else(
+            online: live.as_ref().is_some_and(|(online, _)| *online && !expired),
+            last_seen: live.as_ref().map_or_else(
                 || row.last_seen.unwrap_or(row.created_at).max(0) as u64,
-                |(_, last_seen)| last_seen,
+                |(_, last_seen)| last_seen.timestamp().max(0) as u64,
             ),
+            last_seen_precise: live.as_ref().map(|(_, last_seen)| *last_seen).or_else(|| {
+                row.last_seen_text
+                    .as_deref()
+                    .and_then(precise_stored_timestamp)
+            }),
             created_at: row.created_at.max(0) as u64,
+            created_at_precise: stored_node_created_at(&row),
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
+            expiry_precise: self
+                .wire_registry
+                .as_ref()
+                .and_then(|registry| registry.get(&node_key_hex))
+                .and_then(|record| record.expiry)
+                .or_else(|| {
+                    row.expiry_text
+                        .as_deref()
+                        .and_then(precise_stored_timestamp)
+                }),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
             disco_key: row.disco_key.clone(),
             os: os_from_host_info(&host_info),
@@ -954,22 +3386,48 @@ impl PersistentMachineAdmin {
 
     async fn row_to_wire_record(
         &self,
-        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> Result<MachineRecord, MachineAdminError> {
-        let host_info = row.host_info_value();
+        self.row_to_wire_record_with_association(row)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    async fn row_to_wire_record_with_association(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<(MachineRecord, NativeNodeAssociations), MachineAdminError> {
+        self.row_to_wire_record_using_associations(row, None).await
+    }
+
+    async fn row_to_wire_record_using_associations(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+        captured: Option<&NativeNodeAssociations>,
+    ) -> Result<(MachineRecord, NativeNodeAssociations), MachineAdminError> {
+        let host_info = row
+            .try_host_info_value()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         let node_key = key_without_prefix("nodekey:", &row.node_key);
         if node_key.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "persisted node has empty node key".to_string(),
             ));
         }
-        let created_at =
-            unix_timestamp_for_record(row.created_at.max(0) as u64, &node_key, "created_at")?;
-        let last_seen = unix_timestamp_for_record(
-            row.last_seen.unwrap_or(row.created_at).max(0) as u64,
-            &node_key,
-            "last_seen",
-        )?;
+        let created_at = stored_node_created_at(row).ok_or_else(|| {
+            MachineAdminError::BadRequest(format!(
+                "persisted node {node_key} has invalid created_at"
+            ))
+        })?;
+        let last_seen = row
+            .last_seen_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or_else(|| {
+                row.last_seen
+                    .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+            })
+            .unwrap_or(created_at);
         let ipv4 = row
             .ipv4
             .as_deref()
@@ -995,13 +3453,21 @@ impl PersistentMachineAdmin {
             })
             .transpose()?;
         require_any_address(ipv4, ipv6)?;
-        let name = if row.given_name.is_empty() {
-            row.hostname.clone()
-        } else {
-            row.given_name.clone()
+        // Preserve a corrupt stored given name for map validation.
+        let name = row.given_name.clone();
+        let auth_key = match captured.and_then(|associations| associations.auth_key.as_ref()) {
+            Some(key) => key.clone(),
+            None => self.auth_key_association(row.auth_key_id).await?,
         };
-        let ephemeral = self.auth_key_ephemeral(&row).await?;
-        let user_identity = self.user_identity_for_row(&row).await;
+        let ephemeral = auth_key.as_ref().is_some_and(|key| key.ephemeral);
+        let user_identity = match captured.and_then(|associations| associations.user.as_ref()) {
+            Some(user) => identity_from_loaded_user(row.user_id, user.as_ref()),
+            None => self.user_identity_for_row_checked(row).await?,
+        };
+        let association = NativeNodeAssociations {
+            user: user_identity.association.clone(),
+            auth_key: Some(auth_key),
+        };
         let mut record = MachineRecord::new_at_with_addresses(
             created_at,
             node_key.clone(),
@@ -1014,29 +3480,50 @@ impl PersistentMachineAdmin {
         );
         record.node_id = u64::try_from(row.id).ok();
         record.auth_key_id = row.auth_key_id;
+        record.set_user_account_metadata(user_identity.provider.clone(), user_identity.created_at);
         record.set_user_identity(
             user_identity.id,
             user_identity.login_name,
             user_identity.display_name,
             user_identity.profile_pic_url,
         );
-        record.replace_host_info(host_info_from_value(&host_info));
-        record.os = os_from_host_info(&host_info);
-        record.os_version = version_from_host_info(&host_info);
-        if !name.is_empty() {
-            record.hostname = name;
-        }
+        record.replace_host_info(host_info_from_value(&host_info)?);
+        record.raw_hostname = row.hostname.clone();
+        record.hostname = name;
         record.disco_key = (!row.disco_key.is_empty()).then_some(row.disco_key.clone());
-        record.endpoints = row.endpoint_list();
+        record.endpoints = row
+            .try_endpoint_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         record.home_derp = preferred_derp_from_host_info(&host_info);
         record.expiry = row
-            .expiry
-            .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
-            .transpose()?;
+            .expiry_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or(row
+                .expiry
+                .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
+                .transpose()?);
         record.last_seen = last_seen;
-        record.forced_tags = row.tag_list();
-        record.approved_routes = row.approved_route_list();
+        record.forced_tags = row
+            .try_tag_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        record.approved_routes = row
+            .try_approved_route_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         record.register_method = register_method_from_db(&row.register_method);
+        Ok((record, association))
+    }
+
+    // Capture nullable native values only when this row is being published.
+    // Read-only wire projections must not refresh the NodeStore's baseline.
+    async fn row_to_wire_record_for_publication(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<MachineRecord, MachineAdminError> {
+        let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+        if let Some(registry) = &self.wire_registry {
+            stage_native_row(registry, &row, &record, association)?;
+        }
         Ok(record)
     }
 
@@ -1047,14 +3534,40 @@ impl PersistentMachineAdmin {
         let Some(registry) = &self.wire_registry else {
             return Ok(());
         };
-        let record = self.row_to_wire_record(row).await?;
-        registry.upsert(record.node_key_hex.clone(), record);
+        let record = self.row_to_wire_record_for_publication(row).await?;
+        registry
+            .publish_saved_admin_record(record)
+            .map_err(MachineAdminError::Policy)?;
         Ok(())
     }
 }
 
 #[cfg(feature = "postgres-sqlx")]
 impl PersistentPostgresMachineAdmin {
+    async fn lock_existing_node(
+        &self,
+        id: &str,
+    ) -> Result<
+        (
+            Option<tokio::sync::OwnedMutexGuard<()>>,
+            headscale_db::headscale_nodes::HeadscaleNodeRow,
+        ),
+        MachineAdminError,
+    > {
+        let row = self.row_by_slug(id).await?;
+        let Some(registry) = &self.wire_registry else {
+            return Ok((None, row));
+        };
+        let machine_key = key_without_prefix("mkey:", &row.machine_key);
+        let guard = registry.lock_registration(&machine_key).await;
+        // Resolve by stable database ID again: the node key may have rotated
+        // while this operation waited behind registration.
+        let row = headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, row.id)
+            .await
+            .map_err(|error| db_error_to_machine(error, id))?;
+        Ok((Some(guard), row))
+    }
+
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
@@ -1069,20 +3582,90 @@ impl PersistentPostgresMachineAdmin {
     }
 
     pub fn with_wire_registry(mut self, registry: Arc<MachineRegistry>) -> Self {
+        registry.require_native_policy_persistence();
         self.wire_registry = Some(registry);
         self
     }
 
-    async fn auth_key_ephemeral(
+    async fn registration_user_association(
         &self,
-        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
-    ) -> Result<bool, MachineAdminError> {
-        let Some(auth_key_id) = row.auth_key_id else {
-            return Ok(false);
+        raw_id: Option<i64>,
+        captured: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<RegistrationUserAssociation, MachineAdminError> {
+        let Some(id) = raw_id else {
+            return Ok((Some(None), None));
         };
-        headscale_db::preauth_keys::is_postgres_ephemeral_by_id(&self.pool, auth_key_id)
+        if let Some(user) = captured {
+            return Ok((Some(Some(user.user.clone())), user.write.clone()));
+        }
+        let write = headscale_db::users::get_postgres_for_registration(&self.pool, id)
             .await
-            .map_err(|e| db_error_to_machine(e, &format!("preauth_key id={auth_key_id}")))
+            .map_err(|error| {
+                let message = match error {
+                    headscale_db::DbError::NotFound(_) => "user not found".to_string(),
+                    error => error.headscale_go_message(),
+                };
+                MachineAdminError::Storage(format!("finding user: {message}"))
+            })?;
+        let user = super::users::PersistentUserAdmin::row_to_association_record(write.row.clone());
+        Ok((Some(Some(user)), Some(write)))
+    }
+
+    async fn loaded_user_association(
+        &self,
+        raw_id: Option<i64>,
+    ) -> Result<Option<UserRecord>, MachineAdminError> {
+        let Some(id) = raw_id else {
+            return Ok(None);
+        };
+        if id < 0 {
+            return Err(MachineAdminError::Storage(
+                "invalid stored user identity".into(),
+            ));
+        }
+        match headscale_db::users::get_postgres_by_id(&self.pool, id).await {
+            Ok(row) => Ok(Some(
+                super::users::PersistentUserAdmin::row_to_association_record(row),
+            )),
+            Err(headscale_db::DbError::NotFound(_)) => Ok(None),
+            Err(error) => Err(MachineAdminError::Storage(format!(
+                "loading node user association: {}",
+                error.headscale_go_message(),
+            ))),
+        }
+    }
+
+    async fn auth_key_association(
+        &self,
+        auth_key_id: Option<i64>,
+    ) -> Result<Option<NativeAuthKey>, MachineAdminError> {
+        let Some(id) = auth_key_id else {
+            return Ok(None);
+        };
+        if id < 0 {
+            return Err(MachineAdminError::Storage(
+                "invalid stored preauth key identity".into(),
+            ));
+        }
+        let row = match headscale_db::preauth_keys::get_postgres_by_id(&self.pool, id).await {
+            Ok(row) => row,
+            Err(headscale_db::DbError::NotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(MachineAdminError::Storage(format!(
+                    "loading node preauth key: {}",
+                    error.headscale_go_message()
+                )));
+            }
+        };
+        let user_id = if row.user_id.is_empty() {
+            None
+        } else {
+            Some(row.user_id.parse::<i64>().map_err(|_| {
+                MachineAdminError::Storage("invalid stored preauth key user identity".into())
+            })?)
+        };
+        let user = self.loaded_user_association(user_id).await?;
+        NativeAuthKey::from_row(&row, Some(user)).map(Some)
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -1095,10 +3678,11 @@ impl PersistentPostgresMachineAdmin {
     ) -> Result<usize, MachineAdminError> {
         let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
             .await
-            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+            .map_err(|error| MachineAdminError::Storage(error.headscale_go_message()))?;
         let mut hydrated = 0usize;
         for row in rows {
-            let wire = self.row_to_wire_record(row).await?;
+            let (wire, association) = self.row_to_wire_record_with_association(&row).await?;
+            stage_native_row(registry, &row, &wire, association)?;
             registry.upsert(wire.node_key_hex.clone(), wire);
             hydrated += 1;
         }
@@ -1127,7 +3711,7 @@ impl PersistentPostgresMachineAdmin {
             record,
             policy,
             auth_key_id,
-            None,
+            auth_key_owner_override(&wire_record)?,
             false,
             Some(&wire_record),
         )
@@ -1136,13 +3720,187 @@ impl PersistentPostgresMachineAdmin {
 
     async fn create_or_update_auth_path_inner(
         &self,
-        mut record: MachineAdminRecord,
+        record: MachineAdminRecord,
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
         user_id_override: Option<i64>,
         validate_requested_tags: bool,
         wire_record: Option<&MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_hostinfo(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_path_with_hostinfo(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_user_snapshot(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            hostinfo,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_path_with_user_snapshot(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        hostinfo: Option<Value>,
+        captured_user: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let subject = record.id.clone();
+        let mut plan = self
+            .prepare_auth_path_registration(
+                record,
+                policy,
+                auth_key_id,
+                user_id_override,
+                validate_requested_tags,
+                wire_record,
+                None,
+                captured_user,
+            )
+            .await?;
+        apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())?;
+        if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
+            let _persist = registry.lock_native_persistence().await;
+            let live = LiveRegistrationSave::begin(
+                registry,
+                prior,
+                &plan.params,
+                wire_record,
+                !validate_requested_tags,
+                plan.associations.clone(),
+            )?;
+            if let Err(error) = headscale_db::headscale_nodes::save_postgres_cached_registration(
+                &self.pool,
+                live.registration.clone(),
+            )
+            .await
+            {
+                if !validate_requested_tags {
+                    live.rollback(registry)?;
+                }
+                return Err(db_error_to_machine(error, &subject));
+            }
+            let previous_key = live.update.before.node_key_hex.clone();
+            let record = live.finish(registry);
+            return Ok(AuthPathRegistrationResult {
+                new_node: false,
+                replaced_node_key_hex: (previous_key != record.node_key_hex)
+                    .then_some(previous_key),
+                record: machine_admin_record_from_wire(&record),
+            });
+        }
+        if let Some(prior) = plan.existing.as_ref() {
+            let prepared = self
+                .prepare_headless_registration(
+                    prior,
+                    &plan.params,
+                    wire_record,
+                    !validate_requested_tags,
+                    plan.associations.clone(),
+                )
+                .await?;
+            headscale_db::headscale_nodes::save_postgres_cached_registration(
+                &self.pool,
+                prepared.registration,
+            )
+            .await
+            .map_err(|error| {
+                MachineAdminError::Storage(format!(
+                    "writing node to database: saving node: {}",
+                    error.headscale_go_message(),
+                ))
+            })?;
+            let record = machine_admin_record_from_wire(&prepared.record);
+            let previous_key = key_without_prefix("nodekey:", &prior.node_key);
+            return Ok(AuthPathRegistrationResult {
+                replaced_node_key_hex: (previous_key != record.id).then_some(previous_key),
+                record,
+                new_node: false,
+            });
+        }
+        let node = new_native_registration(&plan.params)?;
+        let material = plan
+            .user_write
+            .take()
+            .map(|user| headscale_db::headscale_nodes::NewNodeAssociations::User(Box::new(user)))
+            .unwrap_or_default();
+        let saved =
+            headscale_db::headscale_nodes::create_postgres_new_registration_with_associations(
+                &self.pool, node, material,
+            )
+            .await
+            .map_err(|error| {
+                MachineAdminError::Storage(format!(
+                    "creating new node: {}",
+                    error.headscale_go_message()
+                ))
+            })?;
+        apply_new_association_projection(&mut plan.associations, &saved.node, &saved.associations)?;
+        let row = saved.node;
+        let record = match wire_record {
+            Some(record) => record.clone(),
+            None => {
+                self.row_to_wire_record_using_associations(&row, Some(&plan.associations))
+                    .await?
+                    .0
+            }
+        };
+        let record = finish_new_native_registration(
+            self.wire_registry.as_deref(),
+            &row,
+            record,
+            !validate_requested_tags,
+            plan.associations.clone(),
+        )?;
+        Ok(AuthPathRegistrationResult {
+            record: machine_admin_record_from_wire(&record),
+            new_node: true,
+            replaced_node_key_hex: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_auth_path_registration(
+        &self,
+        mut record: MachineAdminRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        user_id_override: Option<i64>,
+        validate_requested_tags: bool,
+        wire_record: Option<&MachineRecord>,
+        credential: Option<&NativeAuthKey>,
+        captured_user: Option<&super::users::UserRegistrationSnapshot>,
+    ) -> Result<PreparedAuthPathRegistration, MachineAdminError> {
         if record.id.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "node key must not be empty".into(),
@@ -1151,199 +3909,242 @@ impl PersistentPostgresMachineAdmin {
         let ipv4 = optional_ipv4(&record.ipv4)?;
         let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
         require_any_address(ipv4, ipv6)?;
-        let user_id = match user_id_override {
-            Some(user_id) => Some(user_id),
-            None => self.user_id_for_record(&record).await?,
-        };
-        if validate_requested_tags
-            && validate_requested_tags_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                record.user.as_str(),
-                &mut record.tags,
+        let user_id = if let Some(credential) = credential {
+            credential
+                .user
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|user| i64::try_from(user.id))
+                .transpose()
+                .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))?
+        } else if let Some(user) = captured_user {
+            Some(
+                i64::try_from(user.user.id)
+                    .map_err(|_| MachineAdminError::BadRequest("user id out of range".into()))?,
             )
-            .map_err(MachineAdminError::BadRequest)?
-        {
-            record.expiry = None;
+        } else {
+            match user_id_override {
+                Some(user_id) => Some(user_id),
+                None => self.user_id_for_record(&record).await?,
+            }
+        };
+        if let Some(registry) = &self.wire_registry {
+            registry
+                .validate_registration_node_key(&record.id, &record.machine_key_hex)
+                .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
         }
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
-
-        let existing_for_user = match user_id {
-            Some(user_id) => {
-                match headscale_db::headscale_nodes::get_postgres_by_machine_key_and_user(
-                    &self.pool,
-                    &machine_key,
-                    user_id,
-                )
+        let candidates = if let Some(registry) = &self.wire_registry {
+            registration_rows_from_cache(registry, &record.machine_key_hex)?
+        } else {
+            headscale_db::headscale_nodes::list_postgres_by_machine_key(&self.pool, &machine_key)
                 .await
-                {
-                    Ok(row) => Some(row),
-                    Err(headscale_db::DbError::NotFound(_)) => None,
-                    Err(e) => return Err(db_error_to_machine(e, &record.id)),
-                }
-            }
-            None => None,
+                .map_err(|error| db_error_to_machine(error, &record.id))?
         };
-        let existing_for_machine = match headscale_db::headscale_nodes::get_postgres_by_machine_key(
-            &self.pool,
-            &machine_key,
-        )
-        .await
-        {
-            Ok(row) => Some(row),
-            Err(headscale_db::DbError::NotFound(_)) => None,
-            Err(e) => return Err(db_error_to_machine(e, &record.id)),
-        };
-        // The same node key re-registering from the same machine is the
-        // same node — `tailscale up` after a control-plane restart, or a
-        // `--reset` — whatever its tag state. Without this rule a
-        // row persisted without a user id (no users store attached) could
-        // only be matched by the tagged-machine rule, so an untagged node's
-        // re-registration fell into `create` and was rejected with
-        // "IPv4 address … already in use" — by its own row.
-        let node_key = key_with_prefix("nodekey:", &record.id);
-        let existing_for_node =
-            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
-                .await
-            {
-                // …but a different user is a different node (upstream parity:
-                // the same key registering under another user gets a new row).
-                Ok(row) => {
-                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
-                }
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(e) => return Err(db_error_to_machine(e, &record.id)),
-            };
-        // With no users store attached, `user_id` is NULL on both sides and
-        // the (machine key, user) lookup above cannot match. The machine
-        // key alone is then the device's identity, so a re-registration
-        // under a rotated node key — what a stock client does on every
-        // re-auth — must reuse its row instead of leaving a second one
-        // behind, which would show up as a duplicate peer in every netmap.
-        // With a users store, `existing_for_user` is authoritative and this
-        // never fires.
-        let existing_for_unscoped_machine = user_id.is_none().then(|| {
-            existing_for_machine
-                .as_ref()
-                .filter(|row| row.user_id.is_none())
+        // A different user's node on the same machine is a fresh identity.
+        // Go carries only its NetInfo into that new node when the request
+        // omitted it; ownership, addresses and routes must not carry over.
+        let previous_net_info = if let Some(node) = candidates.iter().find(|node| {
+            node.tag_list().is_empty() && node.user_id.is_some() && node.user_id != user_id
+        }) {
+            node.try_host_info_value()
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+                .get("NetInfo")
                 .cloned()
-        });
-        let existing = existing_for_user
-            .or(existing_for_node)
-            .or_else(|| existing_for_unscoped_machine.flatten())
-            .or_else(|| {
-                existing_for_machine
-                    .as_ref()
-                    .filter(|row| !row.tag_list().is_empty())
-                    .cloned()
-            });
+        } else {
+            None
+        };
+        let existing = select_auth_path_node(
+            candidates,
+            user_id,
+            self.users.is_none() && credential.is_none(),
+            !validate_requested_tags,
+            !record.tags.is_empty(),
+        )?;
+
+        if validate_requested_tags && !record.tags.is_empty() {
+            record.user_id = user_id.and_then(|id| u64::try_from(id).ok());
+            let existing_record = match &existing {
+                Some(existing) => Some(self.row_to_record(existing.clone()).await),
+                None => None,
+            };
+            let nodes = self.policy_nodes_for_registration().await?;
+            validate_auth_path_tags_with_nodes(
+                policy,
+                &mut record,
+                existing_record.as_ref(),
+                &nodes,
+            )
+            .map_err(MachineAdminError::BadRequest)?;
+        }
 
         if let Some(existing) = existing {
-            let replaced_node_key_hex = key_without_prefix("nodekey:", &existing.node_key);
             if let Some(ipv4) = existing.ipv4.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv4.clone_from(ipv4);
             }
             if let Some(ipv6) = existing.ipv6.as_ref().filter(|value| !value.is_empty()) {
                 record.ipv6 = Some(ipv6.clone());
             }
-            self.reject_duplicate_addresses(Some(existing.id), &record)
-                .await?;
-            let mut approved = existing.approved_route_list();
-            approved.extend(record.approved_routes.clone());
-            record.approved_routes = auto_approved_routes_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                Some(&record.user),
-                &record.tags,
-                &approved,
-                &record.routes,
-            )
-            .map_err(MachineAdminError::BadRequest)?;
+            record.approved_routes = existing
+                .try_approved_route_list()
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
 
-            let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
-                &self.pool,
-                existing.id,
-                create_params_for_auth_path(
-                    &record,
-                    wire_record,
-                    user_id,
-                    auth_key_id,
-                    Some(&existing),
-                ),
-            )
-            .await
-            .map_err(|e| db_error_to_machine(e, &record.id))?;
-            let record = self.row_to_record(row).await;
-            Ok(AuthPathRegistrationResult {
-                replaced_node_key_hex: (replaced_node_key_hex != record.id)
-                    .then_some(replaced_node_key_hex),
-                record,
-                new_node: false,
+            let mut params = create_params_for_auth_path(
+                &record,
+                wire_record,
+                user_id,
+                auth_key_id,
+                Some(&existing),
+            )?;
+            finalize_auth_path_clock(&mut params, self.wire_registry.as_deref());
+            let mut associations = if let Some(key) = credential {
+                if params.auth_key_id.and_then(|id| u64::try_from(id).ok()) != Some(key.id) {
+                    return Err(MachineAdminError::BadRequest(
+                        "preauth key identity changed during registration".into(),
+                    ));
+                }
+                NativeNodeAssociations {
+                    user: Some(None),
+                    auth_key: Some(Some(key.clone())),
+                }
+            } else {
+                NativeNodeAssociations {
+                    user: self
+                        .registration_user_association(params.user_id, captured_user)
+                        .await?
+                        .0,
+                    auth_key: if validate_requested_tags {
+                        None
+                    } else {
+                        Some(self.auth_key_association(params.auth_key_id).await?)
+                    },
+                }
+            };
+            if params.user_id.is_some()
+                && let Some(Some(key)) = &associations.auth_key
+            {
+                associations.user.clone_from(&key.user);
+            }
+            Ok(PreparedAuthPathRegistration {
+                associations,
+                params,
+                existing: Some(existing),
+                user_write: None,
             })
         } else {
-            record.approved_routes = auto_approved_routes_for_node(
-                policy,
-                &primary_admin_addr(&record),
-                Some(&record.user),
-                &record.tags,
-                &record.approved_routes,
-                &record.routes,
-            )
-            .map_err(MachineAdminError::BadRequest)?;
-            self.reject_duplicate_addresses(None, &record).await?;
-            let row = headscale_db::headscale_nodes::create_postgres(
-                &self.pool,
-                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None),
-            )
-            .await
-            .map_err(|e| db_error_to_machine(e, &record.id))?;
-            let record = self.row_to_record(row).await;
-            Ok(AuthPathRegistrationResult {
-                record,
-                new_node: true,
-                replaced_node_key_hex: None,
+            record.approved_routes.clear();
+            let mut params =
+                create_params_for_auth_path(&record, wire_record, user_id, auth_key_id, None)?;
+            if let Some(net_info) = previous_net_info
+                && params.host_info.get("NetInfo").is_none_or(Value::is_null)
+            {
+                params.host_info["NetInfo"] = net_info;
+            }
+            finalize_auth_path_clock(&mut params, self.wire_registry.as_deref());
+            let (user, user_write) = if credential.is_some() {
+                (Some(None), None)
+            } else {
+                self.registration_user_association(params.user_id, captured_user)
+                    .await?
+            };
+            let mut associations = if let Some(key) = credential {
+                if params.auth_key_id.and_then(|id| u64::try_from(id).ok()) != Some(key.id) {
+                    return Err(MachineAdminError::BadRequest(
+                        "preauth key identity changed during registration".into(),
+                    ));
+                }
+                NativeNodeAssociations {
+                    user: Some(None),
+                    auth_key: Some(Some(key.clone())),
+                }
+            } else {
+                NativeNodeAssociations {
+                    user,
+                    auth_key: if validate_requested_tags {
+                        None
+                    } else {
+                        Some(self.auth_key_association(params.auth_key_id).await?)
+                    },
+                }
+            };
+            if params.user_id.is_some()
+                && let Some(Some(key)) = &associations.auth_key
+            {
+                associations.user.clone_from(&key.user);
+            }
+            Ok(PreparedAuthPathRegistration {
+                associations,
+                params,
+                existing: None,
+                user_write,
             })
         }
+    }
+
+    async fn prepare_headless_registration(
+        &self,
+        prior: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+        params: &headscale_db::headscale_nodes::CreateParams,
+        wire: Option<&MachineRecord>,
+        auth_key: bool,
+        associations: NativeNodeAssociations,
+    ) -> Result<PreparedNativeRegistration, MachineAdminError> {
+        let (before, loaded) = self.row_to_wire_record_with_association(prior).await?;
+        let mut native = NativeNodePersistence::capture(prior, &before)?;
+        native.set_associations(loaded);
+        prepare_cached_auth_registration(
+            native_row_id(prior)?,
+            &before,
+            Some(&native),
+            params,
+            wire,
+            auth_key,
+            associations,
+        )
     }
 
     async fn row_by_slug(
         &self,
         id: &str,
     ) -> Result<headscale_db::headscale_nodes::HeadscaleNodeRow, MachineAdminError> {
-        let node_key = key_with_prefix("nodekey:", id);
-        match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key).await {
-            Ok(row) => Ok(row),
-            Err(headscale_db::DbError::NotFound(_)) => {
-                if let Ok(node_id) = id.parse::<i64>() {
-                    headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, node_id)
-                        .await
-                        .map_err(|e| db_error_to_machine(e, id))
-                } else {
-                    Err(MachineAdminError::NotFound(id.to_string()))
-                }
-            }
-            Err(e) => Err(db_error_to_machine(e, id)),
+        // Only canonical decimal strings are numeric selectors. A stale hex
+        // key such as 000...001 must never fall back to database node ID 1.
+        if let Ok(node_id) = id.parse::<i64>()
+            && node_id > 0
+            && node_id.to_string() == id
+        {
+            return headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, node_id)
+                .await
+                .map_err(|error| db_error_to_machine(error, id));
         }
+        let node_key = headscale_api_acl::go_key::PublicKeyKind::Node
+            .parse_text(&key_with_prefix("nodekey:", id))
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        // The loaded node-key index already uses typed canonical identities.
+        // Resolve it to the primary key before reading SQL; imported uppercase
+        // hex must not turn every map write into a normalized text scan.
+        if let Some(registry) = &self.wire_registry
+            && let Some(existing) = registry.get(&key_without_prefix("nodekey:", &node_key))
+            && let Some(node_id) = existing.node_id.and_then(|id| i64::try_from(id).ok())
+        {
+            let row = headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, node_id)
+                .await
+                .map_err(|error| db_error_to_machine(error, id))?;
+            if row.node_key != node_key {
+                return Err(MachineAdminError::NotFound(id.into()));
+            }
+            return Ok(row);
+        }
+        headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|error| db_error_to_machine(error, id))
     }
 
     async fn user_id_for_record(
         &self,
         record: &MachineAdminRecord,
     ) -> Result<Option<i64>, MachineAdminError> {
-        if record.user.trim().is_empty() {
-            return Ok(None);
-        }
-        let Some(users) = &self.users else {
-            return Ok(record.user.parse::<i64>().ok());
-        };
-        let user = users
-            .get(&record.user)
-            .await
-            .map_err(|e| MachineAdminError::BadRequest(e.to_string()))?
-            .ok_or_else(|| MachineAdminError::BadRequest("user not found".to_string()))?;
-        i64::try_from(user.id)
-            .map(Some)
-            .map_err(|_| MachineAdminError::BadRequest("user id out of range".to_string()))
+        resolve_record_owner(self.users.as_deref(), record).await
     }
 
     async fn reject_duplicate_addresses(
@@ -1390,50 +4191,52 @@ impl PersistentPostgresMachineAdmin {
         &self,
         row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> UserIdentity {
-        let Some(user_id) = row.user_id else {
-            return UserIdentity::default();
-        };
-        let fallback_id = u64::try_from(user_id).ok();
-        let Some(users) = &self.users else {
-            let id = user_id.to_string();
-            return UserIdentity {
-                id: fallback_id,
-                login_name: id.clone(),
-                display_name: id,
-                profile_pic_url: String::new(),
-            };
-        };
-        match fallback_id.map(|id| users.get_by_id(id)) {
-            Some(fut) => {
-                if let Ok(Some(user)) = fut.await {
-                    user_identity_from_record(&user)
-                } else {
-                    let id = user_id.to_string();
-                    UserIdentity {
-                        id: fallback_id,
-                        login_name: id.clone(),
-                        display_name: id,
-                        profile_pic_url: String::new(),
-                    }
-                }
+        match self.user_identity_for_row_checked(row).await {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::error!(%error, "loading node user association");
+                let mut identity = unloaded_user_identity(row.user_id);
+                identity.association = Some(None);
+                identity.login_name.clear();
+                identity.display_name.clear();
+                identity
             }
-            None => UserIdentity::default(),
         }
+    }
+
+    async fn user_identity_for_row_checked(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<UserIdentity, MachineAdminError> {
+        let loaded = self.loaded_user_association(row.user_id).await?;
+        Ok(identity_from_loaded_user(row.user_id, loaded.as_ref()))
     }
 
     async fn row_to_record(
         &self,
         row: headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> MachineAdminRecord {
+        self.row_to_record_using_associations(row, None).await
+    }
+
+    async fn row_to_record_using_associations(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+        captured: Option<&NativeNodeAssociations>,
+    ) -> MachineAdminRecord {
         let host_info = row.host_info_value();
         let routes = routes_from_host_info(&host_info);
-        let now = now_unix() as i64;
-        let expired = row.expiry.is_some_and(|expiry| expiry <= now);
-        let name = if row.given_name.is_empty() {
-            row.hostname.clone()
-        } else {
-            row.given_name.clone()
-        };
+        let now = Utc::now();
+        let expired = row
+            .expiry_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or_else(|| {
+                row.expiry
+                    .and_then(|expiry| DateTime::from_timestamp(expiry, 0))
+            })
+            .is_some_and(|expiry| node_expiry_is_elapsed(expiry, now));
+        let name = row.given_name.clone();
         let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
         let live = self.wire_registry.as_ref().and_then(|registry| {
             let record = registry.get(&node_key_hex)?;
@@ -1442,25 +4245,44 @@ impl PersistentPostgresMachineAdmin {
                 .get(&record.stable_node_id())
                 .copied()
                 .unwrap_or(false);
-            Some((online, record.last_seen.timestamp().max(0) as u64))
+            Some((online, record.last_seen))
         });
-        let user_identity = self.user_identity_for_row(&row).await;
+        let user_identity = match captured.and_then(|associations| associations.user.as_ref()) {
+            Some(user) => identity_from_loaded_user(row.user_id, user.as_ref()),
+            None => self.user_identity_for_row(&row).await,
+        };
         MachineAdminRecord {
             node_id: u64::try_from(row.id).unwrap_or_default(),
-            id: node_key_hex,
+            id: node_key_hex.clone(),
             name,
             user: user_identity.login_name,
             user_id: user_identity.id,
             auth_key_id: row.auth_key_id,
             ipv4: row.ipv4.clone().unwrap_or_default(),
             ipv6: row.ipv6.clone().filter(|value| !value.is_empty()),
-            online: live.map_or(!expired, |(online, _)| online && !expired),
-            last_seen: live.map_or_else(
+            online: live.as_ref().is_some_and(|(online, _)| *online && !expired),
+            last_seen: live.as_ref().map_or_else(
                 || row.last_seen.unwrap_or(row.created_at).max(0) as u64,
-                |(_, last_seen)| last_seen,
+                |(_, last_seen)| last_seen.timestamp().max(0) as u64,
             ),
+            last_seen_precise: live.as_ref().map(|(_, last_seen)| *last_seen).or_else(|| {
+                row.last_seen_text
+                    .as_deref()
+                    .and_then(precise_stored_timestamp)
+            }),
             created_at: row.created_at.max(0) as u64,
+            created_at_precise: stored_node_created_at(&row),
             expiry: row.expiry.map(|expiry| expiry.max(0) as u64),
+            expiry_precise: self
+                .wire_registry
+                .as_ref()
+                .and_then(|registry| registry.get(&node_key_hex))
+                .and_then(|record| record.expiry)
+                .or_else(|| {
+                    row.expiry_text
+                        .as_deref()
+                        .and_then(precise_stored_timestamp)
+                }),
             machine_key_hex: key_without_prefix("mkey:", &row.machine_key),
             disco_key: row.disco_key.clone(),
             os: os_from_host_info(&host_info),
@@ -1475,22 +4297,48 @@ impl PersistentPostgresMachineAdmin {
 
     async fn row_to_wire_record(
         &self,
-        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
     ) -> Result<MachineRecord, MachineAdminError> {
-        let host_info = row.host_info_value();
+        self.row_to_wire_record_with_association(row)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    async fn row_to_wire_record_with_association(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<(MachineRecord, NativeNodeAssociations), MachineAdminError> {
+        self.row_to_wire_record_using_associations(row, None).await
+    }
+
+    async fn row_to_wire_record_using_associations(
+        &self,
+        row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+        captured: Option<&NativeNodeAssociations>,
+    ) -> Result<(MachineRecord, NativeNodeAssociations), MachineAdminError> {
+        let host_info = row
+            .try_host_info_value()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         let node_key = key_without_prefix("nodekey:", &row.node_key);
         if node_key.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "persisted node has empty node key".to_string(),
             ));
         }
-        let created_at =
-            unix_timestamp_for_record(row.created_at.max(0) as u64, &node_key, "created_at")?;
-        let last_seen = unix_timestamp_for_record(
-            row.last_seen.unwrap_or(row.created_at).max(0) as u64,
-            &node_key,
-            "last_seen",
-        )?;
+        let created_at = stored_node_created_at(row).ok_or_else(|| {
+            MachineAdminError::BadRequest(format!(
+                "persisted node {node_key} has invalid created_at"
+            ))
+        })?;
+        let last_seen = row
+            .last_seen_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or_else(|| {
+                row.last_seen
+                    .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+            })
+            .unwrap_or(created_at);
         let ipv4 = row
             .ipv4
             .as_deref()
@@ -1516,13 +4364,21 @@ impl PersistentPostgresMachineAdmin {
             })
             .transpose()?;
         require_any_address(ipv4, ipv6)?;
-        let name = if row.given_name.is_empty() {
-            row.hostname.clone()
-        } else {
-            row.given_name.clone()
+        // Preserve a corrupt stored given name for map validation.
+        let name = row.given_name.clone();
+        let auth_key = match captured.and_then(|associations| associations.auth_key.as_ref()) {
+            Some(key) => key.clone(),
+            None => self.auth_key_association(row.auth_key_id).await?,
         };
-        let ephemeral = self.auth_key_ephemeral(&row).await?;
-        let user_identity = self.user_identity_for_row(&row).await;
+        let ephemeral = auth_key.as_ref().is_some_and(|key| key.ephemeral);
+        let user_identity = match captured.and_then(|associations| associations.user.as_ref()) {
+            Some(user) => identity_from_loaded_user(row.user_id, user.as_ref()),
+            None => self.user_identity_for_row_checked(row).await?,
+        };
+        let association = NativeNodeAssociations {
+            user: user_identity.association.clone(),
+            auth_key: Some(auth_key),
+        };
         let mut record = MachineRecord::new_at_with_addresses(
             created_at,
             node_key.clone(),
@@ -1535,29 +4391,50 @@ impl PersistentPostgresMachineAdmin {
         );
         record.node_id = u64::try_from(row.id).ok();
         record.auth_key_id = row.auth_key_id;
+        record.set_user_account_metadata(user_identity.provider.clone(), user_identity.created_at);
         record.set_user_identity(
             user_identity.id,
             user_identity.login_name,
             user_identity.display_name,
             user_identity.profile_pic_url,
         );
-        record.replace_host_info(host_info_from_value(&host_info));
-        record.os = os_from_host_info(&host_info);
-        record.os_version = version_from_host_info(&host_info);
-        if !name.is_empty() {
-            record.hostname = name;
-        }
+        record.replace_host_info(host_info_from_value(&host_info)?);
+        record.raw_hostname = row.hostname.clone();
+        record.hostname = name;
         record.disco_key = (!row.disco_key.is_empty()).then_some(row.disco_key.clone());
-        record.endpoints = row.endpoint_list();
+        record.endpoints = row
+            .try_endpoint_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         record.home_derp = preferred_derp_from_host_info(&host_info);
         record.expiry = row
-            .expiry
-            .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
-            .transpose()?;
+            .expiry_text
+            .as_deref()
+            .and_then(precise_stored_timestamp)
+            .or(row
+                .expiry
+                .map(|expiry| unix_timestamp_for_record(expiry.max(0) as u64, &node_key, "expiry"))
+                .transpose()?);
         record.last_seen = last_seen;
-        record.forced_tags = row.tag_list();
-        record.approved_routes = row.approved_route_list();
+        record.forced_tags = row
+            .try_tag_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        record.approved_routes = row
+            .try_approved_route_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
         record.register_method = register_method_from_db(&row.register_method);
+        Ok((record, association))
+    }
+
+    // Capture nullable native values only when this row is being published.
+    // Read-only wire projections must not refresh the NodeStore's baseline.
+    async fn row_to_wire_record_for_publication(
+        &self,
+        row: headscale_db::headscale_nodes::HeadscaleNodeRow,
+    ) -> Result<MachineRecord, MachineAdminError> {
+        let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+        if let Some(registry) = &self.wire_registry {
+            stage_native_row(registry, &row, &record, association)?;
+        }
         Ok(record)
     }
 
@@ -1568,8 +4445,10 @@ impl PersistentPostgresMachineAdmin {
         let Some(registry) = &self.wire_registry else {
             return Ok(());
         };
-        let record = self.row_to_wire_record(row).await?;
-        registry.upsert(record.node_key_hex.clone(), record);
+        let record = self.row_to_wire_record_for_publication(row).await?;
+        registry
+            .publish_saved_admin_record(record)
+            .map_err(MachineAdminError::Policy)?;
         Ok(())
     }
 }
@@ -1582,62 +4461,161 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
         user: &crate::oidc::OidcStoredUser,
         node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
-        let mut pending = self
+        let (mut pending, hostinfo, completion) = self
             .registration_cache
-            .get(registration_id)
+            .pending_registration_completion(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
-        pending.set_user_identity(
-            Some(user.id),
-            oidc_user_name(user),
-            user.display_name.clone(),
-            user.profile_pic_url.clone(),
-        );
-        let mut record = machine_admin_record_from_wire(&pending);
-        record.user = oidc_user_name(user);
-        let effective_expiry = if pending.forced_tags.is_empty() {
-            node_expiry.or(pending.expiry)
-        } else {
-            None
-        };
-        record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
-        record.register_method = REGISTER_METHOD_OIDC;
-
-        let result = self
-            .machines
-            .create_or_update_auth_path_inner(
-                record,
-                &self.policy,
-                None,
-                Some(user.id as i64),
-                true,
-                Some(&pending),
+        let handler = Self::clone(self);
+        let selected_user_id = user.id;
+        crate::tailscale_wire::complete_state_mutation(Box::pin(async move {
+            let user_id = i64::try_from(selected_user_id).map_err(|_| {
+                crate::oidc::OidcRegistrationError::Store(
+                    "finding user: user id out of range".into(),
+                )
+            })?;
+            let write = headscale_db::users::get_for_registration(&handler.machines.pool, user_id)
+                .await
+                .map_err(|error| {
+                    let message = match error {
+                        headscale_db::DbError::NotFound(_) => "user not found".to_string(),
+                        error => error.headscale_go_message(),
+                    };
+                    crate::oidc::OidcRegistrationError::Store(format!("finding user: {message}"))
+                })?;
+            let captured_user = super::users::UserRegistrationSnapshot::from_native(write);
+            let user = &captured_user.user;
+            let machine_key = pending.machine_key_hex.clone();
+            let node_key = pending.node_key_hex.clone();
+            let registration_lock = match handler.machines.registration_guard(&machine_key).await {
+                Some(guard) => Some(guard),
+                None => match &handler.wire_registry {
+                    Some(registry) => Some(registry.lock_registration(&machine_key).await),
+                    None => None,
+                },
+            };
+            let node_key_lock = match handler
+                .machines
+                .node_key_registration_guard(&node_key)
+                .await
+            {
+                Some(guard) => Some(guard),
+                None => match &handler.wire_registry {
+                    Some(registry) => Some(registry.lock_node_key_registration(&node_key).await),
+                    None => None,
+                },
+            };
+            let publication_scope = handler
+                .machines
+                .wire_registry
+                .as_ref()
+                .or(handler.wire_registry.as_ref())
+                .map(|registry| registry.registration_publication_scope(&pending));
+            let identity = user_identity_from_record(user);
+            pending.set_user_identity(
+                Some(user.id),
+                identity.login_name,
+                identity.display_name,
+                identity.profile_pic_url,
+            );
+            pending.set_user_account_metadata(identity.provider, identity.created_at);
+            let mut record = machine_admin_record_from_wire(&pending);
+            record.user = user_login_name(user);
+            let effective_expiry = if pending.forced_tags.is_empty() {
+                node_expiry.or(pending.expiry)
+            } else {
+                None
+            };
+            record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
+            record.expiry_precise = effective_expiry;
+            record.register_method = REGISTER_METHOD_OIDC;
+            prepare_auth_path_addresses(
+                handler.machines.as_ref(),
+                handler.ip_allocator.as_deref(),
+                &handler.policy,
+                &mut record,
             )
             .await
-            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        let wire_record = canonical_wire_record_for_auth_path(&result.record, Some(&pending))
-            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        if let Some(registry) = &self.wire_registry {
-            if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                registry.replace_node_key_auth_completion(
-                    old_node_key_hex,
-                    wire_record.node_key_hex.clone(),
-                    wire_record.clone(),
-                );
-            } else {
-                registry
-                    .upsert_auth_completion(wire_record.node_key_hex.clone(), wire_record.clone());
+            .map_err(|error| crate::oidc::OidcRegistrationError::Store(error.to_string()))?;
+
+            let result = handler
+                .machines
+                .create_or_update_auth_path_with_user_snapshot(
+                    record,
+                    &handler.policy,
+                    None,
+                    Some(user_id),
+                    true,
+                    Some(&pending),
+                    hostinfo,
+                    Some(&captured_user),
+                )
+                .await
+                .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
+            let mut wire_record = handler
+                .machines
+                .wire_record_for_publication(&result.record.id, handler.wire_registry.as_deref())
+                .await
+                .map_err(|error| crate::oidc::OidcRegistrationError::Store(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::oidc::OidcRegistrationError::Store("registered node disappeared".into())
+                })?;
+            hydrate_wire_owner_from_user_admin(
+                handler.machines.users.as_ref(),
+                handler.wire_registry.as_deref(),
+                user.id,
+                &mut wire_record,
+            )
+            .await;
+            if let Some(registry) = &handler.wire_registry {
+                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                    registry
+                        .try_replace_node_key_auth_completion(
+                            old_node_key_hex,
+                            wire_record.node_key_hex.clone(),
+                            wire_record.clone(),
+                        )
+                        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+                } else {
+                    registry
+                        .try_upsert_auth_completion(
+                            wire_record.node_key_hex.clone(),
+                            wire_record.clone(),
+                        )
+                        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+                }
             }
-        }
-        if self
-            .registration_cache
-            .complete(registration_id, wire_record)
-        {
+            handler
+                .registration_cache
+                .finish_registration(completion, wire_record);
+            // Go's HandleNodeFromAuthPath releases the machine-key lock on
+            // return; the approval below takes the same locks again.
+            drop(publication_scope);
+            drop(node_key_lock);
+            drop(registration_lock);
+            // oidc.go handleRegistration: the node is now persisted and known
+            // to the policy manager, so State.AutoApproveRoutes can match the
+            // owner's addresses against the autoApprovers. Its change (a
+            // PolicyChange) follows the registration's own.
+            Box::pin(auto_approve_registered_node(
+                handler.machines.as_ref(),
+                &handler.policy,
+                handler.wire_registry.as_deref(),
+                &result.record,
+            ))
+            .await
+            .map_err(|error| {
+                crate::oidc::OidcRegistrationError::Store(format!("auto approving routes: {error}"))
+            })?;
             Ok(crate::oidc::OidcRegistrationResult {
                 new_node: result.new_node,
             })
-        } else {
-            Err(crate::oidc::OidcRegistrationError::SessionExpired)
-        }
+        }))
+        .await
+        .map_err(|error| {
+            crate::oidc::OidcRegistrationError::Store(format!(
+                "finishing node registration: {error}"
+            ))
+        })?
     }
 
     async fn complete_oidc_auth_request(
@@ -1742,62 +4720,164 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
         user: &crate::oidc::OidcStoredUser,
         node_expiry: Option<DateTime<Utc>>,
     ) -> Result<crate::oidc::OidcRegistrationResult, crate::oidc::OidcRegistrationError> {
-        let mut pending = self
+        let (mut pending, hostinfo, completion) = self
             .registration_cache
-            .get(registration_id)
+            .pending_registration_completion(registration_id)
             .ok_or(crate::oidc::OidcRegistrationError::SessionExpired)?;
-        pending.set_user_identity(
-            Some(user.id),
-            oidc_user_name(user),
-            user.display_name.clone(),
-            user.profile_pic_url.clone(),
-        );
-        let mut record = machine_admin_record_from_wire(&pending);
-        record.user = oidc_user_name(user);
-        let effective_expiry = if pending.forced_tags.is_empty() {
-            node_expiry.or(pending.expiry)
-        } else {
-            None
-        };
-        record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
-        record.register_method = REGISTER_METHOD_OIDC;
-
-        let result = self
-            .machines
-            .create_or_update_auth_path_inner(
-                record,
-                &self.policy,
-                None,
-                Some(user.id as i64),
-                true,
-                Some(&pending),
+        let handler = Self::clone(self);
+        let selected_user_id = user.id;
+        crate::tailscale_wire::complete_state_mutation(Box::pin(async move {
+            let user_id = i64::try_from(selected_user_id).map_err(|_| {
+                crate::oidc::OidcRegistrationError::Store(
+                    "finding user: user id out of range".into(),
+                )
+            })?;
+            let write =
+                headscale_db::users::get_postgres_for_registration(&handler.machines.pool, user_id)
+                    .await
+                    .map_err(|error| {
+                        let message = match error {
+                            headscale_db::DbError::NotFound(_) => "user not found".to_string(),
+                            error => error.headscale_go_message(),
+                        };
+                        crate::oidc::OidcRegistrationError::Store(format!(
+                            "finding user: {message}"
+                        ))
+                    })?;
+            let captured_user = super::users::UserRegistrationSnapshot::from_native(write);
+            let user = &captured_user.user;
+            let machine_key = pending.machine_key_hex.clone();
+            let node_key = pending.node_key_hex.clone();
+            let registration_lock = match handler.machines.registration_guard(&machine_key).await {
+                Some(guard) => Some(guard),
+                None => match &handler.wire_registry {
+                    Some(registry) => Some(registry.lock_registration(&machine_key).await),
+                    None => None,
+                },
+            };
+            let node_key_lock = match handler
+                .machines
+                .node_key_registration_guard(&node_key)
+                .await
+            {
+                Some(guard) => Some(guard),
+                None => match &handler.wire_registry {
+                    Some(registry) => Some(registry.lock_node_key_registration(&node_key).await),
+                    None => None,
+                },
+            };
+            let publication_scope = handler
+                .machines
+                .wire_registry
+                .as_ref()
+                .or(handler.wire_registry.as_ref())
+                .map(|registry| registry.registration_publication_scope(&pending));
+            let identity = user_identity_from_record(user);
+            pending.set_user_identity(
+                Some(user.id),
+                identity.login_name,
+                identity.display_name,
+                identity.profile_pic_url,
+            );
+            pending.set_user_account_metadata(identity.provider, identity.created_at);
+            let mut record = machine_admin_record_from_wire(&pending);
+            record.user = user_login_name(user);
+            let effective_expiry = if pending.forced_tags.is_empty() {
+                node_expiry.or(pending.expiry)
+            } else {
+                None
+            };
+            record.expiry = effective_expiry.map(|expiry| expiry.timestamp().max(0) as u64);
+            record.expiry_precise = effective_expiry;
+            record.register_method = REGISTER_METHOD_OIDC;
+            prepare_auth_path_addresses(
+                handler.machines.as_ref(),
+                handler.ip_allocator.as_deref(),
+                &handler.policy,
+                &mut record,
             )
             .await
-            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        let wire_record = canonical_wire_record_for_auth_path(&result.record, Some(&pending))
-            .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
-        if let Some(registry) = &self.wire_registry {
-            if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                registry.replace_node_key_auth_completion(
-                    old_node_key_hex,
-                    wire_record.node_key_hex.clone(),
-                    wire_record.clone(),
-                );
-            } else {
-                registry
-                    .upsert_auth_completion(wire_record.node_key_hex.clone(), wire_record.clone());
+            .map_err(|error| crate::oidc::OidcRegistrationError::Store(error.to_string()))?;
+
+            let result = handler
+                .machines
+                .create_or_update_auth_path_with_user_snapshot(
+                    record,
+                    &handler.policy,
+                    None,
+                    Some(user_id),
+                    true,
+                    Some(&pending),
+                    hostinfo,
+                    Some(&captured_user),
+                )
+                .await
+                .map_err(|err| crate::oidc::OidcRegistrationError::Store(err.to_string()))?;
+            let mut wire_record = handler
+                .machines
+                .wire_record_for_publication(&result.record.id, handler.wire_registry.as_deref())
+                .await
+                .map_err(|error| crate::oidc::OidcRegistrationError::Store(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::oidc::OidcRegistrationError::Store("registered node disappeared".into())
+                })?;
+            hydrate_wire_owner_from_user_admin(
+                handler.machines.users.as_ref(),
+                handler.wire_registry.as_deref(),
+                user.id,
+                &mut wire_record,
+            )
+            .await;
+            if let Some(registry) = &handler.wire_registry {
+                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                    registry
+                        .try_replace_node_key_auth_completion(
+                            old_node_key_hex,
+                            wire_record.node_key_hex.clone(),
+                            wire_record.clone(),
+                        )
+                        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+                } else {
+                    registry
+                        .try_upsert_auth_completion(
+                            wire_record.node_key_hex.clone(),
+                            wire_record.clone(),
+                        )
+                        .map_err(crate::oidc::OidcRegistrationError::Store)?;
+                }
             }
-        }
-        if self
-            .registration_cache
-            .complete(registration_id, wire_record)
-        {
+            handler
+                .registration_cache
+                .finish_registration(completion, wire_record);
+            // Go's HandleNodeFromAuthPath releases the machine-key lock on
+            // return; the approval below takes the same locks again.
+            drop(publication_scope);
+            drop(node_key_lock);
+            drop(registration_lock);
+            // oidc.go handleRegistration: the node is now persisted and known
+            // to the policy manager, so State.AutoApproveRoutes can match the
+            // owner's addresses against the autoApprovers. Its change (a
+            // PolicyChange) follows the registration's own.
+            Box::pin(auto_approve_registered_node(
+                handler.machines.as_ref(),
+                &handler.policy,
+                handler.wire_registry.as_deref(),
+                &result.record,
+            ))
+            .await
+            .map_err(|error| {
+                crate::oidc::OidcRegistrationError::Store(format!("auto approving routes: {error}"))
+            })?;
             Ok(crate::oidc::OidcRegistrationResult {
                 new_node: result.new_node,
             })
-        } else {
-            Err(crate::oidc::OidcRegistrationError::SessionExpired)
-        }
+        }))
+        .await
+        .map_err(|error| {
+            crate::oidc::OidcRegistrationError::Store(format!(
+                "finishing node registration: {error}"
+            ))
+        })?
     }
 
     async fn complete_oidc_auth_request(
@@ -1902,25 +4982,361 @@ fn short_oidc_machine_key(machine_key_hex: &str) -> String {
     }
 }
 
+impl PersistentMachineAdmin {
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_atomic_auth_key_registration(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+        credential: Option<NativeAuthKey>,
+        material: Option<Arc<headscale_db::preauth_keys::RegistrationKey>>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        use crate::tailscale_wire::AuthKeyRegistrationError;
+        let capture_from_candidate = credential.is_none() && material.is_none();
+        let (credential, material) = if capture_from_candidate {
+            let material =
+                headscale_db::preauth_keys::get_by_token_for_registration(&self.pool, candidate)
+                    .await
+                    .map_err(|_| {
+                        AuthKeyRegistrationError::Credential(
+                            crate::tailscale_wire::RedeemError::Unknown,
+                        )
+                    })?;
+            let user = material.user.as_ref().map(|user| {
+                super::users::PersistentUserAdmin::row_to_association_record(user.row.clone())
+            });
+            let credential = NativeAuthKey::from_row(&material.key, Some(user))
+                .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            (Some(credential), Some(Arc::new(material)))
+        } else {
+            (credential, material)
+        };
+        let captured = captured_auth_key(credential.as_ref())?;
+        let mut record = machine_admin_record_from_wire(&wire_record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        let mut plan = self
+            .prepare_auth_path_registration(
+                record,
+                policy,
+                auth_key_id,
+                auth_key_owner_override(&wire_record)
+                    .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?,
+                false,
+                Some(&wire_record),
+                credential.as_ref(),
+                None,
+            )
+            .await
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        if capture_from_candidate {
+            let material = material.as_ref().expect("candidate snapshot captured");
+            headscale_db::auth_key_registration::validate_captured_registration_key(
+                plan.existing.as_ref(),
+                &material.key,
+                &plan.params,
+                require_fresh,
+            )
+            .map_err(atomic_registration_error)?;
+        }
+        let previous_key = plan
+            .existing
+            .as_ref()
+            .map(|row| key_without_prefix("nodekey:", &row.node_key));
+        if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
+            let _persist = registry.lock_native_persistence().await;
+            let live = LiveRegistrationSave::begin(
+                registry,
+                prior,
+                &plan.params,
+                Some(&wire_record),
+                true,
+                plan.associations.clone(),
+            )
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let committed = match captured.as_ref() {
+                Some(key) => {
+                    headscale_db::auth_key_registration::commit_cached_sqlite_with_key(
+                        &self.pool,
+                        prior,
+                        live.registration.clone(),
+                        key,
+                    )
+                    .await
+                }
+                None => {
+                    headscale_db::auth_key_registration::commit_cached_sqlite(
+                        &self.pool,
+                        prior,
+                        live.registration.clone(),
+                        candidate,
+                        require_fresh,
+                    )
+                    .await
+                }
+            };
+            if let Err(error) = committed {
+                live.rollback(registry).map_err(|rollback| {
+                    AuthKeyRegistrationError::Storage(format!(
+                        "{error}; rollback failed: {rollback}"
+                    ))
+                })?;
+                return Err(if captured.is_some() {
+                    captured_registration_error(error, "writing node to database")
+                } else {
+                    atomic_registration_error(error)
+                });
+            }
+            let previous_key = live.update.before.node_key_hex.clone();
+            let record = live.finish(registry);
+            return Ok(PersistedMachineRegistration {
+                replaced_node_key_hex: (previous_key != record.node_key_hex)
+                    .then_some(previous_key),
+                record,
+            });
+        }
+        if let Some(prior) = plan.existing.as_ref() {
+            let prepared = self
+                .prepare_headless_registration(
+                    prior,
+                    &plan.params,
+                    Some(&wire_record),
+                    true,
+                    plan.associations.clone(),
+                )
+                .await
+                .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let committed = match captured.as_ref() {
+                Some(key) => {
+                    headscale_db::auth_key_registration::commit_cached_sqlite_with_key(
+                        &self.pool,
+                        prior,
+                        prepared.registration.clone(),
+                        key,
+                    )
+                    .await
+                }
+                None => {
+                    headscale_db::auth_key_registration::commit_cached_sqlite(
+                        &self.pool,
+                        prior,
+                        prepared.registration.clone(),
+                        candidate,
+                        require_fresh,
+                    )
+                    .await
+                }
+            };
+            committed
+                .map_err(|error| captured_registration_error(error, "writing node to database"))?;
+            return Ok(PersistedMachineRegistration {
+                replaced_node_key_hex: previous_key
+                    .filter(|key| key != &prepared.record.node_key_hex),
+                record: prepared.record,
+            });
+        }
+        let node = new_native_registration(&plan.params)
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        let row = match captured.as_ref() {
+            Some(key) => {
+                if let Some(material) = &material {
+                    let saved =
+                        headscale_db::auth_key_registration::commit_new_sqlite_with_associations(
+                            &self.pool,
+                            node,
+                            key,
+                            (**material).clone(),
+                        )
+                        .await
+                        .map_err(|error| captured_registration_error(error, "creating new node"))?;
+                    apply_new_association_projection(
+                        &mut plan.associations,
+                        &saved.node,
+                        &saved.associations,
+                    )
+                    .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+                    saved.node
+                } else {
+                    headscale_db::auth_key_registration::commit_new_sqlite_with_key(
+                        &self.pool, node, key,
+                    )
+                    .await
+                    .map_err(|error| captured_registration_error(error, "creating new node"))?
+                }
+            }
+
+            None => {
+                headscale_db::auth_key_registration::commit_new_sqlite(&self.pool, node, candidate)
+                    .await
+                    .map_err(atomic_registration_error)?
+            }
+        };
+        let record = finish_new_native_registration(
+            self.wire_registry.as_deref(),
+            &row,
+            wire_record,
+            true,
+            plan.associations.clone(),
+        )
+        .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: None,
+        })
+    }
+}
+
 #[async_trait]
 impl MachineRegistrationStore for PersistentMachineAdmin {
+    fn runtime_sync_returns_live_snapshot(&self) -> bool {
+        self.wire_registry.is_some()
+    }
+
+    fn supports_guarded_ephemeral_deletion(&self) -> bool {
+        true
+    }
+
+    async fn delete_ephemeral_registration(&self, record: &MachineRecord) -> Result<(), String> {
+        if !record.ephemeral {
+            return Err("refusing ephemeral cleanup of a non-ephemeral node".into());
+        }
+        if let Some(registry) = &self.wire_registry {
+            let id = requested_live_node_id(registry, record)?;
+            return complete_guarded_native_node_deletion(
+                registry,
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                &record.node_key_hex,
+            )
+            .await
+            .map_err(|error| error.to_string());
+        }
+        self.persist_wire_logout(record, Utc::now()).await
+    }
+
+    fn supports_atomic_auth_key_registration(&self) -> bool {
+        true
+    }
+
+    async fn create_or_update_auth_key_registration_atomic(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        self.create_or_update_auth_key_registration_atomic_with_hostinfo(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_hostinfo(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        Box::pin(self.complete_atomic_auth_key_registration(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            hostinfo,
+            None,
+            None,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_lookup(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+        lookup: Option<crate::tailscale_wire::PreauthLookup>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        let (credential, material) = lookup
+            .map(|lookup| (lookup.native, lookup.native_save))
+            .unwrap_or_default();
+        Box::pin(self.complete_atomic_auth_key_registration(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            hostinfo,
+            credential,
+            material,
+        ))
+        .await
+    }
+
     async fn create_or_update_auth_key_registration(
         &self,
         record: MachineRecord,
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
     ) -> Result<PersistedMachineRegistration, String> {
-        let wire_record = record.clone();
-        let result = self
-            .create_or_update_auth_key_path(record, policy, auth_key_id)
+        self.create_or_update_auth_key_registration_with_hostinfo(record, policy, auth_key_id, None)
             .await
-            .map_err(|err| err.to_string())?;
+    }
+
+    async fn create_or_update_auth_key_registration_with_hostinfo(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        hostinfo: Option<Value>,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let mut record = machine_admin_record_from_wire(&wire_record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        let result = self
+            .create_or_update_auth_path_with_hostinfo(
+                record,
+                policy,
+                auth_key_id,
+                auth_key_owner_override(&wire_record).map_err(|error| error.to_string())?,
+                false,
+                Some(&wire_record),
+                hostinfo,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(registry) = &self.wire_registry
+            && let Some(record) = registry.native_registration_record(result.record.node_id)
+        {
+            return Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: result.replaced_node_key_hex,
+            });
+        }
         let row =
             headscale_db::headscale_nodes::get_by_id(&self.pool, result.record.node_id as i64)
                 .await
                 .map_err(|err| err.to_string())?;
         let mut record = self
-            .row_to_wire_record(row)
+            .row_to_wire_record_for_publication(row)
             .await
             .map_err(|err| err.to_string())?;
         record.disco_key = wire_record.disco_key;
@@ -1936,21 +5352,31 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
         record: MachineRecord,
         _policy: &PolicyStore,
     ) -> Result<PersistedMachineRegistration, String> {
+        if let Some(registry) = &self.wire_registry {
+            return persist_live_runtime_node(
+                registry,
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                &record,
+            )
+            .await;
+        }
         let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
         let row = headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key)
             .await
             .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
-        let user_id = self
-            .user_id_for_record(&machine_admin_record_from_wire(&record))
-            .await
-            .map_err(|err| err.to_string())?;
-        let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
-        params.ipv6 = row.ipv6.clone();
-        let row = headscale_db::headscale_nodes::update_from_auth_path(&self.pool, row.id, params)
-            .await
-            .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
+        let params = create_params_for_wire_record(&record, row.user_id, row.auth_key_id)
+            .map_err(|error| error.to_string())?;
+        let auto_rename = is_auto_derived_given_name(&row.given_name, &row.hostname);
+        let row = headscale_db::headscale_nodes::update_runtime_state(
+            &self.pool,
+            &row,
+            params,
+            auto_rename,
+        )
+        .await
+        .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
-            .row_to_wire_record(row)
+            .row_to_wire_record_for_publication(row)
             .await
             .map_err(|err| err.to_string())?;
         Ok(PersistedMachineRegistration {
@@ -1964,22 +5390,426 @@ impl MachineRegistrationStore for PersistentMachineAdmin {
             .await
             .map_err(|err| err.to_string())
     }
+
+    async fn persist_wire_logout(
+        &self,
+        record: &MachineRecord,
+        at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        if record.ephemeral
+            && let Some(id) = record.node_id
+        {
+            let id = i64::try_from(id).map_err(|_| "invalid cached node identity".to_string())?;
+            let _persist = match &self.wire_registry {
+                Some(registry) => Some(registry.lock_native_persistence().await),
+                None => None,
+            };
+            return headscale_db::headscale_nodes::destroy_cached_node(&self.pool, id)
+                .await
+                .map_err(|error| error.headscale_go_message());
+        }
+        if !record.ephemeral
+            && !record.is_tagged()
+            && let Some(registry) = &self.wire_registry
+        {
+            return persist_live_logout_expiry(
+                registry,
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                record,
+                at,
+            )
+            .await;
+        }
+        let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
+        let row = headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        if key_without_prefix("mkey:", &row.machine_key) != record.machine_key_hex
+            || record
+                .node_id
+                .is_some_and(|id| u64::try_from(row.id).ok() != Some(id))
+        {
+            return Err("node identity changed during logout".into());
+        }
+        if record.ephemeral {
+            headscale_db::headscale_nodes::destroy_cached_node(&self.pool, row.id)
+                .await
+                .map_err(|error| error.to_string())?;
+        } else if !record.is_tagged() {
+            headscale_db::headscale_nodes::set_expiry_precise(&self.pool, row.id, Some(at))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn persist_last_seen(&self, node_id: u64, at: DateTime<Utc>) -> Result<(), String> {
+        if let Some(registry) = &self.wire_registry {
+            return persist_live_runtime_node_by_id(
+                registry,
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                node_id,
+            )
+            .await
+            .map(|_| ());
+        }
+        let id = i64::try_from(node_id).map_err(|err| err.to_string())?;
+        headscale_db::headscale_nodes::persist_last_seen_at(&self.pool, id, &at)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+impl PersistentPostgresMachineAdmin {
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_atomic_auth_key_registration(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+        credential: Option<NativeAuthKey>,
+        material: Option<Arc<headscale_db::preauth_keys::RegistrationKey>>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        use crate::tailscale_wire::AuthKeyRegistrationError;
+        let capture_from_candidate = credential.is_none() && material.is_none();
+        let (credential, material) = if capture_from_candidate {
+            let material = headscale_db::preauth_keys::get_postgres_by_token_for_registration(
+                &self.pool, candidate,
+            )
+            .await
+            .map_err(|_| {
+                AuthKeyRegistrationError::Credential(crate::tailscale_wire::RedeemError::Unknown)
+            })?;
+            let user = material.user.as_ref().map(|user| {
+                super::users::PersistentUserAdmin::row_to_association_record(user.row.clone())
+            });
+            let credential = NativeAuthKey::from_row(&material.key, Some(user))
+                .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            (Some(credential), Some(Arc::new(material)))
+        } else {
+            (credential, material)
+        };
+        let captured = captured_auth_key(credential.as_ref())?;
+        let mut record = machine_admin_record_from_wire(&wire_record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        let mut plan = self
+            .prepare_auth_path_registration(
+                record,
+                policy,
+                auth_key_id,
+                auth_key_owner_override(&wire_record)
+                    .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?,
+                false,
+                Some(&wire_record),
+                credential.as_ref(),
+                None,
+            )
+            .await
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        if capture_from_candidate {
+            let material = material.as_ref().expect("candidate snapshot captured");
+            headscale_db::auth_key_registration::validate_captured_registration_key(
+                plan.existing.as_ref(),
+                &material.key,
+                &plan.params,
+                require_fresh,
+            )
+            .map_err(atomic_registration_error)?;
+        }
+        let previous_key = plan
+            .existing
+            .as_ref()
+            .map(|row| key_without_prefix("nodekey:", &row.node_key));
+        if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
+            let _persist = registry.lock_native_persistence().await;
+            let live = LiveRegistrationSave::begin(
+                registry,
+                prior,
+                &plan.params,
+                Some(&wire_record),
+                true,
+                plan.associations.clone(),
+            )
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let committed = match captured.as_ref() {
+                Some(key) => {
+                    headscale_db::auth_key_registration::commit_cached_postgres_with_key(
+                        &self.pool,
+                        prior,
+                        live.registration.clone(),
+                        key,
+                    )
+                    .await
+                }
+                None => {
+                    headscale_db::auth_key_registration::commit_cached_postgres(
+                        &self.pool,
+                        prior,
+                        live.registration.clone(),
+                        candidate,
+                        require_fresh,
+                    )
+                    .await
+                }
+            };
+            if let Err(error) = committed {
+                live.rollback(registry).map_err(|rollback| {
+                    AuthKeyRegistrationError::Storage(format!(
+                        "{error}; rollback failed: {rollback}"
+                    ))
+                })?;
+                return Err(if captured.is_some() {
+                    captured_registration_error(error, "writing node to database")
+                } else {
+                    atomic_registration_error(error)
+                });
+            }
+            let previous_key = live.update.before.node_key_hex.clone();
+            let record = live.finish(registry);
+            return Ok(PersistedMachineRegistration {
+                replaced_node_key_hex: (previous_key != record.node_key_hex)
+                    .then_some(previous_key),
+                record,
+            });
+        }
+        if let Some(prior) = plan.existing.as_ref() {
+            let prepared = self
+                .prepare_headless_registration(
+                    prior,
+                    &plan.params,
+                    Some(&wire_record),
+                    true,
+                    plan.associations.clone(),
+                )
+                .await
+                .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let committed = match captured.as_ref() {
+                Some(key) => {
+                    headscale_db::auth_key_registration::commit_cached_postgres_with_key(
+                        &self.pool,
+                        prior,
+                        prepared.registration.clone(),
+                        key,
+                    )
+                    .await
+                }
+                None => {
+                    headscale_db::auth_key_registration::commit_cached_postgres(
+                        &self.pool,
+                        prior,
+                        prepared.registration.clone(),
+                        candidate,
+                        require_fresh,
+                    )
+                    .await
+                }
+            };
+            committed
+                .map_err(|error| captured_registration_error(error, "writing node to database"))?;
+            return Ok(PersistedMachineRegistration {
+                replaced_node_key_hex: previous_key
+                    .filter(|key| key != &prepared.record.node_key_hex),
+                record: prepared.record,
+            });
+        }
+        let node = new_native_registration(&plan.params)
+            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        let row = match captured.as_ref() {
+            Some(key) => {
+                if let Some(material) = &material {
+                    let saved =
+                        headscale_db::auth_key_registration::commit_new_postgres_with_associations(
+                            &self.pool,
+                            node,
+                            key,
+                            (**material).clone(),
+                        )
+                        .await
+                        .map_err(|error| captured_registration_error(error, "creating new node"))?;
+                    apply_new_association_projection(
+                        &mut plan.associations,
+                        &saved.node,
+                        &saved.associations,
+                    )
+                    .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+                    saved.node
+                } else {
+                    headscale_db::auth_key_registration::commit_new_postgres_with_key(
+                        &self.pool, node, key,
+                    )
+                    .await
+                    .map_err(|error| captured_registration_error(error, "creating new node"))?
+                }
+            }
+
+            None => headscale_db::auth_key_registration::commit_new_postgres(
+                &self.pool, node, candidate,
+            )
+            .await
+            .map_err(atomic_registration_error)?,
+        };
+        let record = finish_new_native_registration(
+            self.wire_registry.as_deref(),
+            &row,
+            wire_record,
+            true,
+            plan.associations.clone(),
+        )
+        .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+        Ok(PersistedMachineRegistration {
+            record,
+            replaced_node_key_hex: None,
+        })
+    }
 }
 
 #[cfg(feature = "postgres-sqlx")]
 #[async_trait]
 impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
+    fn runtime_sync_returns_live_snapshot(&self) -> bool {
+        self.wire_registry.is_some()
+    }
+
+    fn supports_guarded_ephemeral_deletion(&self) -> bool {
+        true
+    }
+
+    async fn delete_ephemeral_registration(&self, record: &MachineRecord) -> Result<(), String> {
+        if !record.ephemeral {
+            return Err("refusing ephemeral cleanup of a non-ephemeral node".into());
+        }
+        if let Some(registry) = &self.wire_registry {
+            let id = requested_live_node_id(registry, record)?;
+            return complete_guarded_native_node_deletion(
+                registry,
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                &record.node_key_hex,
+            )
+            .await
+            .map_err(|error| error.to_string());
+        }
+        self.persist_wire_logout(record, Utc::now()).await
+    }
+
+    fn supports_atomic_auth_key_registration(&self) -> bool {
+        true
+    }
+
+    async fn create_or_update_auth_key_registration_atomic(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        self.create_or_update_auth_key_registration_atomic_with_hostinfo(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_hostinfo(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        Box::pin(self.complete_atomic_auth_key_registration(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            hostinfo,
+            None,
+            None,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_or_update_auth_key_registration_atomic_with_lookup(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        candidate: &str,
+        auth_key_id: Option<i64>,
+        require_fresh: bool,
+        hostinfo: Option<Value>,
+        lookup: Option<crate::tailscale_wire::PreauthLookup>,
+    ) -> Result<PersistedMachineRegistration, crate::tailscale_wire::AuthKeyRegistrationError> {
+        let (credential, material) = lookup
+            .map(|lookup| (lookup.native, lookup.native_save))
+            .unwrap_or_default();
+        Box::pin(self.complete_atomic_auth_key_registration(
+            wire_record,
+            policy,
+            candidate,
+            auth_key_id,
+            require_fresh,
+            hostinfo,
+            credential,
+            material,
+        ))
+        .await
+    }
+
     async fn create_or_update_auth_key_registration(
         &self,
         record: MachineRecord,
         policy: &PolicyStore,
         auth_key_id: Option<i64>,
     ) -> Result<PersistedMachineRegistration, String> {
-        let wire_record = record.clone();
-        let result = self
-            .create_or_update_auth_key_path(record, policy, auth_key_id)
+        self.create_or_update_auth_key_registration_with_hostinfo(record, policy, auth_key_id, None)
             .await
-            .map_err(|err| err.to_string())?;
+    }
+
+    async fn create_or_update_auth_key_registration_with_hostinfo(
+        &self,
+        wire_record: MachineRecord,
+        policy: &PolicyStore,
+        auth_key_id: Option<i64>,
+        hostinfo: Option<Value>,
+    ) -> Result<PersistedMachineRegistration, String> {
+        let mut record = machine_admin_record_from_wire(&wire_record);
+        record.register_method = REGISTER_METHOD_AUTH_KEY;
+        let result = self
+            .create_or_update_auth_path_with_hostinfo(
+                record,
+                policy,
+                auth_key_id,
+                auth_key_owner_override(&wire_record).map_err(|error| error.to_string())?,
+                false,
+                Some(&wire_record),
+                hostinfo,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(registry) = &self.wire_registry
+            && let Some(record) = registry.native_registration_record(result.record.node_id)
+        {
+            return Ok(PersistedMachineRegistration {
+                record,
+                replaced_node_key_hex: result.replaced_node_key_hex,
+            });
+        }
         let row = headscale_db::headscale_nodes::get_postgres_by_id(
             &self.pool,
             result.record.node_id as i64,
@@ -1987,7 +5817,7 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
         .await
         .map_err(|err| err.to_string())?;
         let mut record = self
-            .row_to_wire_record(row)
+            .row_to_wire_record_for_publication(row)
             .await
             .map_err(|err| err.to_string())?;
         record.disco_key = wire_record.disco_key;
@@ -2003,23 +5833,31 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
         record: MachineRecord,
         _policy: &PolicyStore,
     ) -> Result<PersistedMachineRegistration, String> {
+        if let Some(registry) = &self.wire_registry {
+            return persist_live_runtime_node(
+                registry,
+                NativeNodeStore::Postgres(self.pool.clone()),
+                &record,
+            )
+            .await;
+        }
         let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
         let row = headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
             .await
             .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
-        let user_id = self
-            .user_id_for_record(&machine_admin_record_from_wire(&record))
-            .await
-            .map_err(|err| err.to_string())?;
-        let mut params = create_params_for_wire_record(&record, user_id, row.auth_key_id);
-        params.ipv6 = row.ipv6.clone();
-        let row = headscale_db::headscale_nodes::update_postgres_from_auth_path(
-            &self.pool, row.id, params,
+        let params = create_params_for_wire_record(&record, row.user_id, row.auth_key_id)
+            .map_err(|error| error.to_string())?;
+        let auto_rename = is_auto_derived_given_name(&row.given_name, &row.hostname);
+        let row = headscale_db::headscale_nodes::update_postgres_runtime_state(
+            &self.pool,
+            &row,
+            params,
+            auto_rename,
         )
         .await
         .map_err(|err| db_error_to_machine(err, &record.node_key_hex).to_string())?;
         let record = self
-            .row_to_wire_record(row)
+            .row_to_wire_record_for_publication(row)
             .await
             .map_err(|err| err.to_string())?;
         Ok(PersistedMachineRegistration {
@@ -2033,27 +5871,298 @@ impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
             .await
             .map_err(|err| err.to_string())
     }
+
+    async fn persist_wire_logout(
+        &self,
+        record: &MachineRecord,
+        at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        if record.ephemeral
+            && let Some(id) = record.node_id
+        {
+            let id = i64::try_from(id).map_err(|_| "invalid cached node identity".to_string())?;
+            let _persist = match &self.wire_registry {
+                Some(registry) => Some(registry.lock_native_persistence().await),
+                None => None,
+            };
+            return headscale_db::headscale_nodes::destroy_postgres_cached_node(&self.pool, id)
+                .await
+                .map_err(|error| error.headscale_go_message());
+        }
+        if !record.ephemeral
+            && !record.is_tagged()
+            && let Some(registry) = &self.wire_registry
+        {
+            return persist_live_logout_expiry(
+                registry,
+                NativeNodeStore::Postgres(self.pool.clone()),
+                record,
+                at,
+            )
+            .await;
+        }
+        let node_key = key_with_prefix("nodekey:", &record.node_key_hex);
+        let row = headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        if key_without_prefix("mkey:", &row.machine_key) != record.machine_key_hex
+            || record
+                .node_id
+                .is_some_and(|id| u64::try_from(row.id).ok() != Some(id))
+        {
+            return Err("node identity changed during logout".into());
+        }
+        if record.ephemeral {
+            headscale_db::headscale_nodes::destroy_postgres_cached_node(&self.pool, row.id)
+                .await
+                .map_err(|error| error.to_string())?;
+        } else if !record.is_tagged() {
+            headscale_db::headscale_nodes::set_postgres_expiry_precise(
+                &self.pool,
+                row.id,
+                Some(at),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn persist_last_seen(&self, node_id: u64, at: DateTime<Utc>) -> Result<(), String> {
+        if let Some(registry) = &self.wire_registry {
+            return persist_live_runtime_node_by_id(
+                registry,
+                NativeNodeStore::Postgres(self.pool.clone()),
+                node_id,
+            )
+            .await
+            .map(|_| ());
+        }
+        let id = i64::try_from(node_id).map_err(|err| err.to_string())?;
+        headscale_db::headscale_nodes::persist_postgres_last_seen_at(&self.pool, id, &at)
+            .await
+            .map_err(|err| err.to_string())
+    }
 }
 
 #[async_trait]
 impl MachineAdmin for PersistentMachineAdmin {
+    fn numeric_mutation_selector(&self, node_id: u64) -> Option<String> {
+        Some(node_id.to_string())
+    }
+
+    async fn get_view(&self, id: &str) -> Result<Option<MachineAdminView>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_view(registry, id);
+        }
+        let row = match self.row_by_slug(id).await {
+            Ok(row) => row,
+            Err(MachineAdminError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let (wire, associations) = self.row_to_wire_record_with_association(&row).await?;
+        admin_view_from_native_row(&row, &wire, associations).map(Some)
+    }
+
+    async fn list_views(&self) -> Result<Vec<MachineAdminView>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_views(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "nodes"))?;
+        let mut views = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (wire, associations) = self.row_to_wire_record_with_association(&row).await?;
+            views.push(admin_view_from_native_row(&row, &wire, associations)?);
+        }
+        Ok(views)
+    }
+
+    async fn mutate_with_view(
+        &self,
+        id: &str,
+        mutation: MachineAdminMutation,
+    ) -> Result<MachineAdminView, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node_with_view(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                mutation,
+            )
+            .await;
+        }
+        mutate_with_fallback_view(self, id, mutation).await
+    }
+
+    async fn policy_nodes_for_registration(
+        &self,
+    ) -> Result<Vec<PolicyCheckNode>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_policy_nodes(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "registration policy nodes"))?;
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+            nodes.push(policy_node_from_native_row(&row, &record, association)?);
+        }
+        Ok(nodes)
+    }
+
+    async fn policy_nodes_for_check(
+        &self,
+    ) -> Result<Vec<PolicyCheckNodeSnapshot>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_policy_check_snapshot(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "policy check nodes"))?;
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+            nodes.push(PolicyCheckNodeSnapshot {
+                node: policy_node_from_native_row(&row, &record, association)?,
+                advertised_routes: record.available_routes,
+                approved_routes: record.approved_routes,
+            });
+        }
+        Ok(nodes)
+    }
+
+    fn mutation_selector(&self, record: &MachineAdminRecord) -> String {
+        let node_id = if record.node_id == 0 {
+            crate::tailscale_wire::wire::stable_id_from_key(&record.id)
+        } else {
+            record.node_id
+        };
+        node_id.to_string()
+    }
+
+    async fn list_checked(&self) -> Result<Vec<MachineAdminRecord>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_records(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "policy nodes"))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(self.row_to_record(row).await);
+        }
+        Ok(records)
+    }
+
     async fn list(&self) -> Vec<MachineAdminRecord> {
-        match headscale_db::headscale_nodes::list(&self.pool).await {
-            Ok(rows) => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    out.push(self.row_to_record(row).await);
-                }
-                out
-            }
-            Err(e) => {
-                tracing::warn!(?e, "persistent machine list failed");
+        match self.list_checked().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(?error, "persistent machine list failed");
                 Vec::new()
             }
         }
     }
 
+    async fn auto_approve_routes(&self, policy: &PolicyStore) -> Result<usize, MachineAdminError> {
+        let store = NativeNodeStore::Sqlite(self.pool.clone());
+        if let Some(registry) = &self.wire_registry {
+            auto_approve_live_registry(policy, registry.clone(), store).await
+        } else {
+            let mut records = self.list_checked().await?;
+            let identities = self.policy_nodes_for_registration().await?;
+            for record in &mut records {
+                if let Some(identity) = identities.iter().find(|node| node.id == record.node_id) {
+                    record.user_id = identity.user_id;
+                    record.user = identity.user.clone().unwrap_or_default();
+                    record.ipv4 = identity
+                        .addrs
+                        .iter()
+                        .find(|addr| !addr.contains(':'))
+                        .cloned()
+                        .unwrap_or_default();
+                    record.ipv6 = identity
+                        .addrs
+                        .iter()
+                        .find(|addr| addr.contains(':'))
+                        .cloned();
+                }
+            }
+            auto_approve_without_registry(policy, records, store).await
+        }
+    }
+
+    async fn registration_guard(
+        &self,
+        machine_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        match &self.wire_registry {
+            Some(registry) => Some(registry.lock_registration(machine_key).await),
+            None => None,
+        }
+    }
+
+    async fn node_key_registration_guard(
+        &self,
+        node_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        match &self.wire_registry {
+            Some(registry) => Some(registry.lock_node_key_registration(node_key).await),
+            None => None,
+        }
+    }
+
+    async fn wire_record(&self, id: &str) -> Result<Option<MachineRecord>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return Ok(WireMachineAdmin::new(registry.clone())
+                .selected_record(&key_without_prefix("nodekey:", id))
+                .map(|(_, record)| record));
+        }
+        let row = self.row_by_slug(id).await?;
+        self.row_to_wire_record(&row).await.map(Some)
+    }
+
+    async fn wire_record_for_publication(
+        &self,
+        id: &str,
+        registry: Option<&MachineRegistry>,
+    ) -> Result<Option<MachineRecord>, MachineAdminError> {
+        if let Some(registry) = registry.or(self.wire_registry.as_deref()) {
+            let cached = registry.get(&key_without_prefix("nodekey:", id));
+            let node_id = cached
+                .as_ref()
+                .map(MachineRecord::stable_node_id)
+                .or_else(|| id.parse().ok());
+            if let Some(record) = node_id.and_then(|id| registry.native_registration_record(id)) {
+                return Ok(Some(record));
+            }
+        }
+        let row = self.row_by_slug(id).await?;
+        let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+        if let Some(registry) = registry {
+            stage_native_row(registry, &row, &record, association)?;
+        }
+        Ok(Some(record))
+    }
+
+    async fn raw_hostname(&self, id: &str) -> Option<String> {
+        if let Some(registry) = &self.wire_registry {
+            return WireMachineAdmin::new(registry.clone())
+                .selected_record(&key_without_prefix("nodekey:", id))
+                .map(|(_, record)| record.raw_hostname);
+        }
+        self.row_by_slug(id).await.ok().map(|row| row.hostname)
+    }
+
     async fn get(&self, id: &str) -> Option<MachineAdminRecord> {
+        if let Some(registry) = &self.wire_registry {
+            return WireMachineAdmin::new(registry.clone())
+                .get(&key_without_prefix("nodekey:", id))
+                .await;
+        }
         match self.row_by_slug(id).await {
             Ok(row) => Some(self.row_to_record(row).await),
             Err(MachineAdminError::NotFound(_)) => None,
@@ -2068,71 +6177,41 @@ impl MachineAdmin for PersistentMachineAdmin {
         &self,
         record: &MachineAdminRecord,
     ) -> Option<MachineAdminRecord> {
-        let user_id = self.user_id_for_record(record).await.ok().flatten();
-        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
-        let existing_for_user = match user_id {
-            Some(user_id) => match headscale_db::headscale_nodes::get_by_machine_key_and_user(
-                &self.pool,
-                &machine_key,
-                user_id,
-            )
+        self.existing_auth_path_record_checked(record)
             .await
-            {
-                Ok(row) => Some(row),
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(_) => return None,
-            },
-            None => None,
+            .ok()
+            .flatten()
+    }
+
+    async fn existing_auth_path_record_checked(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<MachineAdminRecord>, MachineAdminError> {
+        let user_id = self.user_id_for_record(record).await?;
+        if let Some(registry) = &self.wire_registry {
+            registry
+                .validate_registration_node_key(&record.id, &record.machine_key_hex)
+                .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
+        }
+        let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
+        let candidates = if let Some(registry) = &self.wire_registry {
+            registration_rows_from_cache(registry, &record.machine_key_hex)?
+        } else {
+            headscale_db::headscale_nodes::list_by_machine_key(&self.pool, &machine_key)
+                .await
+                .map_err(|error| db_error_to_machine(error, &record.id))?
         };
-        let existing_for_machine =
-            match headscale_db::headscale_nodes::get_by_machine_key(&self.pool, &machine_key).await
-            {
-                Ok(row) => Some(row),
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(_) => return None,
-            };
-        // The same node key re-registering from the same machine is the
-        // same node — `tailscale up` after a control-plane restart, or a
-        // `--reset` — whatever its tag state. Without this rule a
-        // row persisted without a user id (no users store attached) could
-        // only be matched by the tagged-machine rule, so an untagged node's
-        // re-registration fell into `create` and was rejected with
-        // "IPv4 address … already in use" — by its own row.
-        let node_key = key_with_prefix("nodekey:", &record.id);
-        let existing_for_node =
-            match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
-                // …but a different user is a different node (upstream parity:
-                // the same key registering under another user gets a new row).
-                Ok(row) => {
-                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
-                }
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(_) => return None,
-            };
-        // With no users store attached, `user_id` is NULL on both sides and
-        // the (machine key, user) lookup above cannot match. The machine
-        // key alone is then the device's identity, so a re-registration
-        // under a rotated node key — what a stock client does on every
-        // re-auth — must reuse its row instead of leaving a second one
-        // behind, which would show up as a duplicate peer in every netmap.
-        // With a users store, `existing_for_user` is authoritative and this
-        // never fires.
-        let existing_for_unscoped_machine = user_id.is_none().then(|| {
-            existing_for_machine
-                .as_ref()
-                .filter(|row| row.user_id.is_none())
-                .cloned()
-        });
-        let existing = existing_for_user
-            .or(existing_for_node)
-            .or_else(|| existing_for_unscoped_machine.flatten())
-            .or_else(|| {
-                existing_for_machine
-                    .as_ref()
-                    .filter(|row| !row.tag_list().is_empty())
-                    .cloned()
-            })?;
-        Some(self.row_to_record(existing).await)
+        let Some(existing) = select_auth_path_node(
+            candidates,
+            user_id,
+            self.users.is_none(),
+            false,
+            !record.tags.is_empty(),
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.row_to_record(existing).await))
     }
 
     async fn create(
@@ -2144,25 +6223,42 @@ impl MachineAdmin for PersistentMachineAdmin {
                 "node key must not be empty".into(),
             ));
         }
-        let node_key = key_with_prefix("nodekey:", record.id.trim());
-        match headscale_db::headscale_nodes::get_by_node_key(&self.pool, &node_key).await {
-            Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
-            Err(headscale_db::DbError::NotFound(_)) => {}
-            Err(e) => return Err(db_error_to_machine(e, &record.id)),
-        }
-        let ipv4 = optional_ipv4(&record.ipv4)?;
-        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
-        require_any_address(ipv4, ipv6)?;
-        self.reject_duplicate_addresses(None, &record).await?;
-        let user_id = self.user_id_for_record(&record).await?;
-        let row = headscale_db::headscale_nodes::create(
-            &self.pool,
-            create_params_for_record(&record, user_id),
-        )
+        let machine_key = key_without_prefix("mkey:", &record.machine_key_hex);
+        let raw_node_key = key_without_prefix("nodekey:", record.id.trim());
+        let registration = self.registration_guard(&machine_key).await;
+        let node_key_registration = self.node_key_registration_guard(&raw_node_key).await;
+        let administrator = Self::clone(self);
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = registration;
+            let _node_key_registration = node_key_registration;
+            let node_key = key_with_prefix("nodekey:", record.id.trim());
+            match headscale_db::headscale_nodes::get_by_node_key(&administrator.pool, &node_key)
+                .await
+            {
+                Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
+                Err(headscale_db::DbError::NotFound(_)) => {}
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            }
+            let ipv4 = optional_ipv4(&record.ipv4)?;
+            let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+            require_any_address(ipv4, ipv6)?;
+            administrator
+                .reject_duplicate_addresses(None, &record)
+                .await?;
+            let user_id = administrator.user_id_for_record(&record).await?;
+            let row = headscale_db::headscale_nodes::create(
+                &administrator.pool,
+                create_params_for_record(&record, user_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            administrator.sync_wire_row(row.clone()).await?;
+            Ok(administrator.row_to_record(row).await)
+        })
         .await
-        .map_err(|e| db_error_to_machine(e, &record.id))?;
-        self.sync_wire_row(row.clone()).await?;
-        Ok(self.row_to_record(row).await)
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node creation: {error}"))
+        })?
     }
 
     async fn complete_registration(
@@ -2171,13 +6267,46 @@ impl MachineAdmin for PersistentMachineAdmin {
         policy: &PolicyStore,
         wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path_inner(
+        self.complete_registration_with_hostinfo(record, policy, wire_record, None)
+            .await
+    }
+
+    async fn complete_registration_with_hostinfo(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_hostinfo(
             record,
             policy,
             None,
             None,
             true,
             wire_record.as_ref(),
+            hostinfo,
+        )
+        .await
+    }
+
+    async fn complete_registration_with_user_snapshot(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+        user: super::users::UserRegistrationSnapshot,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_user_snapshot(
+            record,
+            policy,
+            None,
+            None,
+            true,
+            wire_record.as_ref(),
+            hostinfo,
+            Some(&user),
         )
         .await
     }
@@ -2187,52 +6316,149 @@ impl MachineAdmin for PersistentMachineAdmin {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
-        let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, Some(stamp))
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::Expiry(Some(expiry.unwrap_or_else(Utc::now))),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let current_key = key_without_prefix("nodekey:", &row.node_key);
+            let stamp = expiry.unwrap_or_else(Utc::now);
+            let row = headscale_db::headscale_nodes::set_expiry_precise(
+                &administrator.pool,
+                row.id,
+                Some(stamp),
+            )
             .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await?;
+            if let Some(registry) = &administrator.wire_registry {
+                registry
+                    .try_set_expiry(&current_key, Some(stamp))
+                    .map_err(MachineAdminError::Policy)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_expiry(&self.pool, row.id, None)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::Expiry(None),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_expiry(&administrator.pool, row.id, None)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::logout(&self.pool, row.id)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::logout(&administrator.pool, row.id)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::Rename(hostname.to_owned()),
+            )
+            .await;
+        }
         if hostname.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "hostname must not be empty".into(),
             ));
         }
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::rename(&self.pool, row.id, hostname)
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        let hostname = hostname.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::rename(
+                &administrator.pool,
+                row.id,
+                hostname.as_str(),
+            )
             .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::Tags(tags),
+            )
+            .await;
+        }
         if tags.is_empty() {
             return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
         }
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_tags(&self.pool, row.id, tags)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_tags(&administrator.pool, row.id, tags)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_approved_routes(
@@ -2240,98 +6466,134 @@ impl MachineAdmin for PersistentMachineAdmin {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_approved_routes(&self.pool, row.id, routes)
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::ApprovedRoutes(routes),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_approved_routes(
+                &administrator.pool,
+                row.id,
+                routes,
+            )
             .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row =
-            headscale_db::headscale_nodes::set_host_info_routable_ips(&self.pool, row.id, routes)
-                .await
-                .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+                NativeNodeMutation::AvailableRoutes(routes),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_host_info_routable_ips(
+                &administrator.pool,
+                row.id,
+                routes,
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn backfill_node_ips(
         &self,
         ip_allocator: Option<&dyn IpAllocator>,
     ) -> Result<Vec<String>, MachineAdminError> {
-        let Some(ip_allocator) = ip_allocator else {
-            return Ok(Vec::new());
-        };
-        let rows = headscale_db::headscale_nodes::list(&self.pool)
+        let ip_allocator = ip_allocator.ok_or_else(|| {
+            MachineAdminError::BadRequest("backfilling IPs: ip allocator was nil".into())
+        })?;
+        let selected = headscale_db::headscale_nodes::list(&self.pool)
             .await
-            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+            .map_err(|error| db_error_to_machine(error, "nodes"))?;
+        let guards = lock_backfill_nodes(self.wire_registry.as_ref(), &selected).await;
+        let mut rows = Vec::with_capacity(selected.len());
+        for before in selected {
+            let row = headscale_db::headscale_nodes::get_by_id(&self.pool, before.id)
+                .await
+                .map_err(|error| db_error_to_machine(error, &before.id.to_string()))?;
+            if row.machine_key != before.machine_key {
+                return Err(MachineAdminError::BadRequest(
+                    "node registration changed during IP backfill; retry backfill".into(),
+                ));
+            }
+            rows.push(row);
+        }
+        // Complete every awaitable snapshot read before reserving addresses.
+        // No cancellation point separates allocation from spawning the owned
+        // transaction/publication worker below.
+        let mut updates = Vec::new();
         let mut changes = Vec::new();
         for row in rows {
-            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
-            let alloc_input = if node_key_hex.is_empty() {
-                row.id.to_string()
-            } else {
-                node_key_hex
-            };
-            let mut next_ipv4 = row.ipv4.clone();
-            let mut next_ipv6 = row.ipv6.clone();
-            let mut changed = false;
-            if !ip_allocator.ipv4_enabled()
-                && let Some(ipv4) = row.ipv4.as_deref().filter(|value| !value.is_empty())
-            {
-                next_ipv4 = None;
-                changed = true;
-                changes.push(format!(
-                    "removing IPv4 \"{ipv4}\" from Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if row.ipv4.as_deref().is_none_or(str::is_empty) && ip_allocator.ipv4_enabled() {
-                let ipv4 = ip_allocator
-                    .allocate(&alloc_input)
-                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv4: {e}")))?
-                    .to_string();
-                next_ipv4 = Some(ipv4.clone());
-                changed = true;
-                changes.push(format!(
-                    "assigned IPv4 \"{ipv4}\" to Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if !ip_allocator.ipv6_enabled()
-                && let Some(ipv6) = row.ipv6.as_deref().filter(|value| !value.is_empty())
-            {
-                next_ipv6 = None;
-                changed = true;
-                changes.push(format!(
-                    "removing IPv6 \"{ipv6}\" from Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if row.ipv6.as_deref().is_none_or(str::is_empty)
-                && ip_allocator.ipv6_enabled()
-                && let Some(ipv6) = ip_allocator
-                    .allocate_ipv6(&alloc_input)
-                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv6: {e}")))?
-            {
-                next_ipv6 = Some(ipv6.to_string());
-                changed = true;
-                changes.push(format!(
-                    "assigned IPv6 \"{ipv6}\" to Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if changed {
-                let row = headscale_db::headscale_nodes::set_ip_addresses(
-                    &self.pool, row.id, next_ipv4, next_ipv6,
-                )
-                .await
-                .map_err(|e| db_error_to_machine(e, &row.id.to_string()))?;
-                self.sync_wire_row(row).await?;
+            let (update, node_changes) = prepare_ip_backfill(&row, ip_allocator)?;
+            if !node_changes.is_empty() {
+                updates.push(update);
+                changes.extend(node_changes);
             }
         }
-        Ok(changes)
+        let administrator = Self::clone(self);
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _guards = guards;
+            headscale_db::headscale_nodes::set_ip_addresses_batch(&administrator.pool, updates)
+                .await
+                .map_err(|error| db_error_to_machine(error, "nodes"))?;
+            if !changes.is_empty()
+                && let Some(registry) = &administrator.wire_registry
+            {
+                let rows = headscale_db::headscale_nodes::list(&administrator.pool)
+                    .await
+                    .map_err(|error| {
+                        MachineAdminError::BadRequest(format!(
+                            "refreshing NodeStore after IP backfill: {error}"
+                        ))
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                let mut native = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let (record, association) = administrator
+                        .row_to_wire_record_with_association(&row)
+                        .await?;
+                    let id = native_row_id(&row)?;
+                    let mut captured = NativeNodePersistence::capture(&row, &record)?;
+                    captured.set_associations(association);
+                    native.push((id, captured));
+                    records.push(record);
+                }
+                registry.refresh_nodes_after_ip_backfill(records, native);
+            }
+            Ok(changes)
+        })
+        .await
+        .map_err(|error| MachineAdminError::BadRequest(format!("finishing IP backfill: {error}")))?
     }
 
     fn notify_user_removed_full_update(&self) -> bool {
@@ -2343,38 +6605,256 @@ impl MachineAdmin for PersistentMachineAdmin {
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
-        headscale_db::headscale_nodes::destroy(&self.pool, row.id)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
         if let Some(registry) = &self.wire_registry {
-            registry.delete(&node_key_hex);
+            return delete_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Sqlite(self.pool.clone()),
+                id,
+            )
+            .await;
         }
-        Ok(())
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+            headscale_db::headscale_nodes::destroy(&administrator.pool, row.id)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            if let Some(registry) = &administrator.wire_registry {
+                registry
+                    .try_delete(&node_key_hex)
+                    .map_err(MachineAdminError::Policy)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 }
 
 #[cfg(feature = "postgres-sqlx")]
 #[async_trait]
 impl MachineAdmin for PersistentPostgresMachineAdmin {
+    fn numeric_mutation_selector(&self, node_id: u64) -> Option<String> {
+        Some(node_id.to_string())
+    }
+
+    async fn get_view(&self, id: &str) -> Result<Option<MachineAdminView>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_view(registry, id);
+        }
+        let row = match self.row_by_slug(id).await {
+            Ok(row) => row,
+            Err(MachineAdminError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let (wire, associations) = self.row_to_wire_record_with_association(&row).await?;
+        admin_view_from_native_row(&row, &wire, associations).map(Some)
+    }
+
+    async fn list_views(&self) -> Result<Vec<MachineAdminView>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_views(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "nodes"))?;
+        let mut views = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (wire, associations) = self.row_to_wire_record_with_association(&row).await?;
+            views.push(admin_view_from_native_row(&row, &wire, associations)?);
+        }
+        Ok(views)
+    }
+
+    async fn mutate_with_view(
+        &self,
+        id: &str,
+        mutation: MachineAdminMutation,
+    ) -> Result<MachineAdminView, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node_with_view(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                mutation,
+            )
+            .await;
+        }
+        mutate_with_fallback_view(self, id, mutation).await
+    }
+
+    async fn policy_nodes_for_registration(
+        &self,
+    ) -> Result<Vec<PolicyCheckNode>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_policy_nodes(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "registration policy nodes"))?;
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+            nodes.push(policy_node_from_native_row(&row, &record, association)?);
+        }
+        Ok(nodes)
+    }
+
+    async fn policy_nodes_for_check(
+        &self,
+    ) -> Result<Vec<PolicyCheckNodeSnapshot>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_policy_check_snapshot(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "policy check nodes"))?;
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+            nodes.push(PolicyCheckNodeSnapshot {
+                node: policy_node_from_native_row(&row, &record, association)?,
+                advertised_routes: record.available_routes,
+                approved_routes: record.approved_routes,
+            });
+        }
+        Ok(nodes)
+    }
+
+    fn mutation_selector(&self, record: &MachineAdminRecord) -> String {
+        let node_id = if record.node_id == 0 {
+            crate::tailscale_wire::wire::stable_id_from_key(&record.id)
+        } else {
+            record.node_id
+        };
+        node_id.to_string()
+    }
+
+    async fn list_checked(&self) -> Result<Vec<MachineAdminRecord>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return checked_live_records(registry);
+        }
+        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+            .await
+            .map_err(|error| db_error_to_machine(error, "policy nodes"))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(self.row_to_record(row).await);
+        }
+        Ok(records)
+    }
+
     async fn list(&self) -> Vec<MachineAdminRecord> {
-        match headscale_db::headscale_nodes::list_postgres(&self.pool).await {
-            Ok(rows) => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    out.push(self.row_to_record(row).await);
-                }
-                out
-            }
-            Err(e) => {
-                tracing::warn!(?e, "persistent postgres machine list failed");
+        match self.list_checked().await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(?error, "persistent postgres machine list failed");
                 Vec::new()
             }
         }
     }
 
+    async fn auto_approve_routes(&self, policy: &PolicyStore) -> Result<usize, MachineAdminError> {
+        let store = NativeNodeStore::Postgres(self.pool.clone());
+        if let Some(registry) = &self.wire_registry {
+            auto_approve_live_registry(policy, registry.clone(), store).await
+        } else {
+            let mut records = self.list_checked().await?;
+            let identities = self.policy_nodes_for_registration().await?;
+            for record in &mut records {
+                if let Some(identity) = identities.iter().find(|node| node.id == record.node_id) {
+                    record.user_id = identity.user_id;
+                    record.user = identity.user.clone().unwrap_or_default();
+                    record.ipv4 = identity
+                        .addrs
+                        .iter()
+                        .find(|addr| !addr.contains(':'))
+                        .cloned()
+                        .unwrap_or_default();
+                    record.ipv6 = identity
+                        .addrs
+                        .iter()
+                        .find(|addr| addr.contains(':'))
+                        .cloned();
+                }
+            }
+            auto_approve_without_registry(policy, records, store).await
+        }
+    }
+
+    async fn registration_guard(
+        &self,
+        machine_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        match &self.wire_registry {
+            Some(registry) => Some(registry.lock_registration(machine_key).await),
+            None => None,
+        }
+    }
+
+    async fn node_key_registration_guard(
+        &self,
+        node_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        match &self.wire_registry {
+            Some(registry) => Some(registry.lock_node_key_registration(node_key).await),
+            None => None,
+        }
+    }
+
+    async fn wire_record(&self, id: &str) -> Result<Option<MachineRecord>, MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return Ok(WireMachineAdmin::new(registry.clone())
+                .selected_record(&key_without_prefix("nodekey:", id))
+                .map(|(_, record)| record));
+        }
+        let row = self.row_by_slug(id).await?;
+        self.row_to_wire_record(&row).await.map(Some)
+    }
+
+    async fn wire_record_for_publication(
+        &self,
+        id: &str,
+        registry: Option<&MachineRegistry>,
+    ) -> Result<Option<MachineRecord>, MachineAdminError> {
+        if let Some(registry) = registry.or(self.wire_registry.as_deref()) {
+            let cached = registry.get(&key_without_prefix("nodekey:", id));
+            let node_id = cached
+                .as_ref()
+                .map(MachineRecord::stable_node_id)
+                .or_else(|| id.parse().ok());
+            if let Some(record) = node_id.and_then(|id| registry.native_registration_record(id)) {
+                return Ok(Some(record));
+            }
+        }
+        let row = self.row_by_slug(id).await?;
+        let (record, association) = self.row_to_wire_record_with_association(&row).await?;
+        if let Some(registry) = registry {
+            stage_native_row(registry, &row, &record, association)?;
+        }
+        Ok(Some(record))
+    }
+
+    async fn raw_hostname(&self, id: &str) -> Option<String> {
+        if let Some(registry) = &self.wire_registry {
+            return WireMachineAdmin::new(registry.clone())
+                .selected_record(&key_without_prefix("nodekey:", id))
+                .map(|(_, record)| record.raw_hostname);
+        }
+        self.row_by_slug(id).await.ok().map(|row| row.hostname)
+    }
+
     async fn get(&self, id: &str) -> Option<MachineAdminRecord> {
+        if let Some(registry) = &self.wire_registry {
+            return WireMachineAdmin::new(registry.clone())
+                .get(&key_without_prefix("nodekey:", id))
+                .await;
+        }
         match self.row_by_slug(id).await {
             Ok(row) => Some(self.row_to_record(row).await),
             Err(MachineAdminError::NotFound(_)) => None,
@@ -2389,78 +6869,41 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         &self,
         record: &MachineAdminRecord,
     ) -> Option<MachineAdminRecord> {
-        let user_id = self.user_id_for_record(record).await.ok().flatten();
+        self.existing_auth_path_record_checked(record)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn existing_auth_path_record_checked(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<MachineAdminRecord>, MachineAdminError> {
+        let user_id = self.user_id_for_record(record).await?;
+        if let Some(registry) = &self.wire_registry {
+            registry
+                .validate_registration_node_key(&record.id, &record.machine_key_hex)
+                .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
+        }
         let machine_key = key_with_prefix("mkey:", &record.machine_key_hex);
-        let existing_for_user = match user_id {
-            Some(user_id) => {
-                match headscale_db::headscale_nodes::get_postgres_by_machine_key_and_user(
-                    &self.pool,
-                    &machine_key,
-                    user_id,
-                )
+        let candidates = if let Some(registry) = &self.wire_registry {
+            registration_rows_from_cache(registry, &record.machine_key_hex)?
+        } else {
+            headscale_db::headscale_nodes::list_postgres_by_machine_key(&self.pool, &machine_key)
                 .await
-                {
-                    Ok(row) => Some(row),
-                    Err(headscale_db::DbError::NotFound(_)) => None,
-                    Err(_) => return None,
-                }
-            }
-            None => None,
+                .map_err(|error| db_error_to_machine(error, &record.id))?
         };
-        let existing_for_machine = match headscale_db::headscale_nodes::get_postgres_by_machine_key(
-            &self.pool,
-            &machine_key,
-        )
-        .await
-        {
-            Ok(row) => Some(row),
-            Err(headscale_db::DbError::NotFound(_)) => None,
-            Err(_) => return None,
+        let Some(existing) = select_auth_path_node(
+            candidates,
+            user_id,
+            self.users.is_none(),
+            false,
+            !record.tags.is_empty(),
+        )?
+        else {
+            return Ok(None);
         };
-        // The same node key re-registering from the same machine is the
-        // same node — `tailscale up` after a control-plane restart, or a
-        // `--reset` — whatever its tag state. Without this rule a
-        // row persisted without a user id (no users store attached) could
-        // only be matched by the tagged-machine rule, so an untagged node's
-        // re-registration fell into `create` and was rejected with
-        // "IPv4 address … already in use" — by its own row.
-        let node_key = key_with_prefix("nodekey:", &record.id);
-        let existing_for_node =
-            match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key)
-                .await
-            {
-                // …but a different user is a different node (upstream parity:
-                // the same key registering under another user gets a new row).
-                Ok(row) => {
-                    (row.machine_key == machine_key && row.user_id == user_id).then_some(row)
-                }
-                Err(headscale_db::DbError::NotFound(_)) => None,
-                Err(_) => return None,
-            };
-        // With no users store attached, `user_id` is NULL on both sides and
-        // the (machine key, user) lookup above cannot match. The machine
-        // key alone is then the device's identity, so a re-registration
-        // under a rotated node key — what a stock client does on every
-        // re-auth — must reuse its row instead of leaving a second one
-        // behind, which would show up as a duplicate peer in every netmap.
-        // With a users store, `existing_for_user` is authoritative and this
-        // never fires.
-        let existing_for_unscoped_machine = user_id.is_none().then(|| {
-            existing_for_machine
-                .as_ref()
-                .filter(|row| row.user_id.is_none())
-                .cloned()
-        });
-        let existing = existing_for_user
-            .or(existing_for_node)
-            .or_else(|| existing_for_unscoped_machine.flatten())
-            .or_else(|| {
-                existing_for_machine
-                    .as_ref()
-                    .filter(|row| !row.tag_list().is_empty())
-                    .cloned()
-            })?;
-        Some(self.row_to_record(existing).await)
+        Ok(Some(self.row_to_record(existing).await))
     }
 
     async fn create(
@@ -2472,25 +6915,45 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
                 "node key must not be empty".into(),
             ));
         }
-        let node_key = key_with_prefix("nodekey:", record.id.trim());
-        match headscale_db::headscale_nodes::get_postgres_by_node_key(&self.pool, &node_key).await {
-            Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
-            Err(headscale_db::DbError::NotFound(_)) => {}
-            Err(e) => return Err(db_error_to_machine(e, &record.id)),
-        }
-        let ipv4 = optional_ipv4(&record.ipv4)?;
-        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
-        require_any_address(ipv4, ipv6)?;
-        self.reject_duplicate_addresses(None, &record).await?;
-        let user_id = self.user_id_for_record(&record).await?;
-        let row = headscale_db::headscale_nodes::create_postgres(
-            &self.pool,
-            create_params_for_record(&record, user_id),
-        )
+        let machine_key = key_without_prefix("mkey:", &record.machine_key_hex);
+        let raw_node_key = key_without_prefix("nodekey:", record.id.trim());
+        let registration = self.registration_guard(&machine_key).await;
+        let node_key_registration = self.node_key_registration_guard(&raw_node_key).await;
+        let administrator = Self::clone(self);
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = registration;
+            let _node_key_registration = node_key_registration;
+            let node_key = key_with_prefix("nodekey:", record.id.trim());
+            match headscale_db::headscale_nodes::get_postgres_by_node_key(
+                &administrator.pool,
+                &node_key,
+            )
+            .await
+            {
+                Ok(_) => return Err(MachineAdminError::BadRequest("node already exists".into())),
+                Err(headscale_db::DbError::NotFound(_)) => {}
+                Err(e) => return Err(db_error_to_machine(e, &record.id)),
+            }
+            let ipv4 = optional_ipv4(&record.ipv4)?;
+            let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
+            require_any_address(ipv4, ipv6)?;
+            administrator
+                .reject_duplicate_addresses(None, &record)
+                .await?;
+            let user_id = administrator.user_id_for_record(&record).await?;
+            let row = headscale_db::headscale_nodes::create_postgres(
+                &administrator.pool,
+                create_params_for_record(&record, user_id),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &record.id))?;
+            administrator.sync_wire_row(row.clone()).await?;
+            Ok(administrator.row_to_record(row).await)
+        })
         .await
-        .map_err(|e| db_error_to_machine(e, &record.id))?;
-        self.sync_wire_row(row.clone()).await?;
-        Ok(self.row_to_record(row).await)
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node creation: {error}"))
+        })?
     }
 
     async fn complete_registration(
@@ -2499,13 +6962,46 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         policy: &PolicyStore,
         wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        self.create_or_update_auth_path_inner(
+        self.complete_registration_with_hostinfo(record, policy, wire_record, None)
+            .await
+    }
+
+    async fn complete_registration_with_hostinfo(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_hostinfo(
             record,
             policy,
             None,
             None,
             true,
             wire_record.as_ref(),
+            hostinfo,
+        )
+        .await
+    }
+
+    async fn complete_registration_with_user_snapshot(
+        &self,
+        record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+        user: super::users::UserRegistrationSnapshot,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        self.create_or_update_auth_path_with_user_snapshot(
+            record,
+            policy,
+            None,
+            None,
+            true,
+            wire_record.as_ref(),
+            hostinfo,
+            Some(&user),
         )
         .await
     }
@@ -2515,53 +7011,154 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let stamp = expiry.unwrap_or_else(Utc::now).timestamp();
-        let row =
-            headscale_db::headscale_nodes::set_postgres_expiry(&self.pool, row.id, Some(stamp))
-                .await
-                .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::Expiry(Some(expiry.unwrap_or_else(Utc::now))),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let current_key = key_without_prefix("nodekey:", &row.node_key);
+            let stamp = expiry.unwrap_or_else(Utc::now);
+            let row = headscale_db::headscale_nodes::set_postgres_expiry_precise(
+                &administrator.pool,
+                row.id,
+                Some(stamp),
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await?;
+            if let Some(registry) = &administrator.wire_registry {
+                registry
+                    .try_set_expiry(&current_key, Some(stamp))
+                    .map_err(MachineAdminError::Policy)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_postgres_expiry(&self.pool, row.id, None)
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::Expiry(None),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_postgres_expiry(
+                &administrator.pool,
+                row.id,
+                None,
+            )
             .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::logout_postgres(&self.pool, row.id)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::logout_postgres(&administrator.pool, row.id)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::Rename(hostname.to_owned()),
+            )
+            .await;
+        }
         if hostname.trim().is_empty() {
             return Err(MachineAdminError::BadRequest(
                 "hostname must not be empty".into(),
             ));
         }
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::rename_postgres(&self.pool, row.id, hostname)
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        let hostname = hostname.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::rename_postgres(
+                &administrator.pool,
+                row.id,
+                hostname.as_str(),
+            )
             .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), MachineAdminError> {
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::Tags(tags),
+            )
+            .await;
+        }
         if tags.is_empty() {
             return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
         }
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_postgres_tags(&self.pool, row.id, tags)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row =
+                headscale_db::headscale_nodes::set_postgres_tags(&administrator.pool, row.id, tags)
+                    .await
+                    .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_approved_routes(
@@ -2569,100 +7166,137 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row =
-            headscale_db::headscale_nodes::set_postgres_approved_routes(&self.pool, row.id, routes)
-                .await
-                .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::ApprovedRoutes(routes),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_postgres_approved_routes(
+                &administrator.pool,
+                row.id,
+                routes,
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let row = headscale_db::headscale_nodes::set_postgres_host_info_routable_ips(
-            &self.pool, row.id, routes,
-        )
+        if let Some(registry) = &self.wire_registry {
+            return mutate_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+                NativeNodeMutation::AvailableRoutes(routes),
+            )
+            .await;
+        }
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let row = headscale_db::headscale_nodes::set_postgres_host_info_routable_ips(
+                &administrator.pool,
+                row.id,
+                routes,
+            )
+            .await
+            .map_err(|e| db_error_to_machine(e, &id))?;
+            administrator.sync_wire_row(row).await
+        })
         .await
-        .map_err(|e| db_error_to_machine(e, id))?;
-        self.sync_wire_row(row).await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 
     async fn backfill_node_ips(
         &self,
         ip_allocator: Option<&dyn IpAllocator>,
     ) -> Result<Vec<String>, MachineAdminError> {
-        let Some(ip_allocator) = ip_allocator else {
-            return Ok(Vec::new());
-        };
-        let rows = headscale_db::headscale_nodes::list_postgres(&self.pool)
+        let ip_allocator = ip_allocator.ok_or_else(|| {
+            MachineAdminError::BadRequest("backfilling IPs: ip allocator was nil".into())
+        })?;
+        let selected = headscale_db::headscale_nodes::list_postgres(&self.pool)
             .await
-            .map_err(|e| db_error_to_machine(e, "nodes"))?;
+            .map_err(|error| db_error_to_machine(error, "nodes"))?;
+        let guards = lock_backfill_nodes(self.wire_registry.as_ref(), &selected).await;
+        let mut rows = Vec::with_capacity(selected.len());
+        for before in selected {
+            let row = headscale_db::headscale_nodes::get_postgres_by_id(&self.pool, before.id)
+                .await
+                .map_err(|error| db_error_to_machine(error, &before.id.to_string()))?;
+            if row.machine_key != before.machine_key {
+                return Err(MachineAdminError::BadRequest(
+                    "node registration changed during IP backfill; retry backfill".into(),
+                ));
+            }
+            rows.push(row);
+        }
+        // Complete every awaitable snapshot read before reserving addresses.
+        // No cancellation point separates allocation from spawning the owned
+        // transaction/publication worker below.
+        let mut updates = Vec::new();
         let mut changes = Vec::new();
         for row in rows {
-            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
-            let alloc_input = if node_key_hex.is_empty() {
-                row.id.to_string()
-            } else {
-                node_key_hex
-            };
-            let mut next_ipv4 = row.ipv4.clone();
-            let mut next_ipv6 = row.ipv6.clone();
-            let mut changed = false;
-            if !ip_allocator.ipv4_enabled()
-                && let Some(ipv4) = row.ipv4.as_deref().filter(|value| !value.is_empty())
-            {
-                next_ipv4 = None;
-                changed = true;
-                changes.push(format!(
-                    "removing IPv4 \"{ipv4}\" from Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if row.ipv4.as_deref().is_none_or(str::is_empty) && ip_allocator.ipv4_enabled() {
-                let ipv4 = ip_allocator
-                    .allocate(&alloc_input)
-                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv4: {e}")))?
-                    .to_string();
-                next_ipv4 = Some(ipv4.clone());
-                changed = true;
-                changes.push(format!(
-                    "assigned IPv4 \"{ipv4}\" to Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if !ip_allocator.ipv6_enabled()
-                && let Some(ipv6) = row.ipv6.as_deref().filter(|value| !value.is_empty())
-            {
-                next_ipv6 = None;
-                changed = true;
-                changes.push(format!(
-                    "removing IPv6 \"{ipv6}\" from Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if row.ipv6.as_deref().is_none_or(str::is_empty)
-                && ip_allocator.ipv6_enabled()
-                && let Some(ipv6) = ip_allocator
-                    .allocate_ipv6(&alloc_input)
-                    .map_err(|e| MachineAdminError::BadRequest(format!("allocating IPv6: {e}")))?
-            {
-                next_ipv6 = Some(ipv6.to_string());
-                changed = true;
-                changes.push(format!(
-                    "assigned IPv6 \"{ipv6}\" to Node({}) \"{}\"",
-                    row.id, row.hostname
-                ));
-            }
-            if changed {
-                let row = headscale_db::headscale_nodes::set_postgres_ip_addresses(
-                    &self.pool, row.id, next_ipv4, next_ipv6,
-                )
-                .await
-                .map_err(|e| db_error_to_machine(e, &row.id.to_string()))?;
-                self.sync_wire_row(row).await?;
+            let (update, node_changes) = prepare_ip_backfill(&row, ip_allocator)?;
+            if !node_changes.is_empty() {
+                updates.push(update);
+                changes.extend(node_changes);
             }
         }
-        Ok(changes)
+        let administrator = Self::clone(self);
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _guards = guards;
+            headscale_db::headscale_nodes::set_postgres_ip_addresses_batch(
+                &administrator.pool,
+                updates,
+            )
+            .await
+            .map_err(|error| db_error_to_machine(error, "nodes"))?;
+            if !changes.is_empty()
+                && let Some(registry) = &administrator.wire_registry
+            {
+                let rows = headscale_db::headscale_nodes::list_postgres(&administrator.pool)
+                    .await
+                    .map_err(|error| {
+                        MachineAdminError::BadRequest(format!(
+                            "refreshing NodeStore after IP backfill: {error}"
+                        ))
+                    })?;
+                let mut records = Vec::with_capacity(rows.len());
+                let mut native = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let (record, association) = administrator
+                        .row_to_wire_record_with_association(&row)
+                        .await?;
+                    let id = native_row_id(&row)?;
+                    let mut captured = NativeNodePersistence::capture(&row, &record)?;
+                    captured.set_associations(association);
+                    native.push((id, captured));
+                    records.push(record);
+                }
+                registry.refresh_nodes_after_ip_backfill(records, native);
+            }
+            Ok(changes)
+        })
+        .await
+        .map_err(|error| MachineAdminError::BadRequest(format!("finishing IP backfill: {error}")))?
     }
 
     fn notify_user_removed_full_update(&self) -> bool {
@@ -2674,66 +7308,168 @@ impl MachineAdmin for PersistentPostgresMachineAdmin {
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
-        let row = self.row_by_slug(id).await?;
-        let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
-        headscale_db::headscale_nodes::destroy_postgres(&self.pool, row.id)
-            .await
-            .map_err(|e| db_error_to_machine(e, id))?;
         if let Some(registry) = &self.wire_registry {
-            registry.delete(&node_key_hex);
+            return delete_live_native_node(
+                registry.clone(),
+                NativeNodeStore::Postgres(self.pool.clone()),
+                id,
+            )
+            .await;
         }
-        Ok(())
+        let (_registration, row) = self.lock_existing_node(id).await?;
+        let administrator = Self::clone(self);
+        let id = id.to_owned();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _registration = _registration;
+            let node_key_hex = key_without_prefix("nodekey:", &row.node_key);
+            headscale_db::headscale_nodes::destroy_postgres(&administrator.pool, row.id)
+                .await
+                .map_err(|e| db_error_to_machine(e, &id))?;
+            if let Some(registry) = &administrator.wire_registry {
+                registry
+                    .try_delete(&node_key_hex)
+                    .map_err(MachineAdminError::Policy)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            MachineAdminError::BadRequest(format!("finishing node mutation: {error}"))
+        })?
     }
 }
 
 #[async_trait]
 impl MachineAdmin for WireMachineAdmin {
+    fn numeric_mutation_selector(&self, node_id: u64) -> Option<String> {
+        Some(node_id.to_string())
+    }
+
+    async fn get_view(&self, id: &str) -> Result<Option<MachineAdminView>, MachineAdminError> {
+        checked_live_view(&self.registry, id)
+    }
+
+    async fn list_views(&self) -> Result<Vec<MachineAdminView>, MachineAdminError> {
+        checked_live_views(&self.registry)
+    }
+
+    async fn mutate_with_view(
+        &self,
+        id: &str,
+        mutation: MachineAdminMutation,
+    ) -> Result<MachineAdminView, MachineAdminError> {
+        mutate_live_native_node_with_view(
+            self.registry.clone(),
+            NativeNodeStore::Volatile,
+            id,
+            mutation,
+        )
+        .await
+    }
+
+    async fn policy_nodes_for_registration(
+        &self,
+    ) -> Result<Vec<PolicyCheckNode>, MachineAdminError> {
+        checked_live_policy_nodes(&self.registry)
+    }
+
+    async fn policy_nodes_for_check(
+        &self,
+    ) -> Result<Vec<PolicyCheckNodeSnapshot>, MachineAdminError> {
+        checked_live_policy_check_snapshot(&self.registry)
+    }
+
+    async fn list_checked(&self) -> Result<Vec<MachineAdminRecord>, MachineAdminError> {
+        checked_live_records(&self.registry)
+    }
+
+    async fn auto_approve_routes(&self, policy: &PolicyStore) -> Result<usize, MachineAdminError> {
+        auto_approve_live_registry(policy, self.registry.clone(), NativeNodeStore::Volatile).await
+    }
+
+    fn mutation_selector(&self, record: &MachineAdminRecord) -> String {
+        let node_id = if record.node_id == 0 {
+            crate::tailscale_wire::wire::stable_id_from_key(&record.id)
+        } else {
+            record.node_id
+        };
+        node_id.to_string()
+    }
+
     async fn list(&self) -> Vec<MachineAdminRecord> {
-        let deleted = self.deleted.read();
-        let expired = self.expired.read();
         let online_states = self.registry.online_states();
-        // #238: walk the snapshot's borrowed entries; only allocate
-        // for records that survive the `deleted` filter.
+        // #238: walk borrowed entries and clone only the admin DTO fields.
         let snapshot = self.registry.snapshot();
         let mut out: Vec<_> = snapshot
             .iter()
-            .filter(|(k, _)| !deleted.contains(k.as_str()))
             .map(|(k, rec)| {
-                let is_exp = expired.contains(k.as_str());
                 let online = online_states
                     .get(&rec.stable_node_id_for_key(k))
                     .copied()
                     .unwrap_or(false);
-                Self::render(k.as_str(), rec, is_exp, online)
+                Self::render(k.as_str(), rec, online)
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         out
     }
 
+    async fn registration_guard(
+        &self,
+        machine_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Some(self.registry.lock_registration(machine_key).await)
+    }
+
+    async fn node_key_registration_guard(
+        &self,
+        node_key: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Some(self.registry.lock_node_key_registration(node_key).await)
+    }
+
+    async fn wire_record(&self, id: &str) -> Result<Option<MachineRecord>, MachineAdminError> {
+        Ok(self.selected_record(id).map(|(_, record)| record))
+    }
+
+    async fn raw_hostname(&self, id: &str) -> Option<String> {
+        self.selected_record(id)
+            .map(|(_, record)| record.raw_hostname)
+    }
+
     async fn get(&self, id: &str) -> Option<MachineAdminRecord> {
-        if self.deleted.read().contains(id) {
-            return None;
-        }
-        let rec = self.registry.get(id)?;
-        let is_exp = self.expired.read().contains(id);
+        let (current_key, rec) = self.selected_record(id)?;
         let online = self
             .registry
             .online_states()
-            .get(&rec.stable_node_id_for_key(id))
+            .get(&rec.stable_node_id_for_key(&current_key))
             .copied()
             .unwrap_or(false);
-        Some(Self::render(id, &rec, is_exp, online))
+        Some(Self::render(&current_key, &rec, online))
     }
 
     async fn existing_auth_path_record(
         &self,
         record: &MachineAdminRecord,
     ) -> Option<MachineAdminRecord> {
-        let (_, existing) = self
+        self.existing_auth_path_record_checked(record)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn existing_auth_path_record_checked(
+        &self,
+        record: &MachineAdminRecord,
+    ) -> Result<Option<MachineAdminRecord>, MachineAdminError> {
+        self.registry
+            .validate_registration_node_key(&record.id, &record.machine_key_hex)
+            .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
+        let existing = self
             .registry
-            .get_by_machine_key_for_user(&record.machine_key_hex, &record.user)?;
-        Some(machine_admin_record_from_wire(&existing))
+            .auth_path_existing_machine(&record.machine_key_hex, &record.user, record.user_id)
+            .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
+        Ok(existing.map(|(_, existing)| machine_admin_record_from_wire(&existing)))
     }
 
     async fn create(
@@ -2745,79 +7481,70 @@ impl MachineAdmin for WireMachineAdmin {
                 "node key must not be empty".into(),
             ));
         }
-        if self.registry.get(&record.id).is_some() {
-            return Err(MachineAdminError::BadRequest("node already exists".into()));
+        let mut wire = machine_admin_record_to_wire(&record)?;
+        if wire.is_tagged() {
+            wire.clear_user_identity();
         }
-        let ipv4 = optional_ipv4(&record.ipv4)?;
-        let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
-        require_any_address(ipv4, ipv6)?;
-        let snapshot = self.registry.snapshot();
-        for (node_key, existing) in snapshot.iter() {
-            if node_key == &record.id {
-                continue;
-            }
-            if let Some(ipv4) = ipv4
-                && existing.ipv4 == Some(ipv4)
-            {
-                return Err(MachineAdminError::BadRequest(format!(
-                    "IPv4 address {ipv4} already in use"
-                )));
-            }
-            if let Some(ipv6) = ipv6
-                && existing.ipv6 == Some(ipv6)
-            {
-                return Err(MachineAdminError::BadRequest(format!(
-                    "IPv6 address {ipv6} already in use"
-                )));
-            }
-        }
-        let created_at =
-            DateTime::from_timestamp(record.created_at as i64, 0).unwrap_or_else(Utc::now);
-        let expiry = record
-            .expiry
-            .and_then(|seconds| DateTime::from_timestamp(seconds as i64, 0));
-        let mut rec = crate::tailscale_wire::MachineRecord::new_at_with_addresses(
-            created_at,
-            record.id.clone(),
-            record.machine_key_hex.clone(),
-            record.user.clone(),
-            record.name.clone(),
-            ipv4,
-            ipv6,
-            false,
-        );
-        rec.node_id = (record.node_id != 0).then_some(record.node_id);
-        rec.expiry = expiry;
-        rec.last_seen = DateTime::from_timestamp(record.last_seen as i64, 0).unwrap_or(created_at);
-        rec.os = record.os.clone();
-        rec.os_version = record.version.clone();
-        rec.forced_tags = record.tags.clone();
-        rec.available_routes = record.routes.clone();
-        rec.approved_routes = record.approved_routes.clone();
-        rec.register_method = record.register_method;
-
-        self.registry.upsert(record.id.clone(), rec);
-        self.deleted.write().remove(&record.id);
-        self.expired.write().remove(&record.id);
-        self.get(&record.id)
-            .await
-            .ok_or(MachineAdminError::NotFound(record.id))
+        let _registration = self.registry.lock_registration(&wire.machine_key_hex).await;
+        let _node_key_registration = self
+            .registry
+            .lock_node_key_registration(&wire.node_key_hex)
+            .await;
+        let committed = self
+            .registry
+            .insert_volatile_admin_record(wire)
+            .map_err(MachineAdminError::from)?;
+        let online = self
+            .registry
+            .online_states()
+            .get(&committed.stable_node_id_for_key(&committed.node_key_hex))
+            .copied()
+            .unwrap_or(false);
+        Ok(Self::render(&committed.node_key_hex, &committed, online))
     }
 
     async fn complete_registration(
         &self,
         record: MachineAdminRecord,
-        _policy: &PolicyStore,
+        policy: &PolicyStore,
         wire_record: Option<MachineRecord>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
-        let wire = canonical_wire_record_for_auth_path(&record, wire_record.as_ref())?;
-        let old_node_key_hex = self
+        self.complete_registration_with_hostinfo(record, policy, wire_record, None)
+            .await
+    }
+
+    async fn complete_registration_with_hostinfo(
+        &self,
+        mut record: MachineAdminRecord,
+        policy: &PolicyStore,
+        wire_record: Option<MachineRecord>,
+        hostinfo: Option<Value>,
+    ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
+        let existing = self
             .registry
-            .get_by_machine_key_for_user(&wire.machine_key_hex, &record.user)
-            .map(|(node_key, _)| node_key);
-        let registered =
-            self.registry
-                .complete_web_registration(wire, &record.user, record.register_method);
+            .auth_path_existing_machine(&record.machine_key_hex, &record.user, record.user_id)
+            .map_err(|error| MachineAdminError::BadRequest(error.into()))?;
+        let existing_record = existing
+            .as_ref()
+            .map(|(_, node)| machine_admin_record_from_wire(node));
+        let nodes = if record.tags.is_empty() {
+            Vec::new()
+        } else {
+            self.policy_nodes_for_registration().await?
+        };
+        validate_auth_path_tags_with_nodes(policy, &mut record, existing_record.as_ref(), &nodes)
+            .map_err(MachineAdminError::BadRequest)?;
+        let old_node_key_hex = existing.map(|(node_key, _)| node_key);
+        let wire = canonical_wire_record_for_auth_path(&record, wire_record.as_ref())?;
+        let registered = self
+            .registry
+            .complete_web_registration_with_hostinfo(
+                wire,
+                &record.user,
+                record.register_method,
+                hostinfo,
+            )
+            .map_err(MachineAdminError::from)?;
         let replaced_node_key_hex = old_node_key_hex
             .as_ref()
             .filter(|old_node_key_hex| *old_node_key_hex != &registered.node_key_hex)
@@ -2835,56 +7562,53 @@ impl MachineAdmin for WireMachineAdmin {
         id: &str,
         expiry: Option<DateTime<Utc>>,
     ) -> Result<(), MachineAdminError> {
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        // Sidecar bit keeps the admin's intent visible even after the
-        // wire `expiry` is cleared by a future "unexpire" admin verb.
-        self.expired.write().insert(id.to_string());
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
         // Write through to the wire layer so the next /map call returns
         // a logout response. `None` ⇒ expire immediately.
         let stamp = expiry.unwrap_or_else(Utc::now);
-        if !self.registry.set_expiry(id, Some(stamp)) {
+        if !self
+            .registry
+            .try_set_expiry(id, Some(stamp))
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
     }
 
     async fn disable_expiry(&self, id: &str) -> Result<(), MachineAdminError> {
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        self.expired.write().remove(id);
-        if !self.registry.set_expiry(id, None) {
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
+        if !self
+            .registry
+            .try_set_expiry(id, None)
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
     }
 
     async fn logout(&self, id: &str) -> Result<(), MachineAdminError> {
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        if !self.registry.logout(id) {
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
+        if !self
+            .registry
+            .try_set_expiry(id, Some(Utc::now()))
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
     }
 
     async fn rename(&self, id: &str, hostname: &str) -> Result<(), MachineAdminError> {
-        if hostname.trim().is_empty() {
-            return Err(MachineAdminError::BadRequest(
-                "hostname must not be empty".into(),
-            ));
-        }
-        if !valid_given_name_label(hostname) {
-            return Err(MachineAdminError::BadRequest(
-                "given name is not a valid DNS label".into(),
-            ));
-        }
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
+        self.registry
+            .validate_given_name(hostname)
+            .map_err(MachineAdminError::BadRequest)?;
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
         if self
             .registry
             .snapshot()
@@ -2895,8 +7619,16 @@ impl MachineAdmin for WireMachineAdmin {
                 "given name already in use by another node".into(),
             ));
         }
-        if !self.registry.rename(id, hostname.to_string()) {
-            return Err(MachineAdminError::NotFound(id.to_string()));
+        if !self
+            .registry
+            .try_rename(id, hostname.to_string())
+            .map_err(MachineAdminError::Policy)?
+        {
+            return Err(if self.registry.get(id).is_some() {
+                MachineAdminError::BadRequest("given name already in use by another node".into())
+            } else {
+                MachineAdminError::NotFound(id.to_string())
+            });
         }
         Ok(())
     }
@@ -2905,10 +7637,13 @@ impl MachineAdmin for WireMachineAdmin {
         if tags.is_empty() {
             return Err(MachineAdminError::BadRequest(EMPTY_TAGS_ERROR.into()));
         }
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        if !self.registry.set_forced_tags(id, tags) {
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
+        if !self
+            .registry
+            .try_set_forced_tags(id, tags)
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
@@ -2919,10 +7654,13 @@ impl MachineAdmin for WireMachineAdmin {
         id: &str,
         routes: Vec<String>,
     ) -> Result<(), MachineAdminError> {
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        if !self.registry.set_approved_routes(id, routes) {
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
+        if !self
+            .registry
+            .try_set_approved_routes(id, routes)
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
@@ -2935,15 +7673,17 @@ impl MachineAdmin for WireMachineAdmin {
         if updates.is_empty() {
             return Ok(0);
         }
-        {
-            let deleted = self.deleted.read();
-            for (id, _) in &updates {
-                if deleted.contains(id.as_str()) {
-                    return Err(MachineAdminError::NotFound(id.clone()));
-                }
-            }
-        }
-        let (changed, missing) = self.registry.set_approved_routes_many(updates);
+        let ids = updates.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let (_registration, current_keys) = self.lock_existing_nodes(&ids).await?;
+        let updates = updates
+            .into_iter()
+            .zip(current_keys)
+            .map(|((_, routes), id)| (id, routes))
+            .collect();
+        let (changed, missing) = self
+            .registry
+            .try_set_approved_routes_many(updates)
+            .map_err(MachineAdminError::Policy)?;
         if let Some(id) = missing.into_iter().next() {
             return Err(MachineAdminError::NotFound(id));
         }
@@ -2951,10 +7691,13 @@ impl MachineAdmin for WireMachineAdmin {
     }
 
     async fn set_routes(&self, id: &str, routes: Vec<String>) -> Result<(), MachineAdminError> {
-        if self.deleted.read().contains(id) || self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
-        }
-        if !self.registry.set_available_routes(id, routes) {
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        let id = current_key.as_str();
+        if !self
+            .registry
+            .try_set_available_routes(id, routes)
+            .map_err(MachineAdminError::Policy)?
+        {
             return Err(MachineAdminError::NotFound(id.to_string()));
         }
         Ok(())
@@ -2966,16 +7709,14 @@ impl MachineAdmin for WireMachineAdmin {
     }
 
     async fn delete(&self, id: &str) -> Result<(), MachineAdminError> {
-        if self.registry.get(id).is_none() {
-            return Err(MachineAdminError::NotFound(id.to_string()));
+        let (_registration, current_key) = self.lock_existing_node(id).await?;
+        if !self
+            .registry
+            .try_delete(&current_key)
+            .map_err(MachineAdminError::Policy)?
+        {
+            return Err(MachineAdminError::NotFound(id.to_owned()));
         }
-        // P1 lifecycle: write through to the wire registry too so the
-        // wire layer stops emitting peer entries / responding to /map.
-        // The sidecar still records the deletion (idempotent for
-        // operators that call delete twice).
-        self.registry.delete(id);
-        self.deleted.write().insert(id.to_string());
-        self.expired.write().remove(id);
         Ok(())
     }
 }
@@ -2995,7 +7736,11 @@ fn create_params_for_record_with_auth_key(
     headscale_db::headscale_nodes::CreateParams {
         machine_key: key_with_prefix("mkey:", &record.machine_key_hex),
         node_key: key_with_prefix("nodekey:", &record.id),
-        disco_key: record.disco_key.clone(),
+        disco_key: if record.disco_key.is_empty() {
+            ZERO_DISCO_KEY.to_string()
+        } else {
+            record.disco_key.clone()
+        },
         endpoints: Vec::new(),
         host_info: host_info_for_record(record),
         ipv4: optional_ipv4_string(&record.ipv4),
@@ -3007,7 +7752,9 @@ fn create_params_for_record_with_auth_key(
         tags: record.tags.clone(),
         auth_key_id,
         expiry: record.expiry.map(|expiry| expiry as i64),
+        expiry_precise: record.expiry_precise,
         last_seen: (record.last_seen != 0).then_some(record.last_seen as i64),
+        last_seen_precise: record.last_seen_precise,
         approved_routes: record.approved_routes.clone(),
     }
 }
@@ -3018,12 +7765,72 @@ fn create_params_for_auth_path(
     user_id: Option<i64>,
     auth_key_id: Option<i64>,
     existing: Option<&headscale_db::headscale_nodes::HeadscaleNodeRow>,
-) -> headscale_db::headscale_nodes::CreateParams {
-    let Ok(canonical) = canonical_wire_record_for_auth_path(record, wire_record) else {
-        return create_params_for_record_with_auth_key(record, user_id, auth_key_id);
+) -> Result<headscale_db::headscale_nodes::CreateParams, MachineAdminError> {
+    let mut canonical = canonical_wire_record_for_auth_path(record, wire_record)?;
+    let tagged = !record.tags.is_empty();
+    let was_tagged = match existing {
+        Some(row) => !row
+            .try_tag_list()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+            .is_empty(),
+        None => false,
     };
-    let effective_auth_key_id = auth_key_id.or_else(|| existing.and_then(|row| row.auth_key_id));
-    let mut params = create_params_for_wire_record(&canonical, user_id, effective_auth_key_id);
+    if tagged && existing.is_none() && record.register_method != REGISTER_METHOD_AUTH_KEY {
+        canonical.compact_fresh_web_request_tags();
+    }
+    let effective_user_id = if tagged { None } else { user_id };
+    let effective_auth_key_id = if was_tagged && !tagged {
+        None
+    } else {
+        auth_key_id.or_else(|| existing.and_then(|row| row.auth_key_id))
+    };
+    let preserved_netinfo = if canonical.host_info_for_node().net_info.is_none() {
+        existing
+            .map(headscale_db::headscale_nodes::HeadscaleNodeRow::try_host_info_value)
+            .transpose()
+            .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?
+            .and_then(|value| value.get("NetInfo").cloned())
+    } else {
+        None
+    };
+    if let Some(existing) = existing {
+        let mut host_info = canonical.host_info_for_node();
+        if host_info.net_info.is_none() {
+            host_info.net_info = host_info_from_row(existing)?.net_info;
+        }
+        canonical.replace_host_info(host_info);
+        if canonical.endpoints.is_empty() {
+            canonical.endpoints = existing
+                .try_endpoint_list()
+                .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+        }
+    }
+    let mut params =
+        create_params_for_wire_record(&canonical, effective_user_id, effective_auth_key_id)?;
+    if let Some(netinfo) = preserved_netinfo {
+        params.host_info["NetInfo"] = netinfo;
+    }
+    if record.register_method != REGISTER_METHOD_AUTH_KEY
+        && (!was_tagged || tagged)
+        && let Some(existing) = existing
+    {
+        params.register_method.clone_from(&existing.register_method);
+    }
+    if tagged && was_tagged {
+        let now = Utc::now();
+        params.expiry_precise = existing
+            .and_then(|row| {
+                row.expiry_text
+                    .as_deref()
+                    .and_then(precise_stored_timestamp)
+                    .or_else(|| {
+                        row.expiry
+                            .and_then(|expiry| DateTime::from_timestamp(expiry, 0))
+                    })
+            })
+            .filter(|expiry| *expiry >= now);
+        params.expiry = params.expiry_precise.map(|expiry| expiry.timestamp());
+    }
     if let Some(existing) = existing {
         if !existing.given_name.is_empty()
             && !is_auto_derived_given_name(&existing.given_name, &existing.hostname)
@@ -3036,7 +7843,7 @@ fn create_params_for_auth_path(
         params.given_name.clear();
     }
     params.ipv6.clone_from(&record.ipv6);
-    params
+    Ok(params)
 }
 
 fn canonical_wire_record_for_auth_path(
@@ -3047,25 +7854,37 @@ fn canonical_wire_record_for_auth_path(
         Some(wire_record) => wire_record.clone(),
         None => machine_admin_record_to_wire(record)?,
     };
+    if wire_record.is_some() {
+        canonical
+            .raw_hostname
+            .clone_from(&canonical.host_info.hostname);
+    }
     canonical.node_key_hex.clone_from(&record.id);
     canonical.node_id = (record.node_id != 0).then_some(record.node_id);
     canonical
         .machine_key_hex
         .clone_from(&record.machine_key_hex);
     canonical.user.clone_from(&record.user);
+    canonical.user_id = record.user_id;
     canonical.hostname.clone_from(&record.name);
     let ipv4 = optional_ipv4(&record.ipv4)?;
     let ipv6 = optional_ipv6(record.ipv6.as_deref())?;
     require_any_address(ipv4, ipv6)?;
     canonical.ipv4 = ipv4;
     canonical.ipv6 = ipv6;
-    canonical.last_seen = unix_timestamp_for_record(record.last_seen, &record.id, "last_seen")?;
-    canonical.expiry = record
+    canonical.last_seen = if let Some(value) = record.last_seen_precise {
+        value
+    } else {
+        unix_timestamp_for_record(record.last_seen, &record.id, "last_seen")?
+    };
+    canonical.expiry = record.expiry_precise.or(record
         .expiry
         .map(|expiry| unix_timestamp_for_record(expiry, &record.id, "expiry"))
-        .transpose()?;
-    canonical.os.clone_from(&record.os);
-    canonical.os_version.clone_from(&record.version);
+        .transpose()?);
+    if wire_record.is_none() {
+        canonical.os.clone_from(&record.os);
+        canonical.os_version.clone_from(&record.version);
+    }
     canonical.forced_tags.clone_from(&record.tags);
     canonical.available_routes.clone_from(&record.routes);
     canonical
@@ -3079,14 +7898,17 @@ fn create_params_for_wire_record(
     record: &MachineRecord,
     user_id: Option<i64>,
     auth_key_id: Option<i64>,
-) -> headscale_db::headscale_nodes::CreateParams {
+) -> Result<headscale_db::headscale_nodes::CreateParams, MachineAdminError> {
     let admin = machine_admin_record_from_wire(record);
     let mut params = create_params_for_record_with_auth_key(&admin, user_id, auth_key_id);
-    params.hostname = record.host_info_for_node().hostname;
-    params.disco_key = record.disco_key.clone().unwrap_or_default();
+    params.hostname.clone_from(&record.raw_hostname);
+    params.disco_key = record
+        .disco_key
+        .clone()
+        .unwrap_or_else(|| ZERO_DISCO_KEY.to_string());
     params.endpoints.clone_from(&record.endpoints);
-    params.host_info = host_info_for_wire_record(record);
-    params
+    params.host_info = host_info_for_wire_record(record)?;
+    Ok(params)
 }
 
 fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord {
@@ -3102,8 +7924,11 @@ fn machine_admin_record_from_wire(record: &MachineRecord) -> MachineAdminRecord 
         ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
         online: !expired,
         last_seen: record.last_seen.timestamp().max(0) as u64,
+        last_seen_precise: Some(record.last_seen),
         created_at: record.created_at.timestamp().max(0) as u64,
+        created_at_precise: Some(record.created_at),
         expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
+        expiry_precise: record.expiry,
         machine_key_hex: record.machine_key_hex.clone(),
         disco_key: record.disco_key.clone().unwrap_or_default(),
         os: nonempty_or_unknown(&record.os),
@@ -3124,8 +7949,16 @@ fn machine_admin_record_to_wire(
             "persisted node has empty node key".to_string(),
         ));
     }
-    let created_at = unix_timestamp_for_record(machine.created_at, &machine.id, "created_at")?;
-    let last_seen = unix_timestamp_for_record(machine.last_seen, &machine.id, "last_seen")?;
+    let created_at = if let Some(value) = machine.created_at_precise {
+        value
+    } else {
+        unix_timestamp_for_record(machine.created_at, &machine.id, "created_at")?
+    };
+    let last_seen = if let Some(value) = machine.last_seen_precise {
+        value
+    } else {
+        unix_timestamp_for_record(machine.last_seen, &machine.id, "last_seen")?
+    };
     let ipv4 = optional_ipv4(&machine.ipv4)?;
     let ipv6 = optional_ipv6(machine.ipv6.as_deref())?;
     require_any_address(ipv4, ipv6)?;
@@ -3142,10 +7975,10 @@ fn machine_admin_record_to_wire(
     record.node_id = (machine.node_id != 0).then_some(machine.node_id);
     record.user_id = machine.user_id;
     record.auth_key_id = machine.auth_key_id;
-    record.expiry = machine
+    record.expiry = machine.expiry_precise.or(machine
         .expiry
         .map(|expiry| unix_timestamp_for_record(expiry, &machine.id, "expiry"))
-        .transpose()?;
+        .transpose()?);
     record.last_seen = last_seen;
     record.os.clone_from(&machine.os);
     record.os_version.clone_from(&machine.version);
@@ -3182,10 +8015,6 @@ fn unix_timestamp_for_record(
     })
 }
 
-fn oidc_user_name(user: &crate::oidc::OidcStoredUser) -> String {
-    user.username()
-}
-
 fn user_login_name(user: &crate::admin::users::UserRecord) -> String {
     if !user.email.is_empty() {
         user.email.clone()
@@ -3198,9 +8027,22 @@ fn user_login_name(user: &crate::admin::users::UserRecord) -> String {
     }
 }
 
+fn identity_from_loaded_user(raw_id: Option<i64>, user: Option<&UserRecord>) -> UserIdentity {
+    let mut identity = match user {
+        Some(user) => user_identity_from_record(user),
+        None => UserIdentity {
+            association: Some(None),
+            ..Default::default()
+        },
+    };
+    identity.id = raw_id.and_then(|id| u64::try_from(id).ok());
+    identity
+}
+
 fn user_identity_from_record(user: &UserRecord) -> UserIdentity {
     let login_name = user_login_name(user);
     UserIdentity {
+        association: Some(Some(user.clone())),
         id: Some(user.id),
         display_name: if user.display_name.is_empty() {
             login_name.clone()
@@ -3209,7 +8051,97 @@ fn user_identity_from_record(user: &UserRecord) -> UserIdentity {
         },
         login_name,
         profile_pic_url: user.profile_pic_url.clone(),
+        provider: user.provider.clone(),
+        created_at: user.created_at_precise.or_else(|| {
+            i64::try_from(user.created_at)
+                .ok()
+                .filter(|timestamp| *timestamp > 0)
+                .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+        }),
     }
+}
+
+fn apply_loaded_user_identity(
+    record: &mut MachineRecord,
+    association: Option<&Option<UserRecord>>,
+) {
+    let Some(user) = association else {
+        return;
+    };
+    let identity = user
+        .as_ref()
+        .map(user_identity_from_record)
+        .unwrap_or_default();
+    record.set_user_identity(
+        record.user_id,
+        identity.login_name,
+        identity.display_name,
+        identity.profile_pic_url,
+    );
+    record.set_user_account_metadata(identity.provider, identity.created_at);
+}
+
+fn unloaded_user_identity(raw: Option<i64>) -> UserIdentity {
+    let Some(raw) = raw else {
+        return UserIdentity {
+            association: Some(None),
+            ..Default::default()
+        };
+    };
+    let name = raw.to_string();
+    UserIdentity {
+        id: u64::try_from(raw).ok(),
+        login_name: name.clone(),
+        display_name: name,
+        ..Default::default()
+    }
+}
+
+type RegistrationUserAssociation = (
+    Option<Option<super::users::UserRecord>>,
+    Option<headscale_db::users::UserWriteSnapshot>,
+);
+
+async fn hydrate_wire_owner_from_user_admin(
+    users: Option<&Arc<dyn UserAdmin>>,
+    registry: Option<&MachineRegistry>,
+    user_id: u64,
+    wire_record: &mut MachineRecord,
+) {
+    if wire_record.is_tagged() {
+        wire_record.clear_user_identity();
+        return;
+    }
+    let user = match registry.and_then(|registry| registry.cached_native_user(wire_record)) {
+        Some(Some(user)) => user,
+        Some(None) => {
+            wire_record.set_user_identity(
+                wire_record.user_id,
+                String::new(),
+                String::new(),
+                String::new(),
+            );
+            wire_record.set_user_account_metadata(String::new(), None);
+            return;
+        }
+        None => {
+            let Some(users) = users else {
+                return;
+            };
+            let Ok(Some(user)) = users.get_for_node_association(user_id).await else {
+                return;
+            };
+            user
+        }
+    };
+    let identity = user_identity_from_record(&user);
+    wire_record.set_user_identity(
+        wire_record.user_id,
+        identity.login_name,
+        identity.display_name,
+        identity.profile_pic_url,
+    );
+    wire_record.set_user_account_metadata(identity.provider, identity.created_at);
 }
 
 fn key_with_prefix(prefix: &str, value: &str) -> String {
@@ -3291,8 +8223,24 @@ fn version_from_host_info(host_info: &Value) -> String {
         .to_string()
 }
 
-fn host_info_from_value(host_info: &Value) -> HostInfo {
-    serde_json::from_value(host_info.clone()).unwrap_or_default()
+fn host_info_from_value(host_info: &Value) -> Result<HostInfo, MachineAdminError> {
+    if host_info.is_null() {
+        return Ok(HostInfo::default());
+    }
+    serde_json::from_value(host_info.clone()).map_err(|_| {
+        MachineAdminError::BadRequest(
+            "persisted Hostinfo cannot be represented by the wire projection".into(),
+        )
+    })
+}
+
+fn host_info_from_row(
+    row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
+) -> Result<HostInfo, MachineAdminError> {
+    let value = row
+        .try_host_info_value()
+        .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
+    host_info_from_value(&value)
 }
 
 fn host_info_for_record(record: &MachineAdminRecord) -> Value {
@@ -3304,31 +8252,8 @@ fn host_info_for_record(record: &MachineAdminRecord) -> Value {
     })
 }
 
-fn host_info_for_wire_record(record: &MachineRecord) -> Value {
-    let mut host_info = serde_json::to_value(record.host_info_for_node()).unwrap_or_else(|_| {
-        json!({
-            "Hostname": record.hostname,
-            "OS": record.os,
-            "OSVersion": record.os_version,
-            "RoutableIPs": record.available_routes,
-        })
-    });
-    let Some(fields) = host_info.as_object_mut() else {
-        return host_info;
-    };
-    if record.hostname.is_empty() {
-        fields.remove("Hostname");
-    }
-    if record.os.is_empty() {
-        fields.remove("OS");
-    }
-    if record.os_version.is_empty() {
-        fields.remove("OSVersion");
-    }
-    if record.available_routes.is_empty() {
-        fields.remove("RoutableIPs");
-    }
-    host_info
+fn host_info_for_wire_record(record: &MachineRecord) -> Result<Value, MachineAdminError> {
+    native_snapshot::encode_hostinfo(&record.host_info_for_node())
 }
 
 fn db_error_to_machine(e: headscale_db::DbError, subject: &str) -> MachineAdminError {
@@ -3582,12 +8507,9 @@ mod tests {
         rt().block_on(a.expire_at(&id, Some(future))).unwrap();
         let rec = reg.get(&id).unwrap();
         assert_eq!(rec.expiry, Some(future));
-        // Sidecar bit set ⇒ admin view shows "expired" intent even
-        // though wall-clock hasn't reached the timestamp. (Upstream
-        // behaviour: an operator that scheduled expiry sees the node
-        // greyed out immediately.)
+        // Scheduling a future expiry does not revoke authorization now.
         let view = rt().block_on(a.get(&id)).unwrap();
-        assert!(view.expired);
+        assert!(!view.expired);
     }
 
     /// `logout` preserves the machine key and stamps expiry=now on the wire record.
@@ -3622,13 +8544,15 @@ mod tests {
         rt().block_on(a.set_tags(&id, vec!["tag:prod".into(), "tag:db".into()]))
             .unwrap();
         let view = rt().block_on(a.get(&id)).unwrap();
-        assert_eq!(view.tags, vec!["tag:prod", "tag:db"]);
+        // headscale-go State.SetNodeTags does slices.Sort + slices.Compact on
+        // the validated tags (state.go), so the stored order is sorted.
+        assert_eq!(view.tags, vec!["tag:db", "tag:prod"]);
 
         let err = rt().block_on(a.set_tags(&id, Vec::new())).unwrap_err();
         assert!(matches!(err, MachineAdminError::BadRequest(_)));
         assert_eq!(
             reg.get(&id).unwrap().forced_tags,
-            vec!["tag:prod", "tag:db"]
+            vec!["tag:db", "tag:prod"]
         );
     }
 
@@ -3649,8 +8573,11 @@ mod tests {
             ipv6: Some("fd7a:115c:a1e0::44".into()),
             online: false,
             last_seen: 1_700_000_000,
+            last_seen_precise: None,
             created_at: 1_700_000_000,
+            created_at_precise: None,
             expiry: None,
+            expiry_precise: None,
             machine_key_hex: "dd".repeat(32),
             disco_key: String::new(),
             os: "TestOS".into(),
@@ -3758,8 +8685,11 @@ mod tests {
             ipv6: None,
             online: true,
             last_seen: 1_700_000_000,
+            last_seen_precise: None,
             created_at: 1_700_000_000,
+            created_at_precise: None,
             expiry: None,
+            expiry_precise: None,
             machine_key_hex: "bb".repeat(32),
             disco_key: String::new(),
             os: "linux".into(),
@@ -4192,6 +9122,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_machine_admin_preserves_invalid_stored_given_name_on_wire() {
+        let (admin, db, _users) = persistent_fixture().await;
+        let created = admin.create(persistent_record()).await.unwrap();
+        sqlx::query("UPDATE nodes SET given_name = '' WHERE id = ?")
+            .bind(created.node_id as i64)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let registry = MachineRegistry::new();
+        assert_eq!(admin.hydrate_wire_registry(&registry).await.unwrap(), 1);
+        let wire = registry.get(&created.id).unwrap();
+        assert_eq!(wire.hostname, "");
+        assert_eq!(wire.host_info_for_node().hostname, "alice-laptop");
+    }
+
+    #[tokio::test]
     async fn persistent_machine_admin_reports_live_online_and_last_seen() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
@@ -4202,6 +9149,11 @@ mod tests {
             .with_user_admin(users)
             .with_wire_registry(registry.clone());
         let created = admin.create(persistent_record()).await.unwrap();
+        let registration_store: Arc<dyn MachineRegistrationStore> = Arc::new(admin.clone());
+        let _gc = registry.configure_ephemeral_gc(
+            Some(Arc::downgrade(&registration_store)),
+            std::time::Duration::from_secs(120),
+        );
 
         let offline = admin.get(&created.id).await.unwrap();
         assert!(!offline.online);
@@ -4219,20 +9171,40 @@ mod tests {
         registry.touch_last_seen(&created.id);
         assert!(registry.get(&created.id).unwrap().last_seen >= live.last_seen);
         let touched = admin.get(&created.id).await.unwrap();
-        assert_eq!(
-            touched.last_seen,
-            registry
-                .get(&created.id)
-                .unwrap()
-                .last_seen
-                .timestamp()
-                .max(0) as u64
-        );
+        let live_precise = registry.get(&created.id).unwrap().last_seen;
+        assert_eq!(touched.last_seen, live_precise.timestamp().max(0) as u64);
+        assert_eq!(touched.last_seen_precise, Some(live_precise));
 
         drop(guard);
         tokio::task::yield_now().await;
         let disconnected = admin.get(&created.id).await.unwrap();
         assert!(!disconnected.online);
+        assert_eq!(
+            disconnected.last_seen_precise,
+            Some(registry.get(&created.id).unwrap().last_seen)
+        );
+        let expected = registry
+            .get(&created.id)
+            .unwrap()
+            .last_seen
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let mut stored = String::new();
+        for _ in 0..100 {
+            let row = headscale_db::headscale_nodes::get_by_id(db.pool(), created.node_id as i64)
+                .await
+                .unwrap();
+            stored = row.last_seen_text.unwrap_or_default();
+            if stored == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(stored, expected, "disconnect LastSeen must be durable");
+        let restarted = PersistentMachineAdmin::new(db.pool().clone());
+        assert_eq!(
+            restarted.get(&created.id).await.unwrap().last_seen_precise,
+            disconnected.last_seen_precise
+        );
     }
 
     #[tokio::test]
@@ -4267,13 +9239,16 @@ mod tests {
     async fn persistent_machine_admin_hydration_rejects_invalid_persisted_ip() {
         let (admin, db, users) = persistent_fixture().await;
         let user = users.get("alice").await.unwrap().unwrap();
-        headscale_db::headscale_nodes::create(
+        // The database layer now refuses to write an unparsable address
+        // (Go stores nodes.ipv4 through a netip.Addr text serializer), so
+        // corrupt the persisted row behind its back to exercise hydration.
+        let row = headscale_db::headscale_nodes::create(
             db.pool(),
             headscale_db::headscale_nodes::CreateParams {
                 machine_key: format!("mkey:{}", "bb".repeat(32)),
                 node_key: format!("nodekey:{}", "aa".repeat(32)),
                 host_info: json!({"Hostname": "bad-ip-node"}),
-                ipv4: Some("not-an-ip".into()),
+                ipv4: Some("100.64.0.77".into()),
                 hostname: "bad-ip-node".into(),
                 given_name: "bad-ip-node".into(),
                 user_id: Some(user.id as i64),
@@ -4283,12 +9258,28 @@ mod tests {
         )
         .await
         .unwrap();
+        sqlx::query("UPDATE nodes SET ipv4 = 'not-an-ip' WHERE id = ?")
+            .bind(row.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
         let registry = MachineRegistry::new();
 
         let err = admin.hydrate_wire_registry(&registry).await.unwrap_err();
 
-        assert!(matches!(err, MachineAdminError::BadRequest(_)));
-        assert!(err.to_string().contains("invalid IPv4"));
+        // Go loads Node.IPv4 through gorm's `serializer:text` (netip.Addr), so
+        // an unparsable column fails the whole node listing at row decode; the
+        // Rust database layer reports the same condition as a storage error
+        // naming the column.
+        assert!(
+            matches!(
+                &err,
+                MachineAdminError::Storage(message)
+                    if message.contains("decoding column \"ipv4\"")
+                        && message.contains("invalid persisted IP address")
+            ),
+            "{err:?}"
+        );
         assert!(registry.is_empty());
     }
 
@@ -4325,9 +9316,15 @@ mod tests {
             updated.ipv6, created.ipv6,
             "reauth keeps existing IPv6 projection"
         );
-        assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
+        // Go applyAuthNodeUpdate: "On plain reauth we preserve the existing
+        // node.RegisterMethod" (only tag->user conversion sets it), so the
+        // row created with the CLI method (2) stays CLI after an OIDC reauth.
+        assert_eq!(updated.register_method, 2);
         assert_eq!(updated.expiry, Some(4_102_444_800));
-        assert_eq!(updated.approved_routes, vec!["10.0.0.0/24", "10.1.0.0/24"]);
+        // Go applyAuthNodeUpdate never touches ApprovedRoutes on reauth (the
+        // pending entry's approvals are not merged); policy auto-approval is
+        // a separate State.AutoApproveRoutes step run by the caller.
+        assert_eq!(updated.approved_routes, vec!["10.0.0.0/24"]);
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
             .fetch_one(db.pool())
@@ -4340,13 +9337,13 @@ mod tests {
         assert_eq!(raw.node_key, format!("nodekey:{}", "cc".repeat(32)));
         assert_eq!(
             raw.register_method,
-            headscale_db::headscale_nodes::REGISTER_METHOD_OIDC
+            headscale_db::headscale_nodes::REGISTER_METHOD_CLI
         );
     }
 
     #[tokio::test]
     async fn persistent_machine_admin_auth_path_rejects_duplicate_new_node_ip() {
-        let (admin, _db, _users) = persistent_fixture().await;
+        let (admin, db, _users) = persistent_fixture().await;
         admin.create(persistent_record()).await.unwrap();
 
         let mut pending = persistent_record();
@@ -4359,11 +9356,26 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, MachineAdminError::BadRequest(_)));
+        // headscale-go has no IP pre-check on the registration path (its
+        // allocator never hands an address out twice) and createAndSaveNewNode
+        // wraps a failed `tx.Save` as "saving node: ...". The collision is
+        // rejected by the unique nodes.ipv4 index, a Rust-side guard
+        // (migration 20260523000011), and surfaces as that storage error
+        // rather than the old pre-check BadRequest.
         assert!(
-            err.to_string()
-                .contains("IPv4 address 100.64.0.9 already in use")
+            matches!(
+                &err,
+                MachineAdminError::Storage(message)
+                    if message.starts_with("creating new node: saving node:")
+                        && message.contains("nodes.ipv4")
+            ),
+            "{err:?}"
         );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the colliding registration must not add a row");
     }
 
     #[tokio::test]
@@ -4399,13 +9411,17 @@ mod tests {
         assert_eq!(result.record.register_method, REGISTER_METHOD_AUTH_KEY);
         assert_eq!(result.record.tags, vec!["tag:server"]);
         assert_eq!(result.record.routes, vec!["10.0.0.0/24"]);
-        assert_eq!(result.record.approved_routes, vec!["10.0.0.0/24"]);
+        // Go createAndSaveNewNode saves the node without ApprovedRoutes; the
+        // registration caller approves them afterwards via
+        // State.AutoApproveRoutes (empty policy here), so none are persisted.
+        assert!(result.record.approved_routes.is_empty());
         let raw = headscale_db::headscale_nodes::get_by_node_key(
             db.pool(),
             &format!("nodekey:{}", record.node_key_hex),
         )
         .await
         .unwrap();
+        assert!(raw.approved_route_list().is_empty());
         assert_eq!(
             raw.register_method,
             headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
@@ -4485,8 +9501,8 @@ mod tests {
             false,
         );
         record.last_seen = Utc.timestamp_opt(1_700_000_111, 0).unwrap();
-        record.disco_key = Some("discokey:authkey-node".into());
-        record.endpoints = vec!["192.0.2.10:41641".into(), "2001:db8::10:41641".into()];
+        record.disco_key = Some(format!("discokey:{}", "d1".repeat(32)));
+        record.endpoints = vec!["192.0.2.10:41641".into(), "[2001:db8::10]:41641".into()];
         record.home_derp = 7;
         record.os = "linux".into();
         record.os_version = "6.8.0".into();
@@ -4511,7 +9527,14 @@ mod tests {
         assert_eq!(created.register_method, REGISTER_METHOD_AUTH_KEY);
         assert_eq!(created.tags, vec!["tag:server"]);
         assert_eq!(created.routes, vec!["10.40.0.0/24"]);
-        assert_eq!(created.approved_routes, vec!["10.40.0.0/24"]);
+        // Go createAndSaveNewNode persists no ApprovedRoutes for a new node
+        // (State.AutoApproveRoutes runs afterwards in the caller). Approve
+        // explicitly so the reopen/hydration assertions below still cover them.
+        assert!(created.approved_routes.is_empty());
+        admin
+            .set_approved_routes(&created.id, vec!["10.40.0.0/24".into()])
+            .await
+            .unwrap();
 
         let raw = headscale_db::headscale_nodes::get_by_id(db.pool(), created.node_id as i64)
             .await
@@ -4520,7 +9543,7 @@ mod tests {
         assert_eq!(raw.user_id, None);
         assert_eq!(raw.node_key, format!("nodekey:{}", record.node_key_hex));
         assert_eq!(raw.machine_key, format!("mkey:{}", record.machine_key_hex));
-        assert_eq!(raw.disco_key, "discokey:authkey-node");
+        assert_eq!(raw.disco_key, format!("discokey:{}", "d1".repeat(32)));
         assert_eq!(raw.endpoint_list(), record.endpoints);
         assert_eq!(
             raw.register_method,
@@ -4577,7 +9600,10 @@ mod tests {
             hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
             Some("100.64.0.88")
         );
-        assert_eq!(hydrated.disco_key, Some("discokey:authkey-node".into()));
+        assert_eq!(
+            hydrated.disco_key,
+            Some(format!("discokey:{}", "d1".repeat(32)))
+        );
         assert_eq!(hydrated.endpoints, record.endpoints);
         assert_eq!(hydrated.home_derp, 7);
         assert_eq!(hydrated.os, "linux");
@@ -4958,6 +9984,13 @@ mod tests {
         let wire = registry.get(&pending.node_key_hex).unwrap();
         assert_eq!(wire.user, "alice@example.com");
         assert_eq!(wire.expiry, Some(expiry));
+        let owner = users.get_by_id(user.id).await.unwrap().unwrap();
+        assert_eq!(wire.user_provider, owner.provider);
+        assert_eq!(
+            wire.user_created_at
+                .map(|created_at| created_at.timestamp()),
+            Some(owner.created_at as i64)
+        );
 
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
             .await
@@ -4967,6 +10000,8 @@ mod tests {
             crate::tailscale_wire::RegistrationWaitOutcome::Registered(record) => {
                 assert_eq!(record.user, "alice@example.com");
                 assert_eq!(record.register_method, REGISTER_METHOD_OIDC);
+                assert_eq!(record.user_provider, owner.provider);
+                assert_eq!(record.user_created_at, wire.user_created_at);
             }
             other => panic!("unexpected registration outcome: {other:?}"),
         }
@@ -5223,6 +10258,246 @@ mod tests {
         assert_eq!(wire.expiry, Some(token_expiry));
     }
 
+    fn oidc_route_policy(approver: &str, prefix: &str) -> Arc<PolicyStore> {
+        let policy = Arc::new(PolicyStore::new());
+        let raw_policy =
+            format!(r#"{{"autoApprovers":{{"routes":{{"{prefix}":["{approver}"]}}}}}}"#);
+        policy.set(parse_hujson_policy(&raw_policy).unwrap(), raw_policy);
+        policy
+    }
+
+    fn oidc_router_pending(
+        node_byte: &str,
+        machine_byte: &str,
+        hostname: &str,
+        last_octet: u8,
+        routes: &[&str],
+    ) -> MachineRecord {
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            node_byte.repeat(32),
+            machine_byte.repeat(32),
+            String::new(),
+            hostname.into(),
+            Ipv4Addr::new(100, 64, 0, last_octet),
+            false,
+        );
+        pending.user.clear();
+        pending.available_routes = routes.iter().map(ToString::to_string).collect();
+        pending
+    }
+
+    // headscale-go oidc.go handleRegistration: HandleNodeFromAuthPath, then
+    // State.AutoApproveRoutes (SetApprovedRoutes persists the approval and
+    // yields change.PolicyChange()), then Change(nodeChange, routesChange).
+    // The registry is attached to the handler only, as an embedder may do.
+    #[tokio::test]
+    async fn persistent_oidc_registration_auto_approves_policy_routes() {
+        let (admin, db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let policy = oidc_route_policy("alice@example.com", "10.80.0.0/16");
+        registry.configure_policy(&policy);
+        let user = create_oidc_test_user(&users).await;
+        let pending = oidc_router_pending(
+            "c1",
+            "c2",
+            "oidc-router",
+            80,
+            &["10.80.1.0/24", "10.99.0.0/24"],
+        );
+        let registration_id = "r".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+        let history_len = registry.map_change_history().len();
+
+        let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy)
+            .with_wire_registry(registry.clone());
+        let result = handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+        assert!(result.new_node);
+
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.routes, vec!["10.80.1.0/24", "10.99.0.0/24"]);
+        assert_eq!(stored.approved_routes, vec!["10.80.1.0/24"]);
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
+            .await
+            .unwrap();
+        assert_eq!(row.approved_route_list(), vec!["10.80.1.0/24"]);
+        let live = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(live.approved_routes, vec!["10.80.1.0/24"]);
+
+        // HandleNodeFromAuthPath answers PolicyChange because the new node's
+        // addresses join alice's autoApprover set; State.AutoApproveRoutes ->
+        // SetApprovedRoutes then always yields PolicyChange. Same order and
+        // labels as the gRPC RegisterNode path; neither carries an origin.
+        let changes = registry.map_change_history();
+        let new_changes = &changes[history_len..];
+        assert_eq!(
+            new_changes
+                .iter()
+                .map(crate::tailscale_wire::MapChange::reason_labels)
+                .collect::<Vec<_>>(),
+            vec![vec!["policy change"], vec!["policy change"]]
+        );
+        for change in new_changes {
+            assert_eq!(change.origin_node_id, None);
+            assert!(change.content.include_policy);
+            assert!(change.content.requires_runtime_peer_computation);
+        }
+    }
+
+    // The production composition (headscale-cli server.rs): the machine admin
+    // owns the live registry and the handler holds the same one, so the
+    // approval is projected by the admin and must not be applied twice.
+    #[tokio::test]
+    async fn persistent_oidc_registration_auto_approve_with_registry_owning_admin() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        users.create("alice").await.unwrap();
+        let registry = Arc::new(MachineRegistry::new());
+        let admin = Arc::new(
+            PersistentMachineAdmin::new(db.pool().clone())
+                .with_user_admin(users.clone())
+                .with_wire_registry(registry.clone()),
+        );
+        let cache = Arc::new(RegistrationCache::new());
+        let policy = oidc_route_policy("alice@example.com", "10.82.0.0/16");
+        registry.configure_policy(&policy);
+        let user = create_oidc_test_user(&users).await;
+        let pending = oidc_router_pending(
+            "c3",
+            "c4",
+            "oidc-owned",
+            82,
+            &["10.82.1.0/24", "10.99.0.0/24"],
+        );
+        let registration_id = "q".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+        let history_len = registry.map_change_history().len();
+
+        let handler = PersistentOidcRegistrationHandler::new(cache, admin.clone(), policy)
+            .with_wire_registry(registry.clone());
+        handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.approved_routes, vec!["10.82.1.0/24"]);
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
+            .await
+            .unwrap();
+        assert_eq!(row.approved_route_list(), vec!["10.82.1.0/24"]);
+        let live = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(live.approved_routes, vec!["10.82.1.0/24"]);
+        let labels = registry.map_change_history()[history_len..]
+            .iter()
+            .map(crate::tailscale_wire::MapChange::reason_labels)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec![vec!["policy change"], vec!["policy change"]]);
+    }
+
+    // State.AutoApproveRoutes only persists and emits a change when the
+    // approved set differs; an uncovered route leaves the node's approvals
+    // empty and adds nothing after the registration's own change.
+    #[tokio::test]
+    async fn persistent_oidc_registration_without_matching_approver_approves_nothing() {
+        let (admin, db, users) = persistent_fixture().await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let policy = oidc_route_policy("someone-else@example.com", "10.83.0.0/16");
+        registry.configure_policy(&policy);
+        let user = create_oidc_test_user(&users).await;
+        let pending = oidc_router_pending("c5", "c6", "oidc-uncovered", 83, &["10.83.1.0/24"]);
+        let registration_id = "p".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+        let history_len = registry.map_change_history().len();
+
+        let handler = PersistentOidcRegistrationHandler::new(cache, admin.clone(), policy)
+            .with_wire_registry(registry.clone());
+        handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+
+        let stored = admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.routes, vec!["10.83.1.0/24"]);
+        assert!(stored.approved_routes.is_empty());
+        let row = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
+            .await
+            .unwrap();
+        assert!(row.approved_route_list().is_empty());
+        assert!(
+            registry
+                .get(&pending.node_key_hex)
+                .unwrap()
+                .approved_routes
+                .is_empty()
+        );
+        // Only the registration's own change (HandleNodeFromAuthPath); an
+        // unchanged approval adds no SetApprovedRoutes PolicyChange.
+        assert_eq!(registry.map_change_history()[history_len..].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_oidc_registration_auto_approved_routes_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headscale.db");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let (admin, db, users) = persistent_file_fixture(&url, true).await;
+        let admin = Arc::new(admin);
+        let cache = Arc::new(RegistrationCache::new());
+        let registry = Arc::new(MachineRegistry::new());
+        let policy = oidc_route_policy("alice@example.com", "10.84.0.0/16");
+        registry.configure_policy(&policy);
+        let user = create_oidc_test_user(&users).await;
+        let pending = oidc_router_pending(
+            "c7",
+            "c8",
+            "oidc-durable",
+            84,
+            &["10.84.1.0/24", "10.99.0.0/24"],
+        );
+        let registration_id = "o".repeat(24);
+        cache.insert(registration_id.clone(), pending.clone());
+
+        let handler = PersistentOidcRegistrationHandler::new(cache.clone(), admin.clone(), policy)
+            .with_wire_registry(registry);
+        handler
+            .complete_oidc_registration(&registration_id, &user, None)
+            .await
+            .unwrap();
+        drop(handler);
+        drop(cache);
+        drop(admin);
+        drop(users);
+        db.close().await;
+
+        let (reopened_admin, reopened_db, reopened_users) =
+            persistent_file_fixture(&url, false).await;
+        let stored = reopened_admin.get(&pending.node_key_hex).await.unwrap();
+        assert_eq!(stored.routes, vec!["10.84.1.0/24", "10.99.0.0/24"]);
+        assert_eq!(stored.approved_routes, vec!["10.84.1.0/24"]);
+        let registry = MachineRegistry::new();
+        assert_eq!(
+            reopened_admin
+                .hydrate_wire_registry(&registry)
+                .await
+                .unwrap(),
+            1
+        );
+        let hydrated = registry.get(&pending.node_key_hex).unwrap();
+        assert_eq!(hydrated.approved_routes, vec!["10.84.1.0/24"]);
+        drop(reopened_admin);
+        drop(reopened_users);
+        reopened_db.close().await;
+    }
+
     #[tokio::test]
     async fn persistent_oidc_registration_hydrates_canonical_fields_after_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -5251,8 +10526,8 @@ mod tests {
             false,
         );
         pending.last_seen = Utc.timestamp_opt(1_700_001_111, 0).unwrap();
-        pending.disco_key = Some("discokey:oidc-node".into());
-        pending.endpoints = vec!["192.0.2.20:41641".into(), "2001:db8::20:41641".into()];
+        pending.disco_key = Some(format!("discokey:{}", "d2".repeat(32)));
+        pending.endpoints = vec!["192.0.2.20:41641".into(), "[2001:db8::20]:41641".into()];
         pending.home_derp = 9;
         pending.os = "darwin".into();
         pending.os_version = "14.5".into();
@@ -5280,7 +10555,14 @@ mod tests {
         assert_eq!(stored.expiry, None);
         assert_eq!(stored.tags, vec!["tag:server"]);
         assert_eq!(stored.routes, vec!["10.50.0.0/24"]);
-        assert_eq!(stored.approved_routes, vec!["10.50.0.0/24"]);
+        // Go createAndSaveNewNode persists no ApprovedRoutes for a new node
+        // (State.AutoApproveRoutes runs afterwards in the caller). Approve
+        // explicitly so the reopen/hydration assertions below still cover them.
+        assert!(stored.approved_routes.is_empty());
+        admin
+            .set_approved_routes(&node_key, vec!["10.50.0.0/24".into()])
+            .await
+            .unwrap();
 
         let raw = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
             .await
@@ -5289,7 +10571,7 @@ mod tests {
         assert_eq!(raw.user_id, None);
         assert_eq!(raw.node_key, format!("nodekey:{}", pending.node_key_hex));
         assert_eq!(raw.machine_key, format!("mkey:{}", pending.machine_key_hex));
-        assert_eq!(raw.disco_key, "discokey:oidc-node");
+        assert_eq!(raw.disco_key, format!("discokey:{}", "d2".repeat(32)));
         assert_eq!(raw.endpoint_list(), pending.endpoints);
         assert_eq!(
             raw.register_method,
@@ -5339,7 +10621,10 @@ mod tests {
             hydrated.ipv4.map(|ip| ip.to_string()).as_deref(),
             Some("100.64.0.89")
         );
-        assert_eq!(hydrated.disco_key, Some("discokey:oidc-node".into()));
+        assert_eq!(
+            hydrated.disco_key,
+            Some(format!("discokey:{}", "d2".repeat(32)))
+        );
         assert_eq!(hydrated.endpoints, pending.endpoints);
         assert_eq!(hydrated.home_derp, 9);
         assert_eq!(hydrated.os, "darwin");
@@ -5392,7 +10677,7 @@ mod tests {
             false,
         );
         pending.available_routes = vec!["10.30.0.0/24".into()];
-        pending.disco_key = Some("discokey:oidc-rekey".into());
+        pending.disco_key = Some(format!("discokey:{}", "d3".repeat(32)));
         pending.endpoints = vec!["192.0.2.30:41641".into()];
         pending.home_derp = 30;
         pending.ssh_host_keys = vec!["ssh-ed25519 AAAAC3NzaOidcRekey".into()];
@@ -5423,7 +10708,10 @@ mod tests {
         );
         assert_eq!(wire.machine_key_hex, created.machine_key_hex);
         assert_eq!(wire.user, "alice@example.com");
-        assert_eq!(wire.disco_key.as_deref(), Some("discokey:oidc-rekey"));
+        assert_eq!(
+            wire.disco_key.as_deref(),
+            Some(format!("discokey:{}", "d3".repeat(32)).as_str())
+        );
         assert_eq!(wire.endpoints, vec!["192.0.2.30:41641"]);
         assert_eq!(wire.home_derp, 30);
         assert_eq!(wire.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaOidcRekey"]);

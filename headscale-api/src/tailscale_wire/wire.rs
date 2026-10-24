@@ -42,6 +42,7 @@ use serde_json::Value;
 pub const TAGGED_DEVICES_USER_ID: u64 = 2_147_455_555;
 pub const TAGGED_DEVICES_LOGIN_NAME: &str = "tagged-devices";
 pub const TAGGED_DEVICES_DISPLAY_NAME: &str = "Tagged Devices";
+pub(crate) const ZERO_DISCO_KEY: &str = headscale_api_acl::go_key::ZERO_DISCO_KEY;
 /// Mirrors upstream headscale-go `capver.MinSupportedCapabilityVersion`.
 pub const MIN_SUPPORTED_CAPABILITY_VERSION: u32 = 113;
 pub(crate) const ZERO_NODE_KEY_HEX: &str =
@@ -52,7 +53,85 @@ pub(crate) fn is_supported_capability_version(version: u32) -> bool {
 }
 
 pub(crate) fn zero_node_key() -> String {
-    format!("nodekey:{ZERO_NODE_KEY_HEX}")
+    headscale_api_acl::go_key::ZERO_NODE_KEY.to_owned()
+}
+
+fn zero_nl_key() -> String {
+    headscale_api_acl::go_key::ZERO_NODE_LOCK_KEY.to_owned()
+}
+
+pub(crate) fn canonical_control_key(value: &str, prefix: &str) -> Result<String, String> {
+    use headscale_api_acl::go_key::PublicKeyKind;
+    let kind = match prefix {
+        "mkey:" => PublicKeyKind::Machine,
+        "nodekey:" => PublicKeyKind::Node,
+        "discokey:" => PublicKeyKind::Disco,
+        "nlpub:" => PublicKeyKind::NodeLock,
+        "hwattestpub:" => PublicKeyKind::HardwareAttestation,
+        _ => return Err(format!("unknown public-key type prefix {prefix}")),
+    };
+    kind.parse_text(value).map_err(|error| error.to_string())
+}
+
+fn deserialize_node_key<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => canonical_control_key(&value, "nodekey:").map_err(serde::de::Error::custom),
+        None => Ok(zero_node_key()),
+    }
+}
+
+fn deserialize_nl_key<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(value) => canonical_control_key(&value, "nlpub:").map_err(serde::de::Error::custom),
+        None => Ok(zero_nl_key()),
+    }
+}
+
+fn deserialize_signature_type<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.as_deref().map_or_else(
+        || "signature-none".into(),
+        headscale_api_acl::go_tailcfg_json::signature_type_text,
+    ))
+}
+
+fn signature_type_is_zero(value: &str) -> bool {
+    value.is_empty() || value == "signature-none"
+}
+
+fn deserialize_node_cap_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Vec<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Native Go capability flags use nil argument slices. Retain the stable
+    // Vec-valued public projection while accepting both null maps and values.
+    let map = Option::<BTreeMap<String, Option<Vec<Value>>>>::deserialize(deserializer)?;
+    Ok(map
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, values)| (name, values.unwrap_or_default()))
+        .collect())
+}
+
+fn deserialize_endpoints<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Go leaves a null element of a fresh []netip.AddrPort at its zero
+    // value; that value's text/JSON encoding is the empty string.
+    Ok(Option::<Vec<Option<String>>>::deserialize(deserializer)?
+        .map(|values| values.into_iter().map(Option::unwrap_or_default).collect()))
 }
 
 pub(crate) fn unsupported_client_error(version: u32) -> String {
@@ -87,13 +166,15 @@ fn tailscale_version_for_capability(version: u32) -> Option<&'static str> {
 /// | `ForcedTags []string`                            | `forced_tags`      |
 /// | `Hostinfo`                                       | `host_info` plus compatibility projections |
 /// | `Hostinfo.sshHostKeys`                           | `ssh_host_keys`    |
+/// | `Hostname`                                       | `raw_hostname`     |
+/// | `GivenName`                                      | `hostname`         |
 ///
 /// `Expiry` is reflected into map-node `KeyExpiry`/`Expired` state.
 /// Stock clients derive their own `NeedsLogin` transition from the
 /// self node's expired key state, while `LastSeen` is refreshed on
 /// every `/map` arrival so the ephemeral GC sweep can identify
 /// abandoned devices.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MachineRecord {
     /// Upstream `nodes.id` when this record is backed by the
     /// headscale-go-compatible database. In-memory embedders leave it
@@ -101,9 +182,8 @@ pub struct MachineRecord {
     pub node_id: Option<u64>,
     /// Upstream `nodes.auth_key_id` for auth-key registrations.
     ///
-    /// Used during same-node re-registration to mirror headscale-go:
-    /// a used/expired preauth key may be accepted only by the node
-    /// that originally registered with that key.
+    /// Used to distinguish same-key tagged refreshes from retagging. Untagged
+    /// refresh eligibility is bound to the node's current numeric owner.
     pub auth_key_id: Option<i64>,
     /// Hex-encoded (no prefix) Tailscale `NodeKey`. The map endpoint
     /// path `/machine/{node_key}/map` carries the raw hex.
@@ -123,9 +203,18 @@ pub struct MachineRecord {
     pub user_display_name: String,
     /// Owner profile picture URL, if supplied by OIDC.
     pub user_profile_pic_url: String,
-    /// Hostname the client advertised in HostInfo (best-effort; may
-    /// be empty).
+    /// Provider recorded on the owner user, independent of how this node registered.
+    pub user_provider: String,
+    /// Owner user creation time for register responses.
+    pub user_created_at: Option<DateTime<Utc>>,
+    /// Server-managed DNS label (`nodes.given_name`). Admin renames change
+    /// this value without changing the client's raw hostname or Hostinfo.
     pub hostname: String,
+    /// Last non-empty client hostname accepted on the map path, or the raw
+    /// hostname supplied at registration (`nodes.hostname`). This is distinct
+    /// from Hostinfo.Hostname: a map snapshot may explicitly contain an empty
+    /// hostname without clearing this stored node identity.
+    pub raw_hostname: String,
     /// Client operating system from `Hostinfo.OS`.
     pub os: String,
     /// Client operating system version from `Hostinfo.OSVersion`.
@@ -170,7 +259,7 @@ pub struct MachineRecord {
     /// `HostInfo` model so map responses can emit `MapNode.HomeDERP`
     /// and `PeerChange.DERPRegion` like headscale-go.
     pub home_derp: i32,
-    /// P1 (lifecycle): node-key expiry. When `Some(t)` and `t <=
+    /// P1 (lifecycle): node-key expiry. When `Some(t)` and `t <
     /// now()`, map responses expose this through the self node's
     /// `KeyExpiry`/`Expired` fields (mirrors upstream
     /// `Node.IsExpired()` semantics). `None` means "never expires" —
@@ -216,22 +305,8 @@ fn is_dns_label_alphanumeric(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
 }
 
-fn is_dns_label_char(byte: u8) -> bool {
-    is_dns_label_alphanumeric(byte) || byte == b'-'
-}
-
 pub fn valid_given_name_label(label: &str) -> bool {
-    let bytes = label.as_bytes();
-    if bytes.is_empty() || bytes.len() > 63 {
-        return false;
-    }
-    if !is_dns_label_alphanumeric(bytes[0]) || !is_dns_label_alphanumeric(bytes[bytes.len() - 1]) {
-        return false;
-    }
-    bytes.len() <= 2
-        || bytes[1..bytes.len() - 1]
-            .iter()
-            .all(|byte| is_dns_label_char(*byte))
+    headscale_api_acl::go_dnsname::valid_label(label).is_ok()
 }
 
 fn trim_common_hostname_suffixes(hostname: &str) -> &str {
@@ -379,6 +454,24 @@ impl MachineRecord {
         self.user_profile_pic_url = profile_pic_url;
     }
 
+    pub fn set_user_account_metadata(
+        &mut self,
+        provider: String,
+        created_at: Option<DateTime<Utc>>,
+    ) {
+        self.user_provider = provider;
+        self.user_created_at = created_at;
+    }
+
+    pub(crate) fn clear_user_identity(&mut self) {
+        self.user.clear();
+        self.user_id = None;
+        self.user_display_name.clear();
+        self.user_profile_pic_url.clear();
+        self.user_provider.clear();
+        self.user_created_at = None;
+    }
+
     fn user_display_name(&self) -> String {
         if self.user_display_name.is_empty() {
             self.user.clone()
@@ -392,7 +485,10 @@ impl MachineRecord {
     /// `juanfont/headscale@main:hscontrol/types/node.go`.
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         match self.expiry {
-            Some(t) => now >= t,
+            // Go's zero time means no expiry even when the pointer is set.
+            Some(t) => {
+                (t.timestamp() != -62_135_596_800 || t.timestamp_subsec_nanos() != 0) && now > t
+            }
             None => false,
         }
     }
@@ -440,7 +536,10 @@ impl MachineRecord {
             user_id: None,
             user_display_name: String::new(),
             user_profile_pic_url: String::new(),
+            user_provider: String::new(),
+            user_created_at: None,
             hostname: hostname.clone(),
+            raw_hostname: hostname.clone(),
             os: String::new(),
             os_version: String::new(),
             host_info: HostInfo {
@@ -467,6 +566,9 @@ impl MachineRecord {
     /// Replace the stored Hostinfo snapshot and refresh compatibility
     /// projections that older admin/runtime paths still read directly.
     pub fn replace_host_info(&mut self, host_info: HostInfo) {
+        if !host_info.hostname.is_empty() {
+            self.raw_hostname.clone_from(&host_info.hostname);
+        }
         self.os.clone_from(&host_info.os);
         self.os_version.clone_from(&host_info.os_version);
         self.available_routes.clone_from(&host_info.routable_ips);
@@ -479,15 +581,31 @@ impl MachineRecord {
         self.host_info = host_info;
     }
 
+    /// Fresh Go web registration sorts and compacts a slice sharing
+    /// Hostinfo.RequestTags' backing array. The node's Tags slice shrinks,
+    /// while Hostinfo keeps its original length and the cleared tail slots.
+    /// Reauthentication builds a separate tag slice and does not do this.
+    pub(crate) fn compact_fresh_web_request_tags(&mut self) {
+        let tags = &mut self.host_info.request_tags;
+        tags.sort();
+        let mut retained = 0usize;
+        for index in 0..tags.len() {
+            if retained == 0 || tags[index] != tags[retained - 1] {
+                tags.swap(index, retained);
+                retained += 1;
+            }
+        }
+        for tag in &mut tags[retained..] {
+            tag.clear();
+        }
+    }
+
     /// Hostinfo as emitted to clients and persisted to the Go-shaped
     /// `nodes.host_info` column. This keeps the full client-supplied snapshot
     /// while reflecting route/SSH/DERP projections that may be updated by
     /// admin or map code.
     pub fn host_info_for_node(&self) -> HostInfo {
         let mut host_info = self.host_info.clone();
-        if host_info.hostname.is_empty() {
-            host_info.hostname.clone_from(&self.hostname);
-        }
         if host_info.os.is_empty() {
             host_info.os.clone_from(&self.os);
         }
@@ -496,7 +614,9 @@ impl MachineRecord {
         }
         host_info.routable_ips.clone_from(&self.available_routes);
         host_info.ssh_host_keys.clone_from(&self.ssh_host_keys);
-        if self.home_derp != 0 {
+        if let Some(net_info) = host_info.net_info.as_mut() {
+            net_info.preferred_derp = self.home_derp;
+        } else if self.home_derp != 0 {
             host_info
                 .net_info
                 .get_or_insert_with(NetInfo::default)
@@ -522,14 +642,18 @@ pub struct RegisterRequest {
     /// `nodekey:` prefixed hex string. The path parameter and this
     /// field both carry the same value in upstream Tailscale; we
     /// trust the body's copy.
-    #[serde(default = "zero_node_key")]
+    #[serde(default = "zero_node_key", deserialize_with = "deserialize_node_key")]
     pub node_key: String,
     /// Previous node key during node-key rotation.
-    #[serde(default)]
+    #[serde(default = "zero_node_key", deserialize_with = "deserialize_node_key")]
     pub old_node_key: String,
     /// Network-lock public key. Upstream's JSON field is `NLKey`, not
     /// `NlKey`, so it needs an explicit serde spelling.
-    #[serde(default, rename = "NLKey")]
+    #[serde(
+        default = "zero_nl_key",
+        rename = "NLKey",
+        deserialize_with = "deserialize_nl_key"
+    )]
     pub nl_key: String,
     /// Preauth token the client presents (`Auth.AuthKey` in the
     /// upstream `tailcfg.RegisterRequest`). Tailscale models this as
@@ -573,7 +697,8 @@ pub struct RegisterRequest {
     #[serde(
         default,
         rename = "SignatureType",
-        skip_serializing_if = "String::is_empty"
+        deserialize_with = "deserialize_signature_type",
+        skip_serializing_if = "signature_type_is_zero"
     )]
     pub signature_type: String,
     /// Request creation time used by signed registration requests.
@@ -699,9 +824,9 @@ pub struct NetInfo {
 #[derive(Debug, Deserialize, Serialize, Default, Clone, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct HostInfoService {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub proto: String,
-    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    #[serde(default)]
     pub port: u16,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -769,15 +894,19 @@ pub struct HostInfo {
         skip_serializing_if = "String::is_empty"
     )]
     pub backend_log_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hostname: String,
     /// Upstream JSON tag is `OS` (all-caps). PascalCase would produce
     /// `Os` — wrong.
-    #[serde(default, rename = "OS")]
+    #[serde(default, rename = "OS", skip_serializing_if = "String::is_empty")]
     pub os: String,
     /// Upstream calls this `OSVersion`; PascalCase rename keeps the
     /// wire byte-identical.
-    #[serde(default, rename = "OSVersion")]
+    #[serde(
+        default,
+        rename = "OSVersion",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub os_version: String,
     /// Optional bools map to Tailscale's `opt.Bool`: absent/null is
     /// unset, while both true and false are meaningful when present.
@@ -870,8 +999,8 @@ pub struct HostInfo {
     pub tpm: Option<TpmInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_encrypted: Option<bool>,
-    /// NAT/check results advertised by the client. We currently persist
-    /// the preferred DERP field for map-node and stream-patch parity.
+    /// NAT/check results advertised by the client. An omitted NetInfo in a
+    /// map update retains the previous snapshot.
     #[serde(default, rename = "NetInfo", skip_serializing_if = "Option::is_none")]
     pub net_info: Option<NetInfo>,
 }
@@ -893,6 +1022,9 @@ pub struct RegisterResponse {
     /// Empty for preauth flows (no browser follow-up needed).
     #[serde(default)]
     pub node_key_expired: bool,
+    /// Per-machine flag the client polls for in subsequent `/map`
+    /// calls. True ⇒ "you're admitted into the tailnet."
+    pub machine_authorized: bool,
     /// Browser URL for OIDC/web auth. Empty on preauth-success path.
     /// Upstream JSON tag is `AuthURL` (all-caps URL); PascalCase
     /// `auth_url` would emit `AuthUrl` — wrong, and a non-empty
@@ -901,30 +1033,22 @@ pub struct RegisterResponse {
     /// "needs browser auth" branch instead of "preauth success."
     #[serde(default, rename = "AuthURL")]
     pub auth_url: String,
-    /// Per-machine flag the client polls for in subsequent `/map`
-    /// calls. True ⇒ "you're admitted into the tailnet."
-    pub machine_authorized: bool,
-    /// Upstream error string for denied or follow-up register flows.
-    #[serde(default)]
-    pub error: String,
     /// Current node-key signature that the client must re-sign when
     /// rotating its node key. Go encodes the byte slice as base64 and
     /// may emit null for the zero value.
-    #[serde(
-        default,
-        rename = "NodeKeySignature",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "NodeKeySignature")]
     pub node_key_signature: Option<String>,
+    /// Upstream error string for denied or follow-up register flows.
+    #[serde(default)]
+    pub error: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SimpleUser {
-    /// 64-bit stable user ID. We hash the preauth user label into a
-    /// u64 — this is fine for the interop test (no cross-process
-    /// reconciliation) but is a known weak link for production use.
-    #[serde(rename = "ID")]
+    /// Stable numeric database user ID. Wire-only embedders without an
+    /// assigned ID fall back to a deterministic hash of the user label.
+    #[serde(rename = "ID", deserialize_with = "super::wire_ids::scalar")]
     pub id: u64,
     pub display_name: String,
     #[serde(
@@ -940,7 +1064,7 @@ pub struct SimpleUser {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SimpleLogin {
-    #[serde(rename = "ID")]
+    #[serde(rename = "ID", deserialize_with = "super::wire_ids::scalar")]
     pub id: u64,
     pub provider: String,
     pub login_name: String,
@@ -955,9 +1079,8 @@ pub struct SimpleLogin {
 
 /// Body of `POST /machine/{node_key}/map`.
 ///
-/// The upstream `tailcfg.MapRequest` carries ~15 fields. We model only
-/// the few that affect whether the client continues to poll. The
-/// `Stream` flag in particular is critical: when true, the client
+/// Client state, endpoint candidates and map-session options. The
+/// `Stream` flag is critical: when true, the client
 /// expects an HTTP stream of length-prefixed map updates rather than a
 /// single response body.
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -990,7 +1113,7 @@ pub struct MapRequest {
     /// requests (`POST /machine/map`) where there's no URL parameter.
     /// Empty on the keyed-path variant (caller takes the value from the
     /// URL instead).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_node_key")]
     pub node_key: String,
     /// Opaque stream resume handle supplied by newer clients.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1002,8 +1125,7 @@ pub struct MapRequest {
     /// Stock `tailscale` v1.78+ includes this on every MapRequest;
     /// the server must persist + fan it back out on every peer's
     /// `MapNode.DiscoKey` for `wgengine.Reconfig` to add the peer.
-    /// Optional because older clients (and our own test fixtures that
-    /// don't model a real disco key) may omit it.
+    /// Omission represents the zero disco key, as in Go's value-typed key.
     ///
     /// Upstream JSON tag is `DiscoKey` (`tailcfg.MapRequest.DiscoKey`).
     #[serde(default, rename = "DiscoKey", skip_serializing_if = "Option::is_none")]
@@ -1021,10 +1143,12 @@ pub struct MapRequest {
     /// to try (`"ip:port"` strings). Upstream `tailcfg.MapRequest`
     /// historically carried `Endpoints []string`; v1.78+ added a typed
     /// `[]netip.AddrPort` shape but the JSON wire still encodes as a
-    /// `[]string`. Optional ⇒ empty list when absent.
+    /// `[]string`. A null array element is the zero AddrPort, encoded as an
+    /// empty string. Omitted and root-null values retain the absent marker.
     #[serde(
         default,
         rename = "Endpoints",
+        deserialize_with = "deserialize_endpoints",
         skip_serializing_if = "option_vec_is_none_or_empty"
     )]
     pub endpoints: Option<Vec<String>>,
@@ -1055,10 +1179,8 @@ pub struct MapRequest {
 /// Response to `/machine/{node_key}/map`.
 ///
 /// `tailcfg.MapResponse` is both the initial netmap snapshot and the
-/// long-poll delta envelope. Runtime paths still mostly emit full
-/// snapshots, but the wire model accepts and can serialise the current
-/// delta/debug fields so fixtures and compatibility tests can cover the
-/// same surface as headscale-go.
+/// long-poll delta envelope. Streams start with a full snapshot and then
+/// send reason-scoped peer, policy, self and configuration deltas.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapResponse {
@@ -1093,16 +1215,28 @@ pub struct MapResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers_changed: Vec<MapNode>,
     /// Node IDs removed from the peer list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "super::wire_ids::slice",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub peers_removed: Vec<u64>,
     /// Lightweight peer mutation patches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers_changed_patch: Vec<PeerChange>,
     /// Peer last-seen/online edge notifications.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "super::wire_ids::boolean_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub peer_seen_change: BTreeMap<u64, bool>,
     /// Peer online-state updates.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "super::wire_ids::boolean_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub online_change: BTreeMap<u64, bool>,
     /// User profile rows referenced by `Node.User` and `Peers[*].User`.
     /// Upstream sends these in initial maps and in later deltas when a
@@ -1145,8 +1279,8 @@ pub struct MapResponse {
     /// A null value deletes that named filter; `"*": null` clears all.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub packet_filters: BTreeMap<String, Option<Vec<FilterRule>>>,
-    /// Control-plane health strings. `Some(vec![])` explicitly clears
-    /// previous health warnings.
+    /// Control-plane health strings. Direct serde retains `Some(vec![])` as
+    /// an explicit clear; the native pinned-Go encoder applies omitempty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<Vec<String>>,
     /// Structured GUI/display health patches.
@@ -1253,13 +1387,17 @@ pub struct PingResponse {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct PeerChange {
-    #[serde(rename = "NodeID")]
+    #[serde(rename = "NodeID", deserialize_with = "super::wire_ids::scalar")]
     pub node_id: u64,
     #[serde(default, rename = "DERPRegion", skip_serializing_if = "is_zero_i32")]
     pub derp_region: i32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub cap: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_node_cap_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub cap_map: BTreeMap<String, Vec<Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<String>,
@@ -1373,7 +1511,7 @@ pub struct ClientVersion {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserProfile {
-    #[serde(rename = "ID")]
+    #[serde(rename = "ID", deserialize_with = "super::wire_ids::scalar")]
     pub id: u64,
     pub login_name: String,
     pub display_name: String,
@@ -1388,12 +1526,10 @@ pub struct UserProfile {
     pub groups: Vec<String>,
 }
 
-/// `tailcfg.FilterRule`. The default zero-value here is unreachable —
-/// every rule must carry at least one SrcIP / DstPort entry to be
-/// matchable. We never construct empty rules; the only call site is
-/// [`crate::tailscale_wire::map::allow_all_packet_filter`] which
-/// returns the "allow everything" recipe.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+/// `tailcfg.FilterRule`. Capability rules may intentionally carry empty
+/// sources or destination sets when a non-nil App map resolves that way.
+/// Preserve those rules independently of ordinary IP/port admission.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct FilterRule {
     /// Source IPs / CIDRs / `*`. Upstream tag is `SrcIPs`.
@@ -1414,11 +1550,11 @@ pub struct FilterRule {
 }
 
 /// `tailcfg.CapGrant`.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct CapGrant {
     /// Destination prefixes this capability grant matches.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub dsts: Vec<String>,
     /// Deprecated capability list. Upstream element type is `PeerCapability`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1429,7 +1565,7 @@ pub struct CapGrant {
 }
 
 /// `tailcfg.NetPortRange`.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct NetPortRange {
     #[serde(rename = "IP")]
@@ -1441,7 +1577,7 @@ pub struct NetPortRange {
 }
 
 /// `tailcfg.PortRange`.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PortRange {
     pub first: u16,
@@ -1593,9 +1729,9 @@ pub struct SshRecordingAttempt {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct MapNode {
-    /// Stable per-tailnet node ID. We use the FNV hash of the node
-    /// key bytes — deterministic for a given key, fits in u64.
-    #[serde(rename = "ID")]
+    /// Stable database node ID. Wire-only embedders without an assigned ID
+    /// fall back to a deterministic hash of the node key.
+    #[serde(rename = "ID", deserialize_with = "super::wire_ids::scalar")]
     pub id: u64,
     /// `StableNodeID` — same value-domain as `ID` but a string. We
     /// derive it as the decimal node ID string to match
@@ -1607,12 +1743,15 @@ pub struct MapNode {
     /// keyed-path tests); upstream calls this `Name`. Serialised
     /// first since older clients seek it.
     pub name: String,
-    /// User who owns this node. We synthesise a 64-bit user ID from
-    /// the preauth user label (see `register::register_inner`).
-    #[serde(rename = "User")]
+    /// Numeric owner ID, or the wire-only label hash when no ID was assigned.
+    #[serde(rename = "User", deserialize_with = "super::wire_ids::scalar")]
     pub user: u64,
     /// User who shared this node, if different from `User`.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[serde(
+        default,
+        deserialize_with = "super::wire_ids::scalar",
+        skip_serializing_if = "is_zero_u64"
+    )]
     pub sharer: u64,
     /// `nodekey:` prefixed hex.
     pub key: String,
@@ -1632,14 +1771,17 @@ pub struct MapNode {
     pub addresses: Vec<String>,
     /// CIDR ranges the node accepts traffic for. Same as `Addresses`
     /// for a pure mesh peer. Upstream JSON tag is `AllowedIPs`
-    /// (all-caps IPs).
-    #[serde(rename = "AllowedIPs")]
+    /// (all-caps IPs). Upstream tags it `omitzero`: a nil slice (e.g. a
+    /// disable-ipv4 peer with no IPv6 and no routes) is omitted, so
+    /// decoding must accept its absence like Go's json does.
+    #[serde(rename = "AllowedIPs", default)]
     pub allowed_ips: Vec<String>,
     /// Routes for which this node is currently the selected primary
     /// subnet router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_routes: Vec<String>,
-    /// Hostname the node advertised.
+    /// Hostinfo the node advertised. Pinned tailcfg omits a nil Hostinfo view.
+    #[serde(default)]
     pub hostinfo: HostInfo,
     /// Node creation timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1673,7 +1815,11 @@ pub struct MapNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     /// Modern node capability map (`tailcfg.Node.CapMap`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_node_cap_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub cap_map: BTreeMap<String, Vec<Value>>,
     /// Whether the node key is expired from the control plane's view.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2096,8 +2242,8 @@ mod tests {
     fn register_request_round_trip() {
         let r = RegisterRequest {
             version: 96,
-            node_key: "nodekey:deadbeef".into(),
-            old_node_key: "nodekey:feedface".into(),
+            node_key: format!("nodekey:{}", "de".repeat(32)),
+            old_node_key: format!("nodekey:{}", "fe".repeat(32)),
             nl_key: "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             auth: Some(RegisterAuth {
                 auth_key: "hskey-auth-abc".into(),
@@ -2138,8 +2284,8 @@ mod tests {
         assert!(j.contains("\"DeviceCert\""));
         assert!(j.contains("\"Signature\""));
         let back: RegisterRequest = serde_json::from_str(&j).unwrap();
-        assert_eq!(back.node_key, "nodekey:deadbeef");
-        assert_eq!(back.old_node_key, "nodekey:feedface");
+        assert_eq!(back.node_key, r.node_key);
+        assert_eq!(back.old_node_key, r.old_node_key);
         assert_eq!(
             back.nl_key,
             "nlpub:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

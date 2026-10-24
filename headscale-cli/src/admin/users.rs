@@ -4,7 +4,6 @@
 //! for older admin HTTP deployments.
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
 
 use chrono::{DateTime, Utc};
 use headscale_api::admin::UserRecord;
@@ -13,8 +12,16 @@ use serde::Serialize;
 
 use super::AdminError;
 use super::client::AdminClient;
+use super::confirmation::confirm_action;
 use super::grpc_client::{GrpcAdminClient, UserSelector};
-use super::output::{OutputFormat, print_structured, print_table};
+use super::output::{OutputFormat, print_structured, print_table, print_upstream_table};
+use super::proto_output::{impl_go_yaml, print_proto, print_proto_list};
+
+impl_go_yaml!(UserOutput {
+    id => "id", name => "name", created_at => "createdat", display_name => "displayname",
+    email => "email", provider_id => "providerid", provider => "provider", profile_pic_url => "profilepicurl",
+});
+impl_go_yaml!(TimestampOutput { seconds => "seconds", nanos => "nanos" });
 
 /// `POST /api/v1/users` payload.
 #[derive(Serialize)]
@@ -49,7 +56,7 @@ pub async fn create_grpc(
             .await?,
     );
     if fmt.is_structured() {
-        print_structured(fmt, &user)?;
+        print_proto(fmt, &user)?;
     } else {
         println!("User created");
     }
@@ -81,7 +88,7 @@ pub async fn list_grpc(
         .map(UserOutput::from)
         .collect();
     if fmt.is_structured() {
-        print_structured(fmt, &users)?;
+        print_proto_list(fmt, &users)?;
     } else {
         render_grpc_users(&users);
     }
@@ -134,7 +141,7 @@ pub async fn destroy_grpc(
         && !confirm_action(&format!(
             "Do you want to remove the user {:?} ({}) and any associated preauthkeys?",
             user.name, user.id
-        ))?
+        ))
     {
         let message = "User not destroyed";
         if fmt.is_structured() {
@@ -161,14 +168,10 @@ pub async fn rename_grpc(
     new_name: &str,
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
-    let _user = resolve_single_user(client, id, name).await?;
-    let renamed = UserOutput::from(
-        client
-            .rename_user_by_id(upstream_rename_request_id(id), new_name)
-            .await?,
-    );
+    let user = resolve_single_user(client, id, name).await?;
+    let renamed = UserOutput::from(client.rename_user_by_id(user.id, new_name).await?);
     if fmt.is_structured() {
-        print_structured(fmt, &renamed)?;
+        print_proto(fmt, &renamed)?;
     } else {
         println!("User renamed");
     }
@@ -207,7 +210,7 @@ fn render_grpc_users(users: &[UserOutput]) {
             ]
         })
         .collect();
-    print_table(&["ID", "Name", "Username", "Email", "Created"], &rows);
+    print_upstream_table(&["ID", "Name", "Username", "Email", "Created"], &rows);
 }
 
 async fn resolve_single_user(
@@ -276,12 +279,6 @@ fn upstream_user_id_was_supplied(id: Option<i64>) -> bool {
     id.is_some_and(|id| id >= 0)
 }
 
-fn upstream_rename_request_id(id: Option<i64>) -> u64 {
-    id.filter(|id| *id >= 0)
-        .and_then(|id| u64::try_from(id).ok())
-        .unwrap_or_default()
-}
-
 fn validate_picture_url(url: &str) -> Result<(), AdminError> {
     if url.bytes().any(|byte| byte.is_ascii_control()) || has_invalid_percent_escape(url) {
         return Err(AdminError::Local(format!("invalid picture URL: {url}")));
@@ -306,21 +303,6 @@ fn has_invalid_percent_escape(value: &str) -> bool {
         }
     }
     false
-}
-
-fn confirm_action(prompt: &str) -> Result<bool, AdminError> {
-    eprint!("{prompt} [y/n] ");
-    io::stderr()
-        .flush()
-        .map_err(|e| AdminError::Local(format!("write confirmation prompt: {e}")))?;
-    let mut response = String::new();
-    io::stdin()
-        .read_line(&mut response)
-        .map_err(|e| AdminError::Local(format!("read confirmation response: {e}")))?;
-    Ok(matches!(
-        response.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes" | "sure"
-    ))
 }
 
 fn print_result(fmt: OutputFormat, message: &str) -> Result<(), AdminError> {
@@ -431,9 +413,6 @@ mod tests {
             parse_user_identifier(Some("abc")).unwrap_err().to_string(),
             "invalid argument \"abc\" for \"-i, --identifier\" flag: strconv.ParseInt: parsing \"abc\": invalid syntax"
         );
-        assert_eq!(upstream_rename_request_id(None), 0);
-        assert_eq!(upstream_rename_request_id(Some(-1)), 0);
-        assert_eq!(upstream_rename_request_id(Some(42)), 42);
     }
 
     #[test]

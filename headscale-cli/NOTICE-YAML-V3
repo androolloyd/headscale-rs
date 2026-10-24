@@ -1,0 +1,14 @@
+Native DERP YAML receiver compatibility
+
+Copyright (c) 2011-2019 Canonical Ltd
+
+The private DERP YAML receiver follows selected gopkg.in/yaml.v3 v3.0.1
+resolve.go/decode.go scalar, duplicate-key and merge assignment behavior.
+Its parser remains the existing safe Rust granit-parser exposed by
+serde-saphyr. This is a finite DERP schema adaptation, not a replacement
+for the Go parser or the shared CLI YAML facade.
+
+The original yaml.v3 combined license text is retained in LICENSE-YAML-V3.
+The selected source files carry Apache-2.0; the original MIT-covered scanner
+port terms are also preserved in that upstream license text. Source pins,
+implementation scope and unqualified boundaries are in UPSTREAM.md.

@@ -7,6 +7,7 @@ use super::AdminError;
 use super::grpc_client::GrpcAdminClient;
 use super::nodes::NodeOutput;
 use super::output::{OutputFormat, print_structured};
+use super::proto_output::print_proto;
 
 pub async fn register_grpc(
     client: &mut GrpcAdminClient,
@@ -16,7 +17,7 @@ pub async fn register_grpc(
 ) -> Result<(), AdminError> {
     let node = NodeOutput::from(client.auth_register(user, auth_id).await?);
     if fmt.is_structured() {
-        print_structured(fmt, &node)?;
+        print_proto(fmt, &node)?;
     } else {
         let display_name = if node.given_name.is_empty() {
             node.name.as_str()

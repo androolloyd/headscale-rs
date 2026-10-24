@@ -1,0 +1,8 @@
+Go JSON v2 policy decoding
+
+Copyright (c) 2020 The Go Authors. All rights reserved.
+
+The shared headscale-api-acl policy decoder follows
+github.com/go-json-experiment/json v0.0.0-20260601182631-00ed12fed2a6,
+as imported by Headscale v0.29.5. Original BSD terms are retained in
+LICENSE-GO-JSON-EXPERIMENT.

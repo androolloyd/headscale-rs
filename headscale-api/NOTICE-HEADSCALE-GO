@@ -1,0 +1,108 @@
+Headscale compatibility implementation
+
+Copyright (c) 2020, Juan Font
+All rights reserved.
+
+Registration, requested-tag authorization, volatile completion, and IP backfill behavior in src/policy and src/admin/machines.rs.
+Behavior/source reference: github.com/juanfont/headscale v0.29.5,
+commit 0f7d1e536bed9f01dd7161f7637af19bb0908335.
+The original BSD 3-Clause terms are retained in LICENSE-HEADSCALE-GO.
+
+PolicyStore/SSH cache identity and native policy reload side effects follow
+hscontrol/state/state.go (SetPolicy, ReloadPolicy, ClearSSHCheckAuth) and
+hscontrol/db/policy.go (PolicyBytes) at the same v0.29.5 pin.
+
+Policy auto-approval planning and quiet stable-ID NodeStore batching follow
+hscontrol/policy/policy.go (ApproveRoutesWithPolicy), state/state.go
+(autoApproveNodes) and state/node_store.go at the same v0.29.5 pin.
+
+Native cached-node column selection and serialized fresh-read/save ordering in
+src/admin/machines/native_snapshot.rs and src/admin/machines.rs follow
+hscontrol/state/state.go (persistNode/nodeUpdateColumns) at the same pin.
+
+Policy RPC live-install/append/reload ordering, empty-byte semantics and
+precise native policy timestamp projection follow hscontrol/grpcv1.go,
+hscontrol/state/state.go and hscontrol/db/policy.go at the same v0.29.5 pin.
+
+Native live-first tag/route/rename/expiry admin mutation, owner clearing and
+AllApprovedRoutes health checks follow hscontrol/state/state.go and
+hscontrol/types/node.go at the same v0.29.5 pin.
+
+Native cached-ID deletion, durable-before-cache removal and deleted-address
+release follow hscontrol/state/state.go DeleteNode and db/ip.go FreeIPs.
+Configured-domain rename validation follows types/node.go at the same pin.
+
+Native map persistence, deferred change dispatch, automatic-name reservation,
+route-vector and primary-shift handling follow hscontrol/state/state.go and
+state/maprequest.go. Live-first user logout follows hscontrol/auth.go
+handleLogout and State.SetNodeExpiry at the same pinned v0.29.5 source.
+
+Private map Hostinfo replacement/shape preservation in tailscale_wire/hostinfo.rs
+and retained DNS self-refresh dispatch follow state/state.go,
+state/maprequest.go and app.go Headscale.Change at the same pinned source.
+
+Registration Hostinfo companions, omitted NetInfo carry, fresh web tag mutation,
+raw relogin peer-field classification and native live representation after JSON
+persistence follow state/state.go at the same v0.29.5 pin. Debug map dump/readback,
+filename and filesystem create behavior follow mapper/mapper.go and debug.go.
+
+Existing native registration cache-first updates, auth-key rollback versus
+retained web failure state, selected registration columns and raw prior-state
+publication follow state/state.go applyAuthNodeUpdate,
+RegisterNodeWithPreAuthKey and onlyKeysChanged at the same v0.29.5 pin.
+
+Fresh registration database-first ID creation, nil approvals and NodeStore-only
+initial name collision resolution follow state/state.go createAndSaveNewNode
+and state/node_store.go PutNode/resolveGivenName at the same v0.29.5 pin.
+
+Original-entry registration completion lifetime and first-verdict-wins eviction
+behavior follow hscontrol/types/common.go AuthRequest/FinishAuth and
+hscontrol/state/state.go HandleNodeFromAuthPath/authCache at the same pin.
+Registration policy-change selection, ordered tags and active-route multiset
+comparison follow state/state.go reauthChange, policy/v2/policy.go SetNodes
+and types/node.go HasPolicyChange at that pinned v0.29.5 source.
+
+Retained policy-node inputs and self/via admission in src/policy/lifecycle.rs
+and filter.rs follow hscontrol/policy/v2/policy.go SetNodes, compiled.go
+compileOneGrant/compileOneViaGrant, and types/node.go input equality.
+Refresh boundaries, policy origins and expiry merge content follow
+hscontrol/state/state.go and types/change/change.go at the same v0.29.5 pin.
+
+Retained serving caches, nodeAttrs accumulation and route/tag authority in
+src/policy/runtime.rs follow policy/v2/policy.go, compiled.go and types.go.
+The matcher adapter follows hscontrol/policy/matcher/matcher.go and
+types/node.go CanAccess/CanAccessRoute; SSH IP-set resolution, numeric account
+localparts and principal order follow policy/v2/filter.go at the same pin.
+Central policy dispatch and refresh ownership follow hscontrol/state/state.go
+and app.go Headscale.Change at the same Headscale v0.29.5 source.
+
+Independent native UserID/User association snapshots, loaded-owner policy inputs,
+map profiles, registration User/Login and gRPC user projection follow
+hscontrol/types/node.go, types/users.go, mapper/mapper.go and auth.go at the
+same v0.29.5 pin. The original BSD terms remain in LICENSE-HEADSCALE-GO.
+
+Cached native preauth-key/User associations, registration retention/replacement,
+shared one-shot Used projection and native gRPC key output follow
+hscontrol/types/preauth_key.go, types/types_clone.go, state/node_store.go,
+state/state.go and db/preauth_keys.go at the same v0.29.5 pin.
+
+Direct native preauth list/mint projection, numeric-owner binding, original
+insert timestamps, fractional expiry, scoped deletion and distinct node/key
+zero-time expiry rules follow hscontrol/grpcv1.go, db/preauth_keys.go,
+types/preauth_key.go and types/node.go at the same v0.29.5 pin.
+
+Preauth user/key transaction capture, batched user preload, SQLite immediate
+read/write transactions and context-independent handler completion follow
+hscontrol/db/db.go, db/sqliteconfig/config.go, db/preauth_keys.go and grpcv1.go
+at the same v0.29.5 pin.
+
+Credential user preload before bcrypt, first-ID lookup, captured native
+validation/planning and existing-node selection ordering follow
+hscontrol/db/preauth_keys.go, types/preauth_key.go and state/state.go
+at the same v0.29.5 pin.
+
+Grouped registration, OIDC, DNS and request event compatibility follows selected
+Headscale v0.29.5 hscontrol/auth.go, oidc.go, types/users.go, util/dns.go,
+dns/extrarecords.go, types/config.go, mapper/mapper.go and app.go. Source pin
+0f7d1e536bed9f01dd7161f7637af19bb0908335 and original Juan Font BSD attribution
+above apply. Original terms remain in LICENSE-HEADSCALE-GO.

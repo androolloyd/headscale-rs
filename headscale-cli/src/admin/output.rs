@@ -14,6 +14,9 @@ use serde_json::ser::PrettyFormatter;
 
 use super::AdminError;
 
+mod pterm;
+mod runewidth;
+
 #[derive(Serialize)]
 struct ErrorOutput<'a> {
     error: &'a str,
@@ -59,7 +62,20 @@ fn format_json_string<T: Serialize>(value: &T) -> Result<String, AdminError> {
     value
         .serialize(&mut ser)
         .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
-    String::from_utf8(buf).map_err(|e| AdminError::Decode(format!("serialise output: {e}")))
+    String::from_utf8(buf)
+        .map(|json| escape_go_json(&json))
+        .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))
+}
+
+// encoding/json's default Encoder/Marshal escapes these characters even when
+// the result is consumed outside HTML. Apply this after JSON serialization;
+// they can occur only within JSON strings, including object member names.
+fn escape_go_json(json: &str) -> String {
+    json.replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Print `value` in one of the upstream machine-readable formats.
@@ -69,17 +85,69 @@ pub fn print_structured<T: Serialize>(fmt: OutputFormat, value: &T) -> Result<()
         OutputFormat::Json => print_json(value),
         OutputFormat::JsonLine => {
             let s = serde_json::to_string(value)
+                .map(|json| escape_go_json(&json))
                 .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
             println!("{s}");
             Ok(())
         }
         OutputFormat::Yaml => {
-            let s = serde_yaml::to_string(value)
+            let s = crate::yaml::to_go_string(value)
                 .map_err(|e| AdminError::Decode(format!("serialise output: {e}")))?;
             println!("{s}");
             Ok(())
         }
     }
+}
+
+/// Render the upstream pterm table, including multiline cells and its final
+/// blank line. Legacy HTTP commands retain their existing table renderer.
+pub fn print_upstream_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut out = std::io::stdout().lock();
+    let _ = render_upstream_table_into(&mut out, headers, rows);
+}
+
+fn render_upstream_table_into<W: Write>(
+    out: &mut W,
+    headers: &[&str],
+    rows: &[Vec<String>],
+) -> std::io::Result<()> {
+    let mut widths = headers
+        .iter()
+        .map(|s| pterm::visible_width(s))
+        .collect::<Vec<_>>();
+    for row in rows {
+        for (column, cell) in row.iter().enumerate() {
+            widths[column] = widths[column].max(
+                cell.split('\n')
+                    .map(pterm::visible_width)
+                    .max()
+                    .unwrap_or(0),
+            );
+        }
+    }
+    for row in std::iter::once(headers.iter().map(|s| (*s).to_string()).collect::<Vec<_>>())
+        .chain(rows.iter().cloned())
+    {
+        let lines = row
+            .iter()
+            .map(|cell| cell.split('\n').collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for line in 0..lines.iter().map(Vec::len).max().unwrap_or(1) {
+            for (column, cell) in lines.iter().enumerate() {
+                if column > 0 {
+                    write!(out, " | ")?;
+                }
+                let text = cell.get(line).copied().unwrap_or("");
+                write!(
+                    out,
+                    "{text}{}",
+                    " ".repeat(widths[column].saturating_sub(pterm::visible_width(text)))
+                )?;
+            }
+            writeln!(out)?;
+        }
+    }
+    writeln!(out)
 }
 
 /// Format an error exactly like upstream `headscale`'s `printError` helper.
@@ -91,11 +159,13 @@ pub fn format_error(fmt: OutputFormat, message: &str) -> String {
             |_| format!("Error: {message}\n"),
             |json| format!("{json}\n"),
         ),
-        OutputFormat::JsonLine => serde_json::to_string(&value).map_or_else(
-            |_| format!("Error: {message}\n"),
-            |json| format!("{json}\n"),
-        ),
-        OutputFormat::Yaml => serde_yaml::to_string(&value).map_or_else(
+        OutputFormat::JsonLine => serde_json::to_string(&value)
+            .map(|json| escape_go_json(&json))
+            .map_or_else(
+                |_| format!("Error: {message}\n"),
+                |json| format!("{json}\n"),
+            ),
+        OutputFormat::Yaml => crate::yaml::to_go_string(&value).map_or_else(
             |_| format!("Error: {message}\n"),
             |yaml| format!("{yaml}\n"),
         ),

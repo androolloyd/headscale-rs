@@ -1,0 +1,7 @@
+Go4 netipx IP-set behavior
+
+Copyright (c) 2020 The Inet.af AUTHORS. All rights reserved.
+
+The headscale-api policy resolver follows the partial-set/error and zone
+semantics of go4.org/netipx v0.0.0-20231129151722-fdeea329fbba, as used by pinned
+Headscale v0.29.5. The original BSD terms are in LICENSE-NETIPX.

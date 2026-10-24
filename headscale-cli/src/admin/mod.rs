@@ -28,12 +28,14 @@
 pub mod apikeys;
 pub mod auth;
 pub mod client;
+mod confirmation;
 pub mod duration;
 pub mod grpc_client;
 pub mod nodes;
 pub mod output;
 pub mod policy;
 pub mod preauthkeys;
+mod proto_output;
 pub mod tailnet;
 pub mod users;
 
@@ -182,16 +184,22 @@ pub struct ConnectArgs {
     /// upstream's config-driven recovery path.
     #[arg(skip)]
     pub direct_database: Option<DirectPolicyDatabase>,
-    /// Upstream `cli.timeout`, populated from config or
-    /// `HEADSCALE_CLI_TIMEOUT`; this is not a Rust-only CLI flag.
+    /// Whole-second timeout for existing embedding callers. Takes precedence
+    /// over `timeout_nanos`; this is not a CLI flag.
     #[arg(skip)]
     pub timeout_secs: Option<u64>,
+    /// Exact signed Go `cli.timeout` from config or `HEADSCALE_CLI_TIMEOUT`.
+    /// Nonpositive values create an immediately expired command context.
+    #[arg(skip)]
+    pub timeout_nanos: Option<i64>,
     /// True when upstream config discovery fell back to defaults and the local
     /// Unix-socket gRPC setup should emit Cobra's warning banner.
     #[arg(skip)]
     pub warn_no_config_default: bool,
-    /// True when the gRPC endpoint was supplied by upstream `cli.address`
-    /// config, whose Cobra command wrappers prefix connection setup failures.
+    /// Select upstream connection/operation/status formatting, a shared command
+    /// deadline and exit 1 for RPC failures. The standalone binary enables this
+    /// for every gRPC endpoint; direct embedders can leave it false to retain
+    /// typed client errors and their existing transport timeouts.
     #[arg(skip)]
     pub wrap_grpc_connect_error: bool,
 }
@@ -213,14 +221,44 @@ impl ConnectArgs {
         if self.warn_no_config_default {
             print_no_config_default_warning();
         }
-        let result = GrpcAdminClient::connect(
-            self.address.as_deref(),
-            self.api_key.as_deref(),
-            self.unix_socket.as_deref(),
-            self.insecure,
-            self.timeout_secs.map(Duration::from_secs),
-        )
-        .await;
+        let timeout = self.timeout_secs.map(Duration::from_secs).or_else(|| {
+            self.timeout_nanos
+                .map(|nanos| Duration::from_nanos(u64::try_from(nanos).unwrap_or_default()))
+        });
+        if self.wrap_grpc_connect_error {
+            // zerolog.Dur uses float64 milliseconds, including the sign of an
+            // already-expired configured context. Keep that sign in the log
+            // while the Rust timer uses a zero duration for expired contexts.
+            #[allow(clippy::cast_precision_loss)]
+            let timeout_ms = self.timeout_secs.map_or_else(
+                || {
+                    self.timeout_nanos
+                        .map_or(5000.0, |nanos| nanos as f64 / 1_000_000.0)
+                },
+                |seconds| Duration::from_secs(seconds).as_secs_f64() * 1000.0,
+            );
+            tracing::debug!(timeout = timeout_ms, "Setting timeout");
+        }
+        let result = if self.wrap_grpc_connect_error {
+            GrpcAdminClient::connect_upstream(
+                self.address.as_deref(),
+                self.api_key.as_deref(),
+                self.unix_socket.as_deref(),
+                self.insecure,
+                timeout,
+            )
+            .await
+        } else {
+            GrpcAdminClient::connect(
+                self.address.as_deref(),
+                self.api_key.as_deref(),
+                self.unix_socket.as_deref(),
+                self.insecure,
+                timeout,
+            )
+            .await
+        }
+        .map(|client| client.with_upstream_rpc_errors(self.wrap_grpc_connect_error));
         if self.wrap_grpc_connect_error {
             result.map_err(wrap_grpc_connect_error)
         } else {
@@ -233,10 +271,13 @@ impl ConnectArgs {
     }
 
     fn has_explicit_grpc_endpoint(&self) -> bool {
-        self.address
-            .as_deref()
-            .is_some_and(|address| !address.trim().is_empty())
-            || self.unix_socket.is_some()
+        self.address.as_deref().is_some_and(|address| {
+            if self.wrap_grpc_connect_error {
+                !address.is_empty()
+            } else {
+                !address.trim().is_empty()
+            }
+        }) || self.unix_socket.is_some()
     }
 
     pub fn fmt(&self) -> Result<OutputFormat, AdminError> {
@@ -255,7 +296,8 @@ fn wrap_grpc_connect_error(err: AdminError) -> AdminError {
 }
 
 fn print_no_config_default_warning() {
-    let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+    // Go's time.RFC3339 prints `Z` for a UTC offset and `+hh:mm` otherwise.
+    let timestamp = Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     eprintln!("{timestamp} WRN no config file found, using defaults");
 }
 
@@ -703,7 +745,9 @@ pub async fn run_users(conn: &ConnectArgs, cmd: &UsersCmd) -> Result<(), AdminEr
 pub async fn run_nodes(conn: &ConnectArgs, cmd: &NodesCmd) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
     if matches!(cmd, NodesCmd::Register { .. }) {
-        eprintln!("use 'headscale auth register --auth-id <id> --user <user>' instead");
+        eprintln!(
+            "Command \"register\" is deprecated, use 'headscale auth register --auth-id <id> --user <user>' instead"
+        );
     }
     if conn.should_use_legacy_http_for_migrated_commands() {
         let client = conn.build_client()?;
@@ -931,17 +975,6 @@ pub async fn run_preauthkeys(
         };
     }
 
-    match cmd {
-        PreauthKeysCmd::Expire { id } | PreauthKeysCmd::Delete { id }
-            if id.unwrap_or_default() == 0 =>
-        {
-            return Err(AdminError::Usage(
-                "missing --id parameter: missing parameters".into(),
-            ));
-        }
-        _ => {}
-    }
-
     let mut client = conn.build_grpc_client().await?;
     match cmd {
         PreauthKeysCmd::Create {
@@ -951,15 +984,15 @@ pub async fn run_preauthkeys(
             tags,
             expires_in,
         } => {
-            let secs = duration::parse_duration_secs(expires_in).map_err(AdminError::Local)?;
+            let expiration = duration::expiration_from_flag(expires_in)?;
             let user = user.or(parent_user).unwrap_or_default();
-            preauthkeys::create_grpc(
+            preauthkeys::create_grpc_with_expiration(
                 &mut client,
                 user,
                 *reusable,
                 *ephemeral,
                 tags.clone(),
-                secs,
+                Some(expiration),
                 fmt,
             )
             .await
@@ -1004,13 +1037,6 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
         };
     }
 
-    match cmd {
-        ApiKeysCmd::Expire { prefix, id } | ApiKeysCmd::Delete { prefix, id } => {
-            apikeys::validate_selector(prefix.as_deref(), *id)?;
-        }
-        ApiKeysCmd::Create { .. } | ApiKeysCmd::List => {}
-    }
-
     let mut client = conn.build_grpc_client().await?;
     match cmd {
         ApiKeysCmd::Create { expiration } => {
@@ -1027,41 +1053,72 @@ pub async fn run_apikeys(conn: &ConnectArgs, cmd: &ApiKeysCmd) -> Result<(), Adm
 }
 
 pub async fn run_policy(conn: &ConnectArgs, cmd: &PolicyCmd) -> Result<(), AdminError> {
+    let input = policy::PreparedPolicyInput::read(cmd)?;
+    run_policy_with_input(conn, cmd, input).await
+}
+
+#[doc(hidden)]
+pub async fn run_policy_with_input(
+    conn: &ConnectArgs,
+    cmd: &PolicyCmd,
+    mut input: policy::PreparedPolicyInput,
+) -> Result<(), AdminError> {
     let fmt = conn.fmt()?;
-    if cmd.bypasses_direct_database() {
-        policy::confirm_direct_database_access(conn.force)?;
+    let direct = cmd.bypasses_direct_database();
+    if direct {
+        input.confirm_direct_database_access(conn.force)?;
+    }
+    let (body, settings) = input.into_parts();
+    if direct {
         let database = conn.direct_database.as_ref().ok_or_else(|| {
             AdminError::Local(
                 "direct database policy access requires a loaded headscale config".into(),
             )
         })?;
         return match cmd {
-            PolicyCmd::Check { path, .. } => policy::check_direct_db(database, path).await,
-            PolicyCmd::Get { .. } => policy::get_direct_db(database, fmt).await,
-            PolicyCmd::Set { path, .. } => policy::set_direct_db(database, path, fmt).await,
+            PolicyCmd::Check { .. } => {
+                policy::check_direct_db_body(database, policy_body(body.as_deref())?, settings)
+                    .await
+            }
+            PolicyCmd::Get { .. } => {
+                policy::get_direct_db_with_settings(database, fmt, settings).await
+            }
+            PolicyCmd::Set { .. } => {
+                policy::set_direct_db_body(database, policy_body(body.as_deref())?, settings).await
+            }
         };
     }
 
     if conn.should_use_legacy_http_for_migrated_commands() {
         return match cmd {
-            PolicyCmd::Check { path, .. } => policy::check(path),
+            PolicyCmd::Check { path, .. } => {
+                policy::check_body(path, policy_body(body.as_deref())?)
+            }
             PolicyCmd::Get { .. } => {
                 let client = conn.build_client()?;
                 policy::get(&client, fmt).await
             }
-            PolicyCmd::Set { path, .. } => {
+            PolicyCmd::Set { .. } => {
                 let client = conn.build_client()?;
-                policy::set(&client, path, fmt).await
+                policy::set_body(&client, policy_body(body.as_deref())?, fmt).await
             }
         };
     }
 
     let mut client = conn.build_grpc_client().await?;
     match cmd {
-        PolicyCmd::Check { path, .. } => policy::check_grpc(&mut client, path).await,
+        PolicyCmd::Check { .. } => {
+            policy::check_grpc_body(&mut client, policy_body(body.as_deref())?).await
+        }
         PolicyCmd::Get { .. } => policy::get_grpc(&mut client, fmt).await,
-        PolicyCmd::Set { path, .. } => policy::set_grpc(&mut client, path, fmt).await,
+        PolicyCmd::Set { .. } => {
+            policy::set_grpc_body(&mut client, policy_body(body.as_deref())?).await
+        }
     }
+}
+
+fn policy_body(input: Option<&str>) -> Result<&str, AdminError> {
+    input.ok_or_else(|| AdminError::Local("policy file input was not prepared".into()))
 }
 
 impl PolicyCmd {
@@ -1083,7 +1140,7 @@ pub async fn run_health(conn: &ConnectArgs) -> Result<(), AdminError> {
     let mut client = conn.build_grpc_client().await?;
     let response = client.health().await?;
     if fmt.is_structured() {
-        output::print_structured(
+        proto_output::print_proto(
             fmt,
             &HealthOutput {
                 database_connectivity: response.database_connectivity,
@@ -1147,6 +1204,8 @@ pub async fn run_tailnet(conn: &ConnectArgs, cmd: &TailnetCmd) -> Result<(), Adm
 struct HealthOutput {
     database_connectivity: bool,
 }
+
+proto_output::impl_go_yaml!(HealthOutput { database_connectivity => "databaseconnectivity" });
 
 #[cfg(test)]
 mod tests {
@@ -1246,6 +1305,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -1266,6 +1326,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -1285,6 +1346,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };
@@ -1304,6 +1366,7 @@ mod tests {
             force: false,
             direct_database: None,
             timeout_secs: None,
+            timeout_nanos: None,
             warn_no_config_default: false,
             wrap_grpc_connect_error: false,
         };

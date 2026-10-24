@@ -2,15 +2,12 @@
 //!
 //! Wire format: `tailcfg.OverTLSPublicKeyResponse`
 //! (`tailscale/tailcfg/tailcfg.go`). Only `PublicKey` is required for
-//! a TS2021-capable client (capability version >= 39); older clients
-//! also consume a `LegacyPublicKey` field, which we leave empty
-//! because we have no legacy bridge.
+//! a supported TS2021-capable client (capability version >= 113). The legacy key
+//! is the all-zero machine key because there is no legacy bridge.
 //!
 //! Stock `tailscale up` appends a `?v=<capver>` query parameter
-//! advertising the client's capability version. Upstream headscale
-//! rejects requests without a parsable `v`, returns the Noise public
-//! key for TS2021-capable clients (`v >= 39`), and otherwise writes an
-//! empty 200 response because there is no legacy bridge.
+//! advertising the client's capability version. Pinned headscale-go
+//! v0.29.5 rejects versions below its supported floor (113).
 //!
 //! ## Decision log
 //!
@@ -21,25 +18,26 @@
 //!   (`OverTLSPublicKeyResponse` deserialise) round-trips.
 
 use axum::{
-    Json,
     extract::{RawQuery, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
-use super::{WireState, noise::NOISE_CAPABILITY_VERSION};
+use super::{WireState, wire::MIN_SUPPORTED_CAPABILITY_VERSION};
 
 /// `GET /key` response.
 ///
-/// JSON field tag: `PublicKey` (PascalCase) per upstream
-/// `OverTLSPublicKeyResponse`. The `mkey:` prefix is part of the value
+/// JSON field tags match upstream `OverTLSPublicKeyResponse`. The `mkey:` prefix is part of the value
 /// so a downstream parser uses the same code path as it would for any
 /// other Tailscale machine key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OverTLSPublicKeyResponse {
+    /// All-zero legacy key, as serialized by headscale-go.
+    #[serde(rename = "legacyPublicKey")]
+    pub legacy_public_key: String,
     /// Server's Noise X25519 public key, formatted as `mkey:<hex>`.
-    #[serde(rename = "PublicKey")]
+    #[serde(rename = "publicKey")]
     pub public_key: String,
 }
 
@@ -48,17 +46,27 @@ pub async fn handle_key(State(state): State<WireState>, RawQuery(raw_query): Raw
         Ok(cap_ver) => cap_ver,
         Err(resp) => return resp,
     };
-    if cap_ver < u32::from(NOISE_CAPABILITY_VERSION) {
-        return StatusCode::OK.into_response();
+    if !u64::try_from(cap_ver)
+        .is_ok_and(|version| version >= u64::from(MIN_SUPPORTED_CAPABILITY_VERSION))
+    {
+        return text_error(StatusCode::BAD_REQUEST, "unsupported client version");
     }
 
     let body = OverTLSPublicKeyResponse {
+        legacy_public_key: format!("mkey:{}", "0".repeat(64)),
         public_key: format!("mkey:{}", state.server_noise_key.public_hex()),
     };
-    Json(body).into_response()
+    let Ok(mut body) = serde_json::to_vec(&body) else {
+        return text_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode public key response",
+        );
+    };
+    body.push(b'\n');
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-fn parse_capability_version(raw_query: Option<&str>) -> Result<u32, Response> {
+fn parse_capability_version(raw_query: Option<&str>) -> Result<isize, Response> {
     let Some(raw_query) = raw_query else {
         return Err(text_error(
             StatusCode::BAD_REQUEST,
@@ -66,25 +74,28 @@ fn parse_capability_version(raw_query: Option<&str>) -> Result<u32, Response> {
         ));
     };
 
-    let Some(raw_v) = raw_query.split('&').find_map(|part| {
-        let (key, value) = part.split_once('=')?;
-        (key == "v").then_some(value)
-    }) else {
+    let Some(raw_v) = super::query::first_value(raw_query, "v").filter(|value| !value.is_empty())
+    else {
         return Err(text_error(
             StatusCode::BAD_REQUEST,
             "capability version must be set",
         ));
     };
 
-    raw_v
-        .parse::<u32>()
-        .map_err(|_| text_error(StatusCode::BAD_REQUEST, "invalid capability version"))
+    std::str::from_utf8(&raw_v)
+        .ok()
+        .and_then(|value| value.parse::<isize>().ok())
+        .ok_or(())
+        .map_err(|()| text_error(StatusCode::BAD_REQUEST, "invalid capability version"))
 }
 
 fn text_error(status: StatusCode, msg: &str) -> Response {
     (
         status,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         format!("{msg}\n"),
     )
         .into_response()
@@ -139,7 +150,7 @@ mod tests {
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=39")
+                    .uri("/key?v=138")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -148,7 +159,11 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: OverTLSPublicKeyResponse = serde_json::from_slice(&body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.public_key, format!("mkey:{expected_pub}"));
+        assert_eq!(parsed.legacy_public_key, format!("mkey:{}", "0".repeat(64)));
+        assert!(value.get("PublicKey").is_none());
+        assert!(value.get("publicKey").is_some());
     }
 
     #[tokio::test]
@@ -188,20 +203,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_endpoint_returns_empty_200_for_legacy_capability() {
+    async fn key_endpoint_rejects_unsupported_capability() {
         let (state, _dir) = fixture_state();
         let app = router(state);
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/key?v=38")
+                    .uri("/key?v=112")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert!(body.is_empty());
+        assert_eq!(body.as_ref(), b"unsupported client version\n");
     }
 }

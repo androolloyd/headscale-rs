@@ -6,6 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
+    fmt::Write as _,
     sync::OnceLock,
     thread,
     time::Instant,
@@ -25,8 +26,7 @@ use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
     DerpMap, HistogramMetric, MachineRecord, NODESTORE_BATCH_SIZE_BUCKETS,
-    PROMETHEUS_DEFAULT_BUCKETS, WireState,
-    wire::{SshPolicy, stable_id_from_key},
+    PROMETHEUS_DEFAULT_BUCKETS, WireState, wire::SshPolicy,
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
@@ -163,7 +163,8 @@ pub async fn handle_swagger_api_v1() -> Response {
 
 pub async fn handle_web_register(Path(registration_id): Path<String>) -> Response {
     let Some(registration_id) = registration_id_from_register_path(&registration_id) else {
-        return http_error(StatusCode::BAD_REQUEST, "invalid registration id");
+        // Go: authIDFromRequest answers "invalid auth id" for /register/{auth_id} too.
+        return http_error(StatusCode::BAD_REQUEST, "invalid auth id");
     };
 
     (
@@ -257,27 +258,51 @@ pub async fn handle_derp_probe(method: Method) -> Response {
 pub async fn handle_derp_bootstrap_dns(State(state): State<WireState>) -> Response {
     let mut dns_entries: BTreeMap<String, Vec<IpAddr>> = BTreeMap::new();
 
-    let derp_map = state.derp_map.snapshot();
-    for region in derp_map.regions.values() {
-        for node in &region.nodes {
+    let snapshot = state.derp_map.paired_snapshot();
+    let host_names: Vec<String> = if let Some(native) = snapshot.native {
+        let Some(host_names) = native
+            .regions
+            .values()
+            .flatten()
+            .flat_map(|region| region.nodes.iter().flatten())
+            .map(|node| node.as_ref().map(|node| node.host_name.clone()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            // Go's DERPNodeView.HostName dereferences the nil node and
+            // the HTTP recoverer returns 500. Preserve that HTTP outcome
+            // without a Rust panic; the map itself still encodes null.
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        host_names
+    } else {
+        snapshot
+            .projection
+            .regions
+            .values()
+            .flat_map(|region| region.nodes.iter())
+            .map(|node| node.host_name.clone())
+            .collect()
+    };
+    for host_name in host_names {
+        // Scoped so the lookup future, which borrows `host_name`, is dropped
+        // before the name is moved into the map.
+        let ips = {
             let resolved = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
-                tokio::net::lookup_host((node.host_name.as_str(), 0)),
+                tokio::net::lookup_host((host_name.as_str(), 0)),
             )
             .await;
-
             let Ok(Ok(addrs)) = resolved else {
                 continue;
             };
-
-            let ips = addrs
+            addrs
                 .map(|addr| addr.ip())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
-                .collect::<Vec<_>>();
-            if !ips.is_empty() {
-                dns_entries.insert(node.host_name.clone(), ips);
-            }
+                .collect::<Vec<_>>()
+        };
+        if !ips.is_empty() {
+            dns_entries.insert(host_name, ips);
         }
     }
 
@@ -424,7 +449,7 @@ fn debug_vars_payload(state: &WireState) -> serde_json::Value {
         "headscale": {
             "nodes_registered": snapshot.len(),
             "dns_base_domain": dns_spec.base_domain,
-            "derp_regions": state.derp_map.snapshot().regions.len(),
+            "derp_regions": derp_configured_count(&state.derp_map).1,
         }
     })
 }
@@ -1259,8 +1284,56 @@ pub async fn handle_debug_overview(State(state): State<WireState>, headers: Head
     }
 }
 
+fn native_debug_json<T: Serialize>(value: &T) -> serde_json::Result<String> {
+    let raw = serde_json::to_vec(value)?;
+    let body = headscale_api_acl::go_json_output::indent(&raw)
+        .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+    String::from_utf8(body).map_err(<serde_json::Error as serde::ser::Error>::custom)
+}
+
 pub async fn handle_debug_config(State(state): State<WireState>) -> Response {
-    match serde_json::to_string_pretty(&debug_config_info(&state)) {
+    let result = (|| -> serde_json::Result<String> {
+        let mut info = debug_config_info(&state);
+        let snapshot = state.derp_map.paired_snapshot();
+        let native_output = snapshot.native.is_some();
+        let region_id = if let Some(native) = snapshot.native {
+            info.derp.derp_map = native.json_value()?;
+            native.server_region_id()
+        } else {
+            info.derp.derp_map = serde_json::to_value(snapshot.projection)?;
+            None
+        };
+        let mut body = if native_output {
+            native_debug_json(&info)?
+        } else {
+            serde_json::to_string_pretty(&info)?
+        };
+        if let Some(region_id) = region_id {
+            // Keep the existing public struct's declaration/pretty order. The
+            // only unrepresentable public field is replaced by its canonical
+            // integer at the exact borrowed JSON value span, never by a text
+            // match that could also occur in a configured string.
+            let fields = headscale_api_acl::go_json::object(body.as_bytes())
+                .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+            let derp = fields
+                .into_iter()
+                .find(|(name, _)| name == "DERP")
+                .expect("serialized DebugConfigInfo has DERP")
+                .1;
+            let fields = headscale_api_acl::go_json::object(derp.get())
+                .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+            let raw = fields
+                .into_iter()
+                .find(|(name, _)| name == "ServerRegionID")
+                .expect("serialized DebugDerpConfig has ServerRegionID")
+                .1;
+            let start = raw.get().as_ptr() as usize - body.as_ptr() as usize;
+            let end = start + raw.get().len();
+            body.replace_range(start..end, &region_id.to_string());
+        }
+        Ok(body)
+    })();
+    match result {
         Ok(body) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
@@ -1314,9 +1387,35 @@ fn debug_routes_info(
 }
 
 pub async fn handle_debug_derp(State(state): State<WireState>, headers: HeaderMap) -> Response {
-    let derp_map = state.derp_map.snapshot();
+    let snapshot = state.derp_map.paired_snapshot();
+    if let Some(native) = snapshot.native {
+        let Some(info) = native_debug_derp_info(&native, &state) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        return if wants_json(&headers) {
+            match native_debug_json(&info) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+                    .into_response(),
+                Err(error) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+            }
+        } else {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain")],
+                native_debug_derp_string(&info),
+            )
+                .into_response()
+        };
+    }
+    let derp_map = snapshot.projection;
     if wants_json(&headers) {
-        let mut info = debug_derp_info(&derp_map);
+        let info = debug_derp_info(&derp_map);
+        #[cfg(feature = "full")]
+        let mut info = info;
         #[cfg(feature = "full")]
         {
             info.native = state.native_derp.as_deref().map(debug_native_derp_info);
@@ -1366,8 +1465,12 @@ pub async fn handle_debug_filter(State(state): State<WireState>) -> Response {
 }
 
 pub async fn handle_debug_policy(State(state): State<WireState>, headers: HeaderMap) -> Response {
-    let Some(policy) = state.policy.raw() else {
-        return http_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+    let policy = match state.policy.debug_source_bytes().await {
+        Ok(policy) => policy,
+        Err(error) => {
+            tracing::error!(%error, "reading debug policy source");
+            return http_error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+        }
     };
 
     let content_type = if wants_json(&headers) {
@@ -1423,21 +1526,18 @@ pub async fn handle_debug_nodestore(
 }
 
 pub async fn handle_debug_mapresponses(State(state): State<WireState>) -> Response {
-    let responses = match state.mapresponse_debug.read() {
+    let body = match state.mapresponse_debug.read_json() {
         Ok(Some(responses)) => responses,
         Ok(None) => return (StatusCode::OK, MAPRESPONSES_DEBUG_DISABLED_BODY).into_response(),
         Err(err) => return http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     };
 
-    match serde_json::to_string_pretty(&responses) {
-        Ok(body) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response(),
-        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 pub async fn handle_debug_batcher(State(state): State<WireState>, headers: HeaderMap) -> Response {
@@ -1613,6 +1713,18 @@ fn debug_derp_configured(derp_map: &DerpMap) -> bool {
     !derp_map.regions.is_empty() || derp_map.omit_default_regions
 }
 
+fn derp_configured_count(store: &super::DerpMapStore) -> (bool, usize) {
+    let snapshot = store.paired_snapshot();
+    if let Some(native) = snapshot.native {
+        (true, native.regions.len())
+    } else {
+        (
+            debug_derp_configured(&snapshot.projection),
+            snapshot.projection.regions.len(),
+        )
+    }
+}
+
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
 }
@@ -1622,8 +1734,10 @@ fn debug_config_info(state: &WireState) -> DebugConfigInfo {
     let dns_spec = state.dns.spec();
     let tailcfg_dns_config =
         serde_json::to_value(state.dns.build(&[])).unwrap_or(serde_json::Value::Null);
-    let derp_map =
-        serde_json::to_value(state.derp_map.snapshot()).unwrap_or(serde_json::Value::Null);
+    let derp_map = state
+        .derp_map
+        .json_snapshot()
+        .unwrap_or(serde_json::Value::Null);
 
     if let Some(public_control_url) = &state.public_control_url {
         info.server_url.clone_from(public_control_url);
@@ -1682,7 +1796,7 @@ fn metrics_text(state: &WireState) -> String {
         if rec.is_expired_at(now) {
             nodes_expired += 1;
         } else if online_states
-            .get(&stable_id_from_key(node_key))
+            .get(&rec.stable_node_id_for_key(node_key))
             .copied()
             .unwrap_or(false)
         {
@@ -1696,8 +1810,7 @@ fn metrics_text(state: &WireState) -> String {
         }
     }
 
-    let derp_map = state.derp_map.snapshot();
-    let derp = debug_derp_info(&derp_map);
+    let (_, derp_regions) = derp_configured_count(&state.derp_map);
     let routes = state.machines.debug_routes_for_snapshot(&snapshot);
     let active_connections = state.machines.active_connections();
     let map_stream_connections = active_connections.values().sum::<usize>();
@@ -1741,7 +1854,7 @@ fn metrics_text(state: &WireState) -> String {
         &mut out,
         "headscale_derp_regions",
         "Current number of configured DERP regions.",
-        derp.total_regions,
+        derp_regions,
     );
     append_gauge(
         &mut out,
@@ -1819,6 +1932,7 @@ fn metrics_text(state: &WireState) -> String {
         PROMETHEUS_DEFAULT_BUCKETS,
         state.machines.http_duration_metrics(),
     );
+    append_go_http_metrics(&mut out, state);
     append_counter_family(
         &mut out,
         "headscale_nodestore_operations_total",
@@ -1957,6 +2071,59 @@ fn append_counter_family_2(
         out.push_str("\"} ");
         out.push_str(&value.to_string());
         out.push('\n');
+    }
+}
+
+/// The pinned Go server uses github.com/go-chi/metrics v0.1.1, whose HTTP
+/// families have no `headscale_` namespace. Keep these alongside the older
+/// Rust-specific metrics so existing dashboards retain their series.
+fn append_go_http_metrics(out: &mut String, state: &WireState) {
+    out.push_str("# HELP http_requests_total Total number of incoming HTTP requests.\n");
+    out.push_str("# TYPE http_requests_total counter\n");
+    for ((host, status, endpoint, proto, client_aborted), count) in
+        state.machines.http_request_go_metrics()
+    {
+        let labels = format!(
+            "host=\"{}\",status=\"{}\",endpoint=\"{}\",proto=\"{}\",client_aborted=\"{}\"",
+            prometheus_label_value(&host),
+            prometheus_label_value(&status),
+            prometheus_label_value(&endpoint),
+            prometheus_label_value(&proto),
+            prometheus_label_value(&client_aborted),
+        );
+        let _ = writeln!(out, "http_requests_total{{{labels}}} {count}");
+    }
+
+    out.push_str("# HELP http_request_duration_seconds Response latency in seconds for completed incoming HTTP requests.\n");
+    out.push_str("# TYPE http_request_duration_seconds histogram\n");
+    for ((status, endpoint), sample) in state.machines.http_duration_go_metrics() {
+        let labels = format!(
+            "status=\"{}\",endpoint=\"{}\"",
+            prometheus_label_value(&status),
+            prometheus_label_value(&endpoint),
+        );
+        for (_, le) in super::HTTP_GO_BUCKETS {
+            let _ = writeln!(
+                out,
+                "http_request_duration_seconds_bucket{{{labels},le=\"{le}\"}} {}",
+                sample.bucket(le)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "http_request_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}",
+            sample.count
+        );
+        let _ = writeln!(
+            out,
+            "http_request_duration_seconds_sum{{{labels}}} {}",
+            prometheus_float(sample.sum)
+        );
+        let _ = writeln!(
+            out,
+            "http_request_duration_seconds_count{{{labels}}} {}",
+            sample.count
+        );
     }
 }
 
@@ -2140,7 +2307,7 @@ fn debug_nodestore_json(state: &WireState) -> BTreeMap<String, DebugNodeStoreNod
     snapshot
         .iter()
         .map(|(node_key, rec)| {
-            let id = stable_id_from_key(node_key);
+            let id = rec.stable_node_id_for_key(node_key);
             (
                 id.to_string(),
                 DebugNodeStoreNode {
@@ -2209,7 +2376,7 @@ fn debug_nodestore_string(state: &WireState) -> String {
     let peer_map = debug_peer_map_for_snapshot(&state.policy, &snapshot);
     let mut total_peers = 0usize;
     for (node_key, rec) in sorted_snapshot_nodes(&snapshot) {
-        let node_id = stable_id_from_key(node_key);
+        let node_id = rec.stable_node_id_for_key(node_key);
         let peer_count = peer_map
             .get(&node_id)
             .map_or(snapshot.len().saturating_sub(1), BTreeSet::len);
@@ -2300,7 +2467,7 @@ fn debug_policy_manager_string(state: &WireState) -> String {
     for (node_key, rec) in sorted_snapshot_nodes(&state.machines.snapshot()) {
         out.push_str(&format!(
             "id:{} hostname:{} user:{} addr:{}\n",
-            stable_id_from_key(node_key),
+            rec.stable_node_id_for_key(node_key),
             rec.hostname,
             rec.user,
             rec.primary_addr_string().unwrap_or_default()
@@ -2341,7 +2508,7 @@ fn debug_peer_map_for_snapshot(
     let nodes = snapshot
         .iter()
         .map(|(node_key, rec)| PeerMapNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             addr: rec.primary_addr_string().unwrap_or_default(),
             addrs: rec.address_strings(),
             user: (!rec.user.is_empty()).then(|| rec.user.clone()),
@@ -2350,7 +2517,15 @@ fn debug_peer_map_for_snapshot(
         })
         .collect::<Vec<_>>();
 
-    if let Some(map) = policy.build_peer_map(&nodes) {
+    let owners = snapshot
+        .iter()
+        .filter_map(|(key, record)| {
+            record
+                .user_id
+                .map(|owner| (record.stable_node_id_for_key(key), owner))
+        })
+        .collect();
+    if let Some(map) = policy.build_peer_map_with_user_ids(&nodes, &owners) {
         return map
             .into_iter()
             .map(|(node_id, peers)| (node_id, peers.into_iter().collect()))
@@ -2358,13 +2533,13 @@ fn debug_peer_map_for_snapshot(
     }
 
     let all_ids = snapshot
-        .keys()
-        .map(|node_key| stable_id_from_key(node_key))
+        .iter()
+        .map(|(node_key, rec)| rec.stable_node_id_for_key(node_key))
         .collect::<BTreeSet<_>>();
     snapshot
-        .keys()
-        .map(|node_key| {
-            let node_id = stable_id_from_key(node_key);
+        .iter()
+        .map(|(node_key, rec)| {
+            let node_id = rec.stable_node_id_for_key(node_key);
             let peers = all_ids
                 .iter()
                 .copied()
@@ -2389,7 +2564,7 @@ fn stateful_primary_routes_for_debug(
             routes_by_prefix
                 .entry(route.clone())
                 .or_default()
-                .push((node_key, stable_id_from_key(node_key)));
+                .push((node_key, rec.stable_node_id_for_key(node_key)));
         }
     }
 
@@ -2407,7 +2582,7 @@ fn sorted_snapshot_nodes(
     snapshot: &HashMap<String, MachineRecord>,
 ) -> Vec<(&String, &MachineRecord)> {
     let mut nodes = snapshot.iter().collect::<Vec<_>>();
-    nodes.sort_by_key(|(node_key, _)| stable_id_from_key(node_key));
+    nodes.sort_by_key(|(node_key, rec)| rec.stable_node_id_for_key(node_key));
     nodes
 }
 
@@ -2426,7 +2601,7 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
         if expired {
             nodes.expired += 1;
         } else if online_states
-            .get(&stable_id_from_key(node_key))
+            .get(&rec.stable_node_id_for_key(node_key))
             .copied()
             .unwrap_or(false)
         {
@@ -2441,8 +2616,7 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
     }
 
     let routes = state.machines.debug_routes_for_snapshot(&snapshot);
-    let derp_map = state.derp_map.snapshot();
-    let derp = debug_derp_info(&derp_map);
+    let (derp_configured, derp_regions) = derp_configured_count(&state.derp_map);
     DebugOverviewInfo {
         nodes,
         total_users: users.len(),
@@ -2452,8 +2626,8 @@ fn debug_overview_info(state: &WireState) -> DebugOverviewInfo {
             path: None,
         },
         derp: DebugOverviewDerp {
-            configured: derp.configured,
-            regions: derp.total_regions,
+            configured: derp_configured,
+            regions: derp_regions,
         },
         primary_routes: routes.primary_routes.len(),
     }
@@ -2682,6 +2856,102 @@ fn debug_batcher_string(info: &DebugBatcherInfo) -> String {
     out
 }
 
+#[derive(Serialize)]
+struct NativeDebugDerpInfo {
+    configured: bool,
+    total_regions: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    regions: BTreeMap<String, NativeDebugDerpRegion>,
+    #[cfg(feature = "full")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native: Option<DebugNativeDerpInfo>,
+}
+
+#[derive(Serialize)]
+struct NativeDebugDerpRegion {
+    region_id: i64,
+    region_name: String,
+    nodes: Vec<NativeDebugDerpNode>,
+}
+
+#[derive(Serialize)]
+struct NativeDebugDerpNode {
+    name: String,
+    hostname: String,
+    derp_port: i64,
+    #[serde(skip_serializing_if = "native_zero_i64")]
+    stun_port: i64,
+}
+
+fn native_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+fn native_debug_derp_info(
+    map: &super::native_derp::NativeDerpMap,
+    #[allow(unused_variables)] state: &WireState,
+) -> Option<NativeDebugDerpInfo> {
+    let mut regions = BTreeMap::new();
+    for (&id, region) in &map.regions {
+        // Go's debug view dereferences region/node pointers; its recoverer
+        // produces 500 on nil. Keep that outcome without panicking in Rust.
+        let region = region.as_ref()?;
+        let mut nodes = Vec::new();
+        for node in region.nodes.iter().flatten() {
+            let node = node.as_ref()?;
+            nodes.push(NativeDebugDerpNode {
+                name: node.name.clone(),
+                hostname: node.host_name.clone(),
+                derp_port: node.derp_port,
+                stun_port: node.stun_port,
+            });
+        }
+        regions.insert(
+            id.to_string(),
+            NativeDebugDerpRegion {
+                region_id: id,
+                region_name: region.region_name.clone(),
+                nodes,
+            },
+        );
+    }
+    Some(NativeDebugDerpInfo {
+        configured: true,
+        total_regions: map.regions.len(),
+        regions,
+        #[cfg(feature = "full")]
+        native: state.native_derp.as_deref().map(debug_native_derp_info),
+    })
+}
+
+#[allow(clippy::format_push_string)]
+fn native_debug_derp_string(info: &NativeDebugDerpInfo) -> String {
+    let mut out = String::from("=== DERP Map Configuration ===\n\n");
+    out.push_str(&format!("Total Regions: {}\n\n", info.total_regions));
+    // Text Go map iteration has no stable ordering. Retain the embedding
+    // renderer's deterministic numeric order, extended to signed native IDs.
+    let mut regions = info.regions.values().collect::<Vec<_>>();
+    regions.sort_by_key(|region| region.region_id);
+    for region in regions {
+        out.push_str(&format!(
+            "Region {}: {}\n",
+            region.region_id, region.region_name
+        ));
+        out.push_str(&format!("  - Nodes: {}\n", region.nodes.len()));
+        for node in &region.nodes {
+            out.push_str(&format!(
+                "    - {} ({}:{})\n",
+                node.name, node.hostname, node.derp_port
+            ));
+            if node.stun_port != 0 {
+                out.push_str(&format!("      STUN: {}\n", node.stun_port));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn debug_derp_info(derp_map: &DerpMap) -> DebugDerpInfo {
     let configured = debug_derp_configured(derp_map);
     let mut info = DebugDerpInfo {
@@ -2801,7 +3071,7 @@ fn debug_ssh_policies(state: &WireState) -> BTreeMap<String, Option<SshPolicy>> 
     snapshot
         .iter()
         .map(|(node_key, rec)| {
-            let id = stable_id_from_key(node_key);
+            let id = rec.stable_node_id_for_key(node_key);
             let policy = state.policy.ssh_policy_for(
                 &nodes,
                 id,
@@ -2824,7 +3094,7 @@ fn ssh_policy_nodes_from_snapshot(
     snapshot
         .iter()
         .map(|(node_key, rec)| SshPolicyNode {
-            id: stable_id_from_key(node_key),
+            id: rec.stable_node_id_for_key(node_key),
             user_id: rec.user_id,
             user: if rec.user.is_empty() {
                 None
@@ -3501,7 +3771,7 @@ mod tests {
             Some("text/plain; charset=utf-8")
         );
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(&body[..], b"invalid registration id\n");
+        assert_eq!(&body[..], b"invalid auth id\n");
     }
 
     #[tokio::test]
@@ -3519,7 +3789,7 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(&body[..], b"invalid registration id\n");
+        assert_eq!(&body[..], b"invalid auth id\n");
     }
 
     #[tokio::test]
@@ -4515,6 +4785,31 @@ mod tests {
             .unwrap();
         assert_eq!(register_resp.status(), StatusCode::OK);
 
+        let preflight_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(preflight_resp.status().is_client_error());
+
+        let _noise_resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/ts2021")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         let metrics_resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -4549,7 +4844,7 @@ mod tests {
         );
         assert!(
             body.contains(
-                "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/register/{registration_id}\"} 1\n"
+                "headscale_http_requests_total{code=\"200\",method=\"GET\",path=\"/register/{auth_id}\"} 1\n"
             ),
             "{body}",
         );
@@ -4564,6 +4859,18 @@ mod tests {
             "{body}",
         );
         assert!(!body.contains("path=\"/metrics\""), "{body}");
+        assert!(
+            body.contains("http_requests_total{host=\"\",status=\"200\",endpoint=\"GET /health\",proto=\"HTTP/1.1\",client_aborted=\"\"} 1"),
+            "{body}"
+        );
+        assert!(body.contains("endpoint=\"POST /ts2021\""), "{body}");
+        assert!(!body.contains("endpoint=\"OPTIONS /health\""), "{body}");
+        assert!(
+            body.contains(
+                "http_request_duration_seconds_count{status=\"200\",endpoint=\"GET /health\"} 1"
+            ),
+            "{body}"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,25 @@
+Tailscale public-key text compatibility
+
+Copyright (c) 2020 Tailscale Inc & contributors.
+
+src/go_key.rs adapts public-key prefix, size, hexadecimal acceptance, canonical
+text and NLPublic alias/error ordering from tailscale.com v1.98.3 types/key:
+util.go (parseHex, appendHexKey), and nl.go (NLPublic.UnmarshalText).
+The original BSD 3-Clause terms are retained in LICENSE-TAILSCALE.
+
+src/go_tailcfg_json.rs adapts the Hostinfo, NetInfo, Service, Location and
+TPMInfo schemas from tailcfg/tailcfg.go and types/opt/bool.go JSON behavior.
+src/go_key.rs also adapts types/key/hardware_attestation.go typed P-256 keys.
+The baseline remains tailscale.com v1.98.3.
+
+go_tailcfg_json::signature_type_text follows SignatureType.UnmarshalText/String
+in the pinned tailcfg/tailcfg.go, including its fmt.Sscanf fallback behavior.
+
+The Hostinfo typed JSON emission adapter also follows the pinned tailcfg
+zero-omission/pointer tags, Service required fields and opt.Bool.MarshalJSON.
+
+src/go_dnsname.rs follows util/dnsname/dnsname.go ValidLabel at the same
+tailscale.com v1.98.3 pin.
+
+Typed Hostinfo comparison also follows Hostinfo.Equal and NetInfo.BasicallyEqual
+in the pinned tailcfg/tailcfg.go.

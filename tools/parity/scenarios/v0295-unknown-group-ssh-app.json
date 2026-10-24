@@ -1,0 +1,45 @@
+{
+  "name": "v0295-unknown-group-ssh-app",
+  "policy": {
+    "groups": {
+      "group:staff": ["alice@example.com", "ghost@example.com"]
+    },
+    "tagOwners": {
+      "tag:server": ["bob@example.com"]
+    },
+    "grants": [
+      {
+        "src": ["group:staff"],
+        "dst": ["tag:server"],
+        "app": {"tailscale.com/cap/drive": [{}]}
+      }
+    ],
+    "ssh": [
+      {
+        "action": "check",
+        "src": ["group:staff"],
+        "dst": ["tag:server"],
+        "users": ["root"],
+        "checkPeriod": "1h"
+      }
+    ],
+    "sshTests": [
+      {"src": "alice@example.com", "dst": ["tag:server"], "check": ["root"]}
+    ]
+  },
+  "users": [
+    {"id": 1, "name": "alice", "email": "alice@example.com"},
+    {"id": 2, "name": "bob", "email": "bob@example.com"}
+  ],
+  "nodes": [
+    {"id": 1, "user_id": 1, "hostname": "alice-laptop", "ipv4": "100.64.0.1"},
+    {"id": 2, "user_id": 2, "hostname": "server", "ipv4": "100.64.0.2", "tags": ["tag:server"]}
+  ],
+  "filter_node_checks": [
+    {"name": "alice-app-grant", "node_id": 1},
+    {"name": "server-app-grant", "node_id": 2}
+  ],
+  "ssh_checks": [
+    {"name": "server-check-period", "node_id": 2}
+  ]
+}

@@ -208,5 +208,7 @@ jobs:
             tools/parity/headscale-rs -> target
       - name: Pinned headscale-go differential and golden
         run: ./scripts/headscale_go_diff.sh
+      - name: Pinned v0.29.5 compatibility capture audit
+        run: CAPTURE_AUDIT=1 ./scripts/headscale_go_capture_diff.sh
       - name: Current-head Rust golden scenarios
         run: ./scripts/headscale_rs_current_head_golden.sh

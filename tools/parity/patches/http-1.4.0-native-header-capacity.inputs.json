@@ -1,0 +1,20 @@
+{
+  "status": "superseded_by_user_authorized_http_1_5_0_upgrade",
+  "package": "http",
+  "version": "1.4.0",
+  "registry_checksum": "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a",
+  "prerequisite": "Copy the locked http1.4.0 source and its original MIT/Apache license files into vendor/http before applying. No copy or source override has been made.",
+  "feature": "go-native-header-capacity",
+  "effect": "Default keeps u16 indices/hash; explicit native feature uses coupled u32 indices/hash and 1<<22 capacity. Cargo feature unification widens the private representation for that build.",
+  "selection": "Native SDK feature selects the new http feature. Root path override and lock source change keep version/dependency list. Both container recipes carry original license files.",
+  "source_sha256": {
+    "Cargo.toml": "74a5d378644f01aaf6fb7461af281d0196ded9b6425dc174e9ca870f688fc019",
+    "Cargo.toml.orig": "f75ba4b9e29ead4f2bb8b32ae0ca05f0e21dab6369f83afac5ddb217354481ee",
+    "src/header/map.rs": "b7e85adc5525c2849bd92a9164b9203f2d93de650c36eda90abf5f71405f72d2",
+    "LICENSE-MIT": "dc91f8200e4b2a1f9261035d4c18c33c246911a6c0f7b543d75347e61b249cff",
+    "LICENSE-APACHE": "8bb1b50b0e5c9399ae33bd35fab2769010fa6c14e8860c729a52295d84896b7a"
+  },
+  "patch_sha256": "8c5258a77ac5c9ba96ab660b748dd76e80bdc7feebf5f952a3a2a3e54d46b360",
+  "validation": "Original1.4.0 proposal remains unapplied as history; native feature is being rebased onto current1.5.0. User authorized dependency version/resolution changes. No builds/tests.",
+  "replacement": "vendor/http/LOCAL.patch and vendor/http/UPSTREAM.md"
+}

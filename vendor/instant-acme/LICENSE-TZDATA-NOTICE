@@ -1,0 +1,17 @@
+Pinned timezone archive
+
+The zoneinfo.zip archive contains time zone files compiled using
+the code and data maintained as part of the IANA Time Zone Database.
+The IANA asserts that the database is in the public domain.
+
+For more information, see
+https://www.iana.org/time-zones
+ftp://ftp.iana.org/tz/code/tz-link.html
+https://datatracker.ietf.org/doc/html/rfc6557
+
+To rebuild the archive, read and run update.bash.
+
+This package retains the exact Go1.26.9 lib/time/zoneinfo.zip as a private
+default-GOROOT fallback for native Retry-After HTTP-date parsing.
+SHA-256: 8f55634d05f8bca1f7bc7c69c5933428c69357e0bdf565e5ba224e3f88ff12e8
+Size: 408125 bytes. No archive regeneration or runtime validation was performed.

@@ -1,0 +1,28 @@
+Native connection-selected gzip and pool identity/idle policies
+Copyright 2009, 2011 The Go Authors. All rights reserved.
+The default-off go-native-client source adaptation follows selected Go1.26.9
+net/http/transport.go connection key and idle-LRU policy and the bundled
+net/http/internal/httpcommon IsRequestGzip header guard. Original hyper-util
+MIT terms remain in LICENSE; adapted Go BSD terms remain in LICENSE-GO.
+Exact source pins and unvalidated scope are recorded in UPSTREAM.md.
+
+Native separate HTTP/2 connection-cache follow-up
+Copyright 2009, 2011, 2013, 2014 The Go Authors. All rights reserved.
+The selected native cache follows Go1.26.9 net/http/h2_bundle.go clientConnPool
+ordered selection, multiple saturated connections, singleflight dial ownership,
+MarkDead and unused-failure retention phases. General idle-wrapper LRU ownership
+remains separate from physical H2 ownership. Original MIT and Go BSD terms
+remain intact; source scope and unqualified boundaries are in UPSTREAM.md.
+
+Native HTTP/1 response EOF pool handoff
+Copyright 2009 The Go Authors. All rights reserved.
+The explicitly selected native client couples body EOF acknowledgement to its
+actual pooled-connection return or retirement, following selected Go1.26.9
+net/http/transport.go readLoop/bodyEOFSignal. Original MIT and Go BSD terms
+remain intact; UPSTREAM.md records source pins and qualification boundaries.
+
+Native protocol-selected default User-Agent
+Copyright 2009, 2011, 2014 The Go Authors. All rights reserved.
+Explicit native GET markers select request.go and bundled HTTP/2 user-agent
+defaults only after actual connection selection, preserving the first explicit
+field and retry/redirect ownership. Existing MIT and Go BSD terms remain intact.

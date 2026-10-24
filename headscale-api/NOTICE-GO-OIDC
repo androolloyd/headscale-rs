@@ -1,0 +1,21 @@
+CoreOS Project
+Copyright 2014 CoreOS, Inc
+
+This product includes software developed at CoreOS, Inc.
+(http://www.coreos.com/).
+
+Pinned provider discovery compatibility
+
+src/oidc/discovery.rs adapts the providerJSON shape and unmarshalResp behavior
+from github.com/coreos/go-oidc/v3 v3.18.0 oidc/oidc.go. Original Apache-2.0
+terms are retained in LICENSE-GO-OIDC. The original module NOTICE text is
+retained above; the source file has no additional copyright header.
+
+The JSON assignment and MIME grammar portions also adapt Go 1.26.9 standard
+library sources under BSD-3-Clause; see NOTICE-GO-STDLIB and LICENSE-GO-STDLIB.
+
+Source SHA-256:
+- coreos/go-oidc/v3 v3.18.0 oidc/oidc.go: ad1c8f862558cdb25faaccd2d8feaf66f32d2834854e2a4b54d579ab06d90816
+- Go 1.26.9 encoding/json/decode.go: a91535f18f9a2c8380448b1c84c4c2017dbe3d530a10faf8babf03494042da48
+- Go 1.26.9 mime/mediatype.go: 2179fd195097a382a2ac3cdcbcbc6961f2770dbd61adfabfc60535c1acc5faa0
+- Go 1.26.9 mime/grammar.go: 85d1052199201e6ad52e27db50104842295dbf10e87f3914c803c6ce533772a6

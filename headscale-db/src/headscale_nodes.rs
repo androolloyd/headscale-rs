@@ -1,57 +1,258 @@
 //! Headscale-go-compatible node persistence.
 //!
 //! This module owns the canonical `nodes` table that mirrors
-//! `juanfont/headscale@v0.28.0:hscontrol/types/node.go`. Octra's
+//! `juanfont/headscale@v0.29.5:hscontrol/types/node.go`. Octra's
 //! mesh-oriented node store remains in [`crate::nodes`] and persists to
 //! `octra_nodes`, so Octra-specific shape does not occupy the upstream
 //! table name.
 
-use std::{cmp::Ordering, net::IpAddr};
-
 use crate::{DbError, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
+use headscale_api_acl::go_key::PublicKeyKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::SqlitePool;
 #[cfg(feature = "postgres-sqlx")]
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
 
 pub const REGISTER_METHOD_AUTH_KEY: &str = "authkey";
 pub const REGISTER_METHOD_CLI: &str = "cli";
 pub const REGISTER_METHOD_OIDC: &str = "oidc";
 const AUTO_GIVEN_NAME_RETRY_LIMIT: usize = 64;
 
+mod cached_registration;
+pub use cached_registration::{
+    CachedNodeRegistration, RegistrationAuthKey, save_cached_registration,
+    save_cached_registration_on_connection,
+};
+mod new_associations;
+#[cfg(feature = "postgres-sqlx")]
+pub(crate) use new_associations::save_postgres_user as save_postgres_captured_user;
+pub(crate) use new_associations::save_sqlite_user as save_captured_user;
+
+pub use new_associations::{
+    NewNodeAssociations, NewNodeSave, create_new_registration_with_associations,
+    create_new_registration_with_associations_on_connection, create_with_associations,
+    create_with_associations_on_connection,
+};
+#[cfg(feature = "postgres-sqlx")]
+pub use new_associations::{
+    create_postgres_new_registration_with_associations,
+    create_postgres_new_registration_with_associations_on_connection,
+    create_postgres_with_associations, create_postgres_with_associations_on_connection,
+};
+mod new_registration;
+#[cfg(feature = "postgres-sqlx")]
+pub use cached_registration::{
+    save_postgres_cached_registration, save_postgres_cached_registration_on_connection,
+};
+pub use new_registration::{
+    NewNodeRegistration, create_new_registration, create_new_registration_on_connection,
+};
+#[cfg(feature = "postgres-sqlx")]
+pub use new_registration::{
+    create_postgres_new_registration, create_postgres_new_registration_on_connection,
+};
+
+/// The column mask used by Go State.persistNode. Expiry, AuthKeyID,
+/// CreatedAt and DeletedAt deliberately have no fields in this type.
+#[derive(Clone, Debug)]
+pub struct CachedNodeSnapshot {
+    pub id: i64,
+    pub machine_key: String,
+    pub node_key: String,
+    pub disco_key: String,
+    pub endpoints: Option<Vec<String>>,
+    pub host_info: Option<Value>,
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+    pub hostname: String,
+    pub given_name: String,
+    pub user_id: Option<i64>,
+    pub register_method: String,
+    pub tags: Option<Vec<String>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub approved_routes: Option<Vec<String>>,
+}
+
+struct EncodedCachedNode {
+    node: CachedNodeSnapshot,
+    endpoints: Option<String>,
+    host_info: Option<String>,
+    tags: Option<String>,
+    approved_routes: Option<String>,
+}
+
+impl CachedNodeSnapshot {
+    fn encode(mut self) -> Result<EncodedCachedNode> {
+        if self.id <= 0 || self.user_id.is_some_and(|id| id < 0) {
+            return Err(DbError::General("invalid cached node identity".into()));
+        }
+        self.machine_key =
+            crate::stored_text::key_for_write(&self.machine_key, PublicKeyKind::Machine)?;
+        self.node_key = crate::stored_text::key_for_write(&self.node_key, PublicKeyKind::Node)?;
+        self.disco_key = crate::stored_text::key_for_write(&self.disco_key, PublicKeyKind::Disco)?;
+        self.ipv4 = crate::stored_text::optional_address(self.ipv4.as_deref())?;
+        self.ipv6 = crate::stored_text::optional_address(self.ipv6.as_deref())?;
+        let endpoints = self
+            .endpoints
+            .as_ref()
+            .map(|values| json_array(&crate::stored_json::endpoint_values(values)?))
+            .transpose()?;
+        let host_info = self
+            .host_info
+            .as_ref()
+            .map(host_info_for_write)
+            .transpose()?
+            .flatten();
+        let tags = self
+            .tags
+            .as_ref()
+            .map(|values| json_array(values))
+            .transpose()?;
+        let approved_routes = self
+            .approved_routes
+            .as_ref()
+            .map(|values| json_array(&crate::stored_json::prefix_values(values)?))
+            .transpose()?;
+        Ok(EncodedCachedNode {
+            node: self,
+            endpoints,
+            host_info,
+            tags,
+            approved_routes,
+        })
+    }
+}
+
+/// Write the freshly re-read cache snapshot. Like GORM Updates, this does not
+/// insert a missing row and a zero affected-row count is not a save error.
+pub async fn save_cached_node_snapshot(
+    pool: &SqlitePool,
+    snapshot: CachedNodeSnapshot,
+) -> Result<()> {
+    let values = snapshot.encode()?;
+    let node = &values.node;
+    let last_seen = node
+        .last_seen
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Nanos, true));
+    sqlx::query("UPDATE nodes SET machine_key = ?, node_key = ?, disco_key = ?, endpoints = ?, host_info = ?, ipv4 = ?, ipv6 = ?, hostname = ?, given_name = ?, user_id = ?, register_method = ?, tags = ?, last_seen = ?, approved_routes = ?, updated_at = ? WHERE id = ?")
+        .bind(&node.machine_key).bind(&node.node_key).bind(&node.disco_key)
+        .bind(values.endpoints.as_deref()).bind(values.host_info.as_deref())
+        .bind(node.ipv4.as_deref()).bind(node.ipv6.as_deref())
+        .bind(&node.hostname).bind(&node.given_name).bind(node.user_id)
+        .bind(&node.register_method).bind(values.tags.as_deref())
+        .bind(last_seen).bind(values.approved_routes.as_deref())
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)).bind(node.id)
+        .execute(pool).await.map_err(DbError::from)?;
+    Ok(())
+}
+
+/// Go NodeSetExpiry updates only expiry and its automatic UpdatedAt clock.
+/// Like Gorm Update, no affected row is not an error and no row is inserted.
+pub async fn save_cached_node_expiry(
+    pool: &SqlitePool,
+    id: i64,
+    expiry: Option<DateTime<Utc>>,
+) -> Result<()> {
+    let expiry = expiry.map(|value| value.to_rfc3339_opts(SecondsFormat::Nanos, true));
+    sqlx::query("UPDATE nodes SET expiry = ?, updated_at = ? WHERE id = ?")
+        .bind(expiry)
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(DbError::from)?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn save_postgres_cached_node_expiry(
+    pool: &PgPool,
+    id: i64,
+    expiry: Option<DateTime<Utc>>,
+) -> Result<()> {
+    let expiry = expiry.map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true));
+    sqlx::query(
+        "UPDATE nodes SET expiry = $1::TIMESTAMPTZ, updated_at = $2::TIMESTAMPTZ WHERE id = $3",
+    )
+    .bind(expiry)
+    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true))
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(DbError::from)?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn save_postgres_cached_node_snapshot(
+    pool: &PgPool,
+    snapshot: CachedNodeSnapshot,
+) -> Result<()> {
+    let values = snapshot.encode()?;
+    let node = &values.node;
+    let last_seen = node
+        .last_seen
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Micros, true));
+    sqlx::query("UPDATE nodes SET machine_key = $1, node_key = $2, disco_key = $3, endpoints = $4, host_info = $5, ipv4 = $6, ipv6 = $7, hostname = $8, given_name = $9, user_id = $10, register_method = $11, tags = $12, last_seen = $13::TIMESTAMPTZ, approved_routes = $14, updated_at = $15::TIMESTAMPTZ WHERE id = $16")
+        .bind(&node.machine_key).bind(&node.node_key).bind(&node.disco_key)
+        .bind(values.endpoints.as_deref()).bind(values.host_info.as_deref())
+        .bind(node.ipv4.as_deref()).bind(node.ipv6.as_deref())
+        .bind(&node.hostname).bind(&node.given_name).bind(node.user_id)
+        .bind(&node.register_method).bind(values.tags.as_deref())
+        .bind(last_seen).bind(values.approved_routes.as_deref())
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)).bind(node.id)
+        .execute(pool).await.map_err(DbError::from)?;
+    Ok(())
+}
+
+// Expiry is a Go *time.Time: preserve SQL NULL separately from an explicit
+// zero time. Other instants on 0001-01-01 can already be expired.
+// Keep the SQLite storage type through decoding; the row adapter validates
+// and canonicalizes the instant before downstream node hydration reads it.
 const NODE_COLUMNS: &str = r"
         id,
-        COALESCE(machine_key, '') AS machine_key,
-        COALESCE(node_key, '') AS node_key,
-        COALESCE(disco_key, '') AS disco_key,
-        COALESCE(endpoints, '[]') AS endpoints,
-        COALESCE(host_info, '{}') AS host_info,
+        machine_key,
+        node_key,
+        disco_key,
+        endpoints,
+        host_info,
         ipv4,
         ipv6,
         COALESCE(hostname, '') AS hostname,
         COALESCE(given_name, '') AS given_name,
         user_id,
         COALESCE(register_method, '') AS register_method,
-        COALESCE(tags, '[]') AS tags,
+        tags,
         auth_key_id,
         CASE
             WHEN expiry IS NULL THEN NULL
             WHEN typeof(expiry) = 'integer' THEN expiry
-            WHEN CAST(expiry AS TEXT) LIKE '0001-01-01%' THEN NULL
             ELSE unixepoch(expiry)
         END AS expiry,
+        json_array(
+            CASE WHEN typeof(expiry) = 'integer' AND EXISTS (
+                SELECT 1 FROM main.sqlite_master
+                WHERE type = 'table' AND name = '_sqlx_migrations'
+            ) THEN 'legacy_integer' ELSE typeof(expiry) END,
+            CASE WHEN typeof(expiry) = 'blob' THEN NULL ELSE CAST(expiry AS TEXT) END,
+            (SELECT cid FROM pragma_table_info('nodes') WHERE name = 'expiry'),
+            'expiry'
+        ) AS expiry_text,
         CASE
             WHEN last_seen IS NULL THEN NULL
             WHEN typeof(last_seen) = 'integer' THEN last_seen
             ELSE unixepoch(last_seen)
         END AS last_seen,
-        COALESCE(approved_routes, '[]') AS approved_routes,
+        CAST(last_seen AS TEXT) AS last_seen_text,
+        approved_routes,
         CASE
             WHEN created_at IS NULL THEN 0
             WHEN typeof(created_at) = 'integer' THEN created_at
             ELSE unixepoch(created_at)
         END AS created_at,
+        COALESCE(CAST(created_at AS TEXT), '') AS created_at_text,
         CASE
             WHEN updated_at IS NULL THEN 0
             WHEN typeof(updated_at) = 'integer' THEN updated_at
@@ -64,8 +265,14 @@ const NODE_COLUMNS: &str = r"
         END AS deleted_at
 ";
 
-fn node_select(suffix: &str) -> String {
+// Go Node.DeletedAt is *time.Time, not gorm.DeletedAt. Native node queries
+// include timestamp-marked rows; only User/Policy have Gorm soft-delete scopes.
+pub(crate) fn node_select(suffix: &str) -> String {
     format!("SELECT {NODE_COLUMNS} FROM nodes {suffix}")
+}
+
+fn key_identity_sql(column: &str, kind: PublicKeyKind) -> String {
+    format!("LOWER(COALESCE({column}, '{}'))", kind.zero_text())
 }
 
 fn sqlite_placeholders(count: usize) -> String {
@@ -73,73 +280,130 @@ fn sqlite_placeholders(count: usize) -> String {
 }
 
 #[cfg(feature = "postgres-sqlx")]
-const POSTGRES_NODE_COLUMNS: &str = r"
+const POSTGRES_NODE_COLUMNS: &str = r#"
         id,
-        COALESCE(machine_key, '') AS machine_key,
-        COALESCE(node_key, '') AS node_key,
-        COALESCE(disco_key, '') AS disco_key,
-        COALESCE(endpoints, '[]') AS endpoints,
-        COALESCE(host_info, '{}') AS host_info,
+        machine_key,
+        node_key,
+        disco_key,
+        endpoints,
+        host_info,
         ipv4,
         ipv6,
         COALESCE(hostname, '') AS hostname,
         COALESCE(given_name, '') AS given_name,
         user_id,
         COALESCE(register_method, '') AS register_method,
-        COALESCE(tags, '[]') AS tags,
+        tags,
         auth_key_id,
         FLOOR(EXTRACT(EPOCH FROM expiry))::BIGINT AS expiry,
+        to_char(expiry AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expiry_text,
         FLOOR(EXTRACT(EPOCH FROM last_seen))::BIGINT AS last_seen,
-        COALESCE(approved_routes, '[]') AS approved_routes,
+        to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_seen_text,
+        approved_routes,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS created_at_text,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
         FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
-";
+"#;
 
 #[cfg(feature = "postgres-sqlx")]
-fn postgres_node_select(suffix: &str) -> String {
+pub(crate) fn postgres_node_select(suffix: &str) -> String {
     format!("SELECT {POSTGRES_NODE_COLUMNS} FROM nodes {suffix}")
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HeadscaleNodeRow {
     pub id: i64,
+    #[sqlx(try_from = "crate::stored_text::MachineKeyColumn")]
     pub machine_key: String,
+    #[sqlx(try_from = "crate::stored_text::NodeKeyColumn")]
     pub node_key: String,
+    #[sqlx(try_from = "crate::stored_text::DiscoKeyColumn")]
     pub disco_key: String,
+    #[sqlx(try_from = "crate::stored_json::EndpointListColumn")]
     pub endpoints: String,
+    #[sqlx(try_from = "crate::stored_json::HostInfoColumn")]
     pub host_info: String,
+    #[sqlx(try_from = "crate::stored_text::NullableAddrColumn")]
     pub ipv4: Option<String>,
+    #[sqlx(try_from = "crate::stored_text::NullableAddrColumn")]
     pub ipv6: Option<String>,
     pub hostname: String,
     pub given_name: String,
     pub user_id: Option<i64>,
     pub register_method: String,
+    #[sqlx(try_from = "crate::stored_json::StringListColumn")]
     pub tags: String,
     pub auth_key_id: Option<i64>,
     pub expiry: Option<i64>,
+    #[sqlx(try_from = "crate::preauth_keys::timestamp::CanonicalExpirationColumn")]
+    pub expiry_text: Option<String>,
     pub last_seen: Option<i64>,
+    pub last_seen_text: Option<String>,
+    #[sqlx(try_from = "crate::stored_json::PrefixListColumn")]
     pub approved_routes: String,
     pub created_at: i64,
+    pub created_at_text: String,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
 }
 
 impl HeadscaleNodeRow {
+    /// Fallible typed-key access for manually built/deserialized rows. SQL rows
+    /// already pass the corresponding column decoder, including NULL zeroes.
+    pub fn try_machine_key(&self) -> Result<String> {
+        crate::stored_text::key_for_write(&self.machine_key, PublicKeyKind::Machine)
+    }
+
+    pub fn try_node_key(&self) -> Result<String> {
+        crate::stored_text::key_for_write(&self.node_key, PublicKeyKind::Node)
+    }
+
+    pub fn try_disco_key(&self) -> Result<String> {
+        crate::stored_text::key_for_write(&self.disco_key, PublicKeyKind::Disco)
+    }
+
+    /// Convenience for validated SQL rows; manually constructed rows needing
+    /// a fallible decision should use try_endpoint_list.
     pub fn endpoint_list(&self) -> Vec<String> {
-        serde_json::from_str(&self.endpoints).unwrap_or_default()
+        self.try_endpoint_list().unwrap_or_default()
+    }
+
+    /// Decode netip endpoints, retaining Go's zero value for null/empty slots.
+    pub fn try_endpoint_list(&self) -> Result<Vec<String>> {
+        crate::stored_json::endpoint_list(&self.endpoints)
     }
 
     pub fn host_info_value(&self) -> Value {
-        serde_json::from_str(&self.host_info).unwrap_or_else(|_| json!({}))
+        self.try_host_info_value().unwrap_or_else(|_| json!({}))
     }
 
+    /// SQL rows have already passed typed Hostinfo decoding. Manual rows must
+    /// not turn malformed policy/route inputs into an empty snapshot.
+    pub fn try_host_info_value(&self) -> Result<Value> {
+        crate::stored_hostinfo::from_bytes(self.host_info.as_bytes())
+    }
+
+    /// Convenience for validated SQL rows. Use try_tag_list for authorization
+    /// decisions on manually constructed or deserialized row values.
     pub fn tag_list(&self) -> Vec<String> {
-        serde_json::from_str(&self.tags).unwrap_or_default()
+        self.try_tag_list().unwrap_or_default()
     }
 
+    /// Decode tag ownership without interpreting malformed data as untagged.
+    pub fn try_tag_list(&self) -> Result<Vec<String>> {
+        crate::stored_json::string_list(&self.tags)
+    }
+
+    /// Convenience for validated SQL rows. Use try_approved_route_list when
+    /// approval input did not pass the SQL row decoder.
     pub fn approved_route_list(&self) -> Vec<String> {
-        serde_json::from_str(&self.approved_routes).unwrap_or_default()
+        self.try_approved_route_list().unwrap_or_default()
+    }
+
+    /// Decode prefixes without silently discarding malformed route approvals.
+    pub fn try_approved_route_list(&self) -> Result<Vec<String>> {
+        crate::stored_json::prefix_list(&self.approved_routes)
     }
 }
 
@@ -159,8 +423,23 @@ pub struct CreateParams {
     pub tags: Vec<String>,
     pub auth_key_id: Option<i64>,
     pub expiry: Option<i64>,
+    pub expiry_precise: Option<DateTime<Utc>>,
     pub last_seen: Option<i64>,
+    pub last_seen_precise: Option<DateTime<Utc>>,
     pub approved_routes: Vec<String>,
+}
+
+impl CreateParams {
+    pub(crate) fn canonicalize_keys(&mut self) -> Result<()> {
+        let machine_key =
+            crate::stored_text::key_for_write(&self.machine_key, PublicKeyKind::Machine)?;
+        let node_key = crate::stored_text::key_for_write(&self.node_key, PublicKeyKind::Node)?;
+        let disco_key = crate::stored_text::key_for_write(&self.disco_key, PublicKeyKind::Disco)?;
+        self.machine_key = machine_key;
+        self.node_key = node_key;
+        self.disco_key = disco_key;
+        Ok(())
+    }
 }
 
 impl Default for CreateParams {
@@ -180,7 +459,9 @@ impl Default for CreateParams {
             tags: Vec::new(),
             auth_key_id: None,
             expiry: None,
+            expiry_precise: None,
             last_seen: None,
+            last_seen_precise: None,
             approved_routes: Vec::new(),
         }
     }
@@ -202,16 +483,34 @@ fn now_unix() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-fn json_array(values: &[String]) -> Result<String> {
-    Ok(serde_json::to_string(values)?)
+fn last_seen_text(params: &CreateParams, format: SecondsFormat) -> Option<String> {
+    params
+        .last_seen_precise
+        .or_else(|| {
+            params
+                .last_seen
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        })
+        .map(|value| value.to_rfc3339_opts(format, true))
 }
 
-fn json_object_or_value(value: &Value) -> Result<String> {
-    if value.is_null() {
-        Ok("{}".to_string())
-    } else {
-        Ok(serde_json::to_string(value)?)
-    }
+fn expiry_text(params: &CreateParams, format: SecondsFormat) -> Option<String> {
+    params
+        .expiry_precise
+        .or_else(|| {
+            params
+                .expiry
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        })
+        .map(|value| value.to_rfc3339_opts(format, true))
+}
+
+fn json_array(values: &[String]) -> Result<String> {
+    crate::stored_json::text_for_write(values)
+}
+
+fn host_info_for_write(value: &Value) -> Result<Option<String>> {
+    crate::stored_hostinfo::text_for_write(value)
 }
 
 fn normalize_tags(mut tags: Vec<String>) -> Vec<String> {
@@ -224,45 +523,8 @@ fn tag_owned_user_id(user_id: Option<i64>, tags: &[String]) -> Option<i64> {
     if tags.is_empty() { user_id } else { None }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RouteSortKey {
-    V4([u8; 4], u8),
-    V6([u8; 16], u8),
-}
-
-fn route_sort_key(route: &str) -> Option<RouteSortKey> {
-    let (addr, bits) = route.split_once('/')?;
-    let bits = bits.parse::<u8>().ok()?;
-    match addr.parse::<IpAddr>().ok()? {
-        IpAddr::V4(addr) if bits <= 32 => Some(RouteSortKey::V4(addr.octets(), bits)),
-        IpAddr::V6(addr) if bits <= 128 => Some(RouteSortKey::V6(addr.octets(), bits)),
-        _ => None,
-    }
-}
-
-fn compare_route_sort_key(a: RouteSortKey, b: RouteSortKey) -> Ordering {
-    match (a, b) {
-        (RouteSortKey::V4(a_addr, a_bits), RouteSortKey::V4(b_addr, b_bits)) => {
-            a_addr.cmp(&b_addr).then(a_bits.cmp(&b_bits))
-        }
-        (RouteSortKey::V4(_, _), RouteSortKey::V6(_, _)) => Ordering::Less,
-        (RouteSortKey::V6(_, _), RouteSortKey::V4(_, _)) => Ordering::Greater,
-        (RouteSortKey::V6(a_addr, a_bits), RouteSortKey::V6(b_addr, b_bits)) => {
-            a_addr.cmp(&b_addr).then(a_bits.cmp(&b_bits))
-        }
-    }
-}
-
-fn compare_routes(a: &str, b: &str) -> Ordering {
-    match (route_sort_key(a), route_sort_key(b)) {
-        (Some(a), Some(b)) => compare_route_sort_key(a, b),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.cmp(b),
-    }
-}
-
-fn normalize_approved_routes(routes: Vec<String>) -> Vec<String> {
+fn normalize_approved_routes(routes: &[String]) -> Result<Vec<String>> {
+    let routes = crate::stored_json::prefix_values(routes)?;
     let mut normalized = Vec::with_capacity(routes.len() + 2);
     for route in routes {
         if route == "0.0.0.0/0" || route == "::/0" {
@@ -273,50 +535,19 @@ fn normalize_approved_routes(routes: Vec<String>) -> Vec<String> {
         }
     }
 
-    normalized.sort_by(|a, b| compare_routes(a, b));
+    normalized.sort_by(|a, b| {
+        headscale_api_acl::go_netip::prefix_compare(a, b).unwrap_or_else(|| a.cmp(b))
+    });
     normalized.dedup();
-    normalized
+    Ok(normalized)
 }
 
 fn is_dns_label_alphanumeric(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
 }
 
-fn is_dns_label_char(byte: u8) -> bool {
-    is_dns_label_alphanumeric(byte) || byte == b'-'
-}
-
 fn validate_given_name(name: &str) -> Result<()> {
-    let bytes = name.as_bytes();
-    if bytes.is_empty() {
-        return Err(DbError::General("empty DNS label".into()));
-    }
-    if bytes.len() > 63 {
-        return Err(DbError::General(format!(
-            "{name:?} is too long, max length is 63 bytes"
-        )));
-    }
-    if !is_dns_label_alphanumeric(bytes[0]) {
-        return Err(DbError::General(format!(
-            "{name:?} is not a valid DNS label: must start with a letter or number"
-        )));
-    }
-    if !is_dns_label_alphanumeric(bytes[bytes.len() - 1]) {
-        return Err(DbError::General(format!(
-            "{name:?} is not a valid DNS label: must end with a letter or number"
-        )));
-    }
-    if bytes.len() > 2 {
-        for byte in &bytes[1..bytes.len() - 1] {
-            if !is_dns_label_char(*byte) {
-                return Err(DbError::General(format!(
-                    "{name:?} is not a valid DNS label: contains invalid character {:?}",
-                    char::from(*byte)
-                )));
-            }
-        }
-    }
-    Ok(())
+    headscale_api_acl::go_dnsname::valid_label(name).map_err(DbError::General)
 }
 
 fn sanitize_hostname_for_given_name(hostname: &str) -> String {
@@ -375,7 +606,7 @@ where
 }
 
 async fn resolve_auto_given_name(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     self_id: Option<i64>,
     hostname: &str,
 ) -> Result<String> {
@@ -384,15 +615,14 @@ async fn resolve_auto_given_name(
         "
         SELECT given_name
         FROM nodes
-        WHERE deleted_at IS NULL
-          AND given_name IS NOT NULL
+        WHERE given_name IS NOT NULL
           AND given_name != ''
           AND (? IS NULL OR id != ?)
         ",
     )
     .bind(self_id)
     .bind(self_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(resolve_given_name_from_existing(&base, rows))
 }
@@ -408,8 +638,7 @@ async fn resolve_postgres_auto_given_name(
         "
         SELECT given_name
         FROM nodes
-        WHERE deleted_at IS NULL
-          AND given_name IS NOT NULL
+        WHERE given_name IS NOT NULL
           AND given_name != ''
           AND ($1::BIGINT IS NULL OR id != $1)
         ",
@@ -420,9 +649,9 @@ async fn resolve_postgres_auto_given_name(
     Ok(resolve_given_name_from_existing(&base, rows))
 }
 
-async fn create_given_name(pool: &SqlitePool, params: &CreateParams) -> Result<String> {
+async fn create_given_name(conn: &mut SqliteConnection, params: &CreateParams) -> Result<String> {
     if params.given_name.is_empty() {
-        resolve_auto_given_name(pool, None, &params.hostname).await
+        resolve_auto_given_name(conn, None, &params.hostname).await
     } else {
         validate_given_name(&params.given_name)?;
         Ok(params.given_name.clone())
@@ -442,9 +671,13 @@ async fn create_postgres_given_name(
     }
 }
 
-async fn auth_path_given_name(pool: &SqlitePool, id: i64, params: &CreateParams) -> Result<String> {
+async fn auth_path_given_name(
+    conn: &mut SqliteConnection,
+    id: i64,
+    params: &CreateParams,
+) -> Result<String> {
     if params.given_name.is_empty() {
-        return resolve_auto_given_name(pool, Some(id), &params.hostname).await;
+        return resolve_auto_given_name(conn, Some(id), &params.hostname).await;
     }
 
     validate_given_name(&params.given_name)?;
@@ -452,12 +685,12 @@ async fn auth_path_given_name(pool: &SqlitePool, id: i64, params: &CreateParams)
         "
         SELECT COUNT(*)
         FROM nodes
-        WHERE given_name = ? AND id != ? AND deleted_at IS NULL
+        WHERE given_name = ? AND id != ?
         ",
     )
     .bind(&params.given_name)
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     if count > 0 {
         return Err(DbError::General(NodeError::NameNotUnique.to_string()));
@@ -480,7 +713,7 @@ async fn auth_path_postgres_given_name(
         "
         SELECT COUNT(*)
         FROM nodes
-        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
+        WHERE given_name = $1 AND id != $2
         ",
     )
     .bind(&params.given_name)
@@ -494,10 +727,19 @@ async fn auth_path_postgres_given_name(
 }
 
 pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    create_on_connection(&mut conn, params).await
+}
+
+pub async fn create_on_connection(
+    conn: &mut SqliteConnection,
+    mut params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
-        let given_name = create_given_name(pool, &params).await?;
-        match create_with_given_name(pool, &params, &given_name).await {
+        let given_name = create_given_name(conn, &params).await?;
+        match create_with_given_name(conn, &params, &given_name).await {
             Ok(node) => return Ok(node),
             Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
@@ -508,17 +750,21 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<Headscale
 }
 
 async fn create_with_given_name(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     params: &CreateParams,
     given_name: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let now = now_unix();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let last_seen = last_seen_text(params, SecondsFormat::Nanos);
+    let expiry = expiry_text(params, SecondsFormat::Nanos);
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
-    let endpoints = json_array(&params.endpoints)?;
-    let host_info = json_object_or_value(&params.host_info)?;
+    let ipv4 = crate::stored_text::optional_address(params.ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(params.ipv6.as_deref())?;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -557,11 +803,11 @@ async fn create_with_given_name(
             NULLIF(?, ''),
             ?,
             ?,
-            CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
-            CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
             ?,
-            datetime(?, 'unixepoch'),
-            datetime(?, 'unixepoch'),
+            ?,
+            ?,
+            ?,
+            ?,
             NULL
         )
         RETURNING id
@@ -571,30 +817,28 @@ async fn create_with_given_name(
     .bind(&params.node_key)
     .bind(&params.disco_key)
     .bind(&endpoints)
-    .bind(&host_info)
-    .bind(&params.ipv4)
-    .bind(&params.ipv6)
+    .bind(host_info.as_deref())
+    .bind(&ipv4)
+    .bind(&ipv6)
     .bind(&params.hostname)
     .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
-    .bind(params.expiry)
-    .bind(params.expiry)
-    .bind(params.last_seen)
-    .bind(params.last_seen)
+    .bind(expiry)
+    .bind(last_seen)
     .bind(&approved_routes)
-    .bind(now)
-    .bind(now)
-    .fetch_one(pool)
+    .bind(&now)
+    .bind(&now)
+    .fetch_one(&mut *conn)
     .await
     .map_err(DbError::from)?;
 
-    let query = node_select("WHERE id = ? AND deleted_at IS NULL");
+    let query = node_select("WHERE id = ?");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(DbError::from)
 }
@@ -608,15 +852,27 @@ pub async fn create_postgres(pool: &PgPool, params: CreateParams) -> Result<Head
 #[cfg(feature = "postgres-sqlx")]
 pub async fn create_postgres_on_connection(
     conn: &mut PgConnection,
-    params: CreateParams,
+    mut params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
         let given_name = create_postgres_given_name(conn, &params).await?;
-        match create_postgres_with_given_name(conn, &params, &given_name).await {
-            Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
-            Err(e) => return Err(map_non_retry_write_err(e)),
+        // A failed INSERT/UPDATE aborts a PostgreSQL transaction. A savepoint
+        // lets generated-name retries proceed inside the enclosing registration.
+        let mut attempt = conn.begin().await?;
+        let result = create_postgres_with_given_name(&mut attempt, &params, &given_name).await;
+        match result {
+            Ok(node) => {
+                attempt.commit().await?;
+                return Ok(node);
+            }
+            Err(error) => {
+                attempt.rollback().await?;
+                if !(retry_auto_given_name && is_given_name_unique_violation(&error)) {
+                    return Err(map_non_retry_write_err(error));
+                }
+            }
         }
     }
 
@@ -629,13 +885,17 @@ async fn create_postgres_with_given_name(
     params: &CreateParams,
     given_name: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let now = now_unix();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let last_seen = last_seen_text(params, SecondsFormat::Micros);
+    let expiry = expiry_text(params, SecondsFormat::Micros);
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
-    let endpoints = json_array(&params.endpoints)?;
-    let host_info = json_object_or_value(&params.host_info)?;
+    let ipv4 = crate::stored_text::optional_address(params.ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(params.ipv6.as_deref())?;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
 
     let id: i64 = sqlx::query_scalar(
         "
@@ -674,17 +934,11 @@ async fn create_postgres_with_given_name(
             NULLIF($11, ''),
             $12,
             $13,
-            CASE
-                WHEN $14::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($14::BIGINT)::DOUBLE PRECISION)
-            END,
-            CASE
-                WHEN $15::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($15::BIGINT)::DOUBLE PRECISION)
-            END,
+            $14::TIMESTAMPTZ,
+            $15::TIMESTAMPTZ,
             $16,
-            to_timestamp(($17::BIGINT)::DOUBLE PRECISION),
-            to_timestamp(($18::BIGINT)::DOUBLE PRECISION),
+            $17::TIMESTAMPTZ,
+            $18::TIMESTAMPTZ,
             NULL
         )
         RETURNING id
@@ -694,25 +948,25 @@ async fn create_postgres_with_given_name(
     .bind(&params.node_key)
     .bind(&params.disco_key)
     .bind(&endpoints)
-    .bind(&host_info)
-    .bind(&params.ipv4)
-    .bind(&params.ipv6)
+    .bind(host_info.as_deref())
+    .bind(&ipv4)
+    .bind(&ipv6)
     .bind(&params.hostname)
     .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
-    .bind(params.expiry)
-    .bind(params.last_seen)
+    .bind(expiry)
+    .bind(last_seen)
     .bind(&approved_routes)
-    .bind(now)
-    .bind(now)
+    .bind(&now)
+    .bind(&now)
     .fetch_one(&mut *conn)
     .await
     .map_err(DbError::from)?;
 
-    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    let query = postgres_node_select("WHERE id = $1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
         .fetch_one(&mut *conn)
@@ -720,8 +974,182 @@ async fn create_postgres_with_given_name(
         .map_err(DbError::from)
 }
 
+/// Persist client map fields without rewriting ownership, expiry, auth-key
+/// references, IP assignments, tags or registration identity.
+pub async fn update_runtime_state(
+    pool: &SqlitePool,
+    expected: &HeadscaleNodeRow,
+    mut params: CreateParams,
+    allow_auto_rename: bool,
+) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
+    let expected_node_key =
+        crate::stored_text::key_for_write(&expected.node_key, PublicKeyKind::Node)?;
+    let expected_machine_key =
+        crate::stored_text::key_for_write(&expected.machine_key, PublicKeyKind::Machine)?;
+    let node_identity = key_identity_sql("node_key", PublicKeyKind::Node);
+    let machine_identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    if params.node_key != expected_node_key || params.machine_key != expected_machine_key {
+        return Err(DbError::Constraint(
+            "map update cannot change node or machine key".into(),
+        ));
+    }
+    let mut conn = pool.acquire().await?;
+    let rename =
+        !params.hostname.is_empty() && params.hostname != expected.hostname && allow_auto_rename;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
+    let last_seen = last_seen_text(&params, SecondsFormat::Nanos);
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = if rename {
+            resolve_auto_given_name(&mut conn, Some(expected.id), &params.hostname).await?
+        } else {
+            expected.given_name.clone()
+        };
+        let update_query = format!(
+            r"UPDATE nodes SET
+                disco_key = NULLIF(?, ''), endpoints = ?, host_info = ?,
+                hostname = CASE WHEN ? = '' THEN hostname ELSE ? END,
+                given_name = CASE WHEN COALESCE(given_name, '') = ?
+                    THEN NULLIF(?, '') ELSE given_name END,
+                approved_routes = CASE WHEN COALESCE(approved_routes, '[]') = ?
+                    THEN ? ELSE approved_routes END,
+                last_seen = COALESCE(?, last_seen), updated_at = ?
+            WHERE id = ? AND {node_identity} = ?
+                AND {machine_identity} = ?",
+        );
+        let result = sqlx::query(&update_query)
+            .bind(&params.disco_key)
+            .bind(&endpoints)
+            .bind(host_info.as_deref())
+            .bind(&params.hostname)
+            .bind(&params.hostname)
+            .bind(&expected.given_name)
+            .bind(&given_name)
+            .bind(&expected.approved_routes)
+            .bind(&approved_routes)
+            .bind(&last_seen)
+            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
+            .bind(expected.id)
+            .bind(&expected_node_key)
+            .bind(&expected_machine_key)
+            .execute(&mut *conn)
+            .await
+            .map_err(DbError::from);
+        match result {
+            Ok(result) => {
+                if result.rows_affected() == 0 {
+                    return Err(DbError::NotFound(format!("node id={}", expected.id)));
+                }
+                let query = node_select("WHERE id = ?");
+                return sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+                    .bind(expected.id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(map_not_found);
+            }
+            Err(error) => {
+                if !(rename && is_given_name_unique_violation(&error)) {
+                    return Err(map_non_retry_write_err(error));
+                }
+            }
+        }
+    }
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+/// Persist client map fields without rewriting ownership, expiry, auth-key
+/// references, IP assignments, tags or registration identity.
+pub async fn update_postgres_runtime_state(
+    pool: &PgPool,
+    expected: &HeadscaleNodeRow,
+    mut params: CreateParams,
+    allow_auto_rename: bool,
+) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
+    let expected_node_key =
+        crate::stored_text::key_for_write(&expected.node_key, PublicKeyKind::Node)?;
+    let expected_machine_key =
+        crate::stored_text::key_for_write(&expected.machine_key, PublicKeyKind::Machine)?;
+    let node_identity = key_identity_sql("node_key", PublicKeyKind::Node);
+    let machine_identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    if params.node_key != expected_node_key || params.machine_key != expected_machine_key {
+        return Err(DbError::Constraint(
+            "map update cannot change node or machine key".into(),
+        ));
+    }
+    let mut conn = pool.acquire().await?;
+    let rename =
+        !params.hostname.is_empty() && params.hostname != expected.hostname && allow_auto_rename;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
+    let last_seen = last_seen_text(&params, SecondsFormat::Micros);
+    for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
+        let given_name = if rename {
+            resolve_postgres_auto_given_name(&mut conn, Some(expected.id), &params.hostname).await?
+        } else {
+            expected.given_name.clone()
+        };
+        let mut attempt = conn.begin().await?;
+        let update_query = format!(
+            r"UPDATE nodes SET
+                disco_key = NULLIF($1, ''), endpoints = $2, host_info = $3,
+                hostname = CASE WHEN $4 = '' THEN hostname ELSE $4 END,
+                given_name = CASE WHEN COALESCE(given_name, '') = $5
+                    THEN NULLIF($6, '') ELSE given_name END,
+                approved_routes = CASE WHEN COALESCE(approved_routes, '[]') = $7
+                    THEN $8 ELSE approved_routes END,
+                last_seen = COALESCE($9::TIMESTAMPTZ, last_seen),
+                updated_at = $10::TIMESTAMPTZ
+            WHERE id = $11 AND {node_identity} = $12
+                AND {machine_identity} = $13",
+        );
+        let result = sqlx::query(&update_query)
+            .bind(&params.disco_key)
+            .bind(&endpoints)
+            .bind(host_info.as_deref())
+            .bind(&params.hostname)
+            .bind(&expected.given_name)
+            .bind(&given_name)
+            .bind(&expected.approved_routes)
+            .bind(&approved_routes)
+            .bind(&last_seen)
+            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true))
+            .bind(expected.id)
+            .bind(&expected_node_key)
+            .bind(&expected_machine_key)
+            .execute(&mut *attempt)
+            .await
+            .map_err(DbError::from);
+        match result {
+            Ok(result) => {
+                attempt.commit().await?;
+                if result.rows_affected() == 0 {
+                    return Err(DbError::NotFound(format!("node id={}", expected.id)));
+                }
+                let query = postgres_node_select("WHERE id = $1");
+                return sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+                    .bind(expected.id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(map_not_found);
+            }
+            Err(error) => {
+                attempt.rollback().await?;
+                if !(rename && is_given_name_unique_violation(&error)) {
+                    return Err(map_non_retry_write_err(error));
+                }
+            }
+        }
+    }
+    Err(DbError::General(NodeError::NameNotUnique.to_string()))
+}
+
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
-    let query = node_select("WHERE id = ? AND deleted_at IS NULL");
+    let query = node_select("WHERE id = ?");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
         .fetch_one(pool)
@@ -730,7 +1158,9 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
 }
 
 pub async fn get_by_node_key(pool: &SqlitePool, node_key: &str) -> Result<HeadscaleNodeRow> {
-    let query = node_select("WHERE node_key = ? AND deleted_at IS NULL ORDER BY id LIMIT 1");
+    let node_key = crate::stored_text::key_for_write(node_key, PublicKeyKind::Node)?;
+    let identity = key_identity_sql("node_key", PublicKeyKind::Node);
+    let query = node_select(&format!("WHERE {identity} = ? ORDER BY id LIMIT 1"));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(node_key)
         .fetch_one(pool)
@@ -739,7 +1169,9 @@ pub async fn get_by_node_key(pool: &SqlitePool, node_key: &str) -> Result<Headsc
 }
 
 pub async fn get_by_machine_key(pool: &SqlitePool, machine_key: &str) -> Result<HeadscaleNodeRow> {
-    let query = node_select("WHERE machine_key = ? AND deleted_at IS NULL ORDER BY id LIMIT 1");
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = node_select(&format!("WHERE {identity} = ? ORDER BY id LIMIT 1"));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(machine_key)
         .fetch_one(pool)
@@ -747,14 +1179,33 @@ pub async fn get_by_machine_key(pool: &SqlitePool, machine_key: &str) -> Result<
         .map_err(map_not_found)
 }
 
+/// All live ownership candidates for registration on one machine. The first
+/// row lookup remains available for Go-compatible database lookup semantics;
+/// auth decisions must inspect the complete ownership set.
+pub async fn list_by_machine_key(
+    pool: &SqlitePool,
+    machine_key: &str,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = node_select(&format!("WHERE {identity} = ? ORDER BY id"));
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(machine_key)
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::from)
+}
+
 pub async fn get_by_machine_key_and_user(
     pool: &SqlitePool,
     machine_key: &str,
     user_id: i64,
 ) -> Result<HeadscaleNodeRow> {
-    let query = node_select(
-        "WHERE machine_key = ? AND user_id = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
-    );
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = node_select(&format!(
+        "WHERE {identity} = ? AND user_id = ? ORDER BY id LIMIT 1"
+    ));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(machine_key)
         .bind(user_id)
@@ -768,9 +1219,7 @@ pub async fn get_by_user_hostname(
     user_id: i64,
     hostname: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let query = node_select(
-        "WHERE user_id = ? AND hostname = ? AND deleted_at IS NULL ORDER BY id LIMIT 1",
-    );
+    let query = node_select("WHERE user_id = ? AND hostname = ? ORDER BY id LIMIT 1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(user_id)
         .bind(hostname)
@@ -790,7 +1239,7 @@ pub async fn get_postgres_by_id_on_connection(
     conn: &mut PgConnection,
     id: i64,
 ) -> Result<HeadscaleNodeRow> {
-    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    let query = postgres_node_select("WHERE id = $1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
         .fetch_one(&mut *conn)
@@ -809,8 +1258,9 @@ pub async fn get_postgres_by_node_key_on_connection(
     conn: &mut PgConnection,
     node_key: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let query =
-        postgres_node_select("WHERE node_key = $1 AND deleted_at IS NULL ORDER BY id LIMIT 1");
+    let node_key = crate::stored_text::key_for_write(node_key, PublicKeyKind::Node)?;
+    let identity = key_identity_sql("node_key", PublicKeyKind::Node);
+    let query = postgres_node_select(&format!("WHERE {identity} = $1 ORDER BY id LIMIT 1"));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(node_key)
         .fetch_one(&mut *conn)
@@ -828,12 +1278,28 @@ pub async fn get_postgres_by_machine_key(
 }
 
 #[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_machine_key(
+    pool: &PgPool,
+    machine_key: &str,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = postgres_node_select(&format!("WHERE {identity} = $1 ORDER BY id"));
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(machine_key)
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::from)
+}
+
+#[cfg(feature = "postgres-sqlx")]
 pub async fn get_postgres_by_machine_key_on_connection(
     conn: &mut PgConnection,
     machine_key: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let query =
-        postgres_node_select("WHERE machine_key = $1 AND deleted_at IS NULL ORDER BY id LIMIT 1");
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = postgres_node_select(&format!("WHERE {identity} = $1 ORDER BY id LIMIT 1"));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(machine_key)
         .fetch_one(&mut *conn)
@@ -857,9 +1323,11 @@ pub async fn get_postgres_by_machine_key_and_user_on_connection(
     machine_key: &str,
     user_id: i64,
 ) -> Result<HeadscaleNodeRow> {
-    let query = postgres_node_select(
-        "WHERE machine_key = $1 AND user_id = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1",
-    );
+    let machine_key = crate::stored_text::key_for_write(machine_key, PublicKeyKind::Machine)?;
+    let identity = key_identity_sql("machine_key", PublicKeyKind::Machine);
+    let query = postgres_node_select(&format!(
+        "WHERE {identity} = $1 AND user_id = $2 ORDER BY id LIMIT 1"
+    ));
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(machine_key)
         .bind(user_id)
@@ -884,9 +1352,7 @@ pub async fn get_postgres_by_user_hostname_on_connection(
     user_id: i64,
     hostname: &str,
 ) -> Result<HeadscaleNodeRow> {
-    let query = postgres_node_select(
-        "WHERE user_id = $1 AND hostname = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1",
-    );
+    let query = postgres_node_select("WHERE user_id = $1 AND hostname = $2 ORDER BY id LIMIT 1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(user_id)
         .bind(hostname)
@@ -900,10 +1366,20 @@ pub async fn update_from_auth_path(
     id: i64,
     params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
+    let mut conn = pool.acquire().await?;
+    update_from_auth_path_on_connection(&mut conn, id, params).await
+}
+
+pub async fn update_from_auth_path_on_connection(
+    conn: &mut SqliteConnection,
+    id: i64,
+    mut params: CreateParams,
+) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
-        let given_name = auth_path_given_name(pool, id, &params).await?;
-        match update_from_auth_path_with_given_name(pool, id, &params, &given_name).await {
+        let given_name = auth_path_given_name(conn, id, &params).await?;
+        match update_from_auth_path_with_given_name(conn, id, &params, &given_name).await {
             Ok(node) => return Ok(node),
             Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
             Err(e) => return Err(map_non_retry_write_err(e)),
@@ -914,18 +1390,22 @@ pub async fn update_from_auth_path(
 }
 
 async fn update_from_auth_path_with_given_name(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     id: i64,
     params: &CreateParams,
     given_name: &str,
 ) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
-    let endpoints = json_array(&params.endpoints)?;
-    let host_info = json_object_or_value(&params.host_info)?;
+    let ipv4 = crate::stored_text::optional_address(params.ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(params.ipv6.as_deref())?;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
     let now = now_unix();
+    let last_seen = last_seen_text(params, SecondsFormat::Nanos);
+    let expiry = expiry_text(params, SecondsFormat::Nanos);
     let affected = sqlx::query(
         "
         UPDATE nodes
@@ -943,44 +1423,42 @@ async fn update_from_auth_path_with_given_name(
             register_method = NULLIF(?, ''),
             tags = ?,
             auth_key_id = ?,
-            expiry = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
-            last_seen = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            expiry = ?,
+            last_seen = ?,
             approved_routes = ?,
             updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(&params.machine_key)
     .bind(&params.node_key)
     .bind(&params.disco_key)
     .bind(&endpoints)
-    .bind(&host_info)
-    .bind(&params.ipv4)
-    .bind(&params.ipv6)
+    .bind(host_info.as_deref())
+    .bind(&ipv4)
+    .bind(&ipv6)
     .bind(&params.hostname)
     .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
-    .bind(params.expiry)
-    .bind(params.expiry)
-    .bind(params.last_seen)
-    .bind(params.last_seen)
+    .bind(expiry)
+    .bind(last_seen)
     .bind(&approved_routes)
     .bind(now)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(DbError::from)?
     .rows_affected();
     if affected == 0 {
         return Err(DbError::NotFound(format!("node id={id}")));
     }
-    let query = node_select("WHERE id = ? AND deleted_at IS NULL");
+    let query = node_select("WHERE id = ?");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(DbError::from)
 }
@@ -999,15 +1477,29 @@ pub async fn update_postgres_from_auth_path(
 pub async fn update_postgres_from_auth_path_on_connection(
     conn: &mut PgConnection,
     id: i64,
-    params: CreateParams,
+    mut params: CreateParams,
 ) -> Result<HeadscaleNodeRow> {
+    params.canonicalize_keys()?;
     let retry_auto_given_name = params.given_name.is_empty();
     for _ in 0..AUTO_GIVEN_NAME_RETRY_LIMIT {
         let given_name = auth_path_postgres_given_name(conn, id, &params).await?;
-        match update_postgres_from_auth_path_with_given_name(conn, id, &params, &given_name).await {
-            Ok(node) => return Ok(node),
-            Err(e) if retry_auto_given_name && is_given_name_unique_violation(&e) => {}
-            Err(e) => return Err(map_non_retry_write_err(e)),
+        // A failed INSERT/UPDATE aborts a PostgreSQL transaction. A savepoint
+        // lets generated-name retries proceed inside the enclosing registration.
+        let mut attempt = conn.begin().await?;
+        let result =
+            update_postgres_from_auth_path_with_given_name(&mut attempt, id, &params, &given_name)
+                .await;
+        match result {
+            Ok(node) => {
+                attempt.commit().await?;
+                return Ok(node);
+            }
+            Err(error) => {
+                attempt.rollback().await?;
+                if !(retry_auto_given_name && is_given_name_unique_violation(&error)) {
+                    return Err(map_non_retry_write_err(error));
+                }
+            }
         }
     }
 
@@ -1023,11 +1515,15 @@ async fn update_postgres_from_auth_path_with_given_name(
 ) -> Result<HeadscaleNodeRow> {
     let tags = normalize_tags(params.tags.clone());
     let user_id = tag_owned_user_id(params.user_id, &tags);
-    let endpoints = json_array(&params.endpoints)?;
-    let host_info = json_object_or_value(&params.host_info)?;
+    let ipv4 = crate::stored_text::optional_address(params.ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(params.ipv6.as_deref())?;
+    let endpoints = json_array(&crate::stored_json::endpoint_values(&params.endpoints)?)?;
+    let host_info = host_info_for_write(&params.host_info)?;
     let tags = json_array(&tags)?;
-    let approved_routes = json_array(&normalize_approved_routes(params.approved_routes.clone()))?;
+    let approved_routes = json_array(&crate::stored_json::prefix_values(&params.approved_routes)?)?;
     let now = now_unix();
+    let last_seen = last_seen_text(params, SecondsFormat::Micros);
+    let expiry = expiry_text(params, SecondsFormat::Micros);
     let affected = sqlx::query(
         "
         UPDATE nodes
@@ -1045,34 +1541,28 @@ async fn update_postgres_from_auth_path_with_given_name(
             register_method = NULLIF($11, ''),
             tags = $12,
             auth_key_id = $13,
-            expiry = CASE
-                WHEN $14::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($14::BIGINT)::DOUBLE PRECISION)
-            END,
-            last_seen = CASE
-                WHEN $15::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($15::BIGINT)::DOUBLE PRECISION)
-            END,
+            expiry = $14::TIMESTAMPTZ,
+            last_seen = $15::TIMESTAMPTZ,
             approved_routes = $16,
             updated_at = to_timestamp(($17::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $18 AND deleted_at IS NULL
+        WHERE id = $18
         ",
     )
     .bind(&params.machine_key)
     .bind(&params.node_key)
     .bind(&params.disco_key)
     .bind(&endpoints)
-    .bind(&host_info)
-    .bind(&params.ipv4)
-    .bind(&params.ipv6)
+    .bind(host_info.as_deref())
+    .bind(&ipv4)
+    .bind(&ipv6)
     .bind(&params.hostname)
     .bind(given_name)
     .bind(user_id)
     .bind(&params.register_method)
     .bind(&tags)
     .bind(params.auth_key_id)
-    .bind(params.expiry)
-    .bind(params.last_seen)
+    .bind(expiry)
+    .bind(last_seen)
     .bind(&approved_routes)
     .bind(now)
     .bind(id)
@@ -1083,7 +1573,7 @@ async fn update_postgres_from_auth_path_with_given_name(
     if affected == 0 {
         return Err(DbError::NotFound(format!("node id={id}")));
     }
-    let query = postgres_node_select("WHERE id = $1 AND deleted_at IS NULL");
+    let query = postgres_node_select("WHERE id = $1");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(id)
         .fetch_one(&mut *conn)
@@ -1092,7 +1582,7 @@ async fn update_postgres_from_auth_path_with_given_name(
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
-    let query = node_select("WHERE deleted_at IS NULL ORDER BY id");
+    let query = node_select("ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .fetch_all(pool)
         .await
@@ -1105,7 +1595,7 @@ pub async fn list_by_ids(pool: &SqlitePool, ids: &[i64]) -> Result<Vec<Headscale
     }
 
     let query = node_select(&format!(
-        "WHERE deleted_at IS NULL AND id IN ({}) ORDER BY id",
+        "WHERE id IN ({}) ORDER BY id",
         sqlite_placeholders(ids.len())
     ));
     let mut query = sqlx::query_as::<_, HeadscaleNodeRow>(&query);
@@ -1121,10 +1611,10 @@ pub async fn list_peers(
     peer_ids: &[i64],
 ) -> Result<Vec<HeadscaleNodeRow>> {
     let query = if peer_ids.is_empty() {
-        node_select("WHERE id != ? AND deleted_at IS NULL ORDER BY id")
+        node_select("WHERE id != ? ORDER BY id")
     } else {
         node_select(&format!(
-            "WHERE id != ? AND deleted_at IS NULL AND id IN ({}) ORDER BY id",
+            "WHERE id != ? AND id IN ({}) ORDER BY id",
             sqlite_placeholders(peer_ids.len())
         ))
     };
@@ -1137,8 +1627,7 @@ pub async fn list_peers(
 
 pub async fn list_ephemeral(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> {
     let query = node_select(
-        "WHERE deleted_at IS NULL
-         AND auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = 1)
+        "WHERE auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = 1)
          ORDER BY id",
     );
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -1148,7 +1637,7 @@ pub async fn list_ephemeral(pool: &SqlitePool) -> Result<Vec<HeadscaleNodeRow>> 
 }
 
 pub async fn list_by_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<HeadscaleNodeRow>> {
-    let query = node_select("WHERE user_id = ? AND deleted_at IS NULL ORDER BY id");
+    let query = node_select("WHERE user_id = ? ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(user_id)
         .fetch_all(pool)
@@ -1164,7 +1653,7 @@ pub async fn list_postgres(pool: &PgPool) -> Result<Vec<HeadscaleNodeRow>> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn list_postgres_on_connection(conn: &mut PgConnection) -> Result<Vec<HeadscaleNodeRow>> {
-    let query = postgres_node_select("WHERE deleted_at IS NULL ORDER BY id");
+    let query = postgres_node_select("ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .fetch_all(&mut *conn)
         .await
@@ -1186,7 +1675,7 @@ pub async fn list_postgres_by_ids_on_connection(
         return list_postgres_on_connection(conn).await;
     }
 
-    let query = postgres_node_select("WHERE deleted_at IS NULL AND id = ANY($1) ORDER BY id");
+    let query = postgres_node_select("WHERE id = ANY($1) ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(ids.to_vec())
         .fetch_all(&mut *conn)
@@ -1211,9 +1700,9 @@ pub async fn list_postgres_peers_on_connection(
     peer_ids: &[i64],
 ) -> Result<Vec<HeadscaleNodeRow>> {
     let query = if peer_ids.is_empty() {
-        postgres_node_select("WHERE id != $1 AND deleted_at IS NULL ORDER BY id")
+        postgres_node_select("WHERE id != $1 ORDER BY id")
     } else {
-        postgres_node_select("WHERE id != $1 AND deleted_at IS NULL AND id = ANY($2) ORDER BY id")
+        postgres_node_select("WHERE id != $1 AND id = ANY($2) ORDER BY id")
     };
     let query = sqlx::query_as::<_, HeadscaleNodeRow>(&query).bind(node_id);
     let query = if peer_ids.is_empty() {
@@ -1235,8 +1724,7 @@ pub async fn list_postgres_ephemeral_on_connection(
     conn: &mut PgConnection,
 ) -> Result<Vec<HeadscaleNodeRow>> {
     let query = postgres_node_select(
-        "WHERE deleted_at IS NULL
-         AND auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = TRUE)
+        "WHERE auth_key_id IN (SELECT id FROM pre_auth_keys WHERE ephemeral = TRUE)
          ORDER BY id",
     );
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
@@ -1256,7 +1744,7 @@ pub async fn list_postgres_by_user_on_connection(
     conn: &mut PgConnection,
     user_id: i64,
 ) -> Result<Vec<HeadscaleNodeRow>> {
-    let query = postgres_node_select("WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id");
+    let query = postgres_node_select("WHERE user_id = $1 ORDER BY id");
     sqlx::query_as::<_, HeadscaleNodeRow>(&query)
         .bind(user_id)
         .fetch_all(&mut *conn)
@@ -1276,7 +1764,7 @@ pub async fn set_tags(pool: &SqlitePool, id: i64, tags: Vec<String>) -> Result<H
             user_id = CASE WHEN ? THEN NULL ELSE user_id END,
             tags = ?,
             updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(clear_user_id)
@@ -1320,7 +1808,7 @@ pub async fn set_postgres_tags_on_connection(
             user_id = CASE WHEN $1 THEN NULL ELSE user_id END,
             tags = $2,
             updated_at = to_timestamp(($3::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $4 AND deleted_at IS NULL
+        WHERE id = $4
         ",
     )
     .bind(clear_user_id)
@@ -1343,7 +1831,7 @@ pub async fn rename(pool: &SqlitePool, id: i64, new_given_name: &str) -> Result<
         "
         SELECT COUNT(*)
         FROM nodes
-        WHERE given_name = ? AND id != ? AND deleted_at IS NULL
+        WHERE given_name = ? AND id != ?
         ",
     )
     .bind(new_given_name)
@@ -1359,7 +1847,7 @@ pub async fn rename(pool: &SqlitePool, id: i64, new_given_name: &str) -> Result<
         "
         UPDATE nodes
         SET given_name = ?, updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(new_given_name)
@@ -1396,7 +1884,7 @@ pub async fn rename_postgres_on_connection(
         "
         SELECT COUNT(*)
         FROM nodes
-        WHERE given_name = $1 AND id != $2 AND deleted_at IS NULL
+        WHERE given_name = $1 AND id != $2
         ",
     )
     .bind(new_given_name)
@@ -1412,7 +1900,7 @@ pub async fn rename_postgres_on_connection(
         "
         UPDATE nodes
         SET given_name = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(new_given_name)
@@ -1428,18 +1916,67 @@ pub async fn rename_postgres_on_connection(
     get_postgres_by_id_on_connection(conn, id).await
 }
 
+/// Persist the typed route vector already computed by policy auto-approval.
+/// This path does not expand a single default route into the admin exit pair
+/// or re-read unrelated columns after the write. The live batch is published
+/// before these per-node writes, following Go autoApproveNodes ordering.
+pub async fn save_policy_approved_routes(
+    pool: &SqlitePool,
+    id: i64,
+    routes: &[String],
+) -> Result<()> {
+    let routes = json_array(&crate::stored_json::prefix_values(routes)?)?;
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let affected = sqlx::query("UPDATE nodes SET approved_routes = ?, updated_at = ? WHERE id = ?")
+        .bind(routes)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(map_sqlx_err)?
+        .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn save_postgres_policy_approved_routes(
+    pool: &PgPool,
+    id: i64,
+    routes: &[String],
+) -> Result<()> {
+    let routes = json_array(&crate::stored_json::prefix_values(routes)?)?;
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let affected = sqlx::query(
+        "UPDATE nodes SET approved_routes = $1, updated_at = $2::TIMESTAMPTZ WHERE id = $3",
+    )
+    .bind(routes)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    Ok(())
+}
+
 pub async fn set_approved_routes(
     pool: &SqlitePool,
     id: i64,
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let routes = json_array(&normalize_approved_routes(routes))?;
+    let routes = json_array(&normalize_approved_routes(&routes)?)?;
     let now = now_unix();
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET approved_routes = ?, updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(routes)
@@ -1471,13 +2008,13 @@ pub async fn set_postgres_approved_routes_on_connection(
     id: i64,
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let routes = json_array(&normalize_approved_routes(routes))?;
+    let routes = json_array(&normalize_approved_routes(&routes)?)?;
     let now = now_unix();
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET approved_routes = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(routes)
@@ -1499,7 +2036,7 @@ pub async fn set_host_info_routable_ips(
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
     let row = get_by_id(pool, id).await?;
-    let mut host_info = row.host_info_value();
+    let mut host_info = row.try_host_info_value()?;
     if !host_info.is_object() {
         host_info = json!({});
     }
@@ -1514,13 +2051,13 @@ pub async fn set_host_info_routable_ips(
         }
     }
 
-    let host_info = json_object_or_value(&host_info)?;
+    let host_info = host_info_for_write(&host_info)?;
     let now = now_unix();
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET host_info = ?, updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(host_info)
@@ -1553,7 +2090,7 @@ pub async fn set_postgres_host_info_routable_ips_on_connection(
     routes: Vec<String>,
 ) -> Result<HeadscaleNodeRow> {
     let row = get_postgres_by_id_on_connection(conn, id).await?;
-    let mut host_info = row.host_info_value();
+    let mut host_info = row.try_host_info_value()?;
     if !host_info.is_object() {
         host_info = json!({});
     }
@@ -1568,13 +2105,13 @@ pub async fn set_postgres_host_info_routable_ips_on_connection(
         }
     }
 
-    let host_info = json_object_or_value(&host_info)?;
+    let host_info = host_info_for_write(&host_info)?;
     let now = now_unix();
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET host_info = $1, updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(host_info)
@@ -1595,17 +2132,31 @@ pub async fn set_expiry(
     id: i64,
     expiry: Option<i64>,
 ) -> Result<HeadscaleNodeRow> {
+    let precise = expiry
+        .map(|seconds| {
+            DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| DbError::General("expiry out of range".into()))
+        })
+        .transpose()?;
+    set_expiry_precise(pool, id, precise).await
+}
+
+pub async fn set_expiry_precise(
+    pool: &SqlitePool,
+    id: i64,
+    expiry: Option<DateTime<Utc>>,
+) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
+    let expiry = expiry.map(|value| value.to_rfc3339_opts(SecondsFormat::Nanos, true));
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET
-            expiry = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
+            expiry = ?,
             updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
-    .bind(expiry)
     .bind(expiry)
     .bind(now)
     .bind(id)
@@ -1625,8 +2176,23 @@ pub async fn set_postgres_expiry(
     id: i64,
     expiry: Option<i64>,
 ) -> Result<HeadscaleNodeRow> {
+    let precise = expiry
+        .map(|seconds| {
+            DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| DbError::General("expiry out of range".into()))
+        })
+        .transpose()?;
+    set_postgres_expiry_precise(pool, id, precise).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_expiry_precise(
+    pool: &PgPool,
+    id: i64,
+    expiry: Option<DateTime<Utc>>,
+) -> Result<HeadscaleNodeRow> {
     let mut conn = pool.acquire().await?;
-    set_postgres_expiry_on_connection(&mut conn, id, expiry).await
+    set_postgres_expiry_precise_on_connection(&mut conn, id, expiry).await
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -1635,17 +2201,30 @@ pub async fn set_postgres_expiry_on_connection(
     id: i64,
     expiry: Option<i64>,
 ) -> Result<HeadscaleNodeRow> {
+    let precise = expiry
+        .map(|seconds| {
+            DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| DbError::General("expiry out of range".into()))
+        })
+        .transpose()?;
+    set_postgres_expiry_precise_on_connection(conn, id, precise).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_expiry_precise_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    expiry: Option<DateTime<Utc>>,
+) -> Result<HeadscaleNodeRow> {
     let now = now_unix();
+    let expiry = expiry.map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true));
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET
-            expiry = CASE
-                WHEN $1::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
-            END,
+            expiry = $1::TIMESTAMPTZ,
             updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(expiry)
@@ -1673,7 +2252,7 @@ pub async fn set_last_seen(
         SET
             last_seen = CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
             updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(last_seen)
@@ -1688,6 +2267,58 @@ pub async fn set_last_seen(
         return Err(DbError::NotFound(format!("node id={id}")));
     }
     get_by_id(pool, id).await
+}
+
+/// Persist a stream disconnect at full timestamp precision. This deliberately
+/// updates only LastSeen and UpdatedAt, avoiding a full node-row rewrite.
+pub async fn persist_last_seen_at(pool: &SqlitePool, id: i64, at: &DateTime<Utc>) -> Result<()> {
+    let timestamp = at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let affected = sqlx::query(
+        "UPDATE nodes SET last_seen = CASE WHEN last_seen IS NULL OR julianday(last_seen) <= julianday(?) THEN ? ELSE last_seen END, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn persist_postgres_last_seen_at(
+    pool: &PgPool,
+    id: i64,
+    at: &DateTime<Utc>,
+) -> Result<()> {
+    let mut conn = pool.acquire().await?;
+    persist_postgres_last_seen_at_on_connection(&mut conn, id, at).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn persist_postgres_last_seen_at_on_connection(
+    conn: &mut PgConnection,
+    id: i64,
+    at: &DateTime<Utc>,
+) -> Result<()> {
+    let timestamp = at.to_rfc3339_opts(SecondsFormat::Micros, true);
+    let affected = sqlx::query(
+        "UPDATE nodes SET last_seen = GREATEST(last_seen, $1::TIMESTAMPTZ), updated_at = NOW() WHERE id = $2",
+    )
+    .bind(timestamp)
+    .bind(id)
+    .execute(conn)
+    .await
+    .map_err(map_sqlx_err)?
+    .rows_affected();
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("node id={id}")));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -1716,7 +2347,7 @@ pub async fn set_postgres_last_seen_on_connection(
                 ELSE to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
             END,
             updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(last_seen)
@@ -1732,35 +2363,123 @@ pub async fn set_postgres_last_seen_on_connection(
     get_postgres_by_id_on_connection(conn, id).await
 }
 
+/// IP-only updates prepared by an authenticated backfill operation.
+#[derive(Clone, Debug)]
+pub struct IpAddressUpdate {
+    pub node_id: i64,
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+}
+
+/// Commit the full backfill together. A failure leaves all node rows unchanged;
+/// allocator reservations are deliberately owned by the allocator, as in Go.
+pub async fn set_ip_addresses_batch(
+    pool: &SqlitePool,
+    mut updates: Vec<IpAddressUpdate>,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    for update in &mut updates {
+        update.ipv4 = crate::stored_text::optional_address(update.ipv4.as_deref())?;
+        update.ipv6 = crate::stored_text::optional_address(update.ipv6.as_deref())?;
+    }
+    let mut transaction = pool.begin().await?;
+    let mut rows = Vec::with_capacity(updates.len());
+    for update in updates {
+        match set_ip_addresses_on_connection(
+            &mut transaction,
+            update.node_id,
+            update.ipv4,
+            update.ipv6,
+        )
+        .await
+        {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                transaction.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+    transaction.commit().await?;
+    Ok(rows)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn set_postgres_ip_addresses_batch(
+    pool: &PgPool,
+    mut updates: Vec<IpAddressUpdate>,
+) -> Result<Vec<HeadscaleNodeRow>> {
+    for update in &mut updates {
+        update.ipv4 = crate::stored_text::optional_address(update.ipv4.as_deref())?;
+        update.ipv6 = crate::stored_text::optional_address(update.ipv6.as_deref())?;
+    }
+    let mut transaction = pool.begin().await?;
+    let mut rows = Vec::with_capacity(updates.len());
+    for update in updates {
+        match set_postgres_ip_addresses_on_connection(
+            &mut transaction,
+            update.node_id,
+            update.ipv4,
+            update.ipv6,
+        )
+        .await
+        {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                transaction.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+    transaction.commit().await?;
+    Ok(rows)
+}
+
 pub async fn set_ip_addresses(
     pool: &SqlitePool,
     id: i64,
     ipv4: Option<String>,
     ipv6: Option<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let now = now_unix();
+    let mut conn = pool.acquire().await?;
+    set_ip_addresses_on_connection(&mut conn, id, ipv4, ipv6).await
+}
+
+pub async fn set_ip_addresses_on_connection(
+    conn: &mut SqliteConnection,
+    id: i64,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+) -> Result<HeadscaleNodeRow> {
+    let ipv4 = crate::stored_text::optional_address(ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(ipv6.as_deref())?;
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET
             ipv4 = ?,
             ipv6 = ?,
-            updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+            updated_at = ?
+        WHERE id = ?
         ",
     )
     .bind(ipv4)
     .bind(ipv6)
     .bind(now)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_err)?
     .rows_affected();
     if affected == 0 {
         return Err(DbError::NotFound(format!("node id={id}")));
     }
-    get_by_id(pool, id).await
+    let query = node_select("WHERE id = ?");
+    sqlx::query_as::<_, HeadscaleNodeRow>(&query)
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::from)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -1781,15 +2500,17 @@ pub async fn set_postgres_ip_addresses_on_connection(
     ipv4: Option<String>,
     ipv6: Option<String>,
 ) -> Result<HeadscaleNodeRow> {
-    let now = now_unix();
+    let ipv4 = crate::stored_text::optional_address(ipv4.as_deref())?;
+    let ipv6 = crate::stored_text::optional_address(ipv6.as_deref())?;
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
     let affected = sqlx::query(
         "
         UPDATE nodes
         SET
             ipv4 = $1,
             ipv6 = $2,
-            updated_at = to_timestamp(($3::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $4 AND deleted_at IS NULL
+            updated_at = $3::TIMESTAMPTZ
+        WHERE id = $4
         ",
     )
     .bind(ipv4)
@@ -1814,7 +2535,7 @@ pub async fn logout(pool: &SqlitePool, id: i64) -> Result<HeadscaleNodeRow> {
         SET
             expiry = datetime(?, 'unixepoch'),
             updated_at = datetime(?, 'unixepoch')
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE id = ?
         ",
     )
     .bind(now)
@@ -1848,7 +2569,7 @@ pub async fn logout_postgres_on_connection(
         SET
             expiry = to_timestamp(($1::BIGINT)::DOUBLE PRECISION),
             updated_at = to_timestamp(($2::BIGINT)::DOUBLE PRECISION)
-        WHERE id = $3 AND deleted_at IS NULL
+        WHERE id = $3
         ",
     )
     .bind(now)
@@ -1862,6 +2583,27 @@ pub async fn logout_postgres_on_connection(
         return Err(DbError::NotFound(format!("node id={id}")));
     }
     get_postgres_by_id_on_connection(conn, id).await
+}
+
+/// Go DeleteNode deletes the authoritative cached ID without requiring an
+/// affected row. An already absent SQL row is still a successful deletion.
+pub async fn destroy_cached_node(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM nodes WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(DbError::from)?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn destroy_postgres_cached_node(pool: &PgPool, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM nodes WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(DbError::from)?;
+    Ok(())
 }
 
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
@@ -1988,9 +2730,12 @@ mod tests {
 
     fn node_params(user_id: i64, auth_key_id: i64) -> CreateParams {
         CreateParams {
-            machine_key: "mkey:abc".into(),
-            node_key: "nodekey:abc".into(),
-            disco_key: "discokey:abc".into(),
+            machine_key: "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+                .into(),
+            node_key: "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+                .into(),
+            disco_key: "discokey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+                .into(),
             endpoints: vec!["192.0.2.10:41641".into(), "[2001:db8::1]:41641".into()],
             host_info: json!({
                 "Hostname": "alice-laptop",
@@ -2005,7 +2750,9 @@ mod tests {
             tags: Vec::new(),
             auth_key_id: Some(auth_key_id),
             expiry: Some(4_102_444_800),
+            expiry_precise: None,
             last_seen: Some(1_700_000_000),
+            last_seen_precise: None,
             approved_routes: vec!["10.0.0.0/24".into()],
         }
     }
@@ -2018,9 +2765,9 @@ mod tests {
         given_name: &str,
     ) -> CreateParams {
         let mut params = node_params(user_id, auth_key_id);
-        params.machine_key = format!("mkey:{index}");
-        params.node_key = format!("nodekey:{index}");
-        params.disco_key = format!("discokey:{index}");
+        params.machine_key = format!("mkey:{index:064x}");
+        params.node_key = format!("nodekey:{index:064x}");
+        params.disco_key = format!("discokey:{index:064x}");
         params.hostname = hostname.into();
         params.given_name = given_name.into();
         params.host_info = json!({
@@ -2054,9 +2801,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(node.id, 1);
-        assert_eq!(node.machine_key, "mkey:abc");
-        assert_eq!(node.node_key, "nodekey:abc");
-        assert_eq!(node.disco_key, "discokey:abc");
+        assert_eq!(
+            node.machine_key,
+            "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            node.node_key,
+            "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            node.disco_key,
+            "discokey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
         assert_eq!(node.hostname, "alice-laptop");
         assert_eq!(node.given_name, "alice-laptop");
         assert_eq!(node.user_id, Some(user_id));
@@ -2099,8 +2855,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(raw.get::<i64, _>("id"), node.id);
-        assert_eq!(raw.get::<String, _>("machine_key"), "mkey:abc");
-        assert_eq!(raw.get::<String, _>("node_key"), "nodekey:abc");
+        assert_eq!(
+            raw.get::<String, _>("machine_key"),
+            "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            raw.get::<String, _>("node_key"),
+            "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
         assert_eq!(raw.get::<String, _>("given_name"), "alice-laptop");
         assert_eq!(raw.get::<String, _>("user_id_type"), "integer");
         assert_eq!(raw.get::<i64, _>("user_id"), user_id);
@@ -2127,9 +2889,12 @@ mod tests {
         assert_eq!(first.given_name, "peer-one");
 
         let mut compound_suffix_params = node_params(user_id, auth_key_id);
-        compound_suffix_params.machine_key = "mkey:compound-suffix".into();
-        compound_suffix_params.node_key = "nodekey:compound-suffix".into();
-        compound_suffix_params.disco_key = "discokey:compound-suffix".into();
+        compound_suffix_params.machine_key =
+            "mkey:5c2900af3eb01230d2c7425595ad23d2d29a03cc61688063ae97296f4b6d8f65".into();
+        compound_suffix_params.node_key =
+            "nodekey:5c2900af3eb01230d2c7425595ad23d2d29a03cc61688063ae97296f4b6d8f65".into();
+        compound_suffix_params.disco_key =
+            "discokey:5c2900af3eb01230d2c7425595ad23d2d29a03cc61688063ae97296f4b6d8f65".into();
         compound_suffix_params.ipv4 = Some("100.64.0.22".into());
         compound_suffix_params.ipv6 = Some("fd7a:115c:a1e0::22".into());
         compound_suffix_params.hostname = "Peer.localdomain.local".into();
@@ -2138,9 +2903,12 @@ mod tests {
         assert_eq!(compound_suffix.given_name, "peer");
 
         let mut duplicate_params = node_params(user_id, auth_key_id);
-        duplicate_params.machine_key = "mkey:duplicate-host".into();
-        duplicate_params.node_key = "nodekey:duplicate-host".into();
-        duplicate_params.disco_key = "discokey:duplicate-host".into();
+        duplicate_params.machine_key =
+            "mkey:6e06b550fd9e124cdb62b306502fdd071eebdc666f6d22fac1f18e94b53b3302".into();
+        duplicate_params.node_key =
+            "nodekey:6e06b550fd9e124cdb62b306502fdd071eebdc666f6d22fac1f18e94b53b3302".into();
+        duplicate_params.disco_key =
+            "discokey:6e06b550fd9e124cdb62b306502fdd071eebdc666f6d22fac1f18e94b53b3302".into();
         duplicate_params.ipv4 = Some("100.64.0.2".into());
         duplicate_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
         duplicate_params.hostname = "Peer.One!".into();
@@ -2149,9 +2917,12 @@ mod tests {
         assert_eq!(duplicate.given_name, "peer-one-1");
 
         let mut empty_params = node_params(user_id, auth_key_id);
-        empty_params.machine_key = "mkey:empty-host".into();
-        empty_params.node_key = "nodekey:empty-host".into();
-        empty_params.disco_key = "discokey:empty-host".into();
+        empty_params.machine_key =
+            "mkey:758a32d33c8c7b82b007d732f513655d4150aeac98c6718fdcaf3d4486163940".into();
+        empty_params.node_key =
+            "nodekey:758a32d33c8c7b82b007d732f513655d4150aeac98c6718fdcaf3d4486163940".into();
+        empty_params.disco_key =
+            "discokey:758a32d33c8c7b82b007d732f513655d4150aeac98c6718fdcaf3d4486163940".into();
         empty_params.ipv4 = Some("100.64.0.3".into());
         empty_params.ipv6 = Some("fd7a:115c:a1e0::3".into());
         empty_params.hostname = "!!!".into();
@@ -2214,9 +2985,12 @@ mod tests {
         assert_eq!(first.given_name.len(), 63);
 
         let mut duplicate_params = node_params(user_id, auth_key_id);
-        duplicate_params.machine_key = "mkey:long-duplicate".into();
-        duplicate_params.node_key = "nodekey:long-duplicate".into();
-        duplicate_params.disco_key = "discokey:long-duplicate".into();
+        duplicate_params.machine_key =
+            "mkey:62783493c5a3656fc94372ec12676a490f76dbefe972187a2d13cf2ed62ac0e4".into();
+        duplicate_params.node_key =
+            "nodekey:62783493c5a3656fc94372ec12676a490f76dbefe972187a2d13cf2ed62ac0e4".into();
+        duplicate_params.disco_key =
+            "discokey:62783493c5a3656fc94372ec12676a490f76dbefe972187a2d13cf2ed62ac0e4".into();
         duplicate_params.ipv4 = Some("100.64.0.2".into());
         duplicate_params.ipv6 = Some("fd7a:115c:a1e0::2".into());
         duplicate_params.hostname = long_hostname;
@@ -2235,9 +3009,12 @@ mod tests {
             .unwrap();
 
         let mut second_params = node_params(user_id, auth_key_id);
-        second_params.machine_key = "mkey:second".into();
-        second_params.node_key = "nodekey:second".into();
-        second_params.disco_key = "discokey:second".into();
+        second_params.machine_key =
+            "mkey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.node_key =
+            "nodekey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
+        second_params.disco_key =
+            "discokey:42f1e5b3cbfa1adfd8a8fadea7a6b1e1b0319c5b2ae2d305285d24efb478d214".into();
         second_params.hostname = "alice-phone".into();
         second_params.given_name = "alice-phone".into();
         second_params.ipv4 = Some("100.64.0.2".into());
@@ -2297,9 +3074,12 @@ mod tests {
 
         let ephemeral_key_id = auth_key_id_with_ephemeral(&db, user_id, true).await;
         let mut ephemeral_params = node_params(user_id, ephemeral_key_id);
-        ephemeral_params.machine_key = "mkey:ephemeral".into();
-        ephemeral_params.node_key = "nodekey:ephemeral".into();
-        ephemeral_params.disco_key = "discokey:ephemeral".into();
+        ephemeral_params.machine_key =
+            "mkey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
+        ephemeral_params.node_key =
+            "nodekey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
+        ephemeral_params.disco_key =
+            "discokey:c173a3b72118fc024557f8319e896b879d9a011f60d53c9be855382f917a0bc0".into();
         ephemeral_params.hostname = "ephemeral".into();
         ephemeral_params.given_name = "ephemeral".into();
         ephemeral_params.ipv4 = Some("100.64.0.2".into());
@@ -2314,6 +3094,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(ephemeral.id, Some(ephemeral_key_id))]
         );
+    }
+
+    #[tokio::test]
+    async fn fractional_expiry_survives_database_read_and_auth_path_update() {
+        let db = fresh_db().await;
+        let user_id = alice_id(&db).await;
+        let auth_key_id = auth_key_id(&db, user_id).await;
+        let node = create(db.pool(), node_params(user_id, auth_key_id))
+            .await
+            .unwrap();
+        let precise = DateTime::from_timestamp(4_102_444_800, 123_456_789).unwrap();
+
+        let expired = set_expiry_precise(db.pool(), node.id, Some(precise))
+            .await
+            .unwrap();
+        assert_eq!(expired.expiry, Some(4_102_444_800));
+        assert_eq!(
+            expired.expiry_text.as_deref(),
+            Some("2100-01-01T00:00:00.123456789Z")
+        );
+        assert_eq!(
+            get_by_id(db.pool(), node.id).await.unwrap().expiry_text,
+            expired.expiry_text
+        );
+
+        let mut params = node_params(user_id, auth_key_id);
+        params.expiry_precise = Some(precise);
+        let updated = update_from_auth_path(db.pool(), node.id, params)
+            .await
+            .unwrap();
+        assert_eq!(updated.expiry_text, expired.expiry_text);
     }
 
     #[tokio::test]
@@ -2382,8 +3193,10 @@ mod tests {
             .await
             .unwrap();
         let mut params = node_params(user_id, auth_key_id);
-        params.node_key = "nodekey:def".into();
-        params.disco_key = "discokey:def".into();
+        params.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        params.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         params.endpoints = vec!["198.51.100.10:41641".into()];
         params.hostname = "alice-reauth".into();
         params.given_name = "alice-reauth".into();
@@ -2399,24 +3212,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.id, original.id);
-        assert_eq!(updated.machine_key, "mkey:abc");
-        assert_eq!(updated.node_key, "nodekey:def");
-        assert_eq!(updated.disco_key, "discokey:def");
+        assert_eq!(
+            updated.machine_key,
+            "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+        );
+        assert_eq!(
+            updated.node_key,
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c"
+        );
+        assert_eq!(
+            updated.disco_key,
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c"
+        );
         assert_eq!(updated.endpoint_list(), vec!["198.51.100.10:41641"]);
         assert_eq!(updated.given_name, "alice-reauth");
         assert_eq!(updated.user_id, Some(user_id));
         assert_eq!(updated.auth_key_id, None);
         assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
         assert!(updated.tag_list().is_empty());
-        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
+        // Go expands exit routes only in the gRPC SetApprovedRoutes handler;
+        // an auth-path update stores the routes it is given.
+        assert_eq!(updated.approved_route_list(), vec!["::/0"]);
         assert_eq!(updated.created_at, original.created_at);
         assert!(updated.updated_at >= original.updated_at);
         assert_eq!(
-            get_by_machine_key_and_user(db.pool(), "mkey:abc", user_id)
-                .await
-                .unwrap()
-                .node_key,
-            "nodekey:def"
+            get_by_machine_key_and_user(
+                db.pool(),
+                "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a",
+                user_id
+            )
+            .await
+            .unwrap()
+            .node_key,
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c"
         );
     }
 
@@ -2429,7 +3257,8 @@ mod tests {
             .await
             .unwrap();
         let mut params = node_params(user_id, auth_key_id);
-        params.node_key = "nodekey:tagged".into();
+        params.node_key =
+            "nodekey:717d0d99ce56850b0bb67d34757e91392f6e4d4bca19c55ec03a33da4c532f7e".into();
         params.given_name = "alice-tagged".into();
         params.tags = vec!["tag:server".into()];
 
@@ -2454,7 +3283,8 @@ mod tests {
         assert_eq!(original.user_id, None);
 
         let mut params = node_params(user_id, auth_key_id);
-        params.node_key = "nodekey:user-owned".into();
+        params.node_key =
+            "nodekey:802dfc550b52a9827d343460aeb8a0aa0568fd9c6ccf548a53cef8c93e09decf".into();
         params.tags = Vec::new();
 
         let updated = update_from_auth_path(db.pool(), original.id, params)
@@ -2476,9 +3306,12 @@ mod tests {
             .unwrap();
 
         let mut second_params = node_params(user_id, auth_key_id);
-        second_params.machine_key = "mkey:def".into();
-        second_params.node_key = "nodekey:def".into();
-        second_params.disco_key = "discokey:def".into();
+        second_params.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         second_params.hostname = "bob-laptop".into();
         second_params.given_name = "bob-laptop".into();
         second_params.ipv4 = Some("100.64.0.2".into());
@@ -2486,9 +3319,12 @@ mod tests {
         let second = create(db.pool(), second_params).await.unwrap();
 
         let mut reauth_params = node_params(user_id, auth_key_id);
-        reauth_params.machine_key = "mkey:def".into();
-        reauth_params.node_key = "nodekey:reauth".into();
-        reauth_params.disco_key = "discokey:reauth".into();
+        reauth_params.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        reauth_params.node_key =
+            "nodekey:d63d35a58aac36961c316280b96e7f5d8d904735f1349123a6b0b9339194032c".into();
+        reauth_params.disco_key =
+            "discokey:d63d35a58aac36961c316280b96e7f5d8d904735f1349123a6b0b9339194032c".into();
         reauth_params.hostname = "alice-laptop".into();
         reauth_params.given_name.clear();
         reauth_params.ipv4 = Some("100.64.0.2".into());
@@ -2524,8 +3360,8 @@ mod tests {
         for (index, id) in node_ids.into_iter().enumerate() {
             let pool = db.pool().clone();
             let mut params = unique_node_params(user_id, auth_key_id, index, "laptop", "");
-            params.node_key = format!("nodekey:reauth-{index}");
-            params.disco_key = format!("discokey:reauth-{index}");
+            params.node_key = format!("nodekey:{:064x}", index + 1_000);
+            params.disco_key = format!("discokey:{:064x}", index + 1_000);
             tasks.push(tokio::spawn(async move {
                 update_from_auth_path(&pool, id, params).await
             }));
@@ -2566,7 +3402,8 @@ mod tests {
         assert_eq!(renamed.given_name, "AdminName");
 
         let mut reauth_params = node_params(user_id, auth_key_id);
-        reauth_params.node_key = "nodekey:reauth".into();
+        reauth_params.node_key =
+            "nodekey:d63d35a58aac36961c316280b96e7f5d8d904735f1349123a6b0b9339194032c".into();
         reauth_params.hostname = "client-new-host".into();
         reauth_params.given_name = "AdminName".into();
 
@@ -2588,11 +3425,23 @@ mod tests {
 
         assert_eq!(get_by_id(db.pool(), node.id).await.unwrap().id, node.id);
         assert_eq!(
-            get_by_node_key(db.pool(), "nodekey:abc").await.unwrap().id,
+            get_by_node_key(
+                db.pool(),
+                "nodekey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+            )
+            .await
+            .unwrap()
+            .id,
             node.id
         );
         assert_eq!(
-            get_by_machine_key(db.pool(), "mkey:abc").await.unwrap().id,
+            get_by_machine_key(
+                db.pool(),
+                "mkey:072d75b5af4db84097b6701ff1b5368aa2717916b388a8009306f8690e16f64a"
+            )
+            .await
+            .unwrap()
+            .id,
             node.id
         );
         assert_eq!(list(db.pool()).await.unwrap().len(), 1);
@@ -2758,9 +3607,12 @@ mod tests {
             .unwrap();
 
         let mut duplicate_ipv4 = node_params(user_id, auth_key_id);
-        duplicate_ipv4.machine_key = "mkey:dup-ipv4".into();
-        duplicate_ipv4.node_key = "nodekey:dup-ipv4".into();
-        duplicate_ipv4.disco_key = "discokey:dup-ipv4".into();
+        duplicate_ipv4.machine_key =
+            "mkey:d23295e0b6c8db9652e204a7a88e1f8c80666d724ab7c3cb7dbf8dbcf44d0168".into();
+        duplicate_ipv4.node_key =
+            "nodekey:d23295e0b6c8db9652e204a7a88e1f8c80666d724ab7c3cb7dbf8dbcf44d0168".into();
+        duplicate_ipv4.disco_key =
+            "discokey:d23295e0b6c8db9652e204a7a88e1f8c80666d724ab7c3cb7dbf8dbcf44d0168".into();
         duplicate_ipv4.hostname = "dup-ipv4".into();
         duplicate_ipv4.given_name = "dup-ipv4".into();
         duplicate_ipv4.ipv6 = Some("fd7a:115c:a1e0::44".into());
@@ -2768,9 +3620,12 @@ mod tests {
         assert!(matches!(err, DbError::General(_)));
 
         let mut duplicate_ipv6 = node_params(user_id, auth_key_id);
-        duplicate_ipv6.machine_key = "mkey:dup-ipv6".into();
-        duplicate_ipv6.node_key = "nodekey:dup-ipv6".into();
-        duplicate_ipv6.disco_key = "discokey:dup-ipv6".into();
+        duplicate_ipv6.machine_key =
+            "mkey:4a358e137b0207ce4f939b687a50a07c2129d0e5b01fb1758a108cd6aac72764".into();
+        duplicate_ipv6.node_key =
+            "nodekey:4a358e137b0207ce4f939b687a50a07c2129d0e5b01fb1758a108cd6aac72764".into();
+        duplicate_ipv6.disco_key =
+            "discokey:4a358e137b0207ce4f939b687a50a07c2129d0e5b01fb1758a108cd6aac72764".into();
         duplicate_ipv6.hostname = "dup-ipv6".into();
         duplicate_ipv6.given_name = "dup-ipv6".into();
         duplicate_ipv6.ipv4 = Some("100.64.0.44".into());
@@ -2788,8 +3643,10 @@ mod tests {
             .unwrap();
 
         let mut duplicate = node_params(user_id, auth_key_id);
-        duplicate.machine_key = "mkey:duplicate-node-key".into();
-        duplicate.disco_key = "discokey:duplicate-node-key".into();
+        duplicate.machine_key =
+            "mkey:8cfc6c1810547730098d875f0351f472920846f0d212da9646ff5eba69111c49".into();
+        duplicate.disco_key =
+            "discokey:8cfc6c1810547730098d875f0351f472920846f0d212da9646ff5eba69111c49".into();
         duplicate.hostname = "duplicate-node-key".into();
         duplicate.given_name = "duplicate-node-key".into();
         duplicate.ipv4 = Some("100.64.0.44".into());
@@ -2807,9 +3664,11 @@ mod tests {
         );
 
         let mut empty_key = node_params(user_id, auth_key_id);
-        empty_key.machine_key = "mkey:empty-node-key".into();
+        empty_key.machine_key =
+            "mkey:0304d3b54ec74bd35de4a4a235e69d7690877395e186e84f7026768e15d8dc21".into();
         empty_key.node_key.clear();
-        empty_key.disco_key = "discokey:empty-node-key".into();
+        empty_key.disco_key =
+            "discokey:0304d3b54ec74bd35de4a4a235e69d7690877395e186e84f7026768e15d8dc21".into();
         empty_key.hostname = "empty-node-key".into();
         empty_key.given_name = "empty-node-key".into();
         empty_key.ipv4 = Some("100.64.0.45".into());
@@ -2817,9 +3676,11 @@ mod tests {
         create(db.pool(), empty_key).await.unwrap();
 
         let mut second_empty_key = node_params(user_id, auth_key_id);
-        second_empty_key.machine_key = "mkey:second-empty-node-key".into();
+        second_empty_key.machine_key =
+            "mkey:1c3d4711b721b6efc79bc5fd4ca6b14497d7fbb8574e271f3282c484d2f4988c".into();
         second_empty_key.node_key.clear();
-        second_empty_key.disco_key = "discokey:second-empty-node-key".into();
+        second_empty_key.disco_key =
+            "discokey:1c3d4711b721b6efc79bc5fd4ca6b14497d7fbb8574e271f3282c484d2f4988c".into();
         second_empty_key.hostname = "second-empty-node-key".into();
         second_empty_key.given_name = "second-empty-node-key".into();
         second_empty_key.ipv4 = Some("100.64.0.46".into());
@@ -2837,9 +3698,12 @@ mod tests {
             .unwrap();
 
         let mut second_params = node_params(user_id, auth_key_id);
-        second_params.machine_key = "mkey:def".into();
-        second_params.node_key = "nodekey:def".into();
-        second_params.disco_key = "discokey:def".into();
+        second_params.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         second_params.hostname = "bob-laptop".into();
         second_params.given_name = "bob-laptop".into();
         second_params.ipv4 = Some("100.64.0.2".into());
@@ -2847,10 +3711,12 @@ mod tests {
         let second = create(db.pool(), second_params).await.unwrap();
 
         let mut duplicate = node_params(user_id, auth_key_id);
-        duplicate.machine_key = "mkey:def".into();
+        duplicate.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         let duplicate_node_key = first.node_key.clone();
         duplicate.node_key = duplicate_node_key.clone();
-        duplicate.disco_key = "discokey:duplicate-node-key-update".into();
+        duplicate.disco_key =
+            "discokey:f9f6a22c6b99537181fb1fb426bb28ca6520829aa406a7b381b551c261fc08e0".into();
         duplicate.hostname = "duplicate-node-key-update".into();
         duplicate.given_name = "duplicate-node-key-update".into();
         duplicate.ipv4 = Some("100.64.0.47".into());
@@ -2884,9 +3750,12 @@ mod tests {
             .unwrap();
 
         let mut second_params = node_params(user_id, auth_key_id);
-        second_params.machine_key = "mkey:def".into();
-        second_params.node_key = "nodekey:def".into();
-        second_params.disco_key = "discokey:def".into();
+        second_params.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         second_params.hostname = "bob-laptop".into();
         second_params.given_name = "bob-laptop".into();
         second_params.ipv4 = Some("100.64.0.2".into());
@@ -2950,9 +3819,12 @@ mod tests {
             .unwrap();
 
         let mut second_params = node_params(user_id, auth_key_id);
-        second_params.machine_key = "mkey:def".into();
-        second_params.node_key = "nodekey:def".into();
-        second_params.disco_key = "discokey:def".into();
+        second_params.machine_key =
+            "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.node_key =
+            "nodekey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
+        second_params.disco_key =
+            "discokey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c".into();
         second_params.hostname = "bob-laptop".into();
         second_params.given_name = "bob-laptop".into();
         second_params.ipv4 = Some("100.64.0.2".into());

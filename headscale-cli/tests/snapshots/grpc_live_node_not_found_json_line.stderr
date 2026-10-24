@@ -1,1 +1,1 @@
-{"error":"not found: node not found"}
+{"error":"expiring node: rpc error: code = Unknown desc = node no longer exists in NodeStore: 404"}

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -14,7 +14,6 @@ use anyhow::{Context, Result, bail};
 use rand_core::{OsRng, RngCore};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 use tokio_stream::{
     StreamExt,
@@ -23,9 +22,9 @@ use tokio_stream::{
 use tonic::transport::server::Connected;
 
 use headscale_api::admin::{
-    ApiKeyAdmin, MachineAdmin, PersistentApiKeyAdmin, PersistentMachineAdmin,
+    ApiKeyAdmin, MachineAdmin, MachineAdminError, PersistentApiKeyAdmin, PersistentMachineAdmin,
     PersistentOidcRegistrationHandler, PersistentPreauthAdmin, PersistentUserAdmin, PreauthAdmin,
-    UserAdmin,
+    UserAdmin, UserRegistryError,
 };
 #[cfg(feature = "postgres-sqlx")]
 use headscale_api::admin::{
@@ -39,30 +38,30 @@ use headscale_api::dns::{
 use headscale_api::grpc::upstream::HeadscaleAdminService;
 use headscale_api::grpc_gateway;
 use headscale_api::oidc::{OidcAuthRuntime, runtime_from_core_oidc};
-use headscale_api::policy::{PolicyStore, parse_hujson_policy};
+use headscale_api::policy::{
+    PolicyCheckNodeSnapshot, PolicyStore, warn_policy_tests_at_boot_for_snapshot,
+};
 use headscale_api::tailscale_wire::derp::{NativeDerpLifecycleDelivery, NativeDerpRuntime};
+use headscale_api::tailscale_wire::native_derp::NativeDerpMap;
 use headscale_api::tailscale_wire::tls;
 use headscale_api::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, TlsMaterialSource};
 use headscale_api::tailscale_wire::{
     AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
-    DerpMapStore, DerpRegion, DerpRegionNode, IpAllocator, KnockConfig, MachineRegistrationStore,
-    MachineRegistry, MapResponseDebugStore, PingTracker, PreauthRedeemer,
+    DerpMapStore, DerpRegion, DerpRegionNode, EphemeralGcHandle, IpAllocator, KnockConfig,
+    MachineRegistrationStore, MachineRegistry, MapResponseDebugStore, PingTracker, PreauthRedeemer,
     REGISTRATION_CACHE_CLEANUP, REGISTRATION_CACHE_EXPIRATION, REGISTRATION_CACHE_MAX_ENTRIES,
-    RegistrationCache, RuntimeConfigSnapshot, ServerNoiseKey, WireState, serve,
-    spawn_map_change_batcher, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
+    RegistrationCache, RouteHealthProbeHandle, RuntimeConfigSnapshot, ServerNoiseKey, WireState,
+    serve, spawn_map_change_batcher, spawn_node_expiry_waker, spawn_offline_connection_cleanup,
     spawn_route_health_probe,
 };
 use headscale_core::config::{EmbeddedDerpConfig, OidcConfig};
 use headscale_core::derp::{EmbeddedDerpRuntime, native::NativeDerpRelay};
 
-use crate::acme_issuer::{
-    AcmeHttp01IssuerConfig, AcmeTlsReloaders, ensure_http01_certificate,
-    ensure_tls_alpn_certificate, reload_acme_tls_alpn_material, reload_acme_tls_material,
-    spawn_http01_renewal_task, spawn_tls_alpn_renewal_task,
-};
+use crate::acme_issuer::{AcmeHttp01IssuerConfig, LazyAcmeProvider};
 use crate::config::{
-    AdminCliConfig, LoggingConfig, PolicyConfig, TuningConfig, UpstreamDatabaseConfig,
-    UpstreamPostgresConfig, server_url_hostname, validate_server_url_base_domain,
+    AdminCliConfig, CliConfig, LoggingConfig, PolicyConfig, ServerConfig, TuningConfig,
+    UpstreamDatabaseConfig, UpstreamPostgresConfig, server_url_hostname,
+    validate_server_url_base_domain,
 };
 use crate::derp_config::DerpConfig;
 use headscale_db::{Database, DatabaseBackend, SqliteOpenOptions};
@@ -74,6 +73,8 @@ const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
 const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 const NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE: Duration = Duration::from_millis(50);
 
+mod acme_grpc_incoming;
+
 #[derive(Debug, Clone)]
 pub(crate) struct RunServerConfig {
     pub listen: String,
@@ -83,6 +84,7 @@ pub(crate) struct RunServerConfig {
     pub ip_allocation: String,
     pub server_url: Option<String>,
     pub state_dir: PathBuf,
+    pub noise_private_key_path: Option<PathBuf>,
     pub https_listen: Option<String>,
     pub metrics_listen_addr: Option<String>,
     pub tls_hostname: Option<String>,
@@ -126,7 +128,9 @@ pub(crate) struct TlsRuntimeConfig {
 
 impl TlsRuntimeConfig {
     fn letsencrypt_enabled(&self) -> bool {
-        non_empty_str(self.letsencrypt_hostname.as_deref()).is_some()
+        self.letsencrypt_hostname
+            .as_deref()
+            .is_some_and(|hostname| !hostname.is_empty())
     }
 
     fn manual_paths(&self) -> Option<(&Path, &Path)> {
@@ -179,7 +183,11 @@ impl TlsRuntimeConfig {
         &self,
         public_listeners: PublicListenerPlan,
     ) -> Result<Option<AcmeRuntimePlan>> {
-        let Some(hostname) = non_empty_str(self.letsencrypt_hostname.as_deref()) else {
+        let Some(hostname) = self
+            .letsencrypt_hostname
+            .as_deref()
+            .filter(|hostname| !hostname.is_empty())
+        else {
             return Ok(None);
         };
         let challenge_type = self.challenge_type_string();
@@ -252,21 +260,91 @@ pub(crate) async fn run_server(cfg: RunServerConfig) -> Result<()> {
     run_tailscale_wire_server(cfg).await
 }
 
+/// Upstream `configtest` constructs a server before exiting. Open the same
+/// storage as `serve`, prepare its allocator/policy/nodes and discover OIDC
+/// before returning, without binding control or admin listeners.
+pub(crate) async fn initialize_configtest_storage(config: &CliConfig) -> Result<()> {
+    let defaults = ServerConfig::default();
+    let server = config.server.as_ref().unwrap_or(&defaults);
+    let server_noise_key = Arc::new(
+        ServerNoiseKey::load_or_generate_with_configured_path(
+            &server.state_dir,
+            server.noise_private_key_path.as_deref(),
+        )
+        .context("reading or creating Noise protocol private key")?,
+    );
+
+    let db = if config
+        .database
+        .as_ref()
+        .and_then(UpstreamDatabaseConfig::runtime_backend)
+        == Some(DatabaseBackend::Postgres)
+    {
+        open_postgres_runtime_database(config.database.as_ref()).await?
+    } else {
+        RuntimeDatabase::Sqlite(
+            open_sqlite_database(&server.db_path, config.database.as_ref()).await?,
+        )
+    };
+    let registration_cache = Arc::new(registration_cache_from_tuning(&config.tuning));
+    let prepared = match &db {
+        RuntimeDatabase::Sqlite(db) => {
+            prepare_sqlite_persistent_wire_runtime(
+                db.pool(),
+                &server.mesh_cidr,
+                server.mesh_cidr_v6.as_deref(),
+                &server.ip_allocation,
+                &config.policy,
+                server_noise_key,
+                registration_cache,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres-sqlx")]
+        RuntimeDatabase::Postgres(pool) => {
+            prepare_postgres_persistent_wire_runtime(
+                pool,
+                &server.mesh_cidr,
+                server.mesh_cidr_v6.as_deref(),
+                &server.ip_allocation,
+                &config.policy,
+                server_noise_key,
+                registration_cache,
+            )
+            .await
+        }
+    }
+    .context("init state")?;
+    let oidc = upstream_oidc_runtime_config(&config.oidc);
+    runtime_from_core_oidc(&oidc, server.server_url.as_deref().unwrap_or_default()).await?;
+    let embedded_derp_config = server
+        .embedded_derp
+        .clone()
+        .with_default_derper_config_path(&server.state_dir);
+    let _native_derp = prepare_native_derp_runtime(
+        &embedded_derp_config,
+        &prepared.server_noise_key,
+        &prepared.wire_registry,
+    )?;
+    drop(prepared);
+    Ok(())
+}
+
 async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     validate_unsupported_runtime_boundaries(&cfg)?;
     let public_listeners = public_listener_plan(&cfg)?;
     let acme_runtime = cfg.tls.acme_runtime_plan(public_listeners)?;
     validate_supported_runtime_config(&cfg)?;
-    tracing::info!("Starting headscale-compatible Tailscale control plane");
-    tracing::info!(
+    tracing::debug!("Starting headscale-compatible Tailscale control plane");
+    tracing::debug!(
         "  Public HTTP: {}",
         optional_addr_status(public_listeners.http_addr)
     );
-    tracing::info!(
+    tracing::debug!(
         "  Public HTTPS: {}",
         optional_addr_status(public_listeners.https_addr)
     );
-    tracing::info!(
+    tracing::debug!(
         "  Metrics/debug: {}",
         cfg.metrics_listen_addr
             .as_deref()
@@ -274,24 +352,24 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             .filter(|addr| !addr.is_empty())
             .unwrap_or("<disabled>")
     );
-    tracing::info!("  Database: {}", runtime_database_status(&cfg));
-    tracing::info!("  State dir: {}", cfg.state_dir.display());
+    tracing::debug!("  Database: {}", runtime_database_status(&cfg));
+    tracing::debug!("  State dir: {}", cfg.state_dir.display());
     if cfg.mesh_cidr.trim().is_empty() {
-        tracing::info!("  IPv4 prefix: <disabled>");
+        tracing::debug!("  IPv4 prefix: <disabled>");
     } else {
-        tracing::info!("  IPv4 prefix: {}", cfg.mesh_cidr);
+        tracing::debug!("  IPv4 prefix: {}", cfg.mesh_cidr);
     }
     if let Some(mesh_cidr_v6) = &cfg.mesh_cidr_v6 {
-        tracing::info!("  IPv6 prefix: {}", mesh_cidr_v6);
+        tracing::debug!("  IPv6 prefix: {}", mesh_cidr_v6);
     }
-    tracing::info!("  Local gRPC socket: {}", cfg.unix_socket.display());
-    tracing::info!("  Remote gRPC: {}", remote_grpc_status(&cfg));
+    tracing::debug!("  Local gRPC socket: {}", cfg.unix_socket.display());
+    tracing::debug!("  Remote gRPC: {}", remote_grpc_status(&cfg));
     if let Some(plan) = &acme_runtime {
         let challenge_type = match plan.challenge_listener {
             AcmeChallengeListener::Http01 { .. } => "HTTP-01",
             AcmeChallengeListener::TlsAlpn01 { .. } => "TLS-ALPN-01",
         };
-        tracing::info!(
+        tracing::debug!(
             hostname = %plan.hostname,
             cache_dir = %plan.cache_dir.display(),
             directory_url = %plan.acme_url,
@@ -312,13 +390,45 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         )
     })?;
 
+    // NewHeadscale reads its Noise identity before opening/migrating state.
+    // Reuse this exact key in the runtime instead of reading it a second time.
+    let server_noise_key = Arc::new(
+        ServerNoiseKey::load_or_generate_with_configured_path(
+            &cfg.state_dir,
+            cfg.noise_private_key_path.as_deref(),
+        )
+        .context("reading or creating Noise protocol private key")?,
+    );
     let db = open_runtime_database(&cfg).await?;
+    let prepared = prepare_persistent_wire_runtime_from_database(&db, &cfg, server_noise_key)
+        .await
+        .context("initializing: creating new headscale: init state")?;
     let oidc_config = upstream_oidc_runtime_config(&cfg.oidc);
     let oidc = runtime_from_core_oidc(&oidc_config, server_url)
         .await
-        .context("build OIDC runtime")?;
+        .context("initializing: creating new headscale")?;
+    let version = crate::VersionInfo::current();
+    tracing::info!(
+        version = version.version,
+        commit = version.commit,
+        "starting headscale"
+    );
+    tracing::info!(
+        minimum_version = "v1.80",
+        "Clients with a lower minimum version will be rejected"
+    );
+    let embedded_derp_config = cfg
+        .embedded_derp
+        .clone()
+        .with_default_derper_config_path(&cfg.state_dir);
+    let native_derp = prepare_native_derp_runtime(
+        &embedded_derp_config,
+        &prepared.server_noise_key,
+        &prepared.wire_registry,
+    )
+    .context("start native DERP relay runtime")?;
     let embedded_derp_runtime =
-        EmbeddedDerpRuntime::start_with_state_dir(cfg.embedded_derp.clone(), &cfg.state_dir)
+        EmbeddedDerpRuntime::start_with_state_dir(embedded_derp_config, &cfg.state_dir)
             .await
             .context("start embedded DERP/STUN runtime")?;
     if let Some(addr) = embedded_derp_runtime.stun_local_addr() {
@@ -328,36 +438,36 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         tracing::info!(?status, "embedded DERP sidecar ready");
     }
     let derp_shuffle_base_domain = cfg.dns.as_ref().map_or("", |dns| dns.base_domain.as_str());
-    let derp_map = derp_map_from_runtime_config(
+    let native_derp_map = native_derp_map_from_runtime_config(
         cfg.derp.as_ref(),
         embedded_derp_runtime.config(),
         derp_shuffle_base_domain,
     )
     .await
     .context("load DERP runtime config")?;
+    let derp_map = native_derp_map.projection();
     let (dns_store, dns_extra_records_path) = dns_store_from_config(
         cfg.dns.clone(),
         Some(&cfg.mesh_cidr),
         cfg.mesh_cidr_v6.as_deref(),
     )
     .context("load DNS runtime config")?;
-    let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref()));
-    let mut runtime = build_persistent_wire_runtime_from_database(
-        &db,
-        &cfg.state_dir,
+    let mut runtime_config = runtime_config_snapshot(&cfg, &derp_map, dns_store.as_ref());
+    // YAML can carry non-finite floats. Keep the typed map for the native
+    // encoder to reject at response generation, rather than failing startup.
+    runtime_config.derp.derp_map = native_derp_map
+        .json_value()
+        .unwrap_or(serde_json::Value::Null);
+    let runtime_config = Arc::new(runtime_config);
+    let mut runtime = prepared.finish(
         server_url,
-        &cfg.mesh_cidr,
-        cfg.mesh_cidr_v6.as_deref(),
-        &cfg.ip_allocation,
         oidc,
         derp_map,
         dns_store.clone(),
-        &cfg.policy,
         runtime_config,
-    )
-    .await?;
-    attach_native_derp_runtime(&mut runtime.state, embedded_derp_runtime.config())
-        .context("start native DERP relay runtime")?;
+    )?;
+    runtime.state.derp_map.set_native(native_derp_map);
+    runtime.state.native_derp = native_derp;
     let ephemeral_gc = runtime.state.machines.configure_ephemeral_gc(
         runtime
             .state
@@ -402,6 +512,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(|| hostname_from_server_url(server_url));
     let sans = SanConfig::with_hostname(tls_hostname);
+    warn_tls_server_url(&cfg, public_listeners, server_url);
     let mut acme_http01_runtime = start_acme_http01_runtime(
         acme_runtime.as_ref(),
         cfg.tls.acme_email.clone(),
@@ -410,6 +521,24 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     .await?;
     let acme_tls_alpn_issuer_config =
         acme_tls_alpn_issuer_config(acme_runtime.as_ref(), cfg.tls.acme_email.clone());
+    // Construct only the empty bound resolver here. Cache reads, key generation
+    // and ACME requests belong to the first authorized TLS handshake.
+    let (acme_provider, acme_shutdown) = if let Some(http01) = acme_http01_runtime.as_ref() {
+        let (provider, shutdown) =
+            LazyAcmeProvider::new(http01.issuer_config.clone(), Some(http01.store.clone()))?;
+        (
+            Some(provider as Arc<dyn tls::AcmeCertificateProvider>),
+            Some(shutdown),
+        )
+    } else if let Some(config) = acme_tls_alpn_issuer_config {
+        let (provider, shutdown) = LazyAcmeProvider::new(config, None)?;
+        (
+            Some(provider as Arc<dyn tls::AcmeCertificateProvider>),
+            Some(shutdown),
+        )
+    } else {
+        (None, None)
+    };
     let tls_source = tls_material_source(&cfg, &sans)?;
     let (acme_http01, acme_http01_host, acme_http01_addr) =
         if let Some(runtime) = acme_http01_runtime.as_ref() {
@@ -439,16 +568,20 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     };
     let local_grpc_listener =
         bind_unix_grpc_listener(&cfg.unix_socket, cfg.unix_socket_permission).await?;
-    let remote_grpc_security = remote_grpc_security(&cfg, &tls_source)?;
-    let remote_grpc_tls_reloader = remote_grpc_security
-        .as_ref()
-        .and_then(RemoteGrpcSecurity::tls_reloader);
+    let remote_grpc_security =
+        remote_grpc_security_with_provider(&cfg, &tls_source, acme_provider.clone())?;
     let remote_grpc_listener = match remote_grpc_security {
-        Some(security) => Some((
-            bind_tcp_grpc_listener(grpc_addr).await?,
-            grpc_addr,
-            security,
-        )),
+        Some(security) => {
+            tracing::info!("enabling remote gRPC at {}", cfg.grpc_listen_addr);
+            if matches!(&security, RemoteGrpcSecurity::Insecure) {
+                tracing::warn!("gRPC is running without security");
+            }
+            Some((
+                bind_tcp_grpc_listener(grpc_addr).await?,
+                grpc_addr,
+                security,
+            ))
+        }
         None => None,
     };
     let derp_auto_update = spawn_derp_auto_update_task(
@@ -459,94 +592,101 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     );
 
     let native_derp_shutdown = runtime.state.native_derp.clone();
-    let handle = serve::serve(runtime.state, serve_cfg, extra_routes)
-        .await
-        .context("start Tailscale wire listeners")?;
-    let acme_http01_renewal = match start_acme_http01_after_public_listener(
-        acme_http01_runtime.as_ref(),
-        &handle,
-        remote_grpc_tls_reloader.clone(),
-    )
-    .await
-    {
-        Ok(renewal) => renewal,
-        Err(err) => {
-            abort_serve_handle(&handle);
-            node_expiry_waker.abort();
-            if let Some(handle) = &route_health_probe {
-                handle.abort();
-            }
-            map_change_batcher.abort();
-            offline_connection_cleanup.abort();
-            if let Some(handle) = &derp_auto_update {
-                handle.abort();
-            }
-            drop(nodestore_write_batcher);
-            drop(embedded_derp_runtime);
-            return Err(err);
+    let native_stream_shutdown = runtime.state.machines.clone();
+    let (handle, http_shutdown) = match acme_provider {
+        Some(provider) => {
+            serve::serve_with_acme_provider(runtime.state, serve_cfg, extra_routes, provider).await
         }
-    };
-    let acme_tls_alpn_renewal = match start_acme_tls_alpn_after_public_listener(
-        acme_tls_alpn_issuer_config,
-        &handle,
-        remote_grpc_tls_reloader.clone(),
-    )
-    .await
-    {
-        Ok(renewal) => renewal,
-        Err(err) => {
-            abort_serve_handle(&handle);
-            if let Some(handle) = &acme_http01_renewal {
-                handle.abort();
-            }
-            node_expiry_waker.abort();
-            if let Some(handle) = &route_health_probe {
-                handle.abort();
-            }
-            map_change_batcher.abort();
-            offline_connection_cleanup.abort();
-            if let Some(handle) = &derp_auto_update {
-                handle.abort();
-            }
-            drop(nodestore_write_batcher);
-            drop(embedded_derp_runtime);
-            return Err(err);
-        }
-    };
+        None => serve::serve_with_shutdown(runtime.state, serve_cfg, extra_routes).await,
+    }
+    .context("start Tailscale wire listeners")?;
+    if let Some(addr) = public_listeners.https_addr.or(public_listeners.http_addr) {
+        tracing::info!("listening and serving HTTP on: {addr}");
+    }
     let dns_extra_records_watcher = dns_extra_records_path.map(|path| {
         tracing::info!(path = %path.display(), "watching DNS extra-records file");
         spawn_extra_records_watcher((*dns_store).clone(), path, None)
     });
-    let local_grpc = spawn_local_grpc_listener(
+    let (local_grpc_stop, local_grpc_stopped) = tokio::sync::oneshot::channel();
+    let local_grpc = spawn_local_grpc_listener_with_shutdown(
         local_grpc_listener,
         cfg.unix_socket.clone(),
         runtime.admin_service.clone(),
+        async move {
+            let _ = local_grpc_stopped.await;
+        },
     );
-    let remote_grpc = remote_grpc_listener.map(|(listener, addr, security)| {
-        spawn_remote_grpc_listener(listener, addr, runtime.admin_service.clone(), security)
-    });
+    let (remote_grpc, remote_grpc_stop) = match remote_grpc_listener {
+        Some((listener, addr, security)) => {
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let task = spawn_remote_grpc_listener_with_shutdown(
+                listener,
+                addr,
+                runtime.admin_service.clone(),
+                security,
+                async move {
+                    let _ = stopped.await;
+                },
+            );
+            (Some(task), Some(stop))
+        }
+        None => (None, None),
+    };
+    let grpc_shutdown = GrpcListenerShutdown {
+        local: local_grpc_stop,
+        remote: remote_grpc_stop,
+    };
     let policy_reload = spawn_policy_reload_signal_task(runtime.admin_service.clone());
-    tracing::info!("Headscale-compatible Tailscale control plane ready");
+    tracing::debug!("Headscale-compatible Tailscale control plane ready");
     let external_acme_http01 = acme_http01_runtime
         .as_mut()
         .and_then(AcmeHttp01Runtime::take_handle);
+    // Go stops scheduled work before shutting down its listeners/batcher.
+    // Keep only the map batcher and NodeStore worker alive for disconnects.
+    let mut maintenance = vec![
+        node_expiry_waker.abort_handle(),
+        offline_connection_cleanup.abort_handle(),
+    ];
+    maintenance.extend(
+        route_health_probe
+            .as_ref()
+            .map(RouteHealthProbeHandle::abort_handle),
+    );
+    maintenance.extend(
+        policy_reload
+            .as_ref()
+            .map(tokio::task::JoinHandle::abort_handle),
+    );
+    maintenance.extend(
+        dns_extra_records_watcher
+            .as_ref()
+            .map(tokio::task::JoinHandle::abort_handle),
+    );
+    maintenance.extend(
+        derp_auto_update
+            .as_ref()
+            .map(tokio::task::JoinHandle::abort_handle),
+    );
+    if let Some(shutdown) = acme_shutdown.as_ref() {
+        maintenance.push(shutdown.abort_handle());
+    }
     let serve_result = await_serve_handle(
         handle,
         local_grpc,
         remote_grpc,
         external_acme_http01,
         native_derp_shutdown,
+        native_stream_shutdown,
+        maintenance,
+        grpc_shutdown,
+        http_shutdown,
+        ephemeral_gc.clone(),
     )
     .await;
     if let Some(handle) = policy_reload {
         handle.abort();
     }
-    if let Some(handle) = acme_http01_renewal {
-        handle.abort();
-    }
-    if let Some(handle) = acme_tls_alpn_renewal {
-        handle.abort();
-    }
+    drop(acme_shutdown);
     node_expiry_waker.abort();
     if let Some(handle) = route_health_probe {
         handle.abort();
@@ -565,36 +705,121 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
     serve_result
 }
 
+#[cfg(test)]
 fn attach_native_derp_runtime(state: &mut WireState, cfg: &EmbeddedDerpConfig) -> Result<()> {
+    state.native_derp = prepare_native_derp_runtime(cfg, &state.server_noise_key, &state.machines)?;
+    Ok(())
+}
+
+fn prepare_native_derp_runtime(
+    cfg: &EmbeddedDerpConfig,
+    server_noise_key: &ServerNoiseKey,
+    machines: &Arc<MachineRegistry>,
+) -> Result<Option<Arc<NativeDerpRuntime>>> {
     if !cfg.native_relay_enabled() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut native_derp =
         NativeDerpRuntime::load_or_generate(&cfg.derper_config_path, NativeDerpRelay::new())?;
-    if native_derp.public_key() == state.server_noise_key.public_bytes() {
+    if native_derp.public_key() == server_noise_key.public_bytes() {
         bail!("embedded DERP private key must not be the same as the Noise private key");
     }
     if cfg.verify_clients {
-        let machines = Arc::clone(&state.machines);
+        let machines = Arc::clone(machines);
         native_derp = native_derp.with_client_verifier(move |client_public| {
             machines.get(&hex::encode(client_public)).is_some()
         });
     }
-    tracing::info!(
+    // Rust-only (headscale-go has no such line, and its startup log is compared
+    // byte for byte), so keep it below info.
+    tracing::debug!(
         public_key = %hex::encode(native_derp.public_key()),
         path = %cfg.derper_config_path.display(),
         verify_clients = native_derp.client_verification_enabled(),
         "embedded native DERP relay ready"
     );
-    state.native_derp = Some(Arc::new(native_derp));
-    Ok(())
+    Ok(Some(Arc::new(native_derp)))
 }
 
 struct PersistentWireRuntime {
     state: WireState,
     oidc: Option<OidcAuthRuntime>,
     admin_service: HeadscaleAdminService,
+}
+
+/// Validated, hydrated state prepared before provider or relay initialization.
+/// Consumed only after the DNS/DERP configuration needed by WireState exists.
+struct PreparedPersistentWireRuntime {
+    server_noise_key: Arc<ServerNoiseKey>,
+    stores: PersistentRuntimeStores,
+    wire_registry: Arc<MachineRegistry>,
+    registration_cache: Arc<RegistrationCache>,
+    ip_allocator: Arc<dyn IpAllocator>,
+    policy: Arc<PolicyStore>,
+    admin_service: HeadscaleAdminService,
+}
+
+impl PreparedPersistentWireRuntime {
+    fn finish(
+        self,
+        server_url: &str,
+        oidc: Option<OidcAuthRuntime>,
+        derp_map: DerpMap,
+        dns: Arc<DnsStore>,
+        runtime_config: Arc<RuntimeConfigSnapshot>,
+    ) -> Result<PersistentWireRuntime> {
+        let Self {
+            server_noise_key,
+            stores,
+            wire_registry,
+            registration_cache,
+            ip_allocator,
+            policy,
+            admin_service,
+        } = self;
+        wire_registry.configure_registration_expiry(runtime_config.node.expiry);
+        wire_registry
+            .try_configure_policy(&policy)
+            .map_err(anyhow::Error::msg)
+            .context("initializing policy manager nodes")?;
+        wire_registry.configure_given_name_domain(&runtime_config.base_domain);
+        wire_registry.configure_ip_allocator(&ip_allocator);
+        headscale_api::tailscale_wire::map::log_invalid_persisted_names(
+            &wire_registry,
+            &runtime_config.base_domain,
+        );
+        let oidc = stores.configure_oidc(
+            oidc,
+            registration_cache.clone(),
+            policy.clone(),
+            wire_registry.clone(),
+            ip_allocator.clone(),
+        );
+        let state = WireState {
+            server_noise_key,
+            preauth: stores.preauth_redeemer(),
+            ip_allocator,
+            machines: wire_registry,
+            registration_store: Some(stores.registration_store()),
+            registration_gate: None,
+            derp_map: DerpMapStore::shared(derp_map),
+            native_derp: None,
+            policy,
+            knock: KnockConfig::disabled(),
+            dns,
+            public_control_url: Some(server_url.to_string()),
+            runtime_config,
+            registration_cache,
+            pings: Arc::new(PingTracker::new()),
+            mapresponse_debug: Arc::new(MapResponseDebugStore::from_env()),
+        };
+        Ok(PersistentWireRuntime {
+            state,
+            oidc,
+            admin_service,
+        })
+    }
 }
 
 enum RuntimeDatabase {
@@ -756,13 +981,13 @@ impl PersistentRuntimeStores {
                 .machines
                 .hydrate_wire_registry(wire_registry)
                 .await
-                .context("hydrate wire registry from SQLite nodes"),
+                .map_err(startup_node_error),
             #[cfg(feature = "postgres-sqlx")]
             Self::Postgres(stores) => stores
                 .machines
                 .hydrate_wire_registry(wire_registry)
                 .await
-                .context("hydrate wire registry from Postgres nodes"),
+                .map_err(startup_node_error),
         }
     }
 
@@ -772,38 +997,58 @@ impl PersistentRuntimeStores {
         registration_cache: Arc<RegistrationCache>,
         policy: Arc<PolicyStore>,
         wire_registry: Arc<MachineRegistry>,
+        ip_allocator: Arc<dyn IpAllocator>,
     ) -> Option<OidcAuthRuntime> {
         let runtime = oidc?;
 
         match self {
             Self::Sqlite(stores) => {
+                let user_store = headscale_api::admin::PolicyOidcUserStore::new(
+                    stores.users.clone(),
+                    policy.as_ref().clone(),
+                    wire_registry.clone(),
+                );
                 let handler = PersistentOidcRegistrationHandler::new(
                     registration_cache,
                     stores.machines.clone(),
                     policy,
                 )
-                .with_wire_registry(wire_registry);
+                .with_wire_registry(wire_registry)
+                .with_ip_allocator(ip_allocator);
                 Some(
                     runtime
-                        .with_user_store(stores.users.clone())
+                        .with_user_store(Arc::new(user_store))
                         .with_registration_handler(Arc::new(handler)),
                 )
             }
             #[cfg(feature = "postgres-sqlx")]
             Self::Postgres(stores) => {
+                let user_store = headscale_api::admin::PolicyOidcUserStore::new(
+                    stores.users.clone(),
+                    policy.as_ref().clone(),
+                    wire_registry.clone(),
+                );
                 let handler = PersistentPostgresOidcRegistrationHandler::new(
                     registration_cache,
                     stores.machines.clone(),
                     policy,
                 )
-                .with_wire_registry(wire_registry);
+                .with_wire_registry(wire_registry)
+                .with_ip_allocator(ip_allocator);
                 Some(
                     runtime
-                        .with_user_store(stores.users.clone())
+                        .with_user_store(Arc::new(user_store))
                         .with_registration_handler(Arc::new(handler)),
                 )
             }
         }
+    }
+}
+
+fn startup_node_error(error: MachineAdminError) -> anyhow::Error {
+    match error {
+        MachineAdminError::Storage(message) => anyhow::anyhow!(message),
+        error => error.into(),
     }
 }
 
@@ -887,10 +1132,12 @@ async fn build_persistent_wire_runtime_with_dns(
         dns,
         &PolicyConfig::database(),
         runtime_config,
+        None,
     )
     .await
 }
 
+#[cfg(test)]
 async fn build_persistent_wire_runtime_with_dns_and_policy(
     pool: &sqlx::SqlitePool,
     state_dir: &Path,
@@ -903,24 +1150,66 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
     dns: Arc<DnsStore>,
     policy_config: &PolicyConfig,
     runtime_config: Arc<RuntimeConfigSnapshot>,
+    server_noise_key: Option<Arc<ServerNoiseKey>>,
 ) -> Result<PersistentWireRuntime> {
+    let server_noise_key = match server_noise_key {
+        Some(key) => key,
+        None => Arc::new(load_server_noise_key(state_dir, &runtime_config)?),
+    };
+    let registration_cache = Arc::new(registration_cache_from_runtime_config(&runtime_config));
+    let prepared = prepare_sqlite_persistent_wire_runtime(
+        pool,
+        mesh_cidr,
+        mesh_cidr_v6,
+        ip_allocation,
+        policy_config,
+        server_noise_key,
+        registration_cache,
+    )
+    .await?;
+    prepared.finish(server_url, oidc, derp_map, dns, runtime_config)
+}
+
+async fn prepare_sqlite_persistent_wire_runtime(
+    pool: &sqlx::SqlitePool,
+    mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
+    policy_config: &PolicyConfig,
+    server_noise_key: Arc<ServerNoiseKey>,
+    registration_cache: Arc<RegistrationCache>,
+) -> Result<PreparedPersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let wire_registry = Arc::new(MachineRegistry::new());
     let stores = PersistentRuntimeStores::sqlite(pool, wire_registry.clone());
-    let registration_cache = Arc::new(registration_cache_from_runtime_config(
-        runtime_config.as_ref(),
-    ));
-    let ip_allocator: Arc<dyn IpAllocator> =
-        Arc::new(CidrIpAllocator::from_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?);
-    let policy = Arc::new(PolicyStore::new());
-    let policy_loaded = load_startup_policy(pool, &policy, policy_config).await?;
-    tracing::info!(
+    let ip_allocator: Arc<dyn IpAllocator> = Arc::new(
+        CidrIpAllocator::from_database(pool, mesh_cidr, mesh_cidr_v6, allocation)
+            .await
+            .context("initializing IP allocator")?,
+    );
+    let hydrated = stores
+        .hydrate_wire_registry(&wire_registry)
+        .await
+        .context("loading nodes")?;
+    let users = load_startup_users(stores.users().as_ref()).await?;
+    let source = load_startup_policy_source(pool, policy_config)
+        .await
+        .context("loading policy")?;
+    let policy_loaded = source.as_ref().is_some_and(|(raw, _)| !raw.is_empty());
+    let policy = Arc::new(
+        PolicyStore::from_initial_registry_bytes(source, users, &wire_registry)
+            .map_err(anyhow::Error::msg)
+            .context("initializing policy manager")?,
+    );
+    // Rust-only bookkeeping: headscale-go logs nothing here, and its CLI output
+    // (configtest/serve) is compared byte for byte, so keep it below info.
+    tracing::debug!(
         loaded = policy_loaded,
         mode = policy_config.mode(),
         "loaded startup policy into wire runtime"
     );
-    let hydrated = stores.hydrate_wire_registry(&wire_registry).await?;
-    tracing::info!(
+    warn_startup_policy_tests(&policy, &wire_registry)?;
+    tracing::debug!(
         nodes = hydrated,
         "hydrated persisted nodes into wire registry"
     );
@@ -938,44 +1227,20 @@ async fn build_persistent_wire_runtime_with_dns_and_policy(
     let admin_service = match policy_config.mode() {
         "database" => admin_service.with_policy_pool(pool.clone()),
         "file" => admin_service.with_policy_file(policy_config.path.clone()),
-        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+        mode => admin_service.with_unsupported_policy_mode(mode),
     };
-    let oidc = stores.configure_oidc(
-        oidc,
-        registration_cache.clone(),
-        policy.clone(),
-        wire_registry.clone(),
-    );
-
-    let state = WireState {
-        server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
-        preauth: stores.preauth_redeemer(),
-        ip_allocator,
-        machines: wire_registry,
-        registration_store: Some(stores.registration_store()),
-        // Upstream headscale admits every key that clears preauth or
-        // interactive login; an embedder supplies a gate here instead.
-        registration_gate: None,
-        derp_map: DerpMapStore::shared(derp_map),
-        native_derp: None,
-        policy,
-        knock: KnockConfig::disabled(),
-        dns,
-        public_control_url: Some(server_url.to_string()),
-        runtime_config,
+    Ok(PreparedPersistentWireRuntime {
+        server_noise_key,
+        stores,
+        wire_registry,
         registration_cache,
-        pings: Arc::new(PingTracker::new()),
-        mapresponse_debug: Arc::new(MapResponseDebugStore::from_env()),
-    };
-
-    Ok(PersistentWireRuntime {
-        state,
-        oidc,
+        ip_allocator,
+        policy,
         admin_service,
     })
 }
 
-#[cfg(feature = "postgres-sqlx")]
+#[cfg(all(test, feature = "postgres-sqlx"))]
 async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
     pool: &sqlx::PgPool,
     state_dir: &Path,
@@ -988,24 +1253,64 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
     dns: Arc<DnsStore>,
     policy_config: &PolicyConfig,
     runtime_config: Arc<RuntimeConfigSnapshot>,
+    server_noise_key: Option<Arc<ServerNoiseKey>>,
 ) -> Result<PersistentWireRuntime> {
+    let server_noise_key = match server_noise_key {
+        Some(key) => key,
+        None => Arc::new(load_server_noise_key(state_dir, &runtime_config)?),
+    };
+    let registration_cache = Arc::new(registration_cache_from_runtime_config(&runtime_config));
+    let prepared = prepare_postgres_persistent_wire_runtime(
+        pool,
+        mesh_cidr,
+        mesh_cidr_v6,
+        ip_allocation,
+        policy_config,
+        server_noise_key,
+        registration_cache,
+    )
+    .await?;
+    prepared.finish(server_url, oidc, derp_map, dns, runtime_config)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn prepare_postgres_persistent_wire_runtime(
+    pool: &sqlx::PgPool,
+    mesh_cidr: &str,
+    mesh_cidr_v6: Option<&str>,
+    ip_allocation: &str,
+    policy_config: &PolicyConfig,
+    server_noise_key: Arc<ServerNoiseKey>,
+    registration_cache: Arc<RegistrationCache>,
+) -> Result<PreparedPersistentWireRuntime> {
     let allocation = IpAllocationStrategy::parse(ip_allocation)?;
     let wire_registry = Arc::new(MachineRegistry::new());
     let stores = PersistentRuntimeStores::postgres(pool, wire_registry.clone());
-    let registration_cache = Arc::new(registration_cache_from_runtime_config(
-        runtime_config.as_ref(),
-    ));
     let ip_allocator: Arc<dyn IpAllocator> = Arc::new(
-        CidrIpAllocator::from_postgres_database(pool, mesh_cidr, mesh_cidr_v6, allocation).await?,
+        CidrIpAllocator::from_postgres_database(pool, mesh_cidr, mesh_cidr_v6, allocation)
+            .await
+            .context("initializing IP allocator")?,
     );
-    let policy = Arc::new(PolicyStore::new());
-    let policy_loaded = load_postgres_startup_policy(pool, &policy, policy_config).await?;
+    let hydrated = stores
+        .hydrate_wire_registry(&wire_registry)
+        .await
+        .context("loading nodes")?;
+    let users = load_startup_users(stores.users().as_ref()).await?;
+    let source = load_postgres_startup_policy_source(pool, policy_config)
+        .await
+        .context("loading policy")?;
+    let policy_loaded = source.as_ref().is_some_and(|(raw, _)| !raw.is_empty());
+    let policy = Arc::new(
+        PolicyStore::from_initial_registry_bytes(source, users, &wire_registry)
+            .map_err(anyhow::Error::msg)
+            .context("initializing policy manager")?,
+    );
     tracing::info!(
         loaded = policy_loaded,
         mode = policy_config.mode(),
         "loaded startup policy into Postgres-backed wire runtime"
     );
-    let hydrated = stores.hydrate_wire_registry(&wire_registry).await?;
+    warn_startup_policy_tests(&policy, &wire_registry)?;
     tracing::info!(
         nodes = hydrated,
         "hydrated persisted Postgres nodes into wire registry"
@@ -1024,91 +1329,67 @@ async fn build_postgres_persistent_wire_runtime_with_dns_and_policy(
     let admin_service = match policy_config.mode() {
         "database" => admin_service.with_postgres_policy_pool(pool.clone()),
         "file" => admin_service.with_policy_file(policy_config.path.clone()),
-        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+        mode => admin_service.with_unsupported_policy_mode(mode),
     };
-    let oidc = stores.configure_oidc(
-        oidc,
-        registration_cache.clone(),
-        policy.clone(),
-        wire_registry.clone(),
-    );
-
-    let state = WireState {
-        server_noise_key: Arc::new(ServerNoiseKey::load_or_generate(state_dir)?),
-        preauth: stores.preauth_redeemer(),
-        ip_allocator,
-        machines: wire_registry,
-        registration_store: Some(stores.registration_store()),
-        // Upstream headscale admits every key that clears preauth or
-        // interactive login; an embedder supplies a gate here instead.
-        registration_gate: None,
-        derp_map: DerpMapStore::shared(derp_map),
-        native_derp: None,
-        policy,
-        knock: KnockConfig::disabled(),
-        dns,
-        public_control_url: Some(server_url.to_string()),
-        runtime_config,
+    Ok(PreparedPersistentWireRuntime {
+        server_noise_key,
+        stores,
+        wire_registry,
         registration_cache,
-        pings: Arc::new(PingTracker::new()),
-        mapresponse_debug: Arc::new(MapResponseDebugStore::from_env()),
-    };
-
-    Ok(PersistentWireRuntime {
-        state,
-        oidc,
+        ip_allocator,
+        policy,
         admin_service,
     })
 }
 
-async fn build_persistent_wire_runtime_from_database(
+async fn prepare_persistent_wire_runtime_from_database(
     db: &RuntimeDatabase,
-    state_dir: &Path,
-    server_url: &str,
-    mesh_cidr: &str,
-    mesh_cidr_v6: Option<&str>,
-    ip_allocation: &str,
-    oidc: Option<OidcAuthRuntime>,
-    derp_map: DerpMap,
-    dns: Arc<DnsStore>,
-    policy_config: &PolicyConfig,
-    runtime_config: Arc<RuntimeConfigSnapshot>,
-) -> Result<PersistentWireRuntime> {
+    cfg: &RunServerConfig,
+    server_noise_key: Arc<ServerNoiseKey>,
+) -> Result<PreparedPersistentWireRuntime> {
+    let registration_cache = Arc::new(registration_cache_from_tuning(&cfg.tuning));
     match db {
         RuntimeDatabase::Sqlite(db) => {
-            build_persistent_wire_runtime_with_dns_and_policy(
+            prepare_sqlite_persistent_wire_runtime(
                 db.pool(),
-                state_dir,
-                server_url,
-                mesh_cidr,
-                mesh_cidr_v6,
-                ip_allocation,
-                oidc,
-                derp_map,
-                dns,
-                policy_config,
-                runtime_config,
+                &cfg.mesh_cidr,
+                cfg.mesh_cidr_v6.as_deref(),
+                &cfg.ip_allocation,
+                &cfg.policy,
+                server_noise_key,
+                registration_cache,
             )
             .await
         }
         #[cfg(feature = "postgres-sqlx")]
         RuntimeDatabase::Postgres(pool) => {
-            build_postgres_persistent_wire_runtime_with_dns_and_policy(
+            prepare_postgres_persistent_wire_runtime(
                 pool,
-                state_dir,
-                server_url,
-                mesh_cidr,
-                mesh_cidr_v6,
-                ip_allocation,
-                oidc,
-                derp_map,
-                dns,
-                policy_config,
-                runtime_config,
+                &cfg.mesh_cidr,
+                cfg.mesh_cidr_v6.as_deref(),
+                &cfg.ip_allocation,
+                &cfg.policy,
+                server_noise_key,
+                registration_cache,
             )
             .await
         }
     }
+}
+
+#[cfg(test)]
+fn load_server_noise_key(
+    state_dir: &Path,
+    runtime_config: &RuntimeConfigSnapshot,
+) -> Result<ServerNoiseKey> {
+    let legacy_path =
+        state_dir.join(headscale_api::tailscale_wire::noise::NOISE_STATIC_KEY_FILENAME);
+    let configured_path = Path::new(&runtime_config.noise_private_key_path);
+    let configured_path = (!runtime_config.noise_private_key_path.is_empty()
+        && configured_path != legacy_path)
+        .then_some(configured_path);
+    ServerNoiseKey::load_or_generate_with_configured_path(state_dir, configured_path)
+        .map_err(Into::into)
 }
 
 fn runtime_config_snapshot(
@@ -1142,11 +1423,12 @@ fn runtime_config_snapshot(
             .as_ref()
             .and_then(|prefix| non_empty_string(prefix)),
         ip_allocation: cfg.ip_allocation.clone(),
-        noise_private_key_path: cfg
-            .state_dir
-            .join(headscale_api::tailscale_wire::noise::NOISE_STATIC_KEY_FILENAME)
-            .display()
-            .to_string(),
+        noise_private_key_path: ServerNoiseKey::effective_key_path(
+            &cfg.state_dir,
+            cfg.noise_private_key_path.as_deref(),
+        )
+        .display()
+        .to_string(),
         unix_socket: cfg.unix_socket.display().to_string(),
         unix_socket_permission: cfg.unix_socket_permission,
         ..RuntimeConfigSnapshot::default()
@@ -1189,17 +1471,16 @@ fn runtime_config_snapshot(
     snapshot.cli.address = cfg.cli.address.clone().unwrap_or_default();
     snapshot.cli.api_key = cfg.cli.api_key.clone().unwrap_or_default();
     snapshot.cli.insecure = cfg.cli.insecure.unwrap_or(false);
-    snapshot.cli.timeout = duration_nanos(Duration::from_secs(
-        cfg.cli
-            .timeout
-            .unwrap_or_else(crate::config::default_cli_timeout_secs),
-    ));
+    snapshot.cli.timeout = cfg
+        .cli
+        .timeout
+        .unwrap_or_else(crate::config::default_cli_timeout_nanos);
 
     if let Some(derp) = &cfg.derp {
         snapshot.derp.server_enabled = derp.server.enabled;
         snapshot.derp.automatically_add_embedded_derp_region =
             derp.server.automatically_add_embedded_derp_region;
-        snapshot.derp.server_region_id = i32::from(derp.server.region_id);
+        snapshot.derp.server_region_id = i32::try_from(derp.server.region_id).unwrap_or_default();
         snapshot
             .derp
             .server_region_code
@@ -1263,7 +1544,10 @@ fn runtime_config_snapshot(
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    snapshot.tls.lets_encrypt.hostname = non_empty_str(cfg.tls.letsencrypt_hostname.as_deref())
+    snapshot.tls.lets_encrypt.hostname = cfg
+        .tls
+        .letsencrypt_hostname
+        .as_deref()
         .unwrap_or("")
         .to_string();
     snapshot.tls.lets_encrypt.cache_dir = cfg.tls.cache_dir_string();
@@ -1363,12 +1647,27 @@ fn runtime_config_snapshot(
     snapshot
 }
 
+fn registration_cache_from_tuning(config: &TuningConfig) -> RegistrationCache {
+    registration_cache_from_limits(
+        u64_nanos_to_i64(config.register_cache_expiration),
+        config.register_cache_max_entries,
+    )
+}
+
+#[cfg(test)]
 fn registration_cache_from_runtime_config(config: &RuntimeConfigSnapshot) -> RegistrationCache {
-    let expiration = u64::try_from(config.tuning.register_cache_expiration)
+    registration_cache_from_limits(
+        config.tuning.register_cache_expiration,
+        config.tuning.register_cache_max_entries,
+    )
+}
+
+fn registration_cache_from_limits(expiration_nanos: i64, entries: i32) -> RegistrationCache {
+    let expiration = u64::try_from(expiration_nanos)
         .ok()
         .filter(|nanos| *nanos > 0)
         .map_or(REGISTRATION_CACHE_EXPIRATION, Duration::from_nanos);
-    let max_entries = usize::try_from(config.tuning.register_cache_max_entries)
+    let max_entries = usize::try_from(entries)
         .ok()
         .filter(|entries| *entries > 0)
         .unwrap_or(REGISTRATION_CACHE_MAX_ENTRIES);
@@ -1474,6 +1773,23 @@ struct PublicListenerPlan {
     https_addr: Option<SocketAddr>,
 }
 
+fn warn_tls_server_url(cfg: &RunServerConfig, listeners: PublicListenerPlan, server_url: &str) {
+    // Headscale v0.29.5 getTLSSettings warns before constructing/loading TLS
+    // material. Keep its exact scheme checks and ACME-specific capitalization.
+    // The explicit dual-listener extension also has a TLS listener.
+    if listeners.https_addr.is_some() {
+        if !server_url.starts_with("https://") {
+            if cfg.tls.letsencrypt_enabled() {
+                tracing::warn!("Listening with TLS but ServerURL does not start with https://");
+            } else {
+                tracing::warn!("listening with TLS but ServerURL does not start with https://");
+            }
+        }
+    } else if !server_url.starts_with("http://") {
+        tracing::warn!("listening without TLS but ServerURL does not start with http://");
+    }
+}
+
 fn public_listener_plan(cfg: &RunServerConfig) -> Result<PublicListenerPlan> {
     let listen_addr = parse_socket_addr(&cfg.listen, "listen")?;
     let explicit_https_addr = cfg
@@ -1576,110 +1892,6 @@ fn acme_tls_alpn_issuer_config(
     }
 }
 
-async fn start_acme_http01_after_public_listener(
-    runtime: Option<&AcmeHttp01Runtime>,
-    handle: &serve::ServeHandle,
-    remote_grpc_tls_reloader: Option<ReloadableServerConfig>,
-) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let Some(runtime) = runtime else {
-        return Ok(None);
-    };
-    let public_tls = handle
-        .tls_reloader
-        .clone()
-        .context("ACME HTTP-01 requires a public TLS reloader")?;
-    let reloaders = AcmeTlsReloaders {
-        public_tls,
-        remote_grpc_tls: remote_grpc_tls_reloader,
-    };
-    let outcome = ensure_http01_certificate(&runtime.issuer_config, &runtime.store).await?;
-    if outcome.issued {
-        reload_acme_tls_material(&runtime.issuer_config, &reloaders)?;
-        tracing::info!(
-            path = %outcome.cache_path.display(),
-            hostname = %runtime.issuer_config.hostname,
-            "ACME HTTP-01 certificate issued, cached, and loaded"
-        );
-    } else {
-        tracing::info!(
-            path = %outcome.cache_path.display(),
-            hostname = %runtime.issuer_config.hostname,
-            "ACME HTTP-01 cached certificate reused"
-        );
-    }
-    tracing::info!(
-        hostname = %runtime.issuer_config.hostname,
-        "ACME HTTP-01 live renewal and TLS reload enabled"
-    );
-    Ok(Some(spawn_http01_renewal_task(
-        runtime.issuer_config.clone(),
-        runtime.store.clone(),
-        reloaders,
-    )))
-}
-
-async fn start_acme_tls_alpn_after_public_listener(
-    issuer_config: Option<AcmeHttp01IssuerConfig>,
-    handle: &serve::ServeHandle,
-    remote_grpc_tls_reloader: Option<ReloadableServerConfig>,
-) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let Some(issuer_config) = issuer_config else {
-        return Ok(None);
-    };
-    let public_tls = handle
-        .tls_reloader
-        .clone()
-        .context("ACME TLS-ALPN-01 requires a public TLS reloader")?;
-    let resolver = handle
-        .tls
-        .as_ref()
-        .and_then(|material| material.acme_tls_alpn_resolver.clone())
-        .context("ACME TLS-ALPN-01 requires a public TLS challenge resolver")?;
-    let reloaders = AcmeTlsReloaders {
-        public_tls,
-        remote_grpc_tls: remote_grpc_tls_reloader,
-    };
-    let outcome = ensure_tls_alpn_certificate(&issuer_config, &resolver).await?;
-    if outcome.issued {
-        reload_acme_tls_alpn_material(&issuer_config, &resolver, &reloaders)?;
-        tracing::info!(
-            path = %outcome.cache_path.display(),
-            hostname = %issuer_config.hostname,
-            "ACME TLS-ALPN-01 certificate issued, cached, and loaded"
-        );
-    } else {
-        tracing::info!(
-            path = %outcome.cache_path.display(),
-            hostname = %issuer_config.hostname,
-            "ACME TLS-ALPN-01 cached certificate reused"
-        );
-    }
-    tracing::info!(
-        hostname = %issuer_config.hostname,
-        "ACME TLS-ALPN-01 live renewal and TLS reload enabled"
-    );
-    Ok(Some(spawn_tls_alpn_renewal_task(
-        issuer_config,
-        resolver,
-        reloaders,
-    )))
-}
-
-fn abort_serve_handle(handle: &serve::ServeHandle) {
-    if let Some(task) = &handle.http {
-        task.abort();
-    }
-    if let Some(task) = &handle.https {
-        task.abort();
-    }
-    if let Some(task) = &handle.metrics {
-        task.abort();
-    }
-    if let Some(task) = &handle.acme_http01 {
-        task.abort();
-    }
-}
-
 fn parse_acme_http01_listen_addr(value: &str) -> Result<SocketAddr> {
     let trimmed = value.trim();
     if trimmed.eq_ignore_ascii_case(":http") || trimmed.eq_ignore_ascii_case("http") {
@@ -1730,23 +1942,52 @@ fn derp_map_from_embedded_config(cfg: &EmbeddedDerpConfig) -> DerpMap {
     }
 }
 
-async fn derp_map_from_runtime_config(
+async fn native_derp_map_from_runtime_config(
     upstream: Option<&DerpConfig>,
     embedded: &EmbeddedDerpConfig,
     base_domain: &str,
-) -> Result<DerpMap> {
+) -> Result<NativeDerpMap> {
     let mut map = if let Some(upstream) = upstream {
-        crate::derp_config::load_derp_map(upstream, base_domain).await?
+        crate::derp_config::load_native_derp_map(upstream, base_domain).await?
     } else {
-        DerpMap::default()
+        NativeDerpMap::default()
     };
 
     let add_embedded_region = upstream
         .filter(|derp| derp.server.enabled)
         .is_none_or(|derp| derp.server.automatically_add_embedded_derp_region);
     if embedded.enabled && add_embedded_region {
-        merge_derp_maps(&mut map, derp_map_from_embedded_config(embedded));
+        let mut embedded_map =
+            NativeDerpMap::from_projection(&derp_map_from_embedded_config(embedded));
+        if let Some(upstream) = upstream.filter(|derp| derp.server.enabled) {
+            let id = upstream.server.region_id;
+            // Physical relay configuration has no region-ID dependency. Its
+            // old u16 value is only a compatibility view; advertise the exact
+            // signed native ID, including the generated node name.
+            let regions = std::mem::take(&mut embedded_map.regions);
+            for (_, region) in regions {
+                let region = region.map(|mut region| {
+                    region.region_id = id;
+                    if let Some(nodes) = &mut region.nodes {
+                        for node in nodes.iter_mut().flatten() {
+                            node.region_id = id;
+                            node.name = id.to_string();
+                        }
+                    }
+                    region
+                });
+                embedded_map.regions.insert(id, region);
+            }
+        }
+        if embedded_map.home_params.is_some() {
+            map.home_params = embedded_map.home_params;
+        }
+        map.regions.extend(embedded_map.regions);
+        map.omit_default_regions |= embedded_map.omit_default_regions;
     }
+    map.set_server_region_id(
+        upstream.map_or(i64::from(embedded.region_id), |derp| derp.server.region_id),
+    );
 
     Ok(map)
 }
@@ -1806,13 +2047,9 @@ fn spawn_policy_reload_signal_task(
             if sighup.recv().await.is_none() {
                 return;
             }
-            tracing::info!("Received SIGHUP, reloading ACL policy");
-            match admin_service.reload_policy_from_config().await {
-                Ok(true) => tracing::info!("ACL policy reloaded"),
-                Ok(false) => {
-                    tracing::info!("ACL policy reload skipped; no configured policy source");
-                }
-                Err(err) => tracing::error!(error = ?err, "reloading ACL policy failed"),
+            tracing::info!(signal = "hangup", "Received SIGHUP, reloading ACL policy");
+            if let Err(err) = admin_service.reload_policy_from_config().await {
+                tracing::error!(error = %err.message(), "reloading policy");
             }
         }
     }))
@@ -1835,19 +2072,9 @@ async fn refresh_derp_map_once(
     store: &DerpMapStore,
     base_domain: &str,
 ) -> Result<()> {
-    let map = derp_map_from_runtime_config(Some(upstream), embedded, base_domain).await?;
-    store.set(map);
+    let map = native_derp_map_from_runtime_config(Some(upstream), embedded, base_domain).await?;
+    store.set_native(map);
     Ok(())
-}
-
-fn merge_derp_maps(dest: &mut DerpMap, source: DerpMap) {
-    if source.home_params.is_some() {
-        dest.home_params = source.home_params;
-    }
-    dest.regions.extend(source.regions);
-    if source.omit_default_regions {
-        dest.omit_default_regions = true;
-    }
 }
 
 fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
@@ -1858,15 +2085,6 @@ fn production_extra_routes(runtime: &PersistentWireRuntime) -> axum::Router {
 enum RemoteGrpcSecurity {
     Insecure,
     Tls(ReloadableServerConfig),
-}
-
-impl RemoteGrpcSecurity {
-    fn tls_reloader(&self) -> Option<ReloadableServerConfig> {
-        match self {
-            Self::Tls(reloader) => Some(reloader.clone()),
-            Self::Insecure => None,
-        }
-    }
 }
 
 struct ConnectedTlsStream(TlsStream<TcpStream>);
@@ -1915,11 +2133,28 @@ fn remote_grpc_status(cfg: &RunServerConfig) -> String {
     }
 }
 
+#[cfg(test)]
 fn remote_grpc_security(
     cfg: &RunServerConfig,
     tls_source: &TlsMaterialSource,
 ) -> Result<Option<RemoteGrpcSecurity>> {
+    remote_grpc_security_with_provider(cfg, tls_source, None)
+}
+
+fn remote_grpc_security_with_provider(
+    cfg: &RunServerConfig,
+    tls_source: &TlsMaterialSource,
+    provider: Option<Arc<dyn tls::AcmeCertificateProvider>>,
+) -> Result<Option<RemoteGrpcSecurity>> {
     if cfg.tls.has_manual_tls() || cfg.tls.letsencrypt_enabled() || cfg.https_listen.is_some() {
+        if let Some(provider) = provider {
+            let material = provider.initial_material()?;
+            let mut config = (*material.server_config).clone();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let reloader = ReloadableServerConfig::new(Arc::new(config));
+            reloader.set_certificate_provider(provider);
+            return Ok(Some(RemoteGrpcSecurity::Tls(reloader)));
+        }
         let material = tls_source
             .load()
             .context("load TLS material for remote gRPC")?;
@@ -1965,62 +2200,106 @@ async fn bind_tcp_grpc_listener(addr: SocketAddr) -> Result<TcpListener> {
         .with_context(|| format!("bind remote gRPC TCP listener {addr}"))
 }
 
+#[cfg(test)]
 fn spawn_local_grpc_listener(
     listener: UnixListener,
     path: PathBuf,
     service: HeadscaleAdminService,
 ) -> tokio::task::JoinHandle<Result<()>> {
+    spawn_local_grpc_listener_with_shutdown(listener, path, service, std::future::pending::<()>())
+}
+
+fn spawn_local_grpc_listener_with_shutdown<F>(
+    listener: UnixListener,
+    path: PathBuf,
+    service: HeadscaleAdminService,
+    shutdown: F,
+) -> tokio::task::JoinHandle<Result<()>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
         let reflection =
             HeadscaleAdminService::reflection_service().context("build gRPC reflection service")?;
         let incoming = UnixListenerStream::new(listener);
-        tracing::info!(path = %path.display(), "admin gRPC listening on Unix socket");
+        tracing::debug!(path = %path.display(), "admin gRPC listening on Unix socket");
         tonic::transport::Server::builder()
             .add_service(service.into_service_server())
             .add_service(reflection)
-            .serve_with_incoming(incoming)
+            .serve_with_incoming_shutdown(incoming, shutdown)
             .await
             .with_context(|| format!("serve admin gRPC Unix socket {}", path.display()))
     })
 }
 
+#[cfg(test)]
 fn spawn_remote_grpc_listener(
     listener: TcpListener,
     addr: SocketAddr,
     service: HeadscaleAdminService,
     security: RemoteGrpcSecurity,
 ) -> tokio::task::JoinHandle<Result<()>> {
+    spawn_remote_grpc_listener_with_shutdown(
+        listener,
+        addr,
+        service,
+        security,
+        std::future::pending::<()>(),
+    )
+}
+
+fn spawn_remote_grpc_listener_with_shutdown<F>(
+    listener: TcpListener,
+    addr: SocketAddr,
+    service: HeadscaleAdminService,
+    security: RemoteGrpcSecurity,
+    shutdown: F,
+) -> tokio::task::JoinHandle<Result<()>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
         let reflection =
             HeadscaleAdminService::reflection_service().context("build gRPC reflection service")?;
-        tracing::info!(%addr, "admin gRPC listening on TCP");
+        tracing::info!("listening and serving gRPC on: {addr}");
         match security {
             RemoteGrpcSecurity::Insecure => {
                 let incoming = TcpListenerStream::new(listener);
                 tonic::transport::Server::builder()
                     .add_service(service.into_authenticated_service_server())
                     .add_service(reflection)
-                    .serve_with_incoming(incoming)
+                    .serve_with_incoming_shutdown(incoming, shutdown)
                     .await
                     .with_context(|| format!("serve remote gRPC TCP listener {addr}"))
             }
             RemoteGrpcSecurity::Tls(reloader) => {
-                let incoming = TcpListenerStream::new(listener).then(move |accepted| {
-                    let reloader = reloader.clone();
-                    async move {
-                        let stream = accepted?;
-                        let acceptor = TlsAcceptor::from(reloader.current());
-                        acceptor
-                            .accept(stream)
+                let incoming: Pin<
+                    Box<
+                        dyn tokio_stream::Stream<Item = std::io::Result<ConnectedTlsStream>> + Send,
+                    >,
+                > = if reloader.certificate_provider().is_some() {
+                    Box::pin(
+                        acme_grpc_incoming::incoming(listener, reloader)
+                            .map(|accepted| accepted.map(ConnectedTlsStream)),
+                    )
+                } else {
+                    Box::pin(TcpListenerStream::new(listener).then(move |accepted| {
+                        let reloader = reloader.clone();
+                        async move {
+                            let stream = accepted?;
+                            headscale_api::tailscale_wire::raw_tls::accept_tls_with_config(
+                                reloader, stream,
+                            )
                             .await
                             .map(ConnectedTlsStream)
                             .map_err(std::io::Error::other)
-                    }
-                });
+                        }
+                    }))
+                };
                 tonic::transport::Server::builder()
                     .add_service(service.into_authenticated_service_server())
                     .add_service(reflection)
-                    .serve_with_incoming(incoming)
+                    .serve_with_incoming_shutdown(incoming, shutdown)
                     .await
                     .with_context(|| format!("serve remote gRPC TCP listener {addr}"))
             }
@@ -2028,70 +2307,100 @@ fn spawn_remote_grpc_listener(
     })
 }
 
-async fn load_persisted_policy(pool: &sqlx::SqlitePool, policy: &PolicyStore) -> Result<bool> {
-    let Some(row) = headscale_db::policies::get_latest(pool)
-        .await
-        .context("load persisted ACL policy")?
-    else {
-        return Ok(false);
-    };
-    let doc = parse_hujson_policy(&row.data).context("parse persisted ACL policy")?;
-    policy.set_at(doc, row.data, row.updated_at);
-    Ok(true)
-}
-
-async fn load_startup_policy(
+async fn load_startup_policy_source(
     pool: &sqlx::SqlitePool,
-    policy: &PolicyStore,
     config: &PolicyConfig,
-) -> Result<bool> {
-    match config.mode() {
-        "database" => load_persisted_policy(pool, policy).await,
-        "file" => load_file_policy(config, policy).await,
-        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+) -> Result<Option<(Vec<u8>, i64)>> {
+    match config.mode.as_str() {
+        "database" => headscale_db::policies::get_latest(pool)
+            .await
+            .map(|row| row.map(|row| (row.data.into_bytes(), row.updated_at)))
+            .map_err(|error| anyhow::anyhow!(error.headscale_go_message())),
+        "file" => load_startup_file_policy(config).await,
+        _ => Ok(None),
     }
 }
 
 #[cfg(feature = "postgres-sqlx")]
-async fn load_postgres_persisted_policy(pool: &sqlx::PgPool, policy: &PolicyStore) -> Result<bool> {
-    let Some(row) = headscale_db::policies::get_latest_postgres(pool)
-        .await
-        .context("load persisted ACL policy from Postgres")?
-    else {
-        return Ok(false);
-    };
-    let doc = parse_hujson_policy(&row.data).context("parse persisted ACL policy")?;
-    policy.set_at(doc, row.data, row.updated_at);
-    Ok(true)
-}
-
-#[cfg(feature = "postgres-sqlx")]
-async fn load_postgres_startup_policy(
+async fn load_postgres_startup_policy_source(
     pool: &sqlx::PgPool,
-    policy: &PolicyStore,
     config: &PolicyConfig,
-) -> Result<bool> {
-    match config.mode() {
-        "database" => load_postgres_persisted_policy(pool, policy).await,
-        "file" => load_file_policy(config, policy).await,
-        mode => anyhow::bail!("policy.mode must be either file or database, got {mode:?}"),
+) -> Result<Option<(Vec<u8>, i64)>> {
+    match config.mode.as_str() {
+        "database" => headscale_db::policies::get_latest_postgres(pool)
+            .await
+            .map(|row| row.map(|row| (row.data.into_bytes(), row.updated_at)))
+            .map_err(|error| anyhow::anyhow!(error.headscale_go_message())),
+        "file" => load_startup_file_policy(config).await,
+        _ => Ok(None),
     }
 }
 
-async fn load_file_policy(config: &PolicyConfig, policy: &PolicyStore) -> Result<bool> {
-    let Some(path) = config.path_if_non_empty() else {
-        return Ok(false);
-    };
-    let raw = tokio::fs::read_to_string(path)
+async fn load_startup_users(
+    users: &dyn UserAdmin,
+) -> Result<Vec<headscale_api::policy::PolicyUser>> {
+    users
+        .policy_users()
         .await
-        .with_context(|| format!("read policy.path {}", path.display()))?;
-    if raw.is_empty() {
-        return Ok(false);
-    }
-    let doc = parse_hujson_policy(&raw)
-        .with_context(|| format!("parse policy.path {}", path.display()))?;
-    policy.set(doc, raw);
-    Ok(true)
+        .map_err(|error| match error {
+            UserRegistryError::Store(message) => anyhow::anyhow!(message),
+            error => error.into(),
+        })
+        .context("loading users")
+}
+
+fn warn_startup_policy_tests(policy: &PolicyStore, registry: &MachineRegistry) -> Result<()> {
+    let Some(doc) = policy.doc() else {
+        return Ok(());
+    };
+    let nodes = PolicyCheckNodeSnapshot::from_registry(registry)
+        .map_err(anyhow::Error::msg)
+        .context("loading policy test node snapshot")?;
+    warn_policy_tests_at_boot_for_snapshot(
+        &doc,
+        policy
+            .source_for_compilation()
+            .as_deref()
+            .unwrap_or_default(),
+        &nodes,
+    );
+    Ok(())
+}
+
+async fn load_startup_file_policy(config: &PolicyConfig) -> Result<Option<(Vec<u8>, i64)>> {
+    let Some(path) = config.path_if_non_empty() else {
+        return Ok(None);
+    };
+    let raw = tokio::fs::read(path)
+        .await
+        .map_err(|error| startup_policy_file_error(path, &error))?;
+    Ok(Some((raw, chrono::Utc::now().timestamp())))
+}
+
+fn startup_policy_file_error(path: &Path, error: &std::io::Error) -> anyhow::Error {
+    use std::io::ErrorKind;
+    let operation = if error.kind() == ErrorKind::IsADirectory {
+        "read"
+    } else {
+        "open"
+    };
+    let message = match error.kind() {
+        ErrorKind::NotFound => "no such file or directory".to_owned(),
+        ErrorKind::PermissionDenied => "permission denied".to_owned(),
+        ErrorKind::IsADirectory => "is a directory".to_owned(),
+        ErrorKind::NotADirectory => "not a directory".to_owned(),
+        _ => {
+            let mut message = error.to_string();
+            if let Some(code) = error.raw_os_error() {
+                let suffix = format!(" (os error {code})");
+                if message.ends_with(&suffix) {
+                    message.truncate(message.len() - suffix.len());
+                }
+            }
+            message
+        }
+    };
+    anyhow::anyhow!("{operation} {}: {message}", path.display())
 }
 
 async fn open_runtime_database(cfg: &RunServerConfig) -> Result<RuntimeDatabase> {
@@ -2116,7 +2425,14 @@ async fn open_postgres_runtime_database(
     let database = database.context("database.type \"postgres\" requires a database block")?;
     let postgres = database.debug_postgres();
     let url = postgres_url_from_config(postgres)?;
-    let pool = headscale_db::open_postgres_pool(&url)
+    let log_path = format!(
+        "host={} dbname={} user={}",
+        postgres.host(),
+        postgres.name(),
+        postgres.user()
+    );
+    tracing::info!(database = "postgres", path = %log_path, "Opening database");
+    let pool = headscale_db::open_postgres_pool_with_options(&url, postgres_pool_options(postgres))
         .await
         .with_context(|| {
             format!(
@@ -2144,8 +2460,9 @@ async fn open_sqlite_database(
     database: Option<&UpstreamDatabaseConfig>,
 ) -> Result<Database> {
     ensure_parent_dir(path)?;
+    tracing::info!(database = "sqlite3", path = %path.display(), "Opening database");
     let url = sqlite_url_for_path(path);
-    let db = Database::new_with_sqlite_options(&url, sqlite_open_options(database)?)
+    let db = Database::new_with_go_sqlite_options(&url, sqlite_open_options(database)?)
         .await
         .with_context(|| format!("open SQLite database at {}", path.display()))?;
     db.migrate()
@@ -2160,17 +2477,21 @@ fn sqlite_open_options(database: Option<&UpstreamDatabaseConfig>) -> Result<Sqli
     };
 
     let sqlite = database.debug_sqlite();
-    let wal_autocheckpoint = match sqlite.wal_autocheckpoint() {
-        -1 => None,
-        value => Some(u32::try_from(value).with_context(|| {
-            "database.sqlite.path must be non-empty and database.sqlite.wal_autocheckpoint must be >= -1"
-        })?),
-    };
-    Ok(SqliteOpenOptions {
-        write_ahead_log: Some(sqlite.write_ahead_log()),
-        wal_autocheckpoint,
-        ..SqliteOpenOptions::default()
-    })
+    Ok(headscale_db::go_sqlite_open_options(
+        sqlite.write_ahead_log(),
+        sqlite.wal_autocheckpoint(),
+    )?)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub(crate) fn postgres_pool_options(
+    postgres: &crate::config::UpstreamPostgresConfig,
+) -> headscale_db::GoPostgresPoolOptions {
+    headscale_db::GoPostgresPoolOptions {
+        max_open_connections: postgres.max_open_conns(),
+        max_idle_connections: postgres.max_idle_conns(),
+        conn_max_idle_time_secs: postgres.conn_max_idle_time_secs(),
+    }
 }
 
 fn sqlite_url_for_path(path: &Path) -> String {
@@ -2200,28 +2521,7 @@ fn postgres_database_status(postgres: &UpstreamPostgresConfig) -> String {
 
 #[cfg(feature = "postgres-sqlx")]
 fn postgres_url_from_config(postgres: &UpstreamPostgresConfig) -> Result<String> {
-    let host = non_empty_str(Some(postgres.host())).unwrap_or("localhost");
-    let port = postgres_config_port(postgres).context("database.postgres.port out of range")?;
-    let name = non_empty_str(Some(postgres.name())).unwrap_or("headscale");
-    let mut url = url::Url::parse("postgres://localhost/headscale")
-        .context("build default Postgres database URL")?;
-    url.set_host(Some(host))
-        .map_err(|err| anyhow::anyhow!("database.postgres.host {host:?} is invalid: {err}"))?;
-    url.set_port(Some(port))
-        .map_err(|()| anyhow::anyhow!("database.postgres.port {port} is invalid"))?;
-    url.set_path(name);
-    if let Some(user) = non_empty_str(Some(postgres.user())) {
-        url.set_username(user)
-            .map_err(|()| anyhow::anyhow!("database.postgres.user is invalid"))?;
-    }
-    if let Some(pass) = non_empty_str(Some(postgres.pass())) {
-        url.set_password(Some(pass))
-            .map_err(|()| anyhow::anyhow!("database.postgres.pass is invalid"))?;
-    }
-    if let Some(sslmode) = postgres_sslmode(postgres.ssl()) {
-        url.query_pairs_mut().append_pair("sslmode", sslmode);
-    }
-    Ok(url.to_string())
+    postgres.connection_url()
 }
 
 fn postgres_config_port(postgres: &UpstreamPostgresConfig) -> Result<u16> {
@@ -2230,20 +2530,6 @@ fn postgres_config_port(postgres: &UpstreamPostgresConfig) -> Result<u16> {
         return Ok(5432);
     }
     u16::try_from(port).context("database.postgres.port must be between 1 and 65535")
-}
-
-#[cfg(feature = "postgres-sqlx")]
-fn postgres_sslmode(value: &str) -> Option<&str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" => None,
-        "false" | "disable" => Some("disable"),
-        "true" | "require" => Some("require"),
-        "allow" => Some("allow"),
-        "prefer" => Some("prefer"),
-        "verify-ca" => Some("verify-ca"),
-        "verify-full" => Some("verify-full"),
-        _ => Some(value.trim()),
-    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -2270,24 +2556,40 @@ fn parse_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
         .with_context(|| format!("Invalid {field} address: {value}"))
 }
 
+struct GrpcListenerShutdown {
+    local: tokio::sync::oneshot::Sender<()>,
+    remote: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 async fn await_serve_handle(
     handle: serve::ServeHandle,
     local_grpc: tokio::task::JoinHandle<Result<()>>,
     remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
     external_acme_http01: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
     native_derp: Option<Arc<NativeDerpRuntime>>,
+    machines: Arc<MachineRegistry>,
+    maintenance: Vec<tokio::task::AbortHandle>,
+    grpc_shutdown: GrpcListenerShutdown,
+    http_shutdown: serve::HttpShutdownControl,
+    ephemeral_gc: EphemeralGcHandle,
 ) -> Result<()> {
-    await_serve_handle_with_shutdown(
+    await_serve_handle_with_native_shutdown(
         handle,
         local_grpc,
         remote_grpc,
         external_acme_http01,
         native_derp,
+        Some(machines),
+        maintenance,
+        Some(grpc_shutdown),
+        Some(http_shutdown),
+        Some(ephemeral_gc),
         shutdown_signal(),
     )
     .await
 }
 
+#[cfg(test)]
 async fn await_serve_handle_with_shutdown<S>(
     handle: serve::ServeHandle,
     local_grpc: tokio::task::JoinHandle<Result<()>>,
@@ -2299,32 +2601,164 @@ async fn await_serve_handle_with_shutdown<S>(
 where
     S: Future<Output = Result<&'static str>>,
 {
+    await_serve_handle_with_native_shutdown(
+        handle,
+        local_grpc,
+        remote_grpc,
+        external_acme_http01,
+        native_derp,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+        shutdown_signal,
+    )
+    .await
+}
+
+async fn await_serve_handle_with_native_shutdown<S>(
+    handle: serve::ServeHandle,
+    local_grpc: tokio::task::JoinHandle<Result<()>>,
+    remote_grpc: Option<tokio::task::JoinHandle<Result<()>>>,
+    external_acme_http01: Option<tokio::task::JoinHandle<Result<(), std::io::Error>>>,
+    native_derp: Option<Arc<NativeDerpRuntime>>,
+    machines: Option<Arc<MachineRegistry>>,
+    maintenance: Vec<tokio::task::AbortHandle>,
+    grpc_shutdown: Option<GrpcListenerShutdown>,
+    http_shutdown: Option<serve::HttpShutdownControl>,
+    ephemeral_gc: Option<EphemeralGcHandle>,
+    shutdown_signal: S,
+) -> Result<()>
+where
+    S: Future<Output = Result<&'static str>>,
+{
     let serve::ServeHandle {
-        http,
-        https,
-        metrics,
-        acme_http01,
+        mut http,
+        mut https,
+        mut metrics,
+        mut acme_http01,
         ..
     } = handle;
+    let mut external_acme_http01 = external_acme_http01;
+    let mut local_grpc = Some(local_grpc);
+    let mut remote_grpc = remote_grpc;
     tokio::pin!(shutdown_signal);
-    tokio::select! {
-        result = await_optional_listener_result(http, "http") => result,
-        result = await_optional_listener_result(https, "https") => result,
-        result = await_optional_listener_result(metrics, "metrics") => result,
-        result = await_optional_listener_result(acme_http01, "acme http-01") => result,
-        result = await_optional_listener_result(external_acme_http01, "acme http-01") => result,
-        result = local_grpc => flatten_anyhow_task_result(result, "local grpc"),
-        result = await_optional_anyhow_task_result(remote_grpc, "remote grpc") => result,
+    let mut result = tokio::select! {
+        result = await_listener_ref(&mut http, "http") => result,
+        result = await_listener_ref(&mut https, "https") => result,
+        result = await_listener_ref(&mut metrics, "metrics") => result,
+        result = await_listener_ref(&mut acme_http01, "acme http-01") => result,
+        result = await_listener_ref(&mut external_acme_http01, "acme http-01") => result,
+        result = await_anyhow_listener_ref(&mut local_grpc, "local grpc") => result,
+        result = await_anyhow_listener_ref(&mut remote_grpc, "remote grpc") => result,
         signal = &mut shutdown_signal => {
-            let signal = signal?;
-            tracing::info!(signal, "Received signal to stop, shutting down gracefully");
-            let delivery = announce_native_derp_server_shutdown(native_derp.as_ref()).await;
-            if delivery.delivered() > 0 {
-                tokio::time::sleep(NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE).await;
+            match signal {
+                Ok(signal) => {
+                    if let Some(gc) = &ephemeral_gc {
+                        gc.abort();
+                    }
+                    for task in &maintenance {
+                        task.abort();
+                    }
+                    tracing::info!(signal, "Received signal to stop, shutting down gracefully");
+                    let delivery = announce_native_derp_server_shutdown(native_derp.as_ref()).await;
+                    if delivery.delivered() > 0 {
+                        tokio::time::sleep(NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE).await;
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
-            Ok(())
         },
+    };
+    // Retain the losing handles through select: dropping JoinHandles detaches
+    // listeners. Stop accepting first, then drain owned native work while its
+    // database, NodeStore worker and map batcher are still available.
+    for task in maintenance {
+        task.abort();
     }
+    if let Some(gc) = &ephemeral_gc {
+        gc.abort();
+    }
+    if let Some(control) = http_shutdown {
+        // This shares one three-second budget across debug then main. Its
+        // listener tasks finish after admission stops; ordinary connection
+        // tasks survive timeout without an abort, as in net/http.Shutdown.
+        control.shutdown().await;
+    } else {
+        for task in [&http, &https, &metrics].into_iter().flatten() {
+            task.abort();
+        }
+    }
+    // ACME challenge-only listeners are independent of Go's debug/main
+    // shutdown context; retain their existing explicit stop behavior.
+    for task in [&acme_http01, &external_acme_http01].into_iter().flatten() {
+        task.abort();
+    }
+    for task in [http, https, metrics, acme_http01, external_acme_http01]
+        .into_iter()
+        .flatten()
+    {
+        let _ = task.await;
+    }
+    if let Some(machines) = machines {
+        machines.shutdown_native_streams().await;
+    }
+    if let Some(shutdown) = grpc_shutdown {
+        // Headscale keeps RPCs available until map sessions have drained,
+        // then gracefully stops local followed by external gRPC without a
+        // timeout. Tonic waits for its accepted connections to finish.
+        let _ = shutdown.local.send(());
+        if let Some(task) = local_grpc {
+            let stopped = flatten_anyhow_task_result(task.await, "local grpc");
+            if result.is_ok() {
+                result = stopped;
+            }
+        }
+        if let Some(stop) = shutdown.remote {
+            let _ = stop.send(());
+        }
+        if let Some(task) = remote_grpc {
+            let stopped = flatten_anyhow_task_result(task.await, "remote grpc");
+            if result.is_ok() {
+                result = stopped;
+            }
+        }
+    } else {
+        // Compatibility helper callers do not own shutdown senders.
+        for task in [&local_grpc, &remote_grpc].into_iter().flatten() {
+            task.abort();
+        }
+        for task in [local_grpc, remote_grpc].into_iter().flatten() {
+            let _ = task.await;
+        }
+    }
+    result
+}
+
+async fn await_listener_ref(
+    handle: &mut Option<tokio::task::JoinHandle<std::result::Result<(), std::io::Error>>>,
+    label: &'static str,
+) -> Result<()> {
+    let result = match handle.as_mut() {
+        Some(task) => task.await,
+        None => return std::future::pending::<Result<()>>().await,
+    };
+    handle.take();
+    flatten_listener_result(result, label)
+}
+
+async fn await_anyhow_listener_ref(
+    handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    label: &'static str,
+) -> Result<()> {
+    let result = match handle.as_mut() {
+        Some(task) => task.await,
+        None => return std::future::pending::<Result<()>>().await,
+    };
+    handle.take();
+    flatten_anyhow_task_result(result, label)
 }
 
 async fn announce_native_derp_server_shutdown(
@@ -2401,16 +2835,6 @@ fn flatten_listener_result(
     }
 }
 
-async fn await_optional_listener_result(
-    handle: Option<tokio::task::JoinHandle<std::result::Result<(), std::io::Error>>>,
-    label: &'static str,
-) -> Result<()> {
-    match handle {
-        Some(handle) => flatten_listener_result(handle.await, label),
-        None => std::future::pending::<Result<()>>().await,
-    }
-}
-
 fn flatten_anyhow_task_result(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
     label: &str,
@@ -2419,16 +2843,6 @@ fn flatten_anyhow_task_result(
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(err).with_context(|| format!("{label} listener failed")),
         Err(err) => Err(err).with_context(|| format!("{label} listener task failed")),
-    }
-}
-
-async fn await_optional_anyhow_task_result(
-    handle: Option<tokio::task::JoinHandle<Result<()>>>,
-    label: &'static str,
-) -> Result<()> {
-    match handle {
-        Some(handle) => flatten_anyhow_task_result(handle.await, label),
-        None => std::future::pending::<Result<()>>().await,
     }
 }
 
@@ -2455,6 +2869,7 @@ impl IpAllocationStrategy {
 }
 
 struct CidrIpAllocator {
+    allocation: Mutex<()>,
     ipv4: Option<Mutex<IpFamilyAllocator>>,
     ipv6: Option<Mutex<IpFamilyAllocator>>,
     strategy: IpAllocationStrategy,
@@ -2491,17 +2906,33 @@ impl CidrIpAllocator {
         cidr_v6: Option<&str>,
         strategy: IpAllocationStrategy,
     ) -> Result<Self> {
-        let rows = headscale_db::headscale_nodes::list(pool)
-            .await
-            .context("read existing node IP addresses for allocator")?;
+        // Go plucks both raw columns before parsing any address, including
+        // rows outside the live-node list. Keep the IPv4/IPv6 query order.
+        let ipv4 = sqlx::query_scalar::<_, headscale_db::stored_text::NullableRawTextColumn>(
+            "SELECT ipv4 FROM nodes",
+        )
+        .fetch_all(pool)
+        .await
+        .context("reading IPv4 addresses from database")?;
+        let ipv6 = sqlx::query_scalar::<_, headscale_db::stored_text::NullableRawTextColumn>(
+            "SELECT ipv6 FROM nodes",
+        )
+        .fetch_all(pool)
+        .await
+        .context("reading IPv6 addresses from database")?;
         Self::from_existing_node_ips(
             cidr,
             cidr_v6,
             strategy,
-            rows.iter().map(|row| ExistingNodeIpAddresses {
-                ipv4: row.ipv4.as_deref(),
-                ipv6: row.ipv6.as_deref(),
-            }),
+            ipv4.iter()
+                .map(|value| ExistingNodeIpAddresses {
+                    ipv4: value.as_deref(),
+                    ipv6: None,
+                })
+                .chain(ipv6.iter().map(|value| ExistingNodeIpAddresses {
+                    ipv4: None,
+                    ipv6: value.as_deref(),
+                })),
         )
     }
 
@@ -2512,17 +2943,33 @@ impl CidrIpAllocator {
         cidr_v6: Option<&str>,
         strategy: IpAllocationStrategy,
     ) -> Result<Self> {
-        let rows = headscale_db::headscale_nodes::list_postgres(pool)
-            .await
-            .context("read existing Postgres node IP addresses for allocator")?;
+        // Go plucks both raw columns before parsing any address, including
+        // rows outside the live-node list. Keep the IPv4/IPv6 query order.
+        let ipv4 = sqlx::query_scalar::<_, headscale_db::stored_text::NullableRawTextColumn>(
+            "SELECT ipv4 FROM nodes",
+        )
+        .fetch_all(pool)
+        .await
+        .context("reading IPv4 addresses from database")?;
+        let ipv6 = sqlx::query_scalar::<_, headscale_db::stored_text::NullableRawTextColumn>(
+            "SELECT ipv6 FROM nodes",
+        )
+        .fetch_all(pool)
+        .await
+        .context("reading IPv6 addresses from database")?;
         Self::from_existing_node_ips(
             cidr,
             cidr_v6,
             strategy,
-            rows.iter().map(|row| ExistingNodeIpAddresses {
-                ipv4: row.ipv4.as_deref(),
-                ipv6: row.ipv6.as_deref(),
-            }),
+            ipv4.iter()
+                .map(|value| ExistingNodeIpAddresses {
+                    ipv4: value.as_deref(),
+                    ipv6: None,
+                })
+                .chain(ipv6.iter().map(|value| ExistingNodeIpAddresses {
+                    ipv4: None,
+                    ipv6: value.as_deref(),
+                })),
         )
     }
 
@@ -2533,8 +2980,12 @@ impl CidrIpAllocator {
         rows: impl IntoIterator<Item = ExistingNodeIpAddresses<'a>>,
     ) -> Result<Self> {
         let allocator = Self::from_cidrs_with_strategy(cidr, cidr_v6, strategy)?;
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        for row in &rows {
+            allocator.seed_existing(row.ipv4, None)?;
+        }
         for row in rows {
-            allocator.seed_existing(row.ipv4, row.ipv6)?;
+            allocator.seed_existing(None, row.ipv6)?;
         }
         Ok(allocator)
     }
@@ -2544,11 +2995,11 @@ impl CidrIpAllocator {
         cidr_v6: Option<&str>,
         strategy: IpAllocationStrategy,
     ) -> Result<Self> {
-        let ipv4 = (!cidr.trim().is_empty())
+        let ipv4 = (!cidr.is_empty())
             .then(|| parse_ipv4_cidr(cidr))
             .transpose()?;
         let ipv6 = cidr_v6
-            .filter(|cidr| !cidr.trim().is_empty())
+            .filter(|cidr| !cidr.is_empty())
             .map(parse_ipv6_cidr)
             .transpose()?;
         if ipv4.is_none() && ipv6.is_none() {
@@ -2556,6 +3007,7 @@ impl CidrIpAllocator {
         }
 
         Ok(Self {
+            allocation: Mutex::new(()),
             ipv4,
             ipv6,
             strategy,
@@ -2563,46 +3015,62 @@ impl CidrIpAllocator {
     }
 
     fn seed_existing(&self, ipv4: Option<&str>, ipv6: Option<&str>) -> Result<()> {
-        if let (Some(state), Some(ipv4)) = (&self.ipv4, ipv4.filter(|value| !value.is_empty())) {
-            let ip: Ipv4Addr = ipv4
-                .parse()
-                .with_context(|| format!("parsing IPv4 address from database: {ipv4}"))?;
-            state
-                .lock()
-                .expect("IPv4 allocator lock poisoned")
-                .used
-                .insert(u128::from(u32::from(ip)));
-        }
-        if let Some(ipv6) = ipv6.filter(|value| !value.is_empty()) {
-            let ip: Ipv6Addr = ipv6
-                .parse()
-                .with_context(|| format!("parsing IPv6 address from database: {ipv6}"))?;
-            if let Some(state) = &self.ipv6 {
-                state
+        let _allocation = self.allocation.lock().expect("IP allocator lock poisoned");
+        for text in [ipv4, ipv6].into_iter().flatten() {
+            let (ip, _) = headscale_api_acl::go_netip::parse_addr(text)
+                .map_err(|error| anyhow::anyhow!("parsing IP address from database: {error}"))?;
+            // Go netipx drops IPv6 zones when inserting an address into its
+            // used IP set. Column names do not constrain the stored family.
+            let (family, value) = match ip {
+                IpAddr::V4(ip) => (&self.ipv4, u128::from(u32::from(ip))),
+                IpAddr::V6(ip) => (&self.ipv6, u128::from(ip)),
+            };
+            if let Some(family) = family {
+                family
                     .lock()
-                    .expect("IPv6 allocator lock poisoned")
+                    .expect("IP family allocator lock poisoned")
                     .used
-                    .insert(u128::from(ip));
+                    .insert(value);
             }
         }
         Ok(())
     }
+
+    fn allocate_ipv4_inner(&self) -> std::result::Result<Ipv4Addr, AllocError> {
+        let Some(ipv4) = &self.ipv4 else {
+            return Err(AllocError::Internal(
+                "IPv4 allocation requested while IPv4 is disabled".into(),
+            ));
+        };
+        let value = ipv4
+            .lock()
+            .expect("IPv4 allocator lock poisoned")
+            .allocate(self.strategy, |candidate| {
+                is_tailscale_reserved_ipv4(Ipv4Addr::from(candidate as u32))
+            })?;
+        Ok(Ipv4Addr::from(value as u32))
+    }
+
+    fn allocate_ipv6_inner(&self) -> std::result::Result<Option<Ipv6Addr>, AllocError> {
+        let Some(ipv6) = &self.ipv6 else {
+            return Ok(None);
+        };
+        let value = ipv6
+            .lock()
+            .expect("IPv6 allocator lock poisoned")
+            .allocate(self.strategy, |candidate| {
+                is_tailscale_reserved_ipv6(Ipv6Addr::from(candidate))
+            })?;
+        Ok(Some(Ipv6Addr::from(value)))
+    }
 }
 
 fn parse_ipv4_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
-    let (addr, prefix) = cidr
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr {cidr:?}: missing prefix"))?;
-    let addr: Ipv4Addr = addr
-        .parse()
-        .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid IPv4 address"))?;
-    let prefix: u8 = prefix
-        .parse()
-        .with_context(|| format!("invalid server.mesh_cidr {cidr:?}: invalid prefix length"))?;
-    if prefix > 32 {
-        anyhow::bail!("invalid server.mesh_cidr {cidr:?}: prefix length must be <= 32");
-    }
-
+    let (address, prefix) = headscale_api_acl::go_netip::parse_prefix(cidr)
+        .map_err(|error| anyhow::anyhow!("invalid server.mesh_cidr: {error}"))?;
+    let IpAddr::V4(addr) = address else {
+        anyhow::bail!("invalid server.mesh_cidr {cidr:?}: expected IPv4 prefix");
+    };
     let host_bits = 32u32 - u32::from(prefix);
     let mask = if prefix == 0 {
         0
@@ -2611,11 +3079,6 @@ fn parse_ipv4_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
     };
     let network = u32::from(addr) & mask;
     let end = network | !mask;
-    if end.saturating_sub(network) < 2 {
-        anyhow::bail!(
-            "invalid server.mesh_cidr {cidr:?}: prefix must leave assignable host addresses"
-        );
-    }
 
     Ok(Mutex::new(IpFamilyAllocator::new(
         u128::from(network),
@@ -2624,19 +3087,11 @@ fn parse_ipv4_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
 }
 
 fn parse_ipv6_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
-    let (addr, prefix) = cidr
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("invalid server.mesh_cidr_v6 {cidr:?}: missing prefix"))?;
-    let addr: Ipv6Addr = addr
-        .parse()
-        .with_context(|| format!("invalid server.mesh_cidr_v6 {cidr:?}: invalid IPv6 address"))?;
-    let prefix: u8 = prefix
-        .parse()
-        .with_context(|| format!("invalid server.mesh_cidr_v6 {cidr:?}: invalid prefix length"))?;
-    if prefix > 128 {
-        anyhow::bail!("invalid server.mesh_cidr_v6 {cidr:?}: prefix length must be <= 128");
-    }
-
+    let (address, prefix) = headscale_api_acl::go_netip::parse_prefix(cidr)
+        .map_err(|error| anyhow::anyhow!("invalid server.mesh_cidr_v6: {error}"))?;
+    let IpAddr::V6(addr) = address else {
+        anyhow::bail!("invalid server.mesh_cidr_v6 {cidr:?}: expected IPv6 prefix");
+    };
     let host_bits = 128u32 - u32::from(prefix);
     let mask = if prefix == 0 {
         0
@@ -2645,11 +3100,6 @@ fn parse_ipv6_cidr(cidr: &str) -> Result<Mutex<IpFamilyAllocator>> {
     };
     let network = u128::from(addr) & mask;
     let end = network | !mask;
-    if end.saturating_sub(network) < 2 {
-        anyhow::bail!(
-            "invalid server.mesh_cidr_v6 {cidr:?}: prefix must leave assignable host addresses"
-        );
-    }
 
     Ok(Mutex::new(IpFamilyAllocator::new(network, end)))
 }
@@ -2703,43 +3153,68 @@ impl IpFamilyAllocator {
         &mut self,
         reserved: impl Fn(u128) -> bool + Copy,
     ) -> std::result::Result<u128, AllocError> {
-        if let Some(count) = self
-            .end
-            .checked_sub(self.network)
-            .and_then(|span| span.checked_add(1))
-            && self.used.len() as u128 >= count
-        {
-            return Err(AllocError::Exhausted);
-        }
-
-        for _ in 0..1024 {
-            let candidate = random_between(self.network, self.end);
+        let start = random_between(self.network, self.end)?;
+        let mut candidate = start;
+        loop {
             if !self.used.contains(&candidate) && !reserved(candidate) {
                 self.used.insert(candidate);
                 self.prev = candidate;
                 return Ok(candidate);
             }
+            candidate = candidate
+                .checked_add(1)
+                .filter(|candidate| *candidate <= self.end)
+                .unwrap_or(self.network);
+            if candidate == start {
+                return Err(AllocError::Exhausted);
+            }
         }
-
-        self.allocate_sequential(reserved)
     }
 }
 
 impl IpAllocator for CidrIpAllocator {
-    fn allocate(&self, node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
-        let _ = node_key_hex;
-        let Some(ipv4) = &self.ipv4 else {
-            return Err(AllocError::Internal(
-                "IPv4 allocation requested while IPv4 is disabled".into(),
-            ));
+    fn release_addresses(&self, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) {
+        let _allocation = self.allocation.lock().expect("IP allocator lock poisoned");
+        if let (Some(ip), Some(family)) = (ipv4, &self.ipv4) {
+            family
+                .lock()
+                .expect("IPv4 allocator lock poisoned")
+                .used
+                .remove(&u128::from(u32::from(ip)));
+        }
+        if let (Some(ip), Some(family)) = (ipv6, &self.ipv6) {
+            family
+                .lock()
+                .expect("IPv6 allocator lock poisoned")
+                .used
+                .remove(&u128::from(ip));
+        }
+        // FreeIPs does not rewind the sequential cursor. Random allocation
+        // can reuse the hole on a later scan; sequential allocation keeps Next.
+    }
+
+    fn allocate(&self, _node_key_hex: &str) -> std::result::Result<Ipv4Addr, AllocError> {
+        let _allocation = self.allocation.lock().expect("IP allocator lock poisoned");
+        self.allocate_ipv4_inner()
+    }
+
+    fn allocate_addresses(
+        &self,
+        _node_key_hex: &str,
+    ) -> std::result::Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), String> {
+        let _allocation = self.allocation.lock().expect("IP allocator lock poisoned");
+        let ipv4 = if self.ipv4.is_some() {
+            Some(
+                self.allocate_ipv4_inner()
+                    .map_err(|error| format!("allocating IPv4 address: {error}"))?,
+            )
+        } else {
+            None
         };
-        let value = ipv4
-            .lock()
-            .expect("IPv4 allocator lock poisoned")
-            .allocate(self.strategy, |candidate| {
-                is_tailscale_reserved_ipv4(Ipv4Addr::from(candidate as u32))
-            })?;
-        Ok(Ipv4Addr::from(value as u32))
+        let ipv6 = self
+            .allocate_ipv6_inner()
+            .map_err(|error| format!("allocating IPv6 address: {error}"))?;
+        Ok((ipv4, ipv6))
     }
 
     fn ipv4_enabled(&self) -> bool {
@@ -2748,19 +3223,10 @@ impl IpAllocator for CidrIpAllocator {
 
     fn allocate_ipv6(
         &self,
-        node_key_hex: &str,
+        _node_key_hex: &str,
     ) -> std::result::Result<Option<Ipv6Addr>, AllocError> {
-        let _ = node_key_hex;
-        let Some(ipv6) = &self.ipv6 else {
-            return Ok(None);
-        };
-        let value = ipv6
-            .lock()
-            .expect("IPv6 allocator lock poisoned")
-            .allocate(self.strategy, |candidate| {
-                is_tailscale_reserved_ipv6(Ipv6Addr::from(candidate))
-            })?;
-        Ok(Some(Ipv6Addr::from(value)))
+        let _allocation = self.allocation.lock().expect("IP allocator lock poisoned");
+        self.allocate_ipv6_inner()
     }
 
     fn ipv6_enabled(&self) -> bool {
@@ -2768,15 +3234,27 @@ impl IpAllocator for CidrIpAllocator {
     }
 }
 
-fn random_between(start: u128, end: u128) -> u128 {
-    let span = end - start;
-    let mut raw = [0u8; 16];
-    OsRng.fill_bytes(&mut raw);
-    let sample = u128::from_be_bytes(raw);
-    if span == u128::MAX {
-        sample
-    } else {
-        start + (sample % (span + 1))
+/// Go crypto/rand.Int uses rejection sampling below (end - start), excluding
+/// the upper endpoint; a single-address prefix returns its sole address.
+fn random_between(start: u128, end: u128) -> std::result::Result<u128, AllocError> {
+    let bound = end - start;
+    if bound <= 1 {
+        return Ok(start);
+    }
+    let bits = 128 - (bound - 1).leading_zeros();
+    let bytes = bits.div_ceil(8) as usize;
+    let high_mask = u8::MAX >> (bytes as u32 * 8 - bits);
+    loop {
+        let mut raw = [0u8; 16];
+        let random = &mut raw[16 - bytes..];
+        OsRng.try_fill_bytes(random).map_err(|error| {
+            AllocError::Internal(format!("getting random IP: generating random IP: {error}"))
+        })?;
+        random[0] &= high_mask;
+        let sample = u128::from_be_bytes(raw);
+        if sample < bound {
+            return Ok(start + sample);
+        }
     }
 }
 
@@ -3124,6 +3602,7 @@ mod tests {
             ip_allocation: "sequential".into(),
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
@@ -3459,9 +3938,10 @@ regions:
             ..EmbeddedDerpConfig::default()
         };
 
-        let map = derp_map_from_runtime_config(Some(&derp), &embedded, "")
+        let map = native_derp_map_from_runtime_config(Some(&derp), &embedded, "")
             .await
-            .unwrap();
+            .unwrap()
+            .projection();
 
         assert_eq!(
             map.regions
@@ -3503,7 +3983,7 @@ regions:
             ..EmbeddedDerpConfig::default()
         };
 
-        let err = derp_map_from_runtime_config(Some(&derp), &embedded, "")
+        let err = native_derp_map_from_runtime_config(Some(&derp), &embedded, "")
             .await
             .unwrap_err();
 
@@ -3873,6 +4353,7 @@ regions:
             Arc::new(RegistrationCache::new()),
             Arc::new(PolicyStore::new()),
             wire_registry,
+            Arc::new(CidrIpAllocator::from_cidr("100.64.0.0/10").unwrap()),
         );
 
         assert!(oidc.is_some());
@@ -3922,6 +4403,7 @@ database:
                 dns,
                 &cfg.policy,
                 runtime_config,
+                None,
             )
             .await?;
             assert!(runtime.oidc.is_some());
@@ -4006,6 +4488,7 @@ database:
                 dns,
                 &cfg.policy,
                 runtime_config,
+                None,
             )
             .await?;
 
@@ -4069,6 +4552,7 @@ database:
                 dns,
                 &cfg.policy,
                 runtime_config,
+                None,
             )
             .await?;
             assert!(runtime.oidc.is_some());
@@ -4105,7 +4589,8 @@ database:
                 oidc_machines,
                 runtime.state.policy.clone(),
             )
-            .with_wire_registry(runtime.state.machines.clone());
+            .with_wire_registry(runtime.state.machines.clone())
+            .with_ip_allocator(runtime.state.ip_allocator.clone());
 
             let first_node_key = "c9".repeat(32);
             let second_node_key = "d9".repeat(32);
@@ -4219,6 +4704,7 @@ database:
                 dns,
                 &cfg.policy,
                 runtime_config,
+                None,
             )
             .await?;
 
@@ -4621,6 +5107,7 @@ database:
             ip_allocation: "sequential".into(),
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
@@ -4680,6 +5167,7 @@ database:
             ip_allocation: "sequential".into(),
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
@@ -4841,12 +5329,13 @@ database:
     #[tokio::test]
     async fn run_server_http01_acme_issues_through_production_challenge_listener() {
         let dir = tempfile::tempdir().unwrap();
+        let public_tls_addr = unused_loopback_addr();
         let challenge_addr = unused_loopback_addr();
         let cache_dir = dir.path().join("acme-cache");
         let acme_server =
             LocalAcmeServer::spawn_http01_listener(challenge_addr, LOCAL_ACME_HOSTNAME).await;
         let mut cfg = test_run_server_config(&dir);
-        cfg.listen = "127.0.0.1:0".into();
+        cfg.listen = public_tls_addr.to_string();
         cfg.grpc_listen_addr = "127.0.0.1:0".into();
         cfg.metrics_listen_addr = None;
         cfg.server_url = Some(format!("https://{LOCAL_ACME_HOSTNAME}"));
@@ -4867,10 +5356,18 @@ database:
                 let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
                 let mut server_task = tokio::task::spawn_local(run_server(cfg));
                 let wait_for_issuance = async {
+                    let client = reqwest::Client::builder()
+                        .no_proxy()
+                        .danger_accept_invalid_certs(true)
+                        .resolve(LOCAL_ACME_HOSTNAME, public_tls_addr)
+                        .timeout(Duration::from_secs(10))
+                        .build().unwrap();
                     loop {
                         if acme_server.finalized() && cache_path.exists() {
                             break;
                         }
+                        // Native autocert starts only on an authorized hello.
+                        let _ = client.get(format!("https://{LOCAL_ACME_HOSTNAME}:{}/health", public_tls_addr.port())).send().await;
                         sleep(Duration::from_millis(25)).await;
                     }
                 };
@@ -4921,10 +5418,17 @@ database:
                 let cache_path = cache_dir.join(LOCAL_ACME_HOSTNAME);
                 let mut server_task = tokio::task::spawn_local(run_server(cfg));
                 let wait_for_issuance = async {
+                    let client = reqwest::Client::builder()
+                        .no_proxy()
+                        .danger_accept_invalid_certs(true)
+                        .resolve(LOCAL_ACME_HOSTNAME, public_tls_addr)
+                        .timeout(Duration::from_secs(10))
+                        .build().unwrap();
                     loop {
                         if acme_server.finalized() && cache_path.exists() {
                             break;
                         }
+                        let _ = client.get(format!("https://{LOCAL_ACME_HOSTNAME}:{}/health", public_tls_addr.port())).send().await;
                         sleep(Duration::from_millis(25)).await;
                     }
                 };
@@ -5168,6 +5672,7 @@ database:
             ip_allocation: "random".into(),
             server_url: Some("https://headscale.example".into()),
             state_dir: dir.path().join("state"),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
@@ -5390,6 +5895,8 @@ database:
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
+prefixes:
+  v4: "100.64.0.0/10"
 dns:
   magic_dns: false
   override_local_dns: false
@@ -5477,7 +5984,7 @@ policy:
         assert_eq!(snapshot.cli.address, "headscale.example:50443");
         assert_eq!(snapshot.cli.api_key, "hskey-api-debug-projection-secret");
         assert!(snapshot.cli.insecure);
-        assert_eq!(snapshot.cli.timeout, 12_000_000_000);
+        assert_eq!(snapshot.cli.timeout, 12);
         assert!(snapshot.log_tail.enabled);
         assert!(snapshot.auto_update.enabled);
         assert_eq!(snapshot.policy.mode, "database");
@@ -5539,6 +6046,7 @@ policy:
             ip_allocation: "sequential".into(),
             server_url: None,
             state_dir: dir.path().join("state"),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: Some("127.0.0.1:9090".into()),
             tls_hostname: None,
@@ -5600,7 +6108,7 @@ policy:
                     "Hostname": "alice-laptop",
                     "RoutableIPs": ["10.0.0.0/24"],
                     "OS": "linux",
-                    "App": "1.80.0",
+                    "OSVersion": "1.80.0",
                 }),
                 ipv4: Some("100.64.0.9".into()),
                 hostname: "alice-laptop".into(),
@@ -5685,7 +6193,12 @@ policy:
                 user: user.id,
                 reusable: true,
                 ephemeral: false,
-                expiration: None,
+                // headscale-go turns a missing expiration into the zero time,
+                // i.e. an already-expired key, so ask for a real one.
+                expiration: Some(prost_types::Timestamp {
+                    seconds: chrono::Utc::now().timestamp() + 3600,
+                    nanos: 0,
+                }),
                 acl_tags: Vec::new(),
             }))
             .await
@@ -5763,7 +6276,8 @@ policy:
             oidc_machines,
             runtime.state.policy.clone(),
         )
-        .with_wire_registry(runtime.state.machines.clone());
+        .with_wire_registry(runtime.state.machines.clone())
+        .with_ip_allocator(runtime.state.ip_allocator.clone());
         let oidc_result = oidc_handler
             .complete_oidc_registration(
                 &oidc_registration_id,
@@ -5790,7 +6304,7 @@ policy:
                 serde_json::json!({
                     "Version": 113,
                     "OmitPeers": true,
-                    "DiscoKey": "discokey:auth-restart",
+                    "DiscoKey": "discokey:685f7902828cf9128ded2b47e28816f89f3f8315e2301d7b4f01d330c53b8886",
                     "Endpoints": ["198.51.100.44:41641", "[2001:db8::44]:41641"],
                     "Hostinfo": {
                         "Hostname": "auth-router",
@@ -5861,7 +6375,7 @@ policy:
         assert_eq!(hydrated_auth.approved_routes, vec!["10.70.0.0/24"]);
         assert_eq!(
             hydrated_auth.disco_key.as_deref(),
-            Some("discokey:auth-restart")
+            Some("discokey:685f7902828cf9128ded2b47e28816f89f3f8315e2301d7b4f01d330c53b8886")
         );
         assert_eq!(
             hydrated_auth.endpoints,
@@ -6025,6 +6539,9 @@ policy:
     async fn persistent_wire_runtime_loads_latest_sqlite_policy() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
+        UserAdmin::create(&PersistentUserAdmin::new(db.pool().clone()), "alice")
+            .await
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let old = r#"{"tagOwners":{"tag:old":["alice@"]}}"#;
         let latest = r#"{"tagOwners":{"tag:server":["alice@"]}}"#;
@@ -6046,6 +6563,7 @@ policy:
 
         let tags = Vec::new();
         let node = headscale_api::policy::NodeView {
+            user_id: None,
             addr: Some("100.64.0.9"),
             addrs: &[],
             user: Some("alice"),
@@ -6061,6 +6579,9 @@ policy:
     async fn persistent_wire_runtime_loads_configured_file_policy() {
         let db = Database::in_memory().await.unwrap();
         db.migrate().await.unwrap();
+        UserAdmin::create(&PersistentUserAdmin::new(db.pool().clone()), "alice")
+            .await
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let policy_path = dir.path().join("policy.hujson");
         let raw_policy = r#"{"tagOwners":{"tag:file":["alice@"]}}"#;
@@ -6081,12 +6602,14 @@ policy:
                 path: policy_path,
             },
             Arc::new(RuntimeConfigSnapshot::default()),
+            None,
         )
         .await
         .unwrap();
 
         let tags = Vec::new();
         let node = headscale_api::policy::NodeView {
+            user_id: None,
             addr: Some("100.64.0.9"),
             addrs: &[],
             user: Some("alice"),
@@ -6233,13 +6756,16 @@ policy:
     }
 
     #[test]
-    fn cidr_allocator_rejects_invalid_or_tiny_prefixes() {
+    fn cidr_allocator_rejects_invalid_prefixes_and_defers_tiny_pool_exhaustion() {
         assert!(CidrIpAllocator::from_cidr("not-a-cidr").is_err());
-        assert!(CidrIpAllocator::from_cidr("100.64.0.0/32").is_err());
+        let ipv4 = CidrIpAllocator::from_cidr("100.64.0.0/32").unwrap();
+        assert!(matches!(ipv4.allocate("tiny"), Err(AllocError::Exhausted)));
         assert!(CidrIpAllocator::from_cidrs("", None).is_err());
         assert!(CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("not-a-cidr")).is_err());
-        assert!(
-            CidrIpAllocator::from_cidrs("100.64.0.0/10", Some("fd7a:115c:a1e0::/128")).is_err()
-        );
+        let ipv6 = CidrIpAllocator::from_cidrs("", Some("fd7a:115c:a1e0::/128")).unwrap();
+        assert!(matches!(
+            ipv6.allocate_ipv6("tiny"),
+            Err(AllocError::Exhausted)
+        ));
     }
 }

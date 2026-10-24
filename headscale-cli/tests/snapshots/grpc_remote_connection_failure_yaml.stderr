@@ -1,2 +1,2 @@
-error: 'connection failure: transport error'
+error: 'connecting to headscale: connecting to http://127.0.0.1:9: context deadline exceeded'
 

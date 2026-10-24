@@ -27,7 +27,7 @@ use headscale_api::{
         AllocError, BATCHER_OFFLINE_CLEANUP_INTERVAL, BATCHER_OFFLINE_CLEANUP_THRESHOLD, DerpMap,
         IpAllocator, KnockConfig, MachineRecord, MachineRegistry, MapResponseDebugStore,
         PingTracker, PreauthRedeemer, RedeemError, RedeemOk, RegistrationCache, ServerNoiseKey,
-        WireState, derp_config,
+        WebRegistrationError, WebRegistrationUser, WireState, derp_config,
         routes::{DebugRoutes, normalize_routes},
         serve, spawn_offline_connection_cleanup, spawn_route_health_probe,
         wire::{DerpRegion, DerpRegionNode, DnsRecord, DnsResolver},
@@ -208,8 +208,8 @@ struct AppState {
     redeemer: Arc<HarnessRedeemer>,
     machines: Arc<MachineRegistry>,
     policy: Arc<PolicyStore>,
-    registration_cache: Arc<RegistrationCache>,
     derp_verify: Arc<DerpVerifyLog>,
+    wire: WireState,
 }
 
 #[derive(Default)]
@@ -500,6 +500,7 @@ async fn main() -> Result<()> {
         }),
         machines: machines.clone(),
         registration_store: None,
+        registration_gate: None,
         derp_map,
         policy: policy.clone(),
         knock: KnockConfig::disabled(),
@@ -515,8 +516,8 @@ async fn main() -> Result<()> {
         redeemer,
         machines,
         policy,
-        registration_cache,
         derp_verify,
+        wire: state.clone(),
     };
     let extra_routes = harness_router(app_state);
     let state_dir = args.state_dir;
@@ -766,6 +767,7 @@ fn apply_policy_auto_approvals(policy: &PolicyStore, machines: &MachineRegistry)
         let addrs = machine.address_strings();
         let user = (!machine.user.is_empty()).then_some(machine.user.as_str());
         let node = NodeView {
+            user_id: None,
             addr: primary_addr.as_deref(),
             addrs: &addrs,
             user,
@@ -802,24 +804,25 @@ async fn register_pending(
     Path(registration_id): Path<String>,
     Json(req): Json<RegisterPendingRequest>,
 ) -> impl IntoResponse {
-    let Some(mut record) = state.registration_cache.get(&registration_id) else {
-        return (StatusCode::NOT_FOUND, "registration not found").into_response();
-    };
-    let user = req.user;
-    record.user = user.clone();
-    if let Err(err) = apply_requested_tags(&state.policy, &mut record) {
-        return (StatusCode::BAD_REQUEST, err).into_response();
-    }
-
-    let record = state.machines.complete_web_registration(record, &user, 2);
-    if !state
-        .registration_cache
-        .complete(&registration_id, record.clone())
+    match state
+        .wire
+        .complete_volatile_web_registration(
+            &registration_id,
+            WebRegistrationUser {
+                name: req.user,
+                ..Default::default()
+            },
+            None,
+            2,
+        )
+        .await
     {
-        return (StatusCode::NOT_FOUND, "registration not found").into_response();
+        Ok(completed) => Json(machine_summary(&completed.record)).into_response(),
+        Err(WebRegistrationError::SessionExpired) => {
+            (StatusCode::NOT_FOUND, "registration not found").into_response()
+        }
+        Err(WebRegistrationError::Store(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
-
-    Json(machine_summary(&record)).into_response()
 }
 
 async fn list_machines(State(state): State<AppState>) -> Json<Vec<MachineSummary>> {
@@ -1086,38 +1089,6 @@ fn machine_summary(machine: &MachineRecord) -> MachineSummary {
         endpoints: machine.endpoints.clone(),
         disco_key: machine.disco_key.clone(),
     }
-}
-
-fn apply_requested_tags(policy: &PolicyStore, record: &mut MachineRecord) -> Result<(), String> {
-    if record.forced_tags.is_empty() {
-        return Ok(());
-    }
-
-    record.forced_tags.sort();
-    record.forced_tags.dedup();
-    let addr = record.primary_addr_string();
-    let addrs = record.address_strings();
-    let node = NodeView {
-        addr: addr.as_deref(),
-        addrs: &addrs,
-        user: Some(record.user.as_str()),
-        tags: &[],
-    };
-    let invalid_tags = record
-        .forced_tags
-        .iter()
-        .filter(|tag| !valid_tag(tag) || !policy.node_can_have_tag(&node, tag))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !invalid_tags.is_empty() {
-        return Err(format!(
-            "requested tags [{}] are invalid or not permitted",
-            invalid_tags.join(" ")
-        ));
-    }
-
-    record.expiry = None;
-    Ok(())
 }
 
 fn valid_tag(tag: &str) -> bool {

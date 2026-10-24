@@ -126,7 +126,11 @@ async fn post_create_then_get_list_round_trip() {
     let list = body_json(resp).await;
     let arr = list.as_array().expect("list is array");
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["key"], key);
+    // Go PreAuthKey.Proto() (ListPreAuthKeys) never re-discloses the secret:
+    // only the creation response carries the full key; listings show
+    // "hskey-auth-<prefix>-***" (types/preauth_key.go).
+    let prefix = &key["hskey-auth-".len().."hskey-auth-".len() + 12];
+    assert_eq!(arr[0]["key"], format!("hskey-auth-{prefix}-***"));
 }
 
 #[tokio::test]

@@ -233,18 +233,39 @@ async fn wire_full_map(wire: &WireState, node_key_hex: &str) -> (StatusCode, ser
 }
 
 #[cfg(feature = "full")]
+thread_local! {
+    /// Surplus length-prefixed frames of a multi-frame body chunk.
+    static PENDING_STREAM_FRAMES: std::cell::RefCell<std::collections::VecDeque<Vec<u8>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Read the next MapResponse from the stream. The server may write several
+/// length-prefixed frames in one body chunk (clients parse a byte stream, as
+/// they do for headscale-go's separate writes), so surplus frames are queued.
+#[cfg(feature = "full")]
 async fn next_stream_map(body: &mut Body) -> headscale_api::tailscale_wire::wire::MapResponse {
     use http_body_util::BodyExt;
 
+    if let Some(frame) = PENDING_STREAM_FRAMES.with(|queue| queue.borrow_mut().pop_front()) {
+        return serde_json::from_slice(&frame).expect("map response json");
+    }
     let frame = BodyExt::frame(body)
         .await
         .expect("stream frame")
         .expect("stream frame ok");
     let chunk = frame.into_data().expect("data frame");
-    assert!(chunk.len() >= 4, "stream frame includes length prefix");
-    let len = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
-    assert_eq!(chunk.len(), 4 + len, "framed chunk size mismatch");
-    serde_json::from_slice(&chunk[4..]).expect("map response json")
+    let mut rest: &[u8] = &chunk;
+    let mut frames = Vec::new();
+    while !rest.is_empty() {
+        assert!(rest.len() >= 4, "truncated stream frame header");
+        let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        assert!(rest.len() >= 4 + len, "truncated stream frame body");
+        frames.push(rest[4..4 + len].to_vec());
+        rest = &rest[4 + len..];
+    }
+    let first = frames.remove(0);
+    PENDING_STREAM_FRAMES.with(|queue| queue.borrow_mut().extend(frames));
+    serde_json::from_slice(&first).expect("map response json")
 }
 
 /// `GET /api/v1/machines/{id}` returning the decoded JSON.
@@ -273,7 +294,12 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
     let registry = Arc::new(MachineRegistry::new());
     let a_hex = "a1".repeat(32);
     let b_hex = "b2".repeat(32);
-    registry.upsert(a_hex.clone(), mk_record(0xa1, "alice-node", 10, false));
+    // Go resolves `alice@`/`carol@` through the users table and matches
+    // nodes by numeric owner id (Username.resolve), so alice-node must be
+    // owned by the user the test creates below (first in-memory id is 1).
+    let mut alice_node = mk_record(0xa1, "alice-node", 10, false);
+    alice_node.user_id = Some(1);
+    registry.upsert(a_hex.clone(), alice_node);
     registry.upsert(b_hex.clone(), mk_record(0xb2, "bob-node", 11, false));
 
     let policy = headscale_api::policy::PolicyStore::new();
@@ -287,6 +313,10 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
         headscale_api::policy::parse_hujson_policy(raw).expect("policy parses"),
         raw.to_string(),
     );
+    // Serving binds the policy manager to the registry so user changes are
+    // evaluated against the live nodes (Go's PolicyManager.SetUsers sees the
+    // NodeStore); without it a rename could never move the compiled filter.
+    registry.configure_policy(&policy);
 
     let users = UserRegistry::new();
     let service = HeadscaleAdminService::new(
@@ -338,8 +368,16 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
     });
     let after_create = next_stream_map(&mut body).await;
     let created = create.await.expect("create task");
+    assert_eq!(
+        created.id, 1,
+        "alice-node is pre-owned by the first user id"
+    );
     assert_policy_filter_mentions_bob(&after_create);
 
+    // Renaming alice to carol keeps `group:renamed` resolving to alice-node,
+    // so the compiled filter is unchanged. Go's State.UpdateUser returns the
+    // empty change when PolicyManager.SetUsers reports no policy change, so
+    // connected streams get no update (only the 50s keepalive).
     let rename = tokio::spawn({
         let service = service.clone();
         let old_id = created.id;
@@ -354,13 +392,46 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
                 .unwrap();
         }
     });
-    let after_rename = next_stream_map(&mut body).await;
+    let quiet = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        next_stream_map(&mut body),
+    )
+    .await;
     rename.await.expect("rename task");
-    assert_policy_filter_mentions_bob(&after_rename);
+    assert!(
+        quiet.is_err(),
+        "a rename that leaves the compiled filter unchanged must not push a map update"
+    );
+
+    // Go's State.CreateUser forces a PolicyChange even when the filter did
+    // not move, so creating an unrelated user refreshes the stream. This
+    // second user owns no nodes, which keeps it deletable (Go refuses to
+    // delete a user that still owns nodes).
+    let create_dave = tokio::spawn({
+        let service = service.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            service
+                .create_user(TonicRequest::new(CreateUserRequest {
+                    name: "dave".into(),
+                    display_name: String::new(),
+                    email: String::new(),
+                    picture_url: String::new(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .user
+                .expect("created user")
+        }
+    });
+    let after_create_dave = next_stream_map(&mut body).await;
+    let dave = create_dave.await.expect("create task");
+    assert_policy_filter_mentions_bob(&after_create_dave);
 
     let delete = tokio::spawn({
         let service = service.clone();
-        let id = created.id;
+        let id = dave.id;
         async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             service
@@ -372,9 +443,13 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
     let after_delete = next_stream_map(&mut body).await;
     delete.await.expect("delete task");
     assert_policy_filter_mentions_bob(&after_delete);
+    // headscale-go's connectionEntry.withSelfDelta strips Node from any send
+    // when the client already holds an equal self node. Bob's own entry did
+    // not change, so the full user-removed update carries peers and filters
+    // but no Node.
     assert!(
-        after_delete.node.is_some(),
-        "user deletion should trigger a full self+peers map response"
+        after_delete.node.is_none(),
+        "unchanged self node must be stripped from the full user-removed update"
     );
     assert!(
         after_delete
@@ -398,6 +473,45 @@ async fn grpc_user_crud_refreshes_connected_map_stream_packet_filters() {
         .expect("delete records a map change");
     assert_eq!(last_change.reason_labels(), vec!["user removed"]);
     assert_eq!(last_change.change_type(), "full");
+
+    // A rename that does move the resolved sources (neither alice@ nor
+    // carol@ names the owner any more) is a policy change and refreshes the
+    // stream; Go always sends the "base" key, with an empty rule list.
+    let rename_away = tokio::spawn({
+        let service = service.clone();
+        let old_id = created.id;
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            service
+                .rename_user(TonicRequest::new(RenameUserRequest {
+                    old_id,
+                    new_name: "erin".into(),
+                }))
+                .await
+                .unwrap();
+        }
+    });
+    // Go sends the PeersRemoved for peers that dropped out of the filter as a
+    // separate frame ahead of the policy frame itself.
+    let removal = next_stream_map(&mut body).await;
+    assert_eq!(
+        removal.peers_removed.len(),
+        1,
+        "alice-node leaves bob's peer list once no rule references it"
+    );
+    let after_rename_away = next_stream_map(&mut body).await;
+    rename_away.await.expect("rename task");
+    let base = after_rename_away
+        .packet_filters
+        .get("base")
+        .expect("base packet filter key present");
+    assert!(
+        base.iter()
+            .flatten()
+            .all(|rule| rule.dst_ports.iter().all(|dst| dst.ip != "100.64.0.11")),
+        "bob must no longer be reachable once no group member resolves: {:?}",
+        after_rename_away.packet_filters
+    );
 }
 
 #[cfg(feature = "full")]
@@ -615,7 +729,12 @@ async fn admin_rename_empty_hostname_400() {
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert!(body.contains("hostname"));
+    // Go State.RenameNode wraps types.ValidateGivenName:
+    //   renaming node: "" is not a valid DNS label: empty DNS label
+    assert!(
+        body.contains(r#"renaming node: \"\" is not a valid DNS label: empty DNS label"#),
+        "{body}"
+    );
 }
 
 #[tokio::test]

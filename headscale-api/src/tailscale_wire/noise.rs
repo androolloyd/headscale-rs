@@ -4,24 +4,16 @@
 //! pattern with a Tailscale-specific prologue string mixed in via
 //! `MixHash`. The full wire-level upgrade also involves:
 //!
-//!   1. An HTTP `Upgrade: tailscale-control-protocol` request to
-//!      `/ts2021`.
+//!   1. An HTTP `Upgrade: tailscale-control-protocol` POST or browser
+//!      `Upgrade: websocket` GET to `/ts2021`.
 //!   2. A custom 3-byte header framing
 //!      (`[msgType:u8][len:u16be]`, or 5-byte for `Initiation` carrying
 //!      a `protocolVersion:u16be`) wrapping each Noise message.
-//!   3. HTTP/2 spoken over the hijacked socket once the handshake
-//!      completes.
+//!   3. HTTP/2 spoken over the Noise stream once the handshake completes.
 //!
-//! This module implements **layer (1) only**: an in-process initiator /
-//! responder pair on top of `snow`, with the Tailscale prologue
-//! correctly bound in. The framing layer (2) and the HTTP/2 hijack (3)
-//! are *not* wired here — see the decision log in `mod.rs` for why,
-//! and `docs/tailscale-interop-blocker.md` for the gap. With just (1)
-//! we can prove the Noise math, write a round-trip test, and persist
-//! the server's long-term static key. Adding (2) is mechanical;
-//! adding (3) requires a Rust HTTP/2 server that can take a hijacked
-//! `tokio::io::AsyncRead+AsyncWrite` connection (no crate exposes
-//! this cleanly today — `h2` requires its own Connection type).
+//! Native and WebSocket upgrades both use the same framed Noise responder
+//! and encrypted HTTP/2 dispatcher. WebSocket binary messages are bridged
+//! into an asynchronous byte stream before the Noise handshake.
 //!
 //! ## Decision log
 //!
@@ -36,16 +28,14 @@
 //!   We pin N to 39 (`NoiseCapabilityVersion`) because that's what
 //!   headscale upstream targets; future clients may advance it but the
 //!   Noise key is the same.
-//! - **Static key persistence:** `<state_dir>/noise_static.key`,
-//!   32 raw bytes (no PEM, no JSON envelope). The file is created
-//!   `0600` on Unix; on Windows we rely on the default ACL inherited
-//!   from the parent dir. We chose raw bytes rather than a JSON
-//!   envelope because there's exactly one consumer (this module) and
-//!   the simpler format is harder to corrupt.
+//! - **Static key persistence:** legacy Rust state uses 32 raw bytes at
+//!   `<state_dir>/noise_static.key`. A configured `noise.private_key_path`
+//!   uses headscale-go's `privkey:<hex>` encoding so a Go server can keep
+//!   the same Noise identity across a handoff.
 
 use std::{
     fs,
-    io::{ErrorKind, Read, Write},
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -57,19 +47,36 @@ use axum::{
     Router,
     body::Body,
     extract::DefaultBodyLimit,
-    extract::{Request, State},
+    extract::{
+        FromRequestParts, Request, State,
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderValue, Response, StatusCode, header},
     response::IntoResponse,
 };
+use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use snow::{Builder, params::NoiseParams};
-use tokio::sync::Notify;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use super::be_transport::{BeNoiseStream, BeTransport};
 use super::controlbase::{FrameHeader, Framed, MsgType};
+use super::request_log::RequestLogRemoteAddr;
 use super::wire::{is_supported_capability_version, unsupported_client_error};
 use super::{WireError, WireState};
+
+fn request_log_remote_addr(req: &Request) -> Option<RequestLogRemoteAddr> {
+    req.extensions()
+        .get::<RequestLogRemoteAddr>()
+        .cloned()
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|peer| RequestLogRemoteAddr(peer.0.to_string()))
+        })
+}
 
 /// Machine key learned from the client's TS2021 Noise static key.
 /// Inner h2 requests carry this through axum extensions so `/register`
@@ -119,6 +126,16 @@ pub const NOISE_CAPABILITY_VERSION: u16 = 39;
 /// Maximum request body size accepted by handlers inside the Noise
 /// HTTP/2 tunnel. Mirrors upstream headscale's `noiseBodyLimit`.
 pub const NOISE_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const CONTROL_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+// Bound only unfinished handshakes. Established control/map sessions do not
+// retain a permit and therefore do not impose a tailnet-size limit.
+const MAX_PENDING_CONTROL_HANDSHAKES: usize = 1024;
+// Match the pinned Go x/net/http2 defaults used by its Noise listener.
+const MAX_CONTROL_H2_STREAMS: u32 = 250;
+const MAX_CONTROL_H2_HEADER_BYTES: u32 = 1024 * 1024 + 10 * 32;
+const MAX_CONTROL_H2_FRAME_BYTES: u32 = 1024 * 1024;
+const CONTROL_H2_RECEIVE_WINDOW: u32 = 1024 * 1024;
 
 /// Noise pattern string. `Noise_IK_25519_ChaChaPoly_BLAKE2s` is the
 /// exact instantiation TS2021 uses. Sourced from
@@ -141,6 +158,7 @@ pub struct ServerNoiseKey {
     /// 32-byte X25519 public point. Cached so `/key` doesn't have to
     /// re-derive on every request.
     public: [u8; 32],
+    pending_handshakes: Arc<Semaphore>,
 }
 
 impl ServerNoiseKey {
@@ -151,43 +169,84 @@ impl ServerNoiseKey {
     /// `state_dir` is created if it doesn't exist. On Unix the key file
     /// is written with mode `0600`.
     pub fn load_or_generate(state_dir: impl AsRef<Path>) -> Result<Self, WireError> {
-        let dir: PathBuf = state_dir.as_ref().into();
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(NOISE_STATIC_KEY_FILENAME);
+        Self::load_or_generate_with_configured_path(state_dir, None)
+    }
 
-        let private = match fs::File::open(&path) {
-            Ok(mut f) => {
-                let mut buf = Vec::with_capacity(32);
-                f.read_to_end(&mut buf)?;
-                if buf.len() != 32 {
+    /// Select the configured Go key when present, retaining an existing raw
+    /// Rust key when an old deployment has not yet created its configured key.
+    pub fn effective_key_path(state_dir: &Path, configured_path: Option<&Path>) -> PathBuf {
+        let legacy = state_dir.join(NOISE_STATIC_KEY_FILENAME);
+        match configured_path {
+            Some(path) if path.exists() || !legacy.exists() => path.to_path_buf(),
+            _ => legacy,
+        }
+    }
+
+    /// Load the configured Go-format key, or generate one in that format.
+    /// An existing legacy raw key takes precedence when the configured file
+    /// does not exist, preserving a Rust server's established identity.
+    pub fn load_or_generate_with_configured_path(
+        state_dir: impl AsRef<Path>,
+        configured_path: Option<&Path>,
+    ) -> Result<Self, WireError> {
+        let dir = state_dir.as_ref();
+        fs::create_dir_all(dir)?;
+        let path = Self::effective_key_path(dir, configured_path);
+        let use_go_format = configured_path.is_some_and(|configured| configured == path);
+
+        let private = match fs::read(&path) {
+            Ok(bytes) if bytes.len() == 32 => bytes,
+            Ok(bytes) if use_go_format => {
+                let text = std::str::from_utf8(&bytes).map_err(|_| {
+                    WireError::Internal(format!("invalid noise private key at {}", path.display()))
+                })?;
+                let hex_key = text
+                    .strip_suffix('\n')
+                    .unwrap_or(text)
+                    .strip_prefix("privkey:")
+                    .ok_or_else(|| {
+                        WireError::Internal(format!(
+                            "invalid noise private key at {}: expected privkey: prefix",
+                            path.display()
+                        ))
+                    })?;
+                if hex_key.len() != 64 || !hex_key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                     return Err(WireError::Internal(format!(
-                        "noise static key at {} has length {}; expected 32",
-                        path.display(),
-                        buf.len()
+                        "invalid noise private key at {}: expected 64 hex digits",
+                        path.display()
                     )));
                 }
-                buf
+                hex::decode(hex_key).map_err(|_| {
+                    WireError::Internal(format!("invalid noise private key at {}", path.display()))
+                })?
+            }
+            Ok(bytes) => {
+                return Err(WireError::Internal(format!(
+                    "noise static key at {} has length {}; expected 32",
+                    path.display(),
+                    bytes.len()
+                )));
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                let kp = Builder::new(NOISE_PATTERN.parse().map_err(noise_err)?)
+                tracing::info!(path = %path.display(), "no private key file at path, creating...");
+                let mut kp = Builder::new(NOISE_PATTERN.parse().map_err(noise_err)?)
                     .generate_keypair()
                     .map_err(noise_err)?;
-                // Persist atomically: write to .tmp then rename. Avoids
-                // a partial file on a crash mid-write.
-                let tmp = path.with_extension("key.tmp");
-                {
-                    let mut f = fs::File::create(&tmp)?;
-                    f.write_all(&kp.private)?;
-                    f.sync_all()?;
+                if use_go_format {
+                    // Tailscale's MachinePrivate marshals a clamped scalar.
+                    kp.private[0] &= 0b1111_1000;
+                    kp.private[31] &= 127;
+                    kp.private[31] |= 64;
                 }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perm = fs::metadata(&tmp)?.permissions();
-                    perm.set_mode(0o600);
-                    fs::set_permissions(&tmp, perm)?;
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-                fs::rename(&tmp, &path)?;
+                let contents = if use_go_format {
+                    format!("privkey:{}\n", hex::encode(&kp.private)).into_bytes()
+                } else {
+                    kp.private.clone()
+                };
+                super::tls::write_atomic(&path, &contents, 0o600)?;
                 kp.private
             }
             Err(e) => return Err(e.into()),
@@ -204,12 +263,19 @@ impl ServerNoiseKey {
         Ok(Self {
             private: Mutex::new(private),
             public,
+            pending_handshakes: Arc::new(Semaphore::new(MAX_PENDING_CONTROL_HANDSHAKES)),
         })
     }
 
     /// 32-byte X25519 public key. Cheap to copy.
     pub fn public_bytes(&self) -> [u8; 32] {
         self.public
+    }
+
+    pub(crate) fn handshake_permit(&self) -> Result<OwnedSemaphorePermit, WireError> {
+        Arc::clone(&self.pending_handshakes)
+            .try_acquire_owned()
+            .map_err(|_| WireError::Noise("too many pending control handshakes".into()))
     }
 
     /// Hex-encoded public key (lowercase, no prefix). The `/key`
@@ -360,7 +426,7 @@ fn noise_err<E: std::fmt::Display>(e: E) -> WireError {
 /// corresponding shared secret in the stock interop flow (the
 /// challenge is only meaningful when paired with a follow-up
 /// `NodeChallengeReply` later in the flow, which we don't implement).
-fn generate_x25519_public() -> Result<[u8; 32], WireError> {
+pub(crate) fn generate_x25519_public() -> Result<[u8; 32], WireError> {
     let params: NoiseParams = NOISE_PATTERN.parse().map_err(noise_err)?;
     let kp = Builder::new(params).generate_keypair().map_err(noise_err)?;
     if kp.public.len() != 32 {
@@ -424,6 +490,8 @@ fn build_early_noise_frame() -> Result<Vec<u8>, WireError> {
 /// See `docs/tailscale-interop-blocker.md` 2026-05-19 continuation
 /// section for what we observed in practice.
 pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) -> Response<Body> {
+    let remote_addr = request_log_remote_addr(&req);
+    let request_event = super::request_log::defer(&req);
     // Verify the upgrade header before we commit to the hijack path.
     let wants_upgrade = req
         .headers()
@@ -437,6 +505,24 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
             .body(Body::from("Internal error\n"))
             .unwrap();
     }
+
+    // Current controlhttp clients put the framed IK initiation in this
+    // header. The raw TLS listener already handles that form; the ordinary
+    // HTTP listener must pass it into the same BE transport driver too.
+    let initial_frame = req
+        .headers()
+        .get(super::raw_tls::HANDSHAKE_HEADER_NAME)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(value) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    tracing::warn!(target = "tailscale_wire::noise", %error, "invalid X-Tailscale-Handshake header; waiting for pipelined initiation");
+                    None
+                }
+            }
+        });
 
     let on_upgrade = match req.extensions().get::<hyper::upgrade::OnUpgrade>() {
         Some(_) => req
@@ -457,6 +543,7 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
 
     let state_for_task = state;
     tokio::spawn(async move {
+        let _request_event = request_event;
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
@@ -467,7 +554,14 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
                 // care about post-handshake h2 (the snow-backed
                 // sibling `drive_ts2021` is kept for the existing
                 // in-process tests that talk Noise spec).
-                if let Err(e) = drive_ts2021_be(state_for_task, io).await {
+                if let Err(e) = drive_ts2021_be_with_init_remote_addr(
+                    state_for_task,
+                    io,
+                    initial_frame,
+                    remote_addr,
+                )
+                .await
+                {
                     tracing::warn!(target = "tailscale_wire::noise", error = %e, "ts2021 connection ended with error");
                 }
             }
@@ -483,6 +577,123 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
         .header(header::UPGRADE, HeaderValue::from_static(UPGRADE_PROTOCOL))
         .body(Body::empty())
         .unwrap()
+}
+
+/// Browser/WASM control clients send the deferred Noise initiation in the
+/// WebSocket URL and then run the same encrypted HTTP/2 stream over binary
+/// WebSocket messages.
+pub async fn handle_ts2021_websocket(
+    State(state): State<WireState>,
+    req: Request,
+) -> Response<Body> {
+    let remote_addr = request_log_remote_addr(&req);
+    let request_event = super::request_log::defer(&req);
+    let offered_protocol = req
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|protocol| protocol.trim() == UPGRADE_PROTOCOL)
+        });
+    let initial_frame = req
+        .uri()
+        .query()
+        .and_then(|query| super::query::first_value(query, super::raw_tls::HANDSHAKE_HEADER_NAME))
+        .and_then(|value| String::from_utf8(value).ok());
+    let (mut parts, _body) = req.into_parts();
+    let websocket = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(websocket) => websocket,
+        Err(error) => return error.into_response(),
+    };
+
+    websocket
+        .protocols([UPGRADE_PROTOCOL])
+        .on_upgrade(move |mut socket| async move {
+            let _request_event = request_event;
+            if !offered_protocol {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1008,
+                        reason: "client must speak the control subprotocol".into(),
+                    })))
+                    .await;
+                return;
+            }
+            let Some(initial_frame) = initial_frame else {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1008,
+                        reason: "missing Tailscale handshake parameter".into(),
+                    })))
+                    .await;
+                return;
+            };
+            let initial_frame = {
+                use base64::Engine;
+                if let Ok(frame) = base64::engine::general_purpose::STANDARD.decode(initial_frame) {
+                    frame
+                } else {
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1008,
+                                reason: "invalid tailscale handshake parameter".into(),
+                            })))
+                            .await;
+                        return;
+                }
+            };
+            if let Err(error) = drive_ts2021_websocket(state, socket, initial_frame, remote_addr).await {
+                tracing::warn!(target = "tailscale_wire::noise", %error, "ts2021 WebSocket connection ended with error");
+            }
+        })
+}
+
+async fn drive_ts2021_websocket(
+    state: WireState,
+    socket: WebSocket,
+    initial_frame: Vec<u8>,
+    remote_addr: Option<RequestLogRemoteAddr>,
+) -> Result<(), WireError> {
+    let (noise_io, websocket_io) = tokio::io::duplex(128 * 1024);
+    let (mut websocket_read, mut websocket_write) = tokio::io::split(websocket_io);
+    let (mut sink, mut stream) = socket.split();
+    let bridge = tokio::spawn(async move {
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            tokio::select! {
+                incoming = stream.next() => match incoming {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if websocket_write.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(bytes))) => {
+                        if sink.send(Message::Pong(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    _ => break,
+                },
+                outgoing = websocket_read.read(&mut buffer) => match outgoing {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        if sink.send(Message::Binary(buffer[..count].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let result =
+        drive_ts2021_be_with_init_remote_addr(state, noise_io, Some(initial_frame), remote_addr)
+            .await;
+    bridge.abort();
+    let _ = bridge.await;
+    result
 }
 
 /// The actual handshake + h2 dispatch driver. Pulled out of the axum
@@ -519,6 +730,8 @@ pub async fn drive_ts2021_with_init<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let pending_handshake = state.server_noise_key.handshake_permit()?;
+    let deadline = tokio::time::Instant::now() + CONTROL_HANDSHAKE_TIMEOUT;
     let mut framed = Framed::new(io);
 
     // Step 1: source the Initiation. The header-fast-start path
@@ -533,10 +746,7 @@ where
             );
             parse_initiation_frame(&bytes)?
         }
-        None => framed
-            .read_frame()
-            .await
-            .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
+        None => handshake_io(deadline, "read initiation frame", framed.read_frame()).await?,
     };
     let proto_version = match hdr {
         FrameHeader::Initiation {
@@ -576,10 +786,12 @@ where
         .write_message(&[], &mut reply_body)
         .map_err(noise_err)?;
     reply_body.truncate(reply_len);
-    framed
-        .write_frame(MsgType::Reply, &reply_body)
-        .await
-        .map_err(|e| WireError::Noise(format!("write reply frame: {e}")))?;
+    handshake_io(
+        deadline,
+        "write reply frame",
+        framed.write_frame(MsgType::Reply, &reply_body),
+    )
+    .await?;
 
     let transport = responder.into_transport_mode().map_err(noise_err)?;
     let mut noise_stream = framed.into_transport(transport);
@@ -609,43 +821,114 @@ where
     // the client logged a json-unmarshal error on the EarlyNoise read).
     let early = build_early_noise_frame()?;
     use tokio::io::AsyncWriteExt;
-    noise_stream
-        .write_all(&early)
-        .await
-        .map_err(|e| WireError::Noise(format!("write early-noise: {e}")))?;
-    noise_stream
-        .flush()
-        .await
-        .map_err(|e| WireError::Noise(format!("flush early-noise: {e}")))?;
+    handshake_io(
+        deadline,
+        "write early-noise",
+        noise_stream.write_all(&early),
+    )
+    .await?;
+    handshake_io(deadline, "flush early-noise", noise_stream.flush()).await?;
+    let h2_conn = handshake_io(
+        deadline,
+        "h2 handshake",
+        control_h2_builder().handshake(noise_stream),
+    )
+    .await?;
+    drop(pending_handshake);
+    serve_noise_h2(state, h2_conn, machine_key_hex, None).await
+}
 
-    // Step 6: h2 handshake + per-request dispatch.
-    let mut h2_conn = h2::server::handshake(noise_stream)
+async fn handshake_io<F, T, E>(
+    deadline: tokio::time::Instant,
+    stage: &str,
+    operation: F,
+) -> Result<T, WireError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    tokio::time::timeout_at(deadline, operation)
         .await
-        .map_err(|e| WireError::Noise(format!("h2 handshake: {e}")))?;
+        .map_err(|_| WireError::Noise(format!("{stage}: handshake timed out")))?
+        .map_err(|err| WireError::Noise(format!("{stage}: {err}")))
+}
 
-    // Build the machine-control router dispatched inside Noise h2.
-    // These endpoints are deliberately not mounted on the outer public
-    // router; upstream headscale only serves them behind TS2021.
-    let router = inner_router(state.clone());
+fn control_h2_builder() -> h2::server::Builder {
+    let mut builder = h2::server::Builder::new();
+    #[cfg(feature = "full")]
+    builder.go_native_server(None);
+    builder
+        .max_concurrent_streams(MAX_CONTROL_H2_STREAMS)
+        .max_header_list_size(MAX_CONTROL_H2_HEADER_BYTES)
+        .max_frame_size(MAX_CONTROL_H2_FRAME_BYTES)
+        .initial_window_size(CONTROL_H2_RECEIVE_WINDOW)
+        .initial_connection_window_size(CONTROL_H2_RECEIVE_WINDOW)
+        .header_table_size(4096);
+    builder
+}
 
-    while let Some(result) = h2_conn.accept().await {
-        let (req, mut respond) = match result {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 accept failed");
-                break;
+async fn serve_noise_h2<T>(
+    state: WireState,
+    mut connection: h2::server::Connection<T, bytes::Bytes>,
+    machine_key_hex: String,
+    remote_addr: Option<RequestLogRemoteAddr>,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let machines = state.machines.clone();
+    let Some(_native_connection) = machines.begin_native_work() else {
+        return Ok(());
+    };
+    let router = inner_router(state);
+    let mut requests = tokio::task::JoinSet::new();
+    let shutdown = machines.native_shutdown_started();
+    tokio::pin!(shutdown);
+    let mut closing = false;
+    loop {
+        while requests.try_join_next().is_some() {}
+        if closing && requests.is_empty() {
+            // Requests have queued their resets and dropped their bodies.
+            // Give control frames one nonblocking flush opportunity; a peer
+            // that stopped reading must not hold local shutdown indefinitely.
+            let _ =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(connection.poll_closed(cx))).await;
+            break;
+        }
+        tokio::select! {
+            biased;
+            () = &mut shutdown, if !closing => {
+                closing = true;
+                connection.graceful_shutdown();
             }
-        };
-        let router_for_req = router.clone();
-        let machine_key_hex = machine_key_hex.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                dispatch_h2_request(router_for_req, machine_key_hex, req, &mut respond).await
-            {
-                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 dispatch failed");
+            result = connection.accept() => {
+                let Some(result) = result else {
+                    if closing {
+                        while requests.join_next().await.is_some() {}
+                    }
+                    break;
+                };
+                let (request, mut response) = result.map_err(|err| WireError::Noise(format!("h2 accept: {err}")))?;
+                if closing || requests.len() >= MAX_CONTROL_H2_STREAMS as usize {
+                    response.send_reset(h2::Reason::REFUSED_STREAM);
+                    continue;
+                }
+                let router = router.clone();
+                let machine_key = machine_key_hex.clone();
+                let remote_addr = remote_addr.clone();
+                let machines = machines.clone();
+                requests.spawn(async move {
+                    if let Err(err) = dispatch_h2_request(router, machine_key, request, &mut response, machines, remote_addr).await {
+                        tracing::debug!(target = "tailscale_wire::noise", error = %err, "h2 request ended");
+                    }
+                });
             }
-        });
+            _ = requests.join_next(), if !requests.is_empty() => {}
+        }
     }
+    // Native shutdown joins requests above. Unexpected transport closure drops
+    // the JoinSet and releases their guards; owned map mutations and deferred
+    // disconnect persistence retain their own shutdown work tickets.
     Ok(())
 }
 
@@ -665,6 +948,8 @@ async fn dispatch_h2_request(
     machine_key_hex: String,
     req: http::Request<h2::RecvStream>,
     respond: &mut h2::server::SendResponse<bytes::Bytes>,
+    machines: Arc<super::MachineRegistry>,
+    remote_addr: Option<RequestLogRemoteAddr>,
 ) -> Result<(), WireError> {
     use bytes::{Bytes, BytesMut};
     use http_body::Body as HttpBody;
@@ -674,6 +959,8 @@ async fn dispatch_h2_request(
 
     let req_method = parts.method.clone();
     let req_uri = parts.uri.clone();
+    let shutdown = machines.native_shutdown_started();
+    tokio::pin!(shutdown);
     tracing::debug!(
         target = "tailscale_wire::noise",
         method = %req_method,
@@ -685,7 +972,21 @@ async fn dispatch_h2_request(
     // expect a fully-buffered body anyway (`Json<...>` / `Bytes`
     // extractors). Register and map bodies are <2 KiB.
     let mut body_bytes = BytesMut::new();
-    while let Some(chunk) = body.data().await {
+    let body_deadline = tokio::time::Instant::now() + CONTROL_HANDSHAKE_TIMEOUT;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            () = &mut shutdown => {
+                respond.send_reset(h2::Reason::INTERNAL_ERROR);
+                return Ok(());
+            }
+            chunk = tokio::time::timeout_at(body_deadline, body.data()) => {
+                chunk.map_err(|_| WireError::Noise("h2 request body timed out".into()))?
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         let chunk = chunk.map_err(|e| WireError::Noise(format!("h2 body read: {e}")))?;
         let n = chunk.len();
         if body_bytes.len().saturating_add(n) > NOISE_BODY_LIMIT {
@@ -715,35 +1016,58 @@ async fn dispatch_h2_request(
         .extensions
         .insert(NoisePeerMachineKey(machine_key_hex));
     parts.extensions.insert(cancellation.clone());
+    if let Some(remote_addr) = remote_addr {
+        parts.extensions.insert(remote_addr);
+    }
     let axum_req = http::Request::from_parts(parts, axum_body);
 
     let router_response = router.oneshot(axum_req);
     tokio::pin!(router_response);
-    let reset = std::future::poll_fn(|cx| respond.poll_reset(cx));
-    tokio::pin!(reset);
-
-    let resp = tokio::select! {
-        resp = &mut router_response => {
-            resp.map_err(|e| WireError::Noise(format!("router oneshot: {e}")))?
-        }
-        reset = &mut reset => {
-            cancellation.cancel();
-            match reset {
-                Ok(reason) => {
-                    tracing::debug!(
-                        target = "tailscale_wire::noise",
-                        uri = %req_uri,
-                        reason = ?reason,
-                        "h2 stream reset before response"
-                    );
-                    return Ok(());
+    let resp = {
+        let reset = std::future::poll_fn(|cx| respond.poll_reset(cx));
+        tokio::pin!(reset);
+        tokio::select! {
+            biased;
+            () = &mut shutdown => None,
+            resp = &mut router_response => {
+                Some(resp.map_err(|e| WireError::Noise(format!("router oneshot: {e}")))?)
+            }
+            reset = &mut reset => {
+                cancellation.cancel();
+                match reset {
+                    Ok(reason) => {
+                        tracing::debug!(
+                            target = "tailscale_wire::noise",
+                            uri = %req_uri,
+                            reason = ?reason,
+                            "h2 stream reset before response"
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(WireError::Noise(format!("h2 poll_reset: {e}"))),
                 }
-                Err(e) => return Err(WireError::Noise(format!("h2 poll_reset: {e}"))),
             }
         }
     };
+    let Some(resp) = resp else {
+        cancellation.cancel();
+        // Dropping an unanswered h2 SendResponse implicitly sends CANCEL.
+        // Go's expired write deadline uses INTERNAL_ERROR for stopped maps.
+        respond.send_reset(h2::Reason::INTERNAL_ERROR);
+        return Ok(());
+    };
 
-    let (resp_parts, mut resp_body) = resp.into_parts();
+    let (mut resp_parts, mut resp_body) = resp.into_parts();
+    let deletion = resp_parts
+        .extensions
+        .remove::<super::map::MapStreamDeletion>();
+    let deletion = async move {
+        match deletion {
+            Some(deletion) => deletion.deleted().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deletion);
     let mut head = http::Response::builder().status(resp_parts.status);
     {
         let hdrs = head.headers_mut().expect("builder is valid");
@@ -766,32 +1090,51 @@ async fn dispatch_h2_request(
         "h2 dispatch sent response headers; streaming body frames"
     );
 
-    // Forward body frames as they arrive. We poll the underlying
-    // `http_body::Body` directly (rather than going through
-    // `BodyExt::collect`) so a non-terminating stream — the
-    // `Stream=true` long-poll body — keeps the h2 stream open and
-    // delivers keepalive `\n` chunks the client expects every 30s.
-    //
-    // Per `tailscale/control/controlclient/direct.go::sendMapRequest`,
-    // the client uses `json.NewDecoder(resp.Body).Decode(&mr)` on a
-    // streaming JSON decoder — pure newline-delimited JSON is
-    // tolerated as whitespace between documents. The first
-    // MapResponse frame unblocks the daemon's state-machine transition
-    // to "Up"; subsequent frames carry registry-change deltas (we emit
-    // a fresh full MapResponse on every wake — incremental Peers{Patch,Changed}
-    // is documented as upstream-equivalent-but-unimplemented in
-    // `wire.rs`).
+    // Forward already-framed map updates under HTTP/2 flow control. Polling
+    // the body directly preserves the initial full response, incremental
+    // updates and keepalives without collecting the never-ending stream.
     let mut frame_count: u64 = 0;
     loop {
-        let frame_opt =
-            std::future::poll_fn(|cx| std::pin::Pin::new(&mut resp_body).poll_frame(cx)).await;
+        let frame_opt = tokio::select! {
+            biased;
+            () = &mut deletion => {
+                // Go's immediate write deadline resets deleted sessions even
+                // when no further response-body frame can be consumed.
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                cancellation.cancel();
+                return Ok(());
+            }
+            () = &mut shutdown => {
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                cancellation.cancel();
+                return Ok(());
+            }
+            frame = std::future::poll_fn(|cx| std::pin::Pin::new(&mut resp_body).poll_frame(cx)) => frame,
+            reset = std::future::poll_fn(|cx| send.poll_reset(cx)) => {
+                cancellation.cancel();
+                return reset.map(|_| ()).map_err(|error| WireError::Noise(format!("h2 response reset: {error}")));
+            }
+        };
         match frame_opt {
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(data) => {
                     if !data.is_empty() {
                         let chunk: Bytes = data;
-                        send.send_data(chunk, false)
-                            .map_err(|e| WireError::Noise(format!("h2 send_data: {e}")))?;
+                        // Capacity waits must remain interruptible by the
+                        // owning map session's sticky deletion signal.
+                        let sent = tokio::select! {
+                            biased;
+                            () = &mut deletion => None,
+                            () = &mut shutdown => None,
+                            result = send_h2_data(&mut send, chunk, false) => Some(result),
+                        };
+                        if let Some(result) = sent {
+                            result?;
+                        } else {
+                            send.send_reset(h2::Reason::INTERNAL_ERROR);
+                            cancellation.cancel();
+                            return Ok(());
+                        }
                         frame_count += 1;
                     }
                 }
@@ -803,6 +1146,7 @@ async fn dispatch_h2_request(
                 }
             },
             Some(Err(e)) => {
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
                 tracing::warn!(
                     target = "tailscale_wire::noise",
                     uri = %req_uri,
@@ -815,8 +1159,7 @@ async fn dispatch_h2_request(
                 // Body ended naturally — for register/non-streaming
                 // map this is the common path. Close the stream by
                 // sending an empty final frame with end_of_stream=true.
-                send.send_data(Bytes::new(), true)
-                    .map_err(|e| WireError::Noise(format!("h2 send_data eof: {e}")))?;
+                send_h2_data(&mut send, Bytes::new(), true).await?;
                 break;
             }
         }
@@ -827,6 +1170,38 @@ async fn dispatch_h2_request(
         frames = frame_count,
         "h2 dispatch complete"
     );
+    Ok(())
+}
+
+/// Respect the peer's receive window instead of buffering an unbounded
+/// sequence of map updates behind a slow or stalled client.
+async fn send_h2_data(
+    stream: &mut h2::SendStream<bytes::Bytes>,
+    mut data: bytes::Bytes,
+    end_stream: bool,
+) -> Result<(), WireError> {
+    if data.is_empty() {
+        if end_stream {
+            stream
+                .send_data(data, true)
+                .map_err(|error| WireError::Noise(format!("h2 send_data eof: {error}")))?;
+        }
+        return Ok(());
+    }
+    while !data.is_empty() {
+        stream.reserve_capacity(data.len());
+        let capacity = std::future::poll_fn(|cx| stream.poll_capacity(cx))
+            .await
+            .ok_or_else(|| WireError::Noise("h2 response stream closed".into()))?
+            .map_err(|error| WireError::Noise(format!("h2 send capacity: {error}")))?;
+        if capacity == 0 {
+            continue;
+        }
+        let chunk = data.split_to(capacity.min(data.len()));
+        stream
+            .send_data(chunk, end_stream && data.is_empty())
+            .map_err(|error| WireError::Noise(format!("h2 send_data: {error}")))?;
+    }
     Ok(())
 }
 
@@ -861,6 +1236,7 @@ async fn not_implemented_handler() -> impl IntoResponse {
 /// aren't mounted here — they live on the outer public router.
 pub(crate) fn inner_router(state: WireState) -> Router {
     use axum::routing::{get, patch, post};
+    let metrics_registry = Arc::clone(&state.machines);
     Router::new()
         // Keyed variants — kept for legacy / direct-test paths.
         .route(
@@ -890,6 +1266,12 @@ pub(crate) fn inner_router(state: WireState) -> Router {
         .route("/machine/c2n", post(not_implemented_handler))
         .layer(DefaultBodyLimit::max(NOISE_BODY_LIMIT))
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: axum::middleware::Next| {
+                let metrics_registry = Arc::clone(&metrics_registry);
+                async move { super::record_http_metrics(metrics_registry, req, next, true).await }
+            },
+        ))
 }
 
 /// Like [`drive_ts2021_with_init`] but uses the **big-endian-nonce**
@@ -915,6 +1297,22 @@ pub async fn drive_ts2021_be_with_init<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    drive_ts2021_be_with_init_remote_addr(state, io, initial_frame, None).await
+}
+
+/// Native upgrades pin the outer router's resolved RemoteAddr across the
+/// hijack, exactly as the Go Noise overrideRemoteAddr middleware does.
+pub(super) async fn drive_ts2021_be_with_init_remote_addr<T>(
+    state: WireState,
+    io: T,
+    initial_frame: Option<Vec<u8>>,
+    remote_addr: Option<RequestLogRemoteAddr>,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let pending_handshake = state.server_noise_key.handshake_permit()?;
+    let deadline = tokio::time::Instant::now() + CONTROL_HANDSHAKE_TIMEOUT;
     let mut framed = Framed::new(io);
 
     // Step 1: source the Initiation (header-fast-start or pipelined).
@@ -927,10 +1325,7 @@ where
             );
             parse_initiation_frame(&bytes)?
         }
-        None => framed
-            .read_frame()
-            .await
-            .map_err(|e| WireError::Noise(format!("read initiation frame: {e}")))?,
+        None => handshake_io(deadline, "read initiation frame", framed.read_frame()).await?,
     };
     let proto_version = match hdr {
         FrameHeader::Initiation {
@@ -967,10 +1362,12 @@ where
         .write_message(&[], &mut reply_body)
         .map_err(noise_err)?;
     reply_body.truncate(reply_len);
-    framed
-        .write_frame(MsgType::Reply, &reply_body)
-        .await
-        .map_err(|e| WireError::Noise(format!("write reply frame: {e}")))?;
+    handshake_io(
+        deadline,
+        "write reply frame",
+        framed.write_frame(MsgType::Reply, &reply_body),
+    )
+    .await?;
 
     // Step 4: extract split keys *before* converting into transport
     // mode (snow's transport_state_mut path is private; the public
@@ -999,40 +1396,21 @@ where
     // the client logged a json-unmarshal error on the EarlyNoise read).
     let early = build_early_noise_frame()?;
     use tokio::io::AsyncWriteExt;
-    noise_stream
-        .write_all(&early)
-        .await
-        .map_err(|e| WireError::Noise(format!("write early-noise (be): {e}")))?;
-    noise_stream
-        .flush()
-        .await
-        .map_err(|e| WireError::Noise(format!("flush early-noise (be): {e}")))?;
-
-    // Step 6: h2 over BE-nonce noise stream + per-request dispatch.
-    let mut h2_conn = h2::server::handshake(noise_stream)
-        .await
-        .map_err(|e| WireError::Noise(format!("h2 handshake: {e}")))?;
-
-    let router = inner_router(state.clone());
-    while let Some(result) = h2_conn.accept().await {
-        let (req, mut respond) = match result {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 accept failed");
-                break;
-            }
-        };
-        let router_for_req = router.clone();
-        let machine_key_hex = machine_key_hex.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                dispatch_h2_request(router_for_req, machine_key_hex, req, &mut respond).await
-            {
-                tracing::warn!(target = "tailscale_wire::noise", error = %e, "h2 dispatch failed");
-            }
-        });
-    }
-    Ok(())
+    handshake_io(
+        deadline,
+        "write early-noise",
+        noise_stream.write_all(&early),
+    )
+    .await?;
+    handshake_io(deadline, "flush early-noise", noise_stream.flush()).await?;
+    let h2_conn = handshake_io(
+        deadline,
+        "h2 handshake",
+        control_h2_builder().handshake(noise_stream),
+    )
+    .await?;
+    drop(pending_handshake);
+    serve_noise_h2(state, h2_conn, machine_key_hex, remote_addr).await
 }
 
 /// Convenience wrapper for the no-pre-decoded-Initiation case.
@@ -1169,6 +1547,59 @@ mod tests {
     }
 
     #[test]
+    fn configured_go_key_is_used_across_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("go/noise_private.key");
+        let private = [7u8; 32];
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("privkey:{}", hex::encode(private))).unwrap();
+        let first =
+            ServerNoiseKey::load_or_generate_with_configured_path(dir.path(), Some(&path)).unwrap();
+        let expected = derive_x25519_public(&private).unwrap();
+        assert_eq!(first.public_bytes(), expected);
+        assert!(!dir.path().join(NOISE_STATIC_KEY_FILENAME).exists());
+        let second =
+            ServerNoiseKey::load_or_generate_with_configured_path(dir.path(), Some(&path)).unwrap();
+        assert_eq!(second.public_bytes(), expected);
+    }
+
+    #[test]
+    fn configured_key_generation_is_go_compatible_and_preserves_legacy_identity() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("go/noise_private.key");
+        let first =
+            ServerNoiseKey::load_or_generate_with_configured_path(dir.path(), Some(&path)).unwrap();
+        let encoded = fs::read_to_string(&path).unwrap();
+        assert_eq!(encoded.trim_end_matches('\n').len(), "privkey:".len() + 64);
+        assert!(encoded.starts_with("privkey:"));
+        let second =
+            ServerNoiseKey::load_or_generate_with_configured_path(dir.path(), Some(&path)).unwrap();
+        assert_eq!(first.public_bytes(), second.public_bytes());
+
+        let legacy_dir = tempdir().unwrap();
+        let legacy = ServerNoiseKey::load_or_generate(legacy_dir.path()).unwrap();
+        let missing = legacy_dir.path().join("missing.key");
+        let reopened = ServerNoiseKey::load_or_generate_with_configured_path(
+            legacy_dir.path(),
+            Some(&missing),
+        )
+        .unwrap();
+        assert_eq!(legacy.public_bytes(), reopened.public_bytes());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn malformed_configured_key_fails_closed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("noise_private.key");
+        fs::write(&path, "privkey:invalid").unwrap();
+        assert!(
+            ServerNoiseKey::load_or_generate_with_configured_path(dir.path(), Some(&path)).is_err()
+        );
+        assert!(!dir.path().join(NOISE_STATIC_KEY_FILENAME).exists());
+    }
+
+    #[test]
     fn server_key_public_hex_is_64_chars() {
         let dir = tempdir().unwrap();
         let k = ServerNoiseKey::load_or_generate(dir.path()).unwrap();
@@ -1279,6 +1710,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), b"Internal error\n");
+    }
+
+    #[tokio::test]
+    async fn ts2021_websocket_get_reaches_upgrade_handler() {
+        let (state, _dir) = fixture_state();
+        let app = crate::tailscale_wire::router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/ts2021?X-Tailscale-Handshake=AAAA")
+                    .header("Connection", "Upgrade")
+                    .header("Upgrade", "websocket")
+                    .header("Sec-WebSocket-Version", "13")
+                    .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .header("Sec-WebSocket-Protocol", UPGRADE_PROTOCOL)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]

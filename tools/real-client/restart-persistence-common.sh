@@ -967,15 +967,15 @@ EOF
 write_database_config() {
   case "${database_backend}" in
     sqlite)
-      if [[ "${target}" == "headscale-go" ]]; then
-        cat <<EOF
+      # Both servers need an explicit database type: headscale-go has no
+      # default, and headscale-rs now validates the same way.
+      cat <<EOF
 
 database:
   type: sqlite
   sqlite:
     path: ${db_path}
 EOF
-      fi
       ;;
     postgres)
       cat <<EOF

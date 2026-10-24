@@ -111,8 +111,11 @@ fn admin_record(
         ipv6: None,
         online: true,
         last_seen: Utc::now().timestamp() as u64,
+        last_seen_precise: None,
         created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap().timestamp() as u64,
+        created_at_precise: None,
         expiry: None,
+        expiry_precise: None,
         machine_key_hex: key(machine_byte),
         disco_key: String::new(),
         os: "linux".into(),
@@ -294,6 +297,10 @@ async fn register_ok(
     response
 }
 
+/// headscale-go's noise RegistrationHandler always answers 200 and reports a
+/// failed registration in `RegisterResponse.Error` (`regErr`), wrapped by
+/// handleRegister as "handling register with auth key: ..." and, for a new
+/// node, by HandleNodeFromPreAuthKey as "creating new node: ...".
 async fn register_rejected_requested_tags(
     state: &WireState,
     node_byte: u8,
@@ -303,12 +310,12 @@ async fn register_rejected_requested_tags(
 ) {
     let (status, value) =
         register_with_auth_key(state, node_byte, machine_byte, auth_key, request_tags).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["MachineAuthorized"], false, "{value}");
+    let error = value["Error"].as_str().unwrap_or_default();
     assert!(
-        value["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("requested tags"),
+        error.starts_with("handling register with auth key: creating new node: requested tags ")
+            && error.ends_with(" are invalid or not permitted"),
         "{value}"
     );
 }
@@ -501,7 +508,12 @@ async fn tagsauthkeywithtagclicannotmodifyadmintags() {
     register_ok(&state, 0x13, 0x92, "hskey-auth-tagged-admin", &[]).await;
     assert!(registry.set_forced_tags(&key(0x13), tags(&["tag:valid-owned", "tag:second"])));
 
-    register_rejected_requested_tags(
+    // Go only validates Hostinfo.RequestTags when it creates a node from a
+    // pre-auth key. A machine that already has its node is updated in place
+    // (tags are re-applied only for a *different* tagged key), so the same key
+    // re-registering with advertised tags succeeds and the admin tags survive
+    // on the row, which now carries the new node key.
+    register_ok(
         &state,
         0x14,
         0x92,
@@ -509,7 +521,8 @@ async fn tagsauthkeywithtagclicannotmodifyadmintags() {
         &["tag:valid-owned"],
     )
     .await;
-    assert_registry_tags(&registry, &key(0x13), &["tag:valid-owned", "tag:second"]);
+    assert!(registry.get(&key(0x13)).is_none());
+    assert_registry_tags(&registry, &key(0x14), &["tag:valid-owned", "tag:second"]);
 }
 
 #[tokio::test]
@@ -520,7 +533,10 @@ async fn tagsauthkeywithtagcannotaddviacli() {
     );
     register_ok(&state, 0x15, 0x93, "hskey-auth-no-add", &[]).await;
 
-    register_rejected_requested_tags(
+    // Go ignores advertised tags for an existing node re-registering with
+    // the same tagged key: the registration succeeds, the row moves to the
+    // new node key and the tags stay those of the key.
+    register_ok(
         &state,
         0x16,
         0x93,
@@ -528,7 +544,8 @@ async fn tagsauthkeywithtagcannotaddviacli() {
         &["tag:valid-owned", "tag:second"],
     )
     .await;
-    assert_registry_tags(&registry, &key(0x15), &["tag:valid-owned"]);
+    assert!(registry.get(&key(0x15)).is_none());
+    assert_registry_tags(&registry, &key(0x16), &["tag:valid-owned"]);
 }
 
 #[tokio::test]
@@ -539,9 +556,10 @@ async fn tagsauthkeywithtagcannotchangeviacli() {
     );
     register_ok(&state, 0x17, 0x94, "hskey-auth-no-change", &[]).await;
 
-    register_rejected_requested_tags(&state, 0x18, 0x94, "hskey-auth-no-change", &["tag:second"])
-        .await;
-    assert_registry_tags(&registry, &key(0x17), &["tag:valid-owned"]);
+    // Same Go rule as above: advertised tags never replace a tagged key's tags.
+    register_ok(&state, 0x18, 0x94, "hskey-auth-no-change", &["tag:second"]).await;
+    assert!(registry.get(&key(0x17)).is_none());
+    assert_registry_tags(&registry, &key(0x18), &["tag:valid-owned"]);
 }
 
 #[tokio::test]
@@ -600,7 +618,10 @@ async fn tagsauthkeywithouttagclicannotreduceadminmultitag() {
     register_ok(&state, 0x1a, 0x96, "hskey-auth-plain-reduce", &[]).await;
     assert!(registry.set_forced_tags(&key(0x1a), tags(&["tag:valid-owned", "tag:second"])));
 
-    register_rejected_requested_tags(
+    // Go finds the (now tagged) node through findExistingNodeForPAK and
+    // re-registers it in place; an untagged key does not touch its tags and
+    // advertised tags are ignored.
+    register_ok(
         &state,
         0x1b,
         0x96,
@@ -608,7 +629,8 @@ async fn tagsauthkeywithouttagclicannotreduceadminmultitag() {
         &["tag:valid-owned"],
     )
     .await;
-    assert_registry_tags(&registry, &key(0x1a), &["tag:valid-owned", "tag:second"]);
+    assert!(registry.get(&key(0x1a)).is_none());
+    assert_registry_tags(&registry, &key(0x1b), &["tag:valid-owned", "tag:second"]);
 }
 
 #[tokio::test]
@@ -637,7 +659,9 @@ async fn tagsauthkeywithouttagcannotaddviacli() {
         authkey_fixture("hskey-auth-plain-no-add", RedeemOk::for_user(TAG_USER));
     register_ok(&state, 0x20, 0x99, "hskey-auth-plain-no-add", &[]).await;
 
-    register_rejected_requested_tags(
+    // Go does not process advertised tags when re-registering an existing
+    // user-owned node with a pre-auth key; the node simply gets the new key.
+    register_ok(
         &state,
         0x21,
         0x99,
@@ -645,7 +669,8 @@ async fn tagsauthkeywithouttagcannotaddviacli() {
         &["tag:valid-owned"],
     )
     .await;
-    assert_registry_tags(&registry, &key(0x20), &[]);
+    assert!(registry.get(&key(0x20)).is_none());
+    assert_registry_tags(&registry, &key(0x21), &[]);
 }
 
 #[tokio::test]

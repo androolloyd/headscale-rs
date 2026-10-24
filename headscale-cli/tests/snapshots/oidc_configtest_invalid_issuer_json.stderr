@@ -1,0 +1,3 @@
+{
+	"error": "configuration error: loading configuration: oidc.issuer must be a valid http(s) URL: got \"not-a-url\""
+}

@@ -2,6 +2,48 @@
 
 dns_live_resolver_pid=""
 dns_live_resolver_pids=()
+dns_live_resolver_containers=()
+
+dns_live_resolver_start_sidecar() {
+  local image="$1"
+  local work_dir="$2"
+  shift 2
+  local architecture
+  local responder
+  local container="dns-live-resolver-${RANDOM}-${RANDOM}"
+  local resolver_ip
+
+  mkdir -p "${work_dir}"
+  responder="$(cd "${work_dir}" && pwd)/dns-live-responder"
+  architecture="$(docker info --format '{{.Architecture}}')"
+  case "${architecture}" in
+    aarch64|arm64) architecture=arm64 ;;
+    x86_64|amd64) architecture=amd64 ;;
+    *) echo "unsupported Docker DNS fixture architecture: ${architecture}" >&2; return 2 ;;
+  esac
+  GOOS=linux GOARCH="${architecture}" CGO_ENABLED=0 \
+    go build -o "${responder}" tools/real-client/dns-live-responder.go
+  docker run -d --rm --network bridge --name "${container}" \
+    -v "${responder}:/dns-live-responder:ro" \
+    --entrypoint /dns-live-responder "${image}" "$@" >/dev/null
+  dns_live_resolver_containers+=("${container}")
+
+  local deadline=$((SECONDS + 5))
+  until docker logs "${container}" 2>&1 | grep -q 'dns-live-responder listening'; do
+    if ((SECONDS >= deadline)); then
+      docker logs "${container}" >&2 || true
+      echo "DNS resolver sidecar did not become ready" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+  resolver_ip="$(docker inspect "${container}" --format '{{.NetworkSettings.Networks.bridge.IPAddress}}')"
+  if [[ -z "${resolver_ip}" ]]; then
+    echo "DNS resolver sidecar has no bridge IP" >&2
+    return 1
+  fi
+  DNS_LIVE_SIDECAR_IP="${resolver_ip}"
+}
 
 dns_live_resolver_free_udp_port() {
   ruby -rsocket -e 's=UDPSocket.new; s.bind("0.0.0.0", 0); puts s.addr[1]; s.close'
@@ -181,6 +223,32 @@ start_dns_live_split_resolver() {
   local port
   local records_json
 
+  if [[ "${REAL_CLIENT_DNS_LIVE_SIDECAR:-false}" == "true" ]]; then
+    local sidecar_ip
+    dns_live_resolver_start_sidecar "${image}" "${work_dir}" \
+      -name "${name}" -ipv4 "${expected_ip}" \
+      -ipv6-name "${ipv6_name}" -ipv6 "${expected_ipv6}"
+    sidecar_ip="${DNS_LIVE_SIDECAR_IP}"
+    DNS_LIVE_SPLIT_SUFFIX="${suffix}"
+    DNS_LIVE_SPLIT_NAME="${name}"
+    DNS_LIVE_SPLIT_IPV4="${expected_ip}"
+    DNS_LIVE_SPLIT_RESOLVER_ADDR="${sidecar_ip}"
+    DNS_LIVE_SPLIT_ROUTE_EXPECTATION="${suffix}=${sidecar_ip}"
+    DNS_LIVE_SPLIT_RESOLVE_EXPECTATION="${name}=ip4:${expected_ip}"
+    DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS="${DNS_LIVE_SPLIT_RESOLVE_EXPECTATION}"
+    if [[ -n "${ipv6_name}" ]]; then
+      DNS_LIVE_SPLIT_IPV6_NAME="${ipv6_name}"
+      DNS_LIVE_SPLIT_IPV6="${expected_ipv6}"
+      DNS_LIVE_SPLIT_IPV6_RESOLVE_EXPECTATION="${ipv6_name}=ip6:${expected_ipv6}"
+      DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS="${DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS},${DNS_LIVE_SPLIT_IPV6_RESOLVE_EXPECTATION}"
+      export DNS_LIVE_SPLIT_IPV6_NAME DNS_LIVE_SPLIT_IPV6 DNS_LIVE_SPLIT_IPV6_RESOLVE_EXPECTATION
+    fi
+    export DNS_LIVE_SPLIT_SUFFIX DNS_LIVE_SPLIT_NAME DNS_LIVE_SPLIT_IPV4
+    export DNS_LIVE_SPLIT_RESOLVER_ADDR DNS_LIVE_SPLIT_ROUTE_EXPECTATION
+    export DNS_LIVE_SPLIT_RESOLVE_EXPECTATION DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS
+    return
+  fi
+
   mkdir -p "${work_dir}"
   host_gateway_ip="$(dns_live_resolver_host_gateway_ip "${image}")"
   if [[ -z "${host_gateway_ip}" ]]; then
@@ -188,7 +256,7 @@ start_dns_live_split_resolver() {
     return 1
   fi
 
-  port="$(dns_live_resolver_free_udp_port)"
+  port="${REAL_CLIENT_DNS_LIVE_SPLIT_PORT:-$(dns_live_resolver_free_udp_port)}"
   records_json="$(ruby -rjson -e '
     records = [{"name" => ARGV.fetch(0), "type" => 1, "value" => ARGV.fetch(1)}]
     ipv6_name = ARGV.fetch(2)
@@ -238,7 +306,10 @@ start_dns_live_split_resolver() {
       question = data.byteslice(12, offset + 4 - 12)
       record = qclass == 1 ? records[[qname.downcase.sub(/\.\z/, ""), qtype]] : nil
       matches = !record.nil?
-      flags = matches ? 0x8180 : 0x8183
+      # A known name without this qtype is NOERROR/NODATA. Returning
+      # NXDOMAIN for its AAAA lookup can make clients discard the A answer.
+      known_name = records.keys.any? { |record_name, _| record_name == qname.downcase.sub(/\.\z/, "") }
+      flags = (matches || known_name) ? 0x8180 : 0x8183
       answers = matches ? 1 : 0
       response = data.byteslice(0, 2) + [flags, 1, answers, 0, 0].pack("nnnnn") + question
       if matches
@@ -276,7 +347,12 @@ start_dns_live_split_resolver() {
   DNS_LIVE_SPLIT_SUFFIX="${suffix}"
   DNS_LIVE_SPLIT_NAME="${name}"
   DNS_LIVE_SPLIT_IPV4="${expected_ip}"
-  DNS_LIVE_SPLIT_RESOLVER_ADDR="${host_gateway_ip}:${port}"
+  if [[ "${port}" == "53" ]]; then
+    # headscale-go accepts plain DNS resolver IPs, not IP:port strings.
+    DNS_LIVE_SPLIT_RESOLVER_ADDR="${host_gateway_ip}"
+  else
+    DNS_LIVE_SPLIT_RESOLVER_ADDR="${host_gateway_ip}:${port}"
+  fi
   DNS_LIVE_SPLIT_ROUTE_EXPECTATION="${suffix}=${DNS_LIVE_SPLIT_RESOLVER_ADDR}"
   DNS_LIVE_SPLIT_RESOLVE_EXPECTATION="${name}=ip4:${expected_ip}"
   DNS_LIVE_SPLIT_RESOLVE_EXPECTATIONS="${DNS_LIVE_SPLIT_RESOLVE_EXPECTATION}"
@@ -316,6 +392,14 @@ start_dns_live_failure_resolver() {
       return 2
       ;;
   esac
+
+  if [[ "${REAL_CLIENT_DNS_LIVE_SIDECAR:-false}" == "true" ]]; then
+    dns_live_resolver_start_sidecar "${image}" "${work_dir}" -rcode "${rcode}"
+    DNS_LIVE_FAILURE_RESOLVER_ADDR="${DNS_LIVE_SIDECAR_IP}"
+    DNS_LIVE_FAILURE_RESOLVER_RCODE="${rcode}"
+    export DNS_LIVE_FAILURE_RESOLVER_ADDR DNS_LIVE_FAILURE_RESOLVER_RCODE
+    return
+  fi
 
   mkdir -p "${work_dir}"
   host_gateway_ip="$(dns_live_resolver_host_gateway_ip "${image}")"
@@ -406,6 +490,11 @@ stop_dns_live_resolver() {
     [[ -n "${pid}" ]] || continue
     wait "${pid}" >/dev/null 2>&1 || true
   done
+  local container
+  for container in "${dns_live_resolver_containers[@]}"; do
+    docker rm -f "${container}" >/dev/null 2>&1 || true
+  done
   dns_live_resolver_pid=""
   dns_live_resolver_pids=()
+  dns_live_resolver_containers=()
 }

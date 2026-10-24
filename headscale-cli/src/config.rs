@@ -5,11 +5,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use headscale_api::dns::{DnsConfigSpec, parse_extra_records};
-use headscale_core::config::{EmbeddedDerpConfig, EmbeddedDerpRelayMode, OidcConfig};
+use headscale_core::config::{ConfigError, EmbeddedDerpConfig, EmbeddedDerpRelayMode, OidcConfig};
 use headscale_db::DatabaseBackend;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::derp_config::DerpConfig;
+
+#[cfg(feature = "postgres-sqlx")]
+mod postgres;
+mod prefix_warning;
+mod secret_file;
 
 const DEFAULT_CONFIG_FILENAMES: &[&str] =
     &["config.yaml", "config.yml", "config.json", "config.toml"];
@@ -17,11 +22,18 @@ const DEFAULT_CLI_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_NODE_ROUTES_HA_PROBE_INTERVAL_SECS: u64 = 10;
 const DEFAULT_NODE_ROUTES_HA_PROBE_TIMEOUT_SECS: u64 = 5;
 const MISSING_NOISE_PRIVATE_KEY_PATH_ERROR: &str = "Fatal config error: headscale now requires a new `noise.private_key_path` field in the config file for the Tailscale v2 protocol";
+pub(crate) const DEPRECATED_EPHEMERAL_TIMEOUT_WARNING: &str = "WARN: The \"ephemeral_node_inactivity_timeout\" configuration key is deprecated. Please use \"node.ephemeral.inactivity_timeout\" instead. \"ephemeral_node_inactivity_timeout\" has been removed.";
 pub(crate) const TLS_ALPN_ACME_PORT_WARNING: &str = "Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443";
 
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct CliConfig {
+    #[serde(skip)]
+    pub(crate) deprecation_warnings: Vec<String>,
+    #[serde(skip)]
+    pub(crate) dns_extra_records_is_set: bool,
+    #[serde(skip)]
+    pub(crate) dns_extra_records_path_is_set: bool,
     /// Server mode configuration
     pub server: Option<ServerConfig>,
     /// Upstream top-level `server_url`.
@@ -104,7 +116,11 @@ pub(crate) struct CliConfig {
     #[serde(default, alias = "log", skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
     /// Top-level headscale-compatible DNS configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_cli_dns",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dns: Option<DnsConfigSpec>,
     /// Upstream-compatible ACL policy serving mode.
     #[serde(default, skip_serializing_if = "policy_config_is_default")]
@@ -136,6 +152,156 @@ pub(crate) struct DefaultConfigLoad {
     pub(crate) used_defaults: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{log_message}")]
+pub(crate) struct ConfigDeprecationError {
+    pub(crate) log_message: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{log_message}")]
+pub(crate) struct ConfigFatalError {
+    pub(crate) log_message: String,
+    pub(crate) before_log_config: bool,
+}
+
+/// Own the initial file snapshot through command selection. The source can
+/// contain secrets; do not derive Debug or include it in diagnostics.
+pub(crate) struct InitialConfigLoad {
+    pub(crate) config: CliConfig,
+    source: Option<(PathBuf, String)>,
+}
+
+impl InitialConfigLoad {
+    pub(crate) fn used_defaults(&self) -> bool {
+        self.source.is_none()
+    }
+
+    pub(crate) fn into_config(self, full: bool) -> Result<CliConfig> {
+        if !full {
+            return Ok(self.config);
+        }
+        match self.source {
+            Some((path, contents)) => CliConfig::load_source_unresolved(&path, &contents),
+            None => CliConfig::server_defaults_unresolved(),
+        }
+    }
+}
+
+/// Viper's CLI loader reads only these settings. Ignore unrelated server
+/// values while decoding, including values that the typed server config
+/// would reject, rather than loading secrets or validating server options.
+#[derive(Default)]
+struct AdminConfigProjection {
+    values: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for AdminConfigProjection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ProjectionVisitor;
+
+        impl<'de> de::Visitor<'de> for ProjectionVisitor {
+            type Value = AdminConfigProjection;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a configuration mapping")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(AdminConfigProjection::default())
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                self.visit_unit()
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut projection = AdminConfigProjection::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    let key = key.to_ascii_lowercase();
+                    if matches!(
+                        key.split('.').next(),
+                        Some(
+                            "cli"
+                                | "unix_socket"
+                                | "log"
+                                | "logging"
+                                | "disable_check_updates"
+                                | "server"
+                        )
+                    ) {
+                        projection.values.insert(key, map.next_value()?);
+                    } else {
+                        map.next_value::<de::IgnoredAny>()?;
+                    }
+                }
+                Ok(projection)
+            }
+        }
+
+        deserializer.deserialize_any(ProjectionVisitor)
+    }
+}
+
+impl AdminConfigProjection {
+    fn get(&self, path: &str) -> Option<&serde_json::Value> {
+        if let Some(value) = self.values.get(path) {
+            return (!value.is_null()).then_some(value);
+        }
+        let (root, mut path) = path.split_once('.')?;
+        let mut value = self.values.get(root)?;
+        loop {
+            let object = value.as_object()?;
+            if let Some((_, value)) = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(path))
+            {
+                return (!value.is_null()).then_some(value);
+            }
+            let (component, remaining) = path.split_once('.')?;
+            value = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(component))?
+                .1;
+            path = remaining;
+        }
+    }
+
+    fn to_config(&self) -> CliConfig {
+        let logging = LoggingConfig {
+            level: self
+                .get("log.level")
+                .or_else(|| self.get("logging.level"))
+                .map_or_else(default_log_level, cast_cli_string),
+            format: self
+                .get("log.format")
+                .or_else(|| self.get("logging.format"))
+                .map_or_else(default_log_format, cast_cli_string),
+        };
+        CliConfig {
+            cli: Some(AdminCliConfig {
+                address: self.get("cli.address").map(cast_cli_string),
+                api_key: self.get("cli.api_key").map(cast_cli_string),
+                insecure: self.get("cli.insecure").map(cast_cli_bool),
+                timeout: self.get("cli.timeout").map(cast_cli_duration_value),
+            }),
+            unix_socket: self
+                .get("unix_socket")
+                .map(cast_cli_string)
+                .map(PathBuf::from),
+            // Preserve the Rust nested-socket extension without decoding any
+            // other server fields or performing server normalization.
+            server: self.get("server.unix_socket").map(|value| ServerConfig {
+                unix_socket: PathBuf::from(cast_cli_string(value)),
+                ..ServerConfig::default()
+            }),
+            disable_check_updates: self.get("disable_check_updates").is_some_and(cast_cli_bool),
+            logging: Some(logging),
+            ..CliConfig::default()
+        }
+    }
+}
+
 /// Operator CLI configuration used by upstream `headscale` admin commands.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct AdminCliConfig {
@@ -148,13 +314,13 @@ pub(crate) struct AdminCliConfig {
     /// Disable TLS certificate verification for remote gRPC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure: Option<bool>,
-    /// Upstream operator CLI request timeout in seconds.
+    /// Upstream operator CLI request timeout in signed Go nanoseconds.
     #[serde(
         default,
-        deserialize_with = "deserialize_optional_duration_secs_from_int_or_string",
+        deserialize_with = "deserialize_optional_cli_duration_nanos",
         skip_serializing_if = "Option::is_none"
     )]
-    pub timeout: Option<u64>,
+    pub timeout: Option<i64>,
 }
 
 /// Server (control plane) configuration.
@@ -181,6 +347,9 @@ pub(crate) struct ServerConfig {
     /// State directory for the Tailscale wire noise key and TLS material.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
+    /// Configured Tailscale Noise key file. Upstream uses a `privkey:` text key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_private_key_path: Option<PathBuf>,
     /// Optional HTTPS bind address for the Tailscale wire listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_listen: Option<String>,
@@ -501,7 +670,7 @@ impl PolicyConfig {
     }
 
     pub(crate) fn mode(&self) -> &str {
-        self.mode.trim()
+        self.mode.as_str()
     }
 
     pub(crate) fn is_file_mode(&self) -> bool {
@@ -519,17 +688,107 @@ impl PolicyConfig {
 }
 
 impl CliConfig {
+    pub(crate) fn load_initial(path: Option<&Path>) -> Result<InitialConfigLoad> {
+        let path = path.map(Path::to_path_buf).or_else(|| {
+            default_config_dirs()
+                .into_iter()
+                .flat_map(|directory| {
+                    DEFAULT_CONFIG_FILENAMES
+                        .iter()
+                        .map(move |filename| directory.join(filename))
+                })
+                .find(|candidate| candidate.is_file())
+        });
+        if let Some(path) = path {
+            let contents = std::fs::read_to_string(&path).map_err(|error| {
+                anyhow::anyhow!(crate::go_style_open_error(
+                    "fatal error reading config file",
+                    &path,
+                    &error,
+                ))
+            })?;
+            let config = Self::parse_admin(&contents, ConfigFormat::from_path(&path))
+                .context("fatal error reading config file")?;
+            Ok(InitialConfigLoad {
+                config,
+                source: Some((path, contents)),
+            })
+        } else {
+            let mut config = Self::default();
+            config.apply_admin_env_overrides_from(std::env::vars());
+            Ok(InitialConfigLoad {
+                config,
+                source: None,
+            })
+        }
+    }
+
+    pub(crate) fn load_admin(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::parse_admin(&contents, ConfigFormat::from_path(path))
+    }
+
+    fn parse_admin(contents: &str, format: ConfigFormat) -> Result<Self> {
+        let projection: AdminConfigProjection = match format {
+            ConfigFormat::Toml => toml::from_str(contents).context("failed to parse TOML config"),
+            ConfigFormat::Yaml => {
+                headscale_cli::yaml::from_str(contents).context("failed to parse YAML config")
+            }
+            ConfigFormat::Json => {
+                serde_json::from_str(contents).context("failed to parse JSON config")
+            }
+        }?;
+        let mut config = projection.to_config();
+        config.apply_admin_env_overrides_from(std::env::vars());
+        Ok(config)
+    }
+
+    fn apply_admin_env_overrides_from<I, K, V>(&mut self, vars: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        for (key, value) in vars {
+            let key = key.as_ref();
+            let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
+            self.apply_cli_env_overrides_from(std::iter::once((key, value)));
+            self.apply_logging_env_overrides_from(std::iter::once((key, value)));
+            match key {
+                "HEADSCALE_UNIX_SOCKET" => self.unix_socket = Some(PathBuf::from(value)),
+                "HEADSCALE_DISABLE_CHECK_UPDATES" => {
+                    self.disable_check_updates = cast_cli_bool_string(value);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Load configuration from a file.
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let mut config = Self::parse(&contents, ConfigFormat::from_path(path))?;
+        Self::load_source(path, &contents)
+    }
+
+    fn load_source(path: &Path, contents: &str) -> Result<Self> {
+        let mut config = Self::load_source_unresolved(path, contents)?;
+        config.resolve_oidc_client_secret()?;
+        Ok(config)
+    }
+
+    fn load_source_unresolved(path: &Path, contents: &str) -> Result<Self> {
+        let mut config =
+            Self::parse_with_deprecations(contents, ConfigFormat::from_path(path), true)?;
+        crate::print_config_deprecation_warnings(&config);
         let config_dir = path.parent().map(Path::to_path_buf);
         if let Some(parent) = config_dir.as_deref() {
             config.resolve_config_relative_paths(parent);
         }
         config.normalize_upstream_aliases();
         let should_refresh_derp_projection = config.embedded_derp_matches_upstream_projection();
-        config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
@@ -541,7 +800,7 @@ impl CliConfig {
         config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
-        config.apply_cli_env_overrides_from(std::env::vars())?;
+        config.apply_cli_env_overrides_from(std::env::vars());
         if let Some(parent) = config_dir.as_deref() {
             config.resolve_config_relative_paths(parent);
         }
@@ -549,7 +808,6 @@ impl CliConfig {
             config.reset_embedded_derp_projection();
         }
         config.normalize_upstream_aliases();
-        config.resolve_oidc_client_secret()?;
         Ok(config)
     }
 
@@ -573,7 +831,22 @@ impl CliConfig {
         Self::load_default_with_source_from_dirs(default_config_dirs())
     }
 
+    pub(crate) fn load_default_admin_with_source() -> Result<DefaultConfigLoad> {
+        Self::load_default_with_source_from_dirs_for_profile(default_config_dirs(), true)
+    }
+
     pub(crate) fn load_default_with_source_from_dirs<I, P>(dirs: I) -> Result<DefaultConfigLoad>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        Self::load_default_with_source_from_dirs_for_profile(dirs, false)
+    }
+
+    fn load_default_with_source_from_dirs_for_profile<I, P>(
+        dirs: I,
+        admin_only: bool,
+    ) -> Result<DefaultConfigLoad>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -583,7 +856,12 @@ impl CliConfig {
             for filename in DEFAULT_CONFIG_FILENAMES {
                 let candidate = dir.join(filename);
                 if candidate.is_file() {
-                    let config = Self::load(&candidate).with_context(|| {
+                    let load = if admin_only {
+                        Self::load_admin
+                    } else {
+                        Self::load
+                    };
+                    let config = load(&candidate).with_context(|| {
                         format!("failed to load config file {}", candidate.display())
                     })?;
                     return Ok(DefaultConfigLoad {
@@ -595,8 +873,34 @@ impl CliConfig {
         }
 
         let mut config = Self::default();
+        if admin_only {
+            config.apply_admin_env_overrides_from(std::env::vars());
+            return Ok(DefaultConfigLoad {
+                config,
+                used_defaults: true,
+            });
+        }
+        Ok(DefaultConfigLoad {
+            config: Self::server_defaults_from_env()?,
+            used_defaults: true,
+        })
+    }
+
+    fn server_defaults_from_env() -> Result<Self> {
+        let mut config = Self::server_defaults_unresolved()?;
+        config.resolve_oidc_client_secret()?;
+        Ok(config)
+    }
+
+    fn server_defaults_unresolved() -> Result<Self> {
+        let mut config = Self::default();
+        config.prepare_oidc_for_server()?;
+        let (warnings, records, records_path) = collect_config_input_metadata(|_| false, true)?;
+        config.deprecation_warnings = warnings;
+        config.dns_extra_records_is_set = records;
+        config.dns_extra_records_path_is_set = records_path;
+        crate::print_config_deprecation_warnings(&config);
         config.normalize_upstream_aliases();
-        config.apply_oidc_env_overrides_from(std::env::vars())?;
         config.apply_node_env_overrides_from(std::env::vars())?;
         config.apply_taildrop_env_overrides_from(std::env::vars())?;
         config.apply_runtime_feature_env_overrides_from(std::env::vars())?;
@@ -608,30 +912,98 @@ impl CliConfig {
         config.apply_tls_acme_env_overrides_from(std::env::vars());
         config.apply_policy_env_overrides_from(std::env::vars());
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
-        config.apply_cli_env_overrides_from(std::env::vars())?;
+        config.apply_cli_env_overrides_from(std::env::vars());
         config.normalize_upstream_aliases();
-        config.resolve_oidc_client_secret()?;
-        Ok(DefaultConfigLoad {
-            config,
-            used_defaults: true,
-        })
+        Ok(config)
     }
 
+    #[cfg(test)]
     fn parse(contents: &str, format: ConfigFormat) -> Result<Self> {
-        let mut config: Self = match format {
+        Self::parse_with_deprecations(contents, format, false)
+    }
+
+    fn parse_with_deprecations(
+        contents: &str,
+        format: ConfigFormat,
+        include_env: bool,
+    ) -> Result<Self> {
+        let config: Option<Self> = match format {
             ConfigFormat::Toml => toml::from_str(contents).context("failed to parse TOML config"),
             ConfigFormat::Yaml => {
-                serde_yaml::from_str(contents).context("failed to parse YAML config")
+                headscale_cli::yaml::from_str(contents).context("failed to parse YAML config")
             }
             ConfigFormat::Json => {
                 serde_json::from_str(contents).context("failed to parse JSON config")
             }
         }?;
+        let mut config = config.unwrap_or_default();
         config.normalize_upstream_aliases();
-        reject_removed_config_keys(contents, format)?;
+        if include_env {
+            config.prepare_oidc_for_server()?;
+        }
+        let (warnings, records, records_path) =
+            config_input_metadata(contents, format, include_env)?;
+        config.deprecation_warnings = warnings;
+        config.dns_extra_records_is_set = records;
+        config.dns_extra_records_path_is_set = records_path;
         Ok(config)
     }
 
+    fn prepare_oidc_for_server(&mut self) -> Result<()> {
+        self.oidc.apply_headscale_env_overrides_unchecked_from(
+            std::env::vars().filter(|(key, _)| key != "HEADSCALE_OIDC_EXPIRY"),
+        )?;
+        // Pinned Go validates an activated provider before logging removed
+        // keys. This does not resolve the client-secret file or discover it.
+        self.validate_native_oidc()?;
+        Ok(())
+    }
+
+    fn validate_native_oidc(&self) -> Result<()> {
+        let oidc = &self.oidc;
+        if oidc.issuer.is_empty() {
+            // Retain the optional Rust enabled-key extension when no issuer
+            // activates the native provider.
+            return oidc.validate().map_err(Into::into);
+        }
+        // validateOIDCConfig checks these in this order. Use net/url grammar
+        // at this CLI boundary: WHATWG URL parsing trims control/space input
+        // and rejects some Go-accepted host forms before discovery can run.
+        if !matches!(oidc.pkce.method.as_str(), "plain" | "S256") {
+            return Err(ConfigError::InvalidPkceMethod.into());
+        }
+        if !instant_acme::go_is_oidc_issuer_url(&oidc.issuer) {
+            bail!(
+                "oidc.issuer must be a valid http(s) URL: got {}",
+                crate::logging::quote(&oidc.issuer)
+            );
+        }
+        if oidc.client_id.is_empty() {
+            return Err(ConfigError::OidcClientIdRequired.into());
+        }
+        if oidc.client_secret.is_empty()
+            && oidc
+                .client_secret_path
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            return Err(ConfigError::OidcClientSecretRequired.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn upstream_deprecation_warnings(&self) -> Vec<String> {
+        let mut warnings = self.deprecation_warnings.clone();
+        let ephemeral = DEPRECATED_EPHEMERAL_TIMEOUT_WARNING.trim_start_matches("WARN: ");
+        if self.ephemeral_node_inactivity_timeout.is_some()
+            && !warnings.iter().any(|warning| warning == ephemeral)
+        {
+            warnings.push(ephemeral.to_string());
+        }
+        warnings
+    }
+
+    #[cfg(test)]
     fn apply_oidc_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -644,7 +1016,7 @@ impl CliConfig {
             .collect::<Vec<_>>();
         reject_removed_oidc_env_keys(&vars)?;
         self.oidc
-            .apply_headscale_env_overrides_from(vars)
+            .apply_headscale_env_overrides_unchecked_from(vars)
             .context("failed to apply OIDC environment overrides")
     }
 
@@ -672,6 +1044,9 @@ impl CliConfig {
         for (key, value) in vars {
             let key = key.as_ref();
             let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
             if key == "HEADSCALE_RANDOMIZE_CLIENT_PORT" {
                 bail!(
                     "{}",
@@ -679,9 +1054,6 @@ impl CliConfig {
                         "randomize_client_port"
                     ))
                 );
-            }
-            if value.is_empty() {
-                continue;
             }
 
             match key {
@@ -908,7 +1280,11 @@ impl CliConfig {
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        let mut saw_extra_records_env = false;
+        if self.dns_extra_records_is_set && self.dns_extra_records_path_is_set {
+            // Go rejects presence before decoding either source. Runtime
+            // metadata already includes file and nonempty environment keys.
+            return Ok(());
+        }
         for (key, value) in vars {
             let key = key.as_ref();
             let value = value.as_ref();
@@ -954,24 +1330,16 @@ impl CliConfig {
                     let dns = self.dns.get_or_insert_with(DnsConfigSpec::default);
                     dns.extra_records = parse_extra_records(value.as_bytes())
                         .with_context(|| format!("invalid {key}"))?;
-                    saw_extra_records_env = true;
+                    self.dns_extra_records_is_set = true;
                 }
                 "HEADSCALE_DNS_EXTRA_RECORDS_PATH" => {
+                    self.dns_extra_records_path_is_set = true;
                     self.dns
                         .get_or_insert_with(DnsConfigSpec::default)
                         .extra_records_path = Some(PathBuf::from(value));
                 }
                 _ => {}
             }
-        }
-
-        if let Some(dns) = &self.dns
-            && dns.extra_records_path.is_some()
-            && (saw_extra_records_env || !dns.extra_records.is_empty())
-        {
-            bail!(
-                "fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive"
-            );
         }
 
         Ok(())
@@ -1003,7 +1371,7 @@ impl CliConfig {
                         .get_or_insert_with(DerpConfig::default)
                         .server
                         .region_id = value
-                        .parse::<u16>()
+                        .parse::<i64>()
                         .with_context(|| format!("invalid {key}"))?;
                 }
                 "HEADSCALE_DERP_SERVER_REGION_CODE" => {
@@ -1213,17 +1581,19 @@ impl CliConfig {
         }
     }
 
-    fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
+    fn apply_cli_env_overrides_from<I, K, V>(&mut self, vars: I)
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: AsRef<str>,
     {
         for (key, value) in vars {
+            if value.as_ref().is_empty() {
+                continue;
+            }
             match key.as_ref() {
                 "HEADSCALE_CLI_TIMEOUT" => {
-                    let timeout = parse_duration_secs_str(value.as_ref())
-                        .map_err(|err| anyhow::anyhow!("invalid {}: {err}", key.as_ref()))?;
+                    let timeout = cast_cli_duration_string(value.as_ref());
                     self.cli.get_or_insert_with(AdminCliConfig::default).timeout = Some(timeout);
                 }
                 "HEADSCALE_CLI_ADDRESS" => {
@@ -1235,16 +1605,13 @@ impl CliConfig {
                         Some(value.as_ref().to_string());
                 }
                 "HEADSCALE_CLI_INSECURE" => {
-                    let insecure = parse_env_bool(value.as_ref())
-                        .with_context(|| format!("invalid {}", key.as_ref()))?;
                     self.cli
                         .get_or_insert_with(AdminCliConfig::default)
-                        .insecure = Some(insecure);
+                        .insecure = Some(cast_cli_bool_string(value.as_ref()));
                 }
                 _ => {}
             }
         }
-        Ok(())
     }
 
     fn apply_server_transport_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -1308,10 +1675,9 @@ impl CliConfig {
         Ok(())
     }
 
-    fn resolve_oidc_client_secret(&mut self) -> Result<()> {
-        self.oidc
-            .resolve_client_secret()
-            .context("failed to resolve OIDC client secret")
+    pub(crate) fn resolve_oidc_client_secret(&mut self) -> Result<()> {
+        self.validate_dns_record_sources()?;
+        secret_file::resolve(&mut self.oidc)
     }
 
     fn embedded_derp_matches_upstream_projection(&self) -> bool {
@@ -1331,7 +1697,7 @@ impl CliConfig {
             .and_then(host_port_from_url)
             .unwrap_or_default();
 
-        server.embedded_derp.region_id == derp.server.region_id
+        server.embedded_derp.region_id == u16::try_from(derp.server.region_id).unwrap_or_default()
             && server.embedded_derp.region_code == derp.server.region_code
             && server.embedded_derp.region_name == derp.server.region_name
             && server.embedded_derp.stun_addr == derp.server.stun_listen_addr
@@ -1358,7 +1724,6 @@ impl CliConfig {
             || self.metrics_listen_addr.is_some()
             || self.grpc_listen_addr.is_some()
             || self.grpc_allow_insecure.is_some()
-            || self.ephemeral_node_inactivity_timeout.is_some()
             || self
                 .node
                 .as_ref()
@@ -1399,9 +1764,6 @@ impl CliConfig {
         if let Some(grpc_allow_insecure) = self.grpc_allow_insecure {
             server.grpc_allow_insecure = grpc_allow_insecure;
         }
-        if let Some(timeout) = self.ephemeral_node_inactivity_timeout {
-            server.ephemeral_node_inactivity_timeout_secs = timeout;
-        }
         if let Some(timeout) = self
             .node
             .as_ref()
@@ -1409,10 +1771,18 @@ impl CliConfig {
         {
             server.ephemeral_node_inactivity_timeout_secs = timeout;
         }
-        if !had_server_block && let Some(unix_socket) = self.unix_socket.clone() {
+        // The top-level keys are the only form headscale-go has, so they apply
+        // unless a Rust `server:` block set its own socket. An extension block
+        // that only tunes something else (e.g. `https_listen`) must not discard
+        // them: its unset socket still holds the serde default.
+        if (!had_server_block || server.unix_socket == default_unix_socket())
+            && let Some(unix_socket) = self.unix_socket.clone()
+        {
             server.unix_socket = unix_socket;
         }
-        if !had_server_block && let Some(unix_socket_permission) = self.unix_socket_permission {
+        if (!had_server_block || server.unix_socket_permission == default_unix_socket_permission())
+            && let Some(unix_socket_permission) = self.unix_socket_permission
+        {
             server.unix_socket_permission = unix_socket_permission;
         }
         if let Some(noise_private_key_path) = self
@@ -1421,6 +1791,7 @@ impl CliConfig {
             .and_then(|noise| noise.private_key_path.as_ref())
         {
             server.state_dir = state_dir_from_noise_private_key(noise_private_key_path);
+            server.noise_private_key_path = Some(noise_private_key_path.clone());
         }
         if let Some(prefixes) = &self.prefixes {
             let prefix_v4 = non_empty_clone(prefixes.v4.as_ref());
@@ -1440,7 +1811,6 @@ impl CliConfig {
             .prefixes
             .as_ref()
             .and_then(|prefixes| prefixes.allocation.as_ref())
-            && !allocation.trim().is_empty()
         {
             server.ip_allocation.clone_from(allocation);
         }
@@ -1457,7 +1827,11 @@ impl CliConfig {
             && embedded_derp_config_is_default(&server.embedded_derp)
         {
             server.embedded_derp.enabled = true;
-            server.embedded_derp.region_id = derp.server.region_id;
+            // The core embedding extension keeps its public u16 field. The
+            // native source ID remains in `derp` and is never derived from
+            // this compatibility view when constructing the advertised map.
+            server.embedded_derp.region_id =
+                u16::try_from(derp.server.region_id).unwrap_or_default();
             server
                 .embedded_derp
                 .region_code
@@ -1524,12 +1898,112 @@ impl CliConfig {
         Ok(())
     }
 
+    fn validate_dns_record_sources(&self) -> Result<()> {
+        if self.dns_extra_records_is_set && self.dns_extra_records_path_is_set {
+            return Err(ConfigFatalError {
+                log_message: "fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive. Please remove one of them from your config file".into(),
+                before_log_config: true,
+            }.into());
+        }
+        Ok(())
+    }
+
+    /// Complete the typed server load before constructing persistent state.
+    /// Keep file I/O after aggregate/prefix/DERP validation, matching Go's
+    /// LoadServerConfig rather than checking late fatal fields up front.
+    pub(crate) fn complete_server_config_load(&mut self) -> Result<()> {
+        self.validate_dns_record_sources()?;
+        let server = self.server.clone().unwrap_or_default();
+        let server_url = server.server_url.as_deref().unwrap_or_default();
+        crate::print_config_warnings(self);
+        self.validate_upstream_fatal_config(&server, server_url)?;
+        crate::print_invalid_log_format(self);
+
+        let (prefix_v4, prefix_v6) = if let Some(prefixes) = &self.prefixes {
+            (
+                prefixes.v4.as_deref().unwrap_or_default(),
+                prefixes.v6.as_deref().unwrap_or_default(),
+            )
+        } else if self.server_url.is_some() {
+            ("", "")
+        } else {
+            // Keep the nested Rust server configuration extension.
+            (
+                server.mesh_cidr.as_str(),
+                server.mesh_cidr_v6.as_deref().unwrap_or_default(),
+            )
+        };
+        validate_config_prefix(prefix_v4, "IPv4")?;
+        validate_config_prefix(prefix_v6, "IPv6")?;
+        self.validate_trusted_proxies()?;
+        if prefix_v4.is_empty() && prefix_v6.is_empty() {
+            return Err(ConfigError::NoPrefixConfigured.into());
+        }
+        prefix_warning::warn_if_nonstandard(self, prefix_v4, prefix_v6);
+        if !matches!(server.ip_allocation.as_str(), "sequential" | "random") {
+            bail!(
+                "invalid prefix allocation strategy: {}, allowed options: sequential, random",
+                crate::logging::quote(&server.ip_allocation)
+            );
+        }
+
+        if let Some(derp) = &mut self.derp {
+            crate::derp_config::normalize_native_urls(derp)?;
+            crate::derp_config::validate_static_derp_config(derp)
+                .context("invalid static DERP configuration")?;
+        }
+        if server.embedded_derp.enabled {
+            if server.embedded_derp.host_name.trim().is_empty() {
+                bail!("server.embedded_derp.host_name is required when embedded DERP is enabled");
+            }
+            if server.embedded_derp.stun_addr.is_none() {
+                bail!("server.embedded_derp.stun_addr is required when embedded DERP is enabled");
+            }
+            if server.embedded_derp.sidecar_relay_enabled()
+                && server.embedded_derp.derper_binary.as_os_str().is_empty()
+            {
+                bail!(
+                    "server.embedded_derp.derper_binary is required when embedded DERP relay is enabled"
+                );
+            }
+        }
+
+        self.resolve_oidc_client_secret()?;
+        if let Some(dns) = &self.dns {
+            validate_server_url_base_domain(server_url, &dns.base_domain)?;
+        }
+        if let Some(log_message) = self.upstream_fatal_log_message() {
+            return Err(ConfigFatalError {
+                log_message,
+                before_log_config: false,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Validate the loaded config enough to catch startup-time errors without
     /// binding listeners or opening long-running services.
+    #[cfg(test)]
     pub(crate) fn validate_for_configtest(&self) -> Result<()> {
-        self.oidc.validate().context("invalid OIDC configuration")?;
+        self.validate_native_oidc()?;
         self.validate_trusted_proxies()?;
         self.validate_policy_config()?;
+
+        if self.server_url.is_some()
+            && self.prefixes.as_ref().is_none_or(|prefixes| {
+                prefixes
+                    .v4
+                    .as_deref()
+                    .is_none_or(|prefix| prefix.trim().is_empty())
+                    && prefixes
+                        .v6
+                        .as_deref()
+                        .is_none_or(|prefix| prefix.trim().is_empty())
+            })
+        {
+            return Err(ConfigError::NoPrefixConfigured.into());
+        }
 
         let default_server = ServerConfig::default();
         let server = self.server.as_ref().unwrap_or(&default_server);
@@ -1538,18 +2012,12 @@ impl CliConfig {
         self.validate_manual_tls_paths()?;
         self.validate_tls_acme_listener()?;
         parse_server_url_parts(server_url)?;
-        validate_socket_addr(&server.listen, "listen_addr")?;
         if let Some(https_listen) = server.https_listen.as_deref() {
             validate_socket_addr(https_listen, "https_listen")?;
         }
-        validate_optional_socket_addr(
-            server.metrics_listen_addr.as_deref(),
-            "metrics_listen_addr",
-        )?;
-        validate_socket_addr(&server.grpc_listen_addr, "grpc_listen_addr")?;
         if server.ephemeral_node_inactivity_timeout_secs <= 65 {
             bail!(
-                "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 65s",
+                "ephemeral_node_inactivity_timeout ({}s) is set too low, must be more than 1m5s",
                 server.ephemeral_node_inactivity_timeout_secs
             );
         }
@@ -1602,6 +2070,45 @@ impl CliConfig {
         Ok(())
     }
 
+    /// Listener syntax is checked when serving. Pinned Go's `configtest`
+    /// accepts these values because no listeners are bound by that command.
+    pub(crate) fn validate_listener_addresses(&self) -> Result<()> {
+        self.validate_manual_tls_paths()?;
+        self.validate_tls_acme_listener()?;
+        let default_server = ServerConfig::default();
+        let server = self.server.as_ref().unwrap_or(&default_server);
+        if let Some(https_listen) = server.https_listen.as_deref() {
+            validate_socket_addr(https_listen, "https_listen")?;
+        }
+        validate_socket_addr(&server.listen, "listen_addr")?;
+        validate_optional_socket_addr(
+            server.metrics_listen_addr.as_deref(),
+            "metrics_listen_addr",
+        )?;
+        validate_socket_addr(&server.grpc_listen_addr, "grpc_listen_addr")?;
+        Ok(())
+    }
+
+    /// Upstream terminates these checks through zerolog before Cobra formats
+    /// a command error.
+    pub(crate) fn upstream_fatal_log_message(&self) -> Option<String> {
+        let kind = self
+            .database
+            .as_ref()
+            .and_then(|database| database.database_type.as_deref())
+            .unwrap_or_default();
+        if !matches!(kind, "sqlite" | "sqlite3" | "postgres") {
+            return Some(format!(
+                "invalid database type {}, must be sqlite, sqlite3 or postgres",
+                crate::logging::quote(kind)
+            ));
+        }
+        self.dns
+            .as_ref()
+            .filter(|dns| dns.magic_dns && dns.base_domain.is_empty())
+            .map(|_| "dns.base_domain must be set when using MagicDNS (dns.magic_dns)".into())
+    }
+
     pub(crate) fn upstream_nonfatal_config_warnings(&self) -> Vec<&'static str> {
         let default_server = ServerConfig::default();
         let server = self.server.as_ref().unwrap_or(&default_server);
@@ -1617,29 +2124,26 @@ impl CliConfig {
     fn should_warn_tls_alpn_acme_non_443(&self, server: &ServerConfig) -> bool {
         self.tls_letsencrypt_hostname
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_some_and(|value| !value.is_empty())
             && self.tls_letsencrypt_challenge_type.as_deref() == Some("TLS-ALPN-01")
             && !server.listen.ends_with(":443")
     }
 
     fn validate_trusted_proxies(&self) -> Result<()> {
         for (i, raw) in self.trusted_proxies.iter().enumerate() {
-            let (addr, bits) =
-                parse_ip_prefix(raw).with_context(|| format!("trusted_proxies[{i}] {raw:?}"))?;
+            let (_, bits) = parse_ip_prefix(raw)
+                .with_context(|| format!("trusted_proxies[{i}] {}", crate::logging::quote(raw)))?;
             if bits == 0 {
-                bail!("trusted_proxies[{i}] {raw:?}: 0.0.0.0/0 and ::/0 are not allowed");
-            }
-            let max_bits = match addr {
-                IpAddr::V4(_) => 32,
-                IpAddr::V6(_) => 128,
-            };
-            if bits > max_bits {
-                bail!("trusted_proxies[{i}] {raw:?}: prefix length {bits} exceeds {max_bits}");
+                bail!(
+                    "trusted_proxies[{i}] {}: 0.0.0.0/0 and ::/0 are not allowed",
+                    crate::logging::quote(raw)
+                );
             }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_policy_config(&self) -> Result<()> {
         match self.policy.mode() {
             "file" => {
@@ -1648,15 +2152,20 @@ impl CliConfig {
                 };
                 let raw = std::fs::read_to_string(path)
                     .with_context(|| format!("read policy.path {}", path.display()))?;
+                if raw.is_empty() {
+                    return Ok(());
+                }
                 headscale_api::policy::parse_hujson_policy(&raw)
                     .with_context(|| format!("parse policy.path {}", path.display()))?;
                 Ok(())
             }
-            "database" => Ok(()),
-            mode => bail!("policy.mode must be either file or database, got {mode:?}"),
+            // Go loads an empty policy for unrecognized modes and can start;
+            // the policy admin RPCs report the unsupported mode when used.
+            _ => Ok(()),
         }
     }
 
+    #[cfg(test)]
     fn validate_upstream_database_config(&self) -> Result<()> {
         let Some(database) = &self.database else {
             bail!("database.type is required; supported values are sqlite, sqlite3, postgres");
@@ -1700,11 +2209,12 @@ impl CliConfig {
         server_url: &str,
     ) -> Result<()> {
         let mut errors = Vec::new();
+        let mut ephemeral_error_index = None;
 
         let letsencrypt_hostname = self
             .tls_letsencrypt_hostname
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
+            .is_some_and(|value| !value.is_empty());
         let cert_path = self
             .tls_cert_path
             .as_ref()
@@ -1739,15 +2249,16 @@ impl CliConfig {
             );
         }
 
-        if !server_url.trim().starts_with("http://") && !server_url.trim().starts_with("https://") {
+        if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
             errors
                 .push("Fatal config error: server_url must start with https:// or http://".into());
         }
 
         if server.ephemeral_node_inactivity_timeout_secs <= 65 {
+            ephemeral_error_index = Some(errors.len());
             errors.push(format!(
-                "Fatal config error: node.ephemeral.inactivity_timeout ({}s) is set too low, must be more than 65s",
-                server.ephemeral_node_inactivity_timeout_secs
+                "Fatal config error: node.ephemeral.inactivity_timeout ({}) is set too low, must be more than 1m5s",
+                format_go_duration_secs(server.ephemeral_node_inactivity_timeout_secs)
             ));
         }
 
@@ -1813,7 +2324,16 @@ impl CliConfig {
         }
 
         if !errors.is_empty() {
-            bail!("{}", errors.join("\n"));
+            let mut error_text = String::new();
+            for (index, error) in errors.iter().enumerate() {
+                // Pinned Go appends the ephemeral-timeout error without a
+                // newline, including when another validation error follows.
+                if index > 0 && ephemeral_error_index != Some(index - 1) {
+                    error_text.push('\n');
+                }
+                error_text.push_str(error);
+            }
+            bail!("{error_text}");
         }
 
         Ok(())
@@ -1839,7 +2359,7 @@ impl CliConfig {
         let letsencrypt_enabled = self
             .tls_letsencrypt_hostname
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
+            .is_some_and(|value| !value.is_empty());
         if !letsencrypt_enabled {
             return Ok(());
         }
@@ -1966,6 +2486,23 @@ impl UpstreamPostgresConfig {
         &self.ssl
     }
 
+    #[cfg(feature = "postgres-sqlx")]
+    pub(crate) fn ssl_mode(&self) -> Option<&str> {
+        // headscale-go uses strconv.ParseBool before passing the value to
+        // pgx. True omits the setting; false disables TLS. An empty setting
+        // must still be emitted into Go's raw keyword/value string.
+        match self.ssl.as_str() {
+            "1" | "t" | "T" | "TRUE" | "true" | "True" => None,
+            "0" | "f" | "F" | "FALSE" | "false" | "False" => Some("disable"),
+            value => Some(value),
+        }
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    pub(crate) fn connection_url(&self) -> Result<String> {
+        postgres::connection_url(self)
+    }
+
     pub(crate) fn max_open_conns(&self) -> i32 {
         self.max_open_conns
     }
@@ -2001,7 +2538,9 @@ fn default_config_dirs() -> Vec<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".headscale"));
     }
-    dirs.push(PathBuf::from("."));
+    // viper absolutizes each search directory, so a config found in the
+    // working directory resolves its relative paths to absolute ones.
+    dirs.push(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     dirs
 }
 
@@ -2016,11 +2555,58 @@ fn resolve_optional_path(config_dir: &Path, path: &mut Option<PathBuf>) {
     resolve_path(config_dir, value);
 }
 
+/// `util.AbsolutePathFromConfigPath`: a relative path is joined onto the
+/// directory of the config file in use with `filepath.Join`, which also cleans
+/// it (`./a/../b` collapses). When the config was named without a directory the
+/// path is left exactly as written.
+///
+/// Resolution runs both before and after the environment overrides, so a path
+/// that already carries the (relative) config directory must not gain it again.
 fn resolve_path(config_dir: &Path, path: &mut PathBuf) {
-    if path.as_os_str().is_empty() || path.is_absolute() {
+    if path.as_os_str().is_empty() || path.is_absolute() || config_dir.as_os_str().is_empty() {
         return;
     }
-    *path = config_dir.join(&*path);
+    let dir = go_clean_path(config_dir);
+    if dir.is_relative() && dir != Path::new(".") && path.starts_with(&dir) {
+        return;
+    }
+    *path = go_clean_path(&config_dir.join(&*path));
+}
+
+/// Lexical `filepath.Clean` for Unix paths: drops `.` elements and duplicate
+/// separators, folds `..` into the preceding element, and yields `.` for an
+/// empty result.
+fn go_clean_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let rooted = path.has_root();
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.last().is_some_and(|last| last != "..") {
+                    parts.pop();
+                } else if !rooted {
+                    parts.push("..".into());
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_owned()),
+        }
+    }
+    // Start from the root itself; `push("/")` on an empty buffer would be the
+    // same, but reads like an overwrite of an earlier component.
+    let mut cleaned = if rooted {
+        PathBuf::from("/")
+    } else {
+        PathBuf::new()
+    };
+    for part in parts {
+        cleaned.push(part);
+    }
+    if cleaned.as_os_str().is_empty() {
+        cleaned.push(".");
+    }
+    cleaned
 }
 
 fn state_dir_from_noise_private_key(path: &Path) -> PathBuf {
@@ -2262,47 +2848,120 @@ const REMOVED_CONFIG_KEYS: &[RemovedConfigKey] = &[
     },
 ];
 
+#[cfg(test)]
 const REMOVED_OIDC_ENV_KEYS: &[(&str, &str)] = &[(
     "HEADSCALE_OIDC_EXPIRY",
     "oidc.expiry was removed; use node.expiry instead",
 )];
 
-fn reject_removed_config_keys(contents: &str, format: ConfigFormat) -> Result<()> {
+fn config_input_metadata(
+    contents: &str,
+    format: ConfigFormat,
+    include_env: bool,
+) -> Result<(Vec<String>, bool, bool)> {
     match format {
         ConfigFormat::Toml => {
             let value: toml::Value =
                 toml::from_str(contents).context("failed to parse TOML config")?;
-            for key in REMOVED_CONFIG_KEYS {
-                if toml_has_path(&value, key.path) {
-                    bail!("{}", removed_config_key_message(*key));
-                }
-            }
+            collect_config_input_metadata(|path| toml_has_path(&value, path), include_env)
         }
         ConfigFormat::Yaml => {
-            let value: serde_yaml::Value =
-                serde_yaml::from_str(contents).context("failed to parse YAML config")?;
-            for key in REMOVED_CONFIG_KEYS {
-                if yaml_has_path(&value, key.path) {
-                    bail!("{}", removed_config_key_message(*key));
-                }
-            }
+            let value: headscale_cli::yaml::Presence =
+                headscale_cli::yaml::from_str(contents).context("failed to parse YAML config")?;
+            collect_config_input_metadata(|path| value.is_set_path(path), include_env)
         }
         ConfigFormat::Json => {
             let value: serde_json::Value =
                 serde_json::from_str(contents).context("failed to parse JSON config")?;
-            for key in REMOVED_CONFIG_KEYS {
-                if json_has_path(&value, key.path) {
-                    bail!("{}", removed_config_key_message(*key));
-                }
-            }
+            collect_config_input_metadata(|path| json_has_path(&value, path), include_env)
         }
     }
-
-    Ok(())
 }
 
+fn config_key_is_set(
+    file_is_set: &impl Fn(&[&str]) -> bool,
+    path: &[&str],
+    include_env: bool,
+) -> bool {
+    let env_is_set = include_env
+        && std::env::var_os(format!("HEADSCALE_{}", path.join("_").to_ascii_uppercase()))
+            .is_some_and(|value| !value.is_empty());
+    env_is_set || file_is_set(path)
+}
+
+fn collect_config_input_metadata(
+    file_is_set: impl Fn(&[&str]) -> bool,
+    include_env: bool,
+) -> Result<(Vec<String>, bool, bool)> {
+    let records = config_key_is_set(&file_is_set, &["dns", "extra_records"], include_env);
+    let records_path = config_key_is_set(&file_is_set, &["dns", "extra_records_path"], include_env);
+    let warnings = collect_config_deprecations(file_is_set, include_env)?;
+    Ok((warnings, records, records_path))
+}
+
+fn collect_config_deprecations(
+    file_is_set: impl Fn(&[&str]) -> bool,
+    include_env: bool,
+) -> Result<Vec<String>> {
+    let is_set = |path: &[&str]| config_key_is_set(&file_is_set, path, include_env);
+    let mut warnings = Vec::new();
+    let mut fatals = Vec::new();
+    for key in REMOVED_CONFIG_KEYS {
+        if !is_set(key.path) {
+            continue;
+        }
+        let message = removed_config_key_message(*key);
+        let replacement_is_set = key.replacement.is_some_and(|replacement| {
+            // These defaults participate in Viper IsSet even when their
+            // values are empty. Other replacements have no default.
+            matches!(
+                replacement,
+                "dns.magic_dns"
+                    | "dns.base_domain"
+                    | "dns.override_local_dns"
+                    | "dns.nameservers.global"
+                    | "dns.nameservers.split"
+                    | "dns.search_domains"
+            ) || is_set(&replacement.split('.').collect::<Vec<_>>())
+        });
+        if key.display != "oidc.expiry" && replacement_is_set {
+            warnings.push(message);
+        } else {
+            fatals.push(message);
+        }
+    }
+    if is_set(&["ephemeral_node_inactivity_timeout"]) {
+        warnings.push(
+            DEPRECATED_EPHEMERAL_TIMEOUT_WARNING
+                .trim_start_matches("WARN: ")
+                .to_string(),
+        );
+    }
+    if fatals.is_empty() {
+        return Ok(warnings);
+    }
+    // Go's sets do not guarantee multi-message order. Keep the same warning
+    // and fatal groups, in declaration order, without dropping any entries.
+    let mut log_message = String::from("\n");
+    for warning in warnings {
+        log_message.push_str("WARN: ");
+        log_message.push_str(&warning);
+        log_message.push('\n');
+    }
+    for fatal in fatals {
+        log_message.push_str("FATAL: ");
+        log_message.push_str(&fatal);
+        log_message.push('\n');
+    }
+    Err(ConfigDeprecationError { log_message }.into())
+}
+
+#[cfg(test)]
 fn reject_removed_oidc_env_keys(vars: &[(String, String)]) -> Result<()> {
-    for (key, _) in vars {
+    for (key, value) in vars {
+        if value.is_empty() {
+            continue;
+        }
         if let Some((_, message)) = REMOVED_OIDC_ENV_KEYS
             .iter()
             .find(|(removed_key, _)| key == removed_key)
@@ -2328,9 +2987,13 @@ fn removed_config_key_message(key: RemovedConfigKey) -> String {
             "The \"{}\" configuration key has been removed. Please use \"{}\" instead. {}",
             key.display, replacement, hint
         ),
-        (Some(replacement), None) => format!(
+        (Some(replacement), None) if key.display == "oidc.expiry" => format!(
             "The \"{}\" configuration key has been removed. Please use \"{}\" instead.",
             key.display, replacement
+        ),
+        (Some(replacement), None) => format!(
+            "The \"{}\" configuration key is deprecated. Please use \"{}\" instead. \"{}\" has been removed.",
+            key.display, replacement, key.display
         ),
         (None, Some(hint)) => format!(
             "The \"{}\" configuration key has been removed. {}",
@@ -2347,30 +3010,35 @@ fn toml_has_path(value: &toml::Value, path: &[&str]) -> bool {
     let Some((first, rest)) = path.split_first() else {
         return true;
     };
-    value
-        .get(*first)
-        .is_some_and(|value| toml_has_path(value, rest))
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    let dotted = path.join(".");
+    if table.keys().any(|key| key.eq_ignore_ascii_case(&dotted)) {
+        return true;
+    }
+    table
+        .iter()
+        .any(|(key, value)| key.eq_ignore_ascii_case(first) && toml_has_path(value, rest))
 }
 
 fn json_has_path(value: &serde_json::Value, path: &[&str]) -> bool {
     let Some((first, rest)) = path.split_first() else {
-        return true;
+        return !value.is_null();
     };
-    value
-        .get(*first)
-        .is_some_and(|value| json_has_path(value, rest))
-}
-
-fn yaml_has_path(value: &serde_yaml::Value, path: &[&str]) -> bool {
-    let Some((first, rest)) = path.split_first() else {
-        return true;
-    };
-    let serde_yaml::Value::Mapping(mapping) = value else {
+    let Some(object) = value.as_object() else {
         return false;
     };
-    mapping
-        .get(serde_yaml::Value::String((*first).to_string()))
-        .is_some_and(|value| yaml_has_path(value, rest))
+    let dotted = path.join(".");
+    if let Some((_, value)) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(&dotted))
+    {
+        return !value.is_null();
+    }
+    object
+        .iter()
+        .any(|(key, value)| key.eq_ignore_ascii_case(first) && json_has_path(value, rest))
 }
 
 fn deserialize_u32_from_int_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -2403,6 +3071,33 @@ where
     parse_duration_secs_repr(value).map_err(de::Error::custom)
 }
 
+fn deserialize_optional_cli_dns<'de, D>(deserializer: D) -> Result<Option<DnsConfigSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(mut value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(object) = value.as_object_mut()
+        && object
+            .get("extra_records")
+            .is_some_and(|value| !value.is_null())
+        && object
+            .get("extra_records_path")
+            .is_some_and(|value| !value.is_null())
+    {
+        // Presence metadata rejects this configuration before either source
+        // is decoded or opened. Leave the public DnsConfigSpec decoder strict;
+        // only this private CLI boundary defers the conflict to Go's fatal
+        // validation phase, after OIDC validation and removed-key reporting.
+        object.remove("extra_records");
+        object.remove("extra_records_path");
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(de::Error::custom)
+}
+
 fn deserialize_optional_duration_secs_from_int_or_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error>
@@ -2415,6 +3110,78 @@ where
     parse_duration_secs_repr(value)
         .map(Some)
         .map_err(de::Error::custom)
+}
+
+fn deserialize_optional_cli_duration_nanos<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().map(cast_cli_duration_value))
+}
+
+fn cast_cli_duration_value(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::String(value) => cast_cli_duration_string(value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                value
+            } else if let Some(value) = value.as_u64() {
+                // spf13/cast converts integer types directly to int64.
+                value as i64
+            } else {
+                let value = value.as_f64().unwrap_or_default();
+                if !value.is_finite()
+                    || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
+                {
+                    i64::MIN
+                } else {
+                    value as i64
+                }
+            }
+        }
+        // Viper's GetDuration intentionally discards cast errors and returns
+        // zero for unsupported values, creating an expired command context.
+        _ => 0,
+    }
+}
+
+fn cast_cli_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) if value.is_f64() => {
+            // cast uses strconv.FormatFloat with 'f', never exponent notation.
+            value.as_f64().unwrap_or_default().to_string()
+        }
+        serde_json::Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn cast_cli_bool(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        serde_json::Value::String(value) => cast_cli_bool_string(value),
+        _ => false,
+    }
+}
+
+fn cast_cli_bool_string(value: &str) -> bool {
+    // strconv.ParseBool accepts these exact spellings; Viper discards errors.
+    matches!(value, "1" | "t" | "T" | "true" | "TRUE" | "True")
+}
+
+fn cast_cli_duration_string(value: &str) -> i64 {
+    let value_with_unit;
+    let duration = if value.contains(['n', 's', 'u', 'µ', 'm', 'h']) {
+        value
+    } else {
+        value_with_unit = format!("{value}ns");
+        &value_with_unit
+    };
+    headscale_cli::admin::duration::parse_go_duration_nanos(duration).unwrap_or_default()
 }
 
 fn deserialize_duration_nanos_from_millis_or_string<'de, D>(
@@ -2598,32 +3365,16 @@ pub(crate) fn parse_duration_secs_str(value: &str) -> Result<u64, String> {
 }
 
 fn parse_ip_prefix(raw: &str) -> Result<(IpAddr, u8)> {
-    let (addr, bits) = raw
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("missing prefix length"))?;
-    let addr: IpAddr = addr
-        .parse()
-        .with_context(|| format!("invalid IP address {addr:?}"))?;
-    let bits: u8 = bits
-        .parse()
-        .with_context(|| format!("invalid prefix length {bits:?}"))?;
-    Ok((addr, bits))
+    headscale_api_acl::go_netip::parse_prefix(raw).map_err(anyhow::Error::msg)
 }
 
 fn validate_config_prefix(raw: &str, label: &str) -> Result<()> {
-    let raw = raw.trim();
     if raw.is_empty() {
         return Ok(());
     }
-    let (addr, bits) =
-        parse_ip_prefix(raw).with_context(|| format!("parsing {label} prefix from config"))?;
-    if addr.is_ipv4() && bits > 32 {
-        bail!("parsing {label} prefix from config: invalid prefix length {bits:?}");
-    }
-    if addr.is_ipv6() && bits > 128 {
-        bail!("parsing {label} prefix from config: invalid prefix length {bits:?}");
-    }
-    Ok(())
+    headscale_api_acl::go_netip::parse_prefix(raw)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("parsing {label} prefix from config: {error}"))
 }
 
 fn parse_env_bool(value: &str) -> Result<bool> {
@@ -2728,8 +3479,8 @@ fn default_ephemeral_node_inactivity_timeout_secs() -> u64 {
     120
 }
 
-pub(crate) fn default_cli_timeout_secs() -> u64 {
-    DEFAULT_CLI_TIMEOUT_SECS
+pub(crate) fn default_cli_timeout_nanos() -> i64 {
+    (DEFAULT_CLI_TIMEOUT_SECS * 1_000_000_000) as i64
 }
 
 fn default_mesh_cidr() -> String {
@@ -2778,6 +3529,7 @@ impl Default for ServerConfig {
             ip_allocation: default_ip_allocation(),
             server_url: None,
             state_dir: default_state_dir(),
+            noise_private_key_path: None,
             https_listen: None,
             metrics_listen_addr: default_metrics_listen_addr(),
             tls_hostname: None,
@@ -2807,6 +3559,21 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    impl CliConfig {
+        // Most unit fixtures exercise a different validation rule. Give those
+        // upstream-shaped fixtures the prefix Go requires before validating.
+        fn validate_test_fixture(&self) -> Result<()> {
+            let mut fixture = self.clone();
+            if fixture.server_url.is_some() && fixture.prefixes.is_none() {
+                fixture.prefixes = Some(UpstreamPrefixesConfig {
+                    v4: Some("100.64.0.0/10".to_string()),
+                    ..Default::default()
+                });
+            }
+            fixture.validate_for_configtest()
+        }
+    }
 
     #[test]
     fn cli_config_includes_upstream_oidc_defaults() {
@@ -3035,14 +3802,8 @@ expiry = 0
             .unwrap();
         config.normalize_upstream_aliases();
 
-        assert_eq!(
-            config
-                .server
-                .as_ref()
-                .unwrap()
-                .ephemeral_node_inactivity_timeout_secs,
-            300
-        );
+        assert_eq!(config.ephemeral_node_inactivity_timeout, Some(300));
+        assert!(config.server.is_none());
 
         config
             .apply_node_env_overrides_from([("HEADSCALE_NODE_EPHEMERAL_INACTIVITY_TIMEOUT", "6m")])
@@ -3100,7 +3861,7 @@ server_url: "https://headscale.example"
         config
             .apply_node_env_overrides_from([("HEADSCALE_NODE_ROUTES_HA_PROBE_TIMEOUT", "10s")])
             .unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
         let message = format!("{err:#}");
 
         assert!(
@@ -3298,9 +4059,15 @@ server_url: "https://headscale.example"
         assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_SERVER_ENABLED"));
 
         let err = config
-            .apply_derp_env_overrides_from([("HEADSCALE_DERP_SERVER_REGION_ID", "70000")])
+            .apply_derp_env_overrides_from([("HEADSCALE_DERP_SERVER_REGION_ID", "not-a-number")])
             .unwrap_err();
         assert!(format!("{err:#}").contains("invalid HEADSCALE_DERP_SERVER_REGION_ID"));
+
+        // Go's RegionID is an int, so ids beyond u16 are valid configuration.
+        config
+            .apply_derp_env_overrides_from([("HEADSCALE_DERP_SERVER_REGION_ID", "70000")])
+            .unwrap();
+        assert_eq!(config.derp.as_ref().unwrap().server.region_id, 70_000);
 
         let err = config
             .apply_derp_env_overrides_from([(
@@ -3438,7 +4205,7 @@ node:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("node.routes.ha.probe_timeout"));
     }
@@ -3464,7 +4231,7 @@ node:
             );
 
             let config = CliConfig::parse(&source, ConfigFormat::Yaml).unwrap();
-            let err = config.validate_for_configtest().unwrap_err();
+            let err = config.validate_test_fixture().unwrap_err();
             let message = format!("{err:#}");
 
             assert!(
@@ -3529,7 +4296,7 @@ database:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
 
         assert_eq!(
             config.trusted_proxies,
@@ -3567,7 +4334,7 @@ trusted_proxies:
         )
         .unwrap();
 
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
         assert!(format!("{err:#}").contains("trusted_proxies[0]"));
 
         let config = CliConfig::parse(
@@ -3580,8 +4347,8 @@ trusted_proxies:
         )
         .unwrap();
 
-        let err = config.validate_for_configtest().unwrap_err();
-        assert!(format!("{err:#}").contains("missing prefix length"));
+        let err = config.validate_test_fixture().unwrap_err();
+        assert!(format!("{err:#}").contains("netip.ParsePrefix(\"127.0.0.1\"): no '/'"));
     }
 
     #[test]
@@ -3728,7 +4495,7 @@ database:
         );
         assert_eq!(server.grpc_listen_addr, "127.0.0.1:50443");
         assert!(server.grpc_allow_insecure);
-        assert_eq!(server.ephemeral_node_inactivity_timeout_secs, 180);
+        assert_eq!(server.ephemeral_node_inactivity_timeout_secs, 120);
         assert_eq!(
             server.unix_socket,
             PathBuf::from("/run/headscale/headscale.sock")
@@ -3812,7 +4579,7 @@ policy:
 
         assert_eq!(config.policy.mode(), "file");
         assert_eq!(config.policy.path, dir.path().join("policy.hujson"));
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -3833,7 +4600,7 @@ policy:
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
         assert!(config.policy.is_database_mode());
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -3859,21 +4626,26 @@ policy:
     }
 
     #[test]
-    fn configtest_rejects_invalid_policy_mode() {
+    fn configtest_accepts_unknown_policy_mode_like_go() {
         let source = r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
 policy:
   mode: consul
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
-
-        assert!(format!("{err:#}").contains("policy.mode"));
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
-    fn configtest_rejects_invalid_policy_file() {
+    fn configtest_policy_file_allows_empty_and_rejects_malformed() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("policy.hujson"), "{").unwrap();
         let config_path = dir.path().join("config.yaml");
@@ -3881,6 +4653,13 @@ policy:
             &config_path,
             r#"
 server_url: "https://headscale.example"
+noise:
+  private_key_path: noise_private.key
+database:
+  type: sqlite
+dns:
+  magic_dns: false
+  override_local_dns: false
 policy:
   mode: file
   path: policy.hujson
@@ -3889,9 +4668,11 @@ policy:
         .unwrap();
 
         let config = CliConfig::load(&config_path).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("parse policy.path"));
+        fs::write(dir.path().join("policy.hujson"), "").unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -3953,10 +4734,12 @@ prefixes:
 noise:
   private_key_path: "private_key.pem"
 server_url: "https://derp.no"
+prefixes:
+  v4: "100.64.0.0/10"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("dns.nameservers.global"));
         let server = config.server.unwrap();
@@ -3970,7 +4753,7 @@ server_url: "https://derp.no"
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
         assert_eq!(
             config.acme_url.as_deref(),
             Some("https://acme-v02.api.letsencrypt.org/directory")
@@ -4004,7 +4787,7 @@ dns:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err().to_string();
+        let err = config.validate_test_fixture().unwrap_err().to_string();
 
         assert!(err.contains("prefixes.allocation"));
         assert!(err.contains("sequential"));
@@ -4025,9 +4808,9 @@ prefixes:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err().to_string();
+        let err = config.validate_test_fixture().unwrap_err().to_string();
 
-        assert!(err.contains("at least one of prefixes.v4 or prefixes.v6"));
+        assert!(err.contains("no IPv4 or IPv6 prefix configured"));
     }
 
     #[test]
@@ -4043,7 +4826,7 @@ prefixes:
                 r#"v6: "not-a-cidr""#,
                 "parsing IPv6 prefix from config",
             ),
-            ("v4", r#"v4: "100.64.0.0/99""#, "invalid prefix length"),
+            ("v4", r#"v4: "100.64.0.0/99""#, "prefix length out of range"),
         ] {
             let source = format!(
                 r#"
@@ -4059,7 +4842,7 @@ dns:
             );
 
             let config = CliConfig::parse(&source, ConfigFormat::Yaml).unwrap();
-            let err = config.validate_for_configtest().unwrap_err().to_string();
+            let err = config.validate_test_fixture().unwrap_err().to_string();
 
             assert!(
                 err.contains(expected),
@@ -4083,7 +4866,7 @@ database:
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -4102,7 +4885,7 @@ database:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(
             format!("{err:#}").contains("database.postgres connection pool fields must be >= 0")
@@ -4126,7 +4909,7 @@ database:
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
         assert_eq!(
             config.database.as_ref().unwrap().runtime_backend(),
             Some(DatabaseBackend::Sqlite)
@@ -4159,7 +4942,7 @@ database:
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
         assert_eq!(
             config.database.as_ref().unwrap().runtime_backend(),
             Some(DatabaseBackend::Postgres)
@@ -4202,7 +4985,7 @@ database:
 "#,
         ] {
             let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-            let err = config.validate_for_configtest().unwrap_err();
+            let err = config.validate_test_fixture().unwrap_err();
 
             assert!(format!("{err:#}").contains("database.type is required"));
         }
@@ -4222,7 +5005,7 @@ database:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
         let message = format!("{err:#}");
 
         assert!(message.contains("database.type \"postgresql\" is invalid"));
@@ -4243,7 +5026,7 @@ tls_cert_path: "/etc/headscale/cert.pem"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -4290,7 +5073,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
             config.tls_letsencrypt_challenge_type.as_deref(),
             Some("TLS-ALPN-01")
         );
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -4311,7 +5094,7 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -4328,7 +5111,7 @@ tls_letsencrypt_challenge_type: ""
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -4353,7 +5136,7 @@ tls_letsencrypt_challenge_type: "HTTP-01"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(
             format!("{err:#}").contains("Invalid tls_letsencrypt_listen address"),
@@ -4379,7 +5162,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -4400,7 +5183,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
         assert_eq!(
             config.upstream_nonfatal_config_warnings(),
             vec![TLS_ALPN_ACME_PORT_WARNING]
@@ -4425,7 +5208,7 @@ tls_letsencrypt_challenge_type: "TLS-ALPN-01"
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
         assert_eq!(
             config.upstream_nonfatal_config_warnings(),
             Vec::<&str>::new()
@@ -4445,7 +5228,7 @@ tls_cert_path: "/etc/headscale/cert.pem"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("tls_cert_path and tls_key_path must both be set"));
     }
@@ -4547,16 +5330,18 @@ dns:
     }
 
     #[test]
-    fn configtest_rejects_too_low_ephemeral_timeout() {
+    fn configtest_rejects_too_low_node_ephemeral_timeout() {
         let source = r#"
 server_url: "https://headscale.example"
 noise:
   private_key_path: "noise_private.key"
-ephemeral_node_inactivity_timeout: "65s"
+node:
+  ephemeral:
+    inactivity_timeout: "65s"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("node.ephemeral.inactivity_timeout"));
     }
@@ -4580,38 +5365,34 @@ timeout = "7s"
             Some("hskey-api-abcdefghijkl-secret")
         );
         assert_eq!(cli.insecure, Some(true));
-        assert_eq!(cli.timeout, Some(7));
+        assert_eq!(cli.timeout, Some(7_000_000_000));
     }
 
     #[test]
     fn applies_headscale_cli_env_overrides_to_cli_config() {
         let mut config = CliConfig::default();
 
-        config
-            .apply_cli_env_overrides_from([
-                ("HEADSCALE_CLI_ADDRESS", "env.example:50443"),
-                ("HEADSCALE_CLI_API_KEY", "hskey-api-env-secret"),
-                ("HEADSCALE_CLI_INSECURE", "true"),
-                ("HEADSCALE_CLI_TIMEOUT", "9s"),
-            ])
-            .unwrap();
+        config.apply_cli_env_overrides_from([
+            ("HEADSCALE_CLI_ADDRESS", "env.example:50443"),
+            ("HEADSCALE_CLI_API_KEY", "hskey-api-env-secret"),
+            ("HEADSCALE_CLI_INSECURE", "true"),
+            ("HEADSCALE_CLI_TIMEOUT", "9s"),
+        ]);
 
         let cli = config.cli.unwrap();
         assert_eq!(cli.address.as_deref(), Some("env.example:50443"));
         assert_eq!(cli.api_key.as_deref(), Some("hskey-api-env-secret"));
         assert_eq!(cli.insecure, Some(true));
-        assert_eq!(cli.timeout, Some(9));
+        assert_eq!(cli.timeout, Some(9_000_000_000));
     }
 
     #[test]
-    fn rejects_invalid_headscale_cli_timeout_env_override() {
+    fn preserves_fractional_headscale_cli_timeout_env_override() {
         let mut config = CliConfig::default();
 
-        let err = config
-            .apply_cli_env_overrides_from([("HEADSCALE_CLI_TIMEOUT", "1500ms")])
-            .unwrap_err();
+        config.apply_cli_env_overrides_from([("HEADSCALE_CLI_TIMEOUT", "1500ms")]);
 
-        assert!(format!("{err:#}").contains("invalid HEADSCALE_CLI_TIMEOUT"));
+        assert_eq!(config.cli.unwrap().timeout, Some(1_500_000_000));
     }
 
     #[test]
@@ -4852,7 +5633,7 @@ stun_only = true
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(
             format!("{err:#}").contains(
@@ -4888,7 +5669,7 @@ derper_config_path = "/var/lib/headscale/derp_server_private.key"
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -5097,7 +5878,7 @@ enabled = true
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("server.server_url must be a valid URL"));
     }
@@ -5120,7 +5901,7 @@ type = "sqlite"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains(
             "server_url cannot use the same domain as base_domain in a way that could make the DERP and headscale server unreachable"
@@ -5145,7 +5926,7 @@ type = "sqlite"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains(
             "server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable"
@@ -5171,7 +5952,7 @@ type = "sqlite"
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
 
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -5192,7 +5973,7 @@ automatically_add_embedded_derp_region = false
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(
             format!("{err:#}").contains("requires at least one derp.paths entry"),
@@ -5264,7 +6045,7 @@ dns:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains("dns.nameservers.global"));
     }
@@ -5279,14 +6060,14 @@ dns:
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Yaml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
 
         assert!(format!("{err:#}").contains(MISSING_NOISE_PRIVATE_KEY_PATH_ERROR));
     }
 
     #[test]
     fn rejects_dns_extra_records_and_path_together() {
-        let err = CliConfig::parse(
+        let mut config = CliConfig::parse(
             r#"
 server_url: "https://headscale.example"
 dns:
@@ -5300,7 +6081,8 @@ dns:
 "#,
             ConfigFormat::Yaml,
         )
-        .unwrap_err();
+        .unwrap();
+        let err = config.complete_server_config_load().unwrap_err();
 
         assert!(
             format!("{err:#}")
@@ -5410,8 +6192,8 @@ acl_policy_path: "/etc/headscale/policy.hujson"
     }
 
     #[test]
-    fn rejects_removed_dns_config_keys() {
-        let err = CliConfig::parse(
+    fn warns_for_removed_dns_nameservers_when_replacement_default_is_set() {
+        let config = CliConfig::parse(
             r#"
 dns_config:
   nameservers:
@@ -5419,11 +6201,10 @@ dns_config:
 "#,
             ConfigFormat::Yaml,
         )
-        .unwrap_err();
-        let err = format!("{err:#}");
-
-        assert!(err.contains("dns_config.nameservers"));
-        assert!(err.contains("dns.nameservers.global"));
+        .unwrap();
+        let warnings = config.upstream_deprecation_warnings().join("\n");
+        assert!(warnings.contains("dns_config.nameservers"));
+        assert!(warnings.contains("dns.nameservers.global"));
     }
 
     #[test]
@@ -5491,7 +6272,7 @@ method = "S384"
 
         let mut config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
         config.resolve_oidc_client_secret().unwrap();
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -5518,7 +6299,7 @@ method = "S384"
 
         let mut config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
         config.resolve_oidc_client_secret().unwrap();
-        config.validate_for_configtest().unwrap();
+        config.validate_test_fixture().unwrap();
     }
 
     #[test]
@@ -5544,7 +6325,7 @@ method = "S384"
 "#;
 
         let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
-        let err = config.validate_for_configtest().unwrap_err();
+        let err = config.validate_test_fixture().unwrap_err();
         let err = format!("{err:#}");
 
         assert!(err.contains("pkce.method"));

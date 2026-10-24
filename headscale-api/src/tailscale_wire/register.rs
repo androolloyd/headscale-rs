@@ -14,10 +14,9 @@
 //!   `RegisterResponse{Error: ...}` body for registration auth
 //!   failures over Noise. Unsupported client capability versions stay
 //!   HTTP 400, matching upstream `rejectUnsupported`.
-//! - **User ID derivation:** the upstream uses a database primary
-//!   key. We don't have a DB, so we FNV-hash the user label. This is
-//!   stable across requests for the same user but doesn't survive a
-//!   user-label rename.
+//! - **User IDs:** persistent registration carries the database owner ID.
+//!   Wire-only embedders without an assigned ID use the legacy user-label
+//!   hash, which changes if that label changes.
 
 use axum::{
     Extension, Json,
@@ -28,21 +27,23 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::RngCore;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Decode a `RegisterRequest` from a raw body without requiring the
 /// `Content-Type: application/json` header. Stock `tailscale up`
 /// (via controlhttp over the noise tunnel) sends register payloads
 /// with no `Content-Type` set, so the axum `Json` extractor rejects
-/// them with HTTP 415. We use a `Bytes` extractor + manual
-/// `serde_json::from_slice` to mirror what upstream's
+/// them with HTTP 415. We use a `Bytes` extractor with
+/// the shared Go struct decoder to mirror what upstream's
 /// `gorilla/mux`-routed handlers accept.
-fn parse_register_body(raw: &[u8]) -> Result<RegisterRequest, RegisterBodyError> {
-    serde_json::from_slice::<RegisterRequest>(raw).map_err(|e| RegisterBodyError {
-        version: register_body_version(raw),
-        error: e.to_string(),
+fn parse_register_body(
+    raw: &[u8],
+) -> Result<(RegisterRequest, serde_json::Value), RegisterBodyError> {
+    super::request_json::register(raw).map_err(|error| RegisterBodyError {
+        version: error.version,
+        error: error.message,
     })
 }
 
@@ -52,20 +53,9 @@ struct RegisterBodyError {
     error: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RegisterRequestVersionOnly {
-    #[serde(default)]
-    version: u32,
-}
-
-fn register_body_version(raw: &[u8]) -> u32 {
-    serde_json::from_slice::<RegisterRequestVersionOnly>(raw)
-        .map(|req| req.version)
-        .unwrap_or_default()
-}
-
-fn parse_register_or_go_error(raw: &[u8]) -> Result<RegisterRequest, axum::response::Response> {
+fn parse_register_or_go_error(
+    raw: &[u8],
+) -> Result<(RegisterRequest, serde_json::Value), axum::response::Response> {
     match parse_register_body(raw) {
         Ok(body) => Ok(body),
         Err(RegisterBodyError { version, error }) => {
@@ -76,15 +66,11 @@ fn parse_register_or_go_error(raw: &[u8]) -> Result<RegisterRequest, axum::respo
 }
 
 use super::noise::{NoisePeerMachineKey, NoiseRequestCancellation};
-use super::routes::{auto_approved_routes_for_node, normalize_advertised_routes};
 use super::wire::{
-    HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser,
-    is_auto_derived_given_name, is_supported_capability_version, strip_key_prefix,
-    unsupported_client_error,
+    HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, ZERO_DISCO_KEY,
+    is_supported_capability_version, strip_key_prefix, unsupported_client_error,
 };
-use super::{
-    MachineRecord, RedeemError, RegistrationAdmission, RegistrationWaitOutcome, WireState,
-};
+use super::{MachineRecord, RegistrationAdmission, RegistrationWaitOutcome, WireState};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 const AUTH_ID_PREFIX: &str = "hskey-authreq-";
@@ -93,6 +79,68 @@ const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
 const REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH: &str =
     "node exists with a different machine key";
 const REGISTER_LOGOUT_MACHINE_KEY_MISMATCH: &str = "node exist with different machine key";
+
+/// A tagged PAK is bound to the machine, not its creating user. Go prefers
+/// that machine's existing tagged node; with no tagged node, it may convert a
+/// single user-owned node. An ordinary PAK may also re-register a tagged
+/// node, retaining its tagged ownership. Reject ambiguous conversions.
+fn existing_machine_for_preauth(
+    state: &WireState,
+    machine_key_hex: &str,
+    user: &str,
+    user_id: Option<u64>,
+    tagged_key: bool,
+) -> Result<Option<(String, MachineRecord)>, &'static str> {
+    if user_id.is_none() && user.is_empty() && !tagged_key {
+        return Ok(None);
+    }
+    let snapshot = state.machines.snapshot_with_metadata();
+    if user_id.is_some() || (!tagged_key && !user.is_empty()) {
+        let mut owned = snapshot.iter().filter(|(_, node)| {
+            node.machine_key_hex == machine_key_hex
+                && node.forced_tags.is_empty()
+                && user_id.map_or_else(|| node.user == user, |id| node.user_id == Some(id))
+        });
+        if let Some((node_key, existing)) = owned.next() {
+            if owned.next().is_some() {
+                return Err("machine key maps to ambiguous node ownership");
+            }
+            return Ok(Some((node_key.clone(), existing.clone())));
+        }
+    }
+    let matches = snapshot
+        .iter()
+        .filter(|(_, record)| record.machine_key_hex == machine_key_hex)
+        .map(|(node_key, record)| (node_key.clone(), record.clone()))
+        .collect::<Vec<_>>();
+    let tagged = matches
+        .iter()
+        .filter(|(_, record)| !record.forced_tags.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if tagged.len() > 1 {
+        return Err("machine key maps to ambiguous node ownership");
+    }
+    if let Some(existing) = tagged.into_iter().next() {
+        return Ok(Some(existing));
+    }
+    if !tagged_key || user_id.is_some() {
+        return Ok(None);
+    }
+    let matches = matches
+        .into_iter()
+        .filter(|(_, record)| {
+            record.user_id.is_some_and(|id| id != 0)
+                || (record.user_id.is_none()
+                    && !record.user.is_empty()
+                    && snapshot.native_user_association_id(record).is_none())
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err("machine key maps to ambiguous node ownership");
+    }
+    Ok(matches.into_iter().next())
+}
 pub(crate) const CAPABILITY_ADMIN: &str = "https://tailscale.com/cap/is-admin";
 pub(crate) const CAPABILITY_DEFAULT_AUTO_UPDATE: &str = "default-auto-update";
 pub(crate) const CAPABILITY_FILE_SHARING: &str = "https://tailscale.com/cap/file-sharing";
@@ -114,7 +162,7 @@ pub async fn handle_register(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let body = match parse_register_or_go_error(&raw) {
+    let (body, hostinfo) = match parse_register_or_go_error(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -139,13 +187,14 @@ pub async fn handle_register(
         )
             .into_response();
     }
-    register_inner(
+    Box::pin(register_inner_with_hostinfo(
         state,
         body_node_key_hex,
         machine_key,
         body,
+        hostinfo,
         cancellation.map(|Extension(cancellation)| cancellation),
-    )
+    ))
     .await
 }
 
@@ -166,7 +215,7 @@ pub async fn handle_register_flat(
         Ok(machine_key) => machine_key,
         Err(resp) => return resp,
     };
-    let body = match parse_register_or_go_error(&raw) {
+    let (body, hostinfo) = match parse_register_or_go_error(&raw) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -177,13 +226,14 @@ pub async fn handle_register_flat(
         Some(h) => h.to_string(),
         None => body.node_key.clone(),
     };
-    register_inner(
+    Box::pin(register_inner_with_hostinfo(
         state,
         body_node_key_hex,
         machine_key,
         body,
+        hostinfo,
         cancellation.map(|Extension(cancellation)| cancellation),
-    )
+    ))
     .await
 }
 
@@ -194,6 +244,7 @@ pub async fn handle_register_flat(
 /// `MachineRecord`); callers are expected to have already validated
 /// that the two agree (for the keyed path) or supplied the body's value
 /// directly (for the flat path).
+#[cfg(test)]
 async fn register_inner(
     state: WireState,
     node_key_hex: String,
@@ -201,15 +252,34 @@ async fn register_inner(
     body: RegisterRequest,
     cancellation: Option<NoiseRequestCancellation>,
 ) -> axum::response::Response {
+    let hostinfo = serde_json::to_value(&body.hostinfo).expect("HostInfo JSON primitives");
+    Box::pin(register_inner_with_hostinfo(
+        state,
+        node_key_hex,
+        machine_key_hex,
+        body,
+        hostinfo,
+        cancellation,
+    ))
+    .await
+}
+
+async fn register_inner_with_hostinfo(
+    state: WireState,
+    node_key_hex: String,
+    machine_key_hex: String,
+    body: RegisterRequest,
+    requested_hostinfo: serde_json::Value,
+    cancellation: Option<NoiseRequestCancellation>,
+) -> axum::response::Response {
     let has_auth = body.auth.is_some();
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
     let requested_tags = requested_tags_for_body(&body);
     let now = chrono::Utc::now();
-    let default_expiry = configured_node_expiry(state.runtime_config.as_ref(), now);
 
     if let Some(expiry) = body.expiry
         && !is_go_zero_expiry(expiry)
-        && expiry <= now
+        && expiry < now
         && let Some(record) = state.machines.get(&node_key_hex)
     {
         if let Err(resp) = validate_existing_machine_key(
@@ -220,9 +290,9 @@ async fn register_inner(
             return resp;
         }
         if record.is_expired_at(now) {
-            return Json(node_key_expired_response(false)).into_response();
+            return register_json_response(&node_key_expired_response(false));
         }
-        return logout_existing_node(&state, &node_key_hex, &record, expiry);
+        return logout_existing_node(&state, &node_key_hex, &record, expiry).await;
     }
 
     // Admission gate. Deliberately after the logout branch — a node being
@@ -240,7 +310,7 @@ async fn register_inner(
     let is_logout_attempt = authkey.is_empty()
         && body
             .expiry
-            .is_some_and(|expiry| !is_go_zero_expiry(expiry) && expiry <= now);
+            .is_some_and(|expiry| !is_go_zero_expiry(expiry) && expiry < now);
     if !is_logout_attempt && let Some(gate) = state.registration_gate.as_ref() {
         let hostname = body
             .hostinfo
@@ -270,137 +340,237 @@ async fn register_inner(
         }
     }
 
-    if authkey.is_empty() {
-        if !has_auth && let Some(record) = state.machines.get(&node_key_hex) {
-            if let Err(resp) = validate_existing_machine_key(
-                &machine_key_hex,
+    if !has_auth && let Some(record) = state.machines.get(&node_key_hex) {
+        if let Err(resp) = validate_existing_machine_key(
+            &machine_key_hex,
+            &record,
+            REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH,
+        ) {
+            return resp;
+        }
+        if record.is_expired_at(now) {
+            return register_json_response(&node_key_expired_response(false));
+        }
+        if let Some(expiry) = body.expiry {
+            if is_go_zero_expiry(expiry) {
+                return register_json_response(&register_response_for_live_record(
+                    &state.machines,
+                    &record,
+                ));
+            } else if expiry > now {
+                return register_error_response("extending key is not allowed");
+            }
+        } else {
+            return register_json_response(&register_response_for_live_record(
+                &state.machines,
                 &record,
-                REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH,
-            ) {
-                return resp;
+            ));
+        }
+    }
+
+    if body
+        .followup
+        .as_deref()
+        .is_some_and(|followup| !followup.is_empty())
+    {
+        let registration_id = match registration_id_from_followup(
+            body.followup
+                .as_deref()
+                .expect("checked non-empty followup"),
+        ) {
+            Ok(registration_id) => registration_id,
+            Err(error) => {
+                return register_error_response(error.to_string());
             }
-            if record.is_expired_at(now) {
-                return Json(node_key_expired_response(false)).into_response();
-            }
-            if let Some(expiry) = body.expiry {
-                if is_go_zero_expiry(expiry) {
-                    return Json(register_response_for_record(&record)).into_response();
-                } else if expiry > now {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorBody {
-                            error: "extending key is not allowed".into(),
-                        }),
-                    )
-                        .into_response();
+        };
+
+        let outcome = {
+            let registration_cache = state.registration_cache.clone();
+            let wait = async {
+                match registration_id.as_deref() {
+                    Some(id) => registration_cache.wait_for_registration(id).await,
+                    // Generated cache IDs are ASCII. A shape-valid byte ID
+                    // outside UTF-8 cannot alias any generated registration.
+                    None => RegistrationWaitOutcome::Missing,
+                }
+            };
+            tokio::pin!(wait);
+            if let Some(cancellation) = cancellation {
+                tokio::select! {
+                    // If authorization and disconnect become ready together,
+                    // deliver the completed registration as pinned Go does.
+                    biased;
+                    outcome = &mut wait => outcome,
+                    () = cancellation.cancelled() => {
+                        return register_error_response("registration timed out");
+                    }
                 }
             } else {
-                return Json(register_response_for_record(&record)).into_response();
+                wait.await
+            }
+        };
+
+        match outcome {
+            RegistrationWaitOutcome::Registered(record) => {
+                if let Err(resp) = validate_existing_machine_key(
+                    &machine_key_hex,
+                    &record,
+                    REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH,
+                ) {
+                    return resp;
+                }
+                return register_json_response(&register_response_for_live_record(
+                    &state.machines,
+                    &record,
+                ));
+            }
+            RegistrationWaitOutcome::ApprovedWithoutNode
+            | RegistrationWaitOutcome::Rejected(_)
+            | RegistrationWaitOutcome::Expired
+            | RegistrationWaitOutcome::Missing => {
+                return register_interactive(
+                    state,
+                    node_key_hex,
+                    machine_key_hex,
+                    body,
+                    requested_hostinfo,
+                )
+                .await;
             }
         }
-
-        if body
-            .followup
-            .as_deref()
-            .is_some_and(|followup| !followup.is_empty())
-        {
-            let registration_id = match registration_id_from_followup(
-                body.followup
-                    .as_deref()
-                    .expect("checked non-empty followup"),
-            ) {
-                Ok(registration_id) => registration_id,
-                Err(error) => {
-                    return register_error_response(error.to_string());
-                }
-            };
-
-            let outcome = {
-                let registration_cache = state.registration_cache.clone();
-                let wait = registration_cache.wait_for_registration(&registration_id);
-                tokio::pin!(wait);
-                if let Some(cancellation) = cancellation {
-                    tokio::select! {
-                        outcome = &mut wait => outcome,
-                        () = cancellation.cancelled() => {
-                            return register_error_response("registration timed out");
-                        }
-                    }
-                } else {
-                    wait.await
-                }
-            };
-
-            match outcome {
-                RegistrationWaitOutcome::Registered(record) => {
-                    return Json(register_response_for_record(&record)).into_response();
-                }
-                RegistrationWaitOutcome::ApprovedWithoutNode
-                | RegistrationWaitOutcome::Rejected(_)
-                | RegistrationWaitOutcome::Expired
-                | RegistrationWaitOutcome::Missing => {
-                    return register_interactive(state, node_key_hex, machine_key_hex, body).await;
-                }
-            }
-        }
-        return register_interactive(state, node_key_hex, machine_key_hex, body).await;
+    }
+    if authkey.is_empty() {
+        return register_interactive(
+            state,
+            node_key_hex,
+            machine_key_hex,
+            body,
+            requested_hostinfo,
+        )
+        .await;
     }
 
-    let redeemed = match state.preauth.redeem(authkey).await {
-        Ok(ok) => ok,
-        Err(err) => {
-            let Some(ok) = state.preauth.lookup(authkey).await else {
-                return preauth_error_response(err);
-            };
-            let Some((existing_node_key, existing)) = state
-                .machines
-                .get_by_machine_key_for_user(&machine_key_hex, &ok.user)
-            else {
-                return preauth_error_response(err);
-            };
-            if existing_node_key != node_key_hex {
-                return preauth_error_response(err);
+    // Go's accepted auth-key handler keeps running after the HTTP caller
+    // disconnects. Own lookup, validation, planning and publication together,
+    // including time spent waiting for the registration locks or bcrypt.
+    match super::complete_state_mutation(register_auth_key(
+        state,
+        node_key_hex,
+        machine_key_hex,
+        body,
+        requested_hostinfo,
+        requested_tags,
+        now,
+    ))
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => register_error_response(format!("finishing auth-key registration: {error}")),
+    }
+}
+
+async fn register_auth_key(
+    state: WireState,
+    node_key_hex: String,
+    machine_key_hex: String,
+    body: RegisterRequest,
+    requested_hostinfo: serde_json::Value,
+    requested_tags: Vec<String>,
+    _now: chrono::DateTime<chrono::Utc>,
+) -> axum::response::Response {
+    let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
+    let registration_guard = state.machines.lock_registration(&machine_key_hex).await;
+    let node_key_registration_guard = state
+        .machines
+        .lock_node_key_registration(&node_key_hex)
+        .await;
+    // A still-authorized node waking with its current key does not spend a
+    // new PAK. Expiry, rotation, ownership conversion and retagging require
+    // fresh validation even when the client reuses its node key.
+    let lookup = match state.preauth.lookup_for_registration(authkey).await {
+        Ok(lookup) => lookup,
+        Err(error) => return preauth_error_response(error),
+    };
+    let refresh = if let Some(lookup) = &lookup {
+        let key = &lookup.metadata;
+        match existing_machine_for_preauth(
+            &state,
+            &machine_key_hex,
+            &key.user,
+            key.user_id,
+            !key.tags.is_empty(),
+        ) {
+            Ok(Some((current_key, current)))
+                if current_key == node_key_hex
+                    && existing_node_can_refresh_with_key(&current, key, chrono::Utc::now()) =>
+            {
+                Some(key.clone())
             }
-            if !failed_authkey_belongs_to_existing_node(&existing, ok.auth_key_id) {
-                return preauth_error_response(err);
-            }
-            ok
+            Ok(_) => None,
+            Err(error) => return register_error_response(error),
         }
+    } else {
+        None
+    };
+    let require_fresh = refresh.is_none();
+    let atomic_registration = state.preauth.supports_deferred_redemption()
+        && state
+            .registration_store
+            .as_ref()
+            .is_some_and(|store| store.supports_atomic_auth_key_registration());
+    let redeemed = match refresh {
+        Some(key) => key,
+        None => match if atomic_registration {
+            if let Some(lookup) = &lookup
+                && let Some(valid) = lookup.validation_result()
+            {
+                valid.map(|()| lookup.metadata.clone())
+            } else {
+                state.preauth.validate_for_registration(authkey).await
+            }
+        } else {
+            state.preauth.redeem_for_registration(authkey).await
+        } {
+            Ok(ok) => ok,
+            Err(err) => return preauth_error_response(err),
+        },
     };
     let user = redeemed.user.clone();
-
-    if !requested_tags.is_empty() {
-        return invalid_requested_tags_response(&requested_tags);
-    }
 
     let RegisterHostInfoParts {
         mut host_info,
         hostname,
-        os: requested_os,
-        os_version: requested_os_version,
+        os,
+        os_version,
         available_routes,
-        ssh_host_keys: requested_ssh_host_keys,
+        ssh_host_keys,
     } = match register_hostinfo_parts(&body) {
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
 
-    let existing_machine = state
+    let existing_machine = match existing_machine_for_preauth(
+        &state,
+        &machine_key_hex,
+        &user,
+        redeemed.user_id,
+        !redeemed.tags.is_empty(),
+    ) {
+        Ok(existing) => existing,
+        Err(error) => return register_error_response(error),
+    };
+    if existing_machine.is_none() && !requested_tags.is_empty() {
+        return invalid_requested_tags_response(
+            body.hostinfo
+                .as_ref()
+                .map_or(&[], |info| info.request_tags.as_slice()),
+        );
+    }
+    if let Err(error) = state
         .machines
-        .get_by_machine_key_for_user(&machine_key_hex, &user);
-    if state.registration_store.is_none()
-        && let Some((old_node_key_hex, _)) = existing_machine.as_ref()
-        && old_node_key_hex != &node_key_hex
-        && let Some(existing_target) = state.machines.get(&node_key_hex)
-        && (existing_target.machine_key_hex != machine_key_hex || existing_target.user != user)
+        .validate_registration_node_key(&node_key_hex, &machine_key_hex)
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "node key already exists".into(),
-            }),
-        )
-            .into_response();
+        return register_error_response(format!("handling register with auth key: {error}"));
     }
     let (ipv4, ipv6) = if let Some((_, existing)) = existing_machine.as_ref() {
         (existing.ipv4, existing.ipv6)
@@ -410,38 +580,29 @@ async fn register_inner(
             Err(resp) => return resp,
         }
     };
-    let addr = policy_addr(ipv4, ipv6);
+    // A different tagged preauth key is an explicit retag request. The
+    // current key, on the other hand, must preserve any admin tag override
+    // during a container restart. Go v0.29.3 made this distinction for
+    // already-tagged nodes, and also converts an untagged node in place.
     let forced_tags = existing_machine.as_ref().map_or_else(
         || redeemed.tags.clone(),
-        |(_, existing)| existing.forced_tags.clone(),
+        |(_, existing)| {
+            let tagged_key_changed = !redeemed.tags.is_empty()
+                && (existing.forced_tags.is_empty()
+                    || redeemed
+                        .auth_key_id
+                        .is_some_and(|id| existing.auth_key_id != Some(id)));
+            if tagged_key_changed {
+                redeemed.tags.clone()
+            } else {
+                existing.forced_tags.clone()
+            }
+        },
     );
-    let approved_routes = match auto_approved_routes_for_node(
-        &state.policy,
-        &addr,
-        Some(&user),
-        &forced_tags,
-        &[],
-        &available_routes,
-    ) {
-        Ok(routes) => routes,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("invalid approved routes: {e}"),
-                }),
-            )
-                .into_response();
-        }
-    };
-    let approved_routes = match existing_machine.as_ref() {
-        Some((_, existing)) => merge_existing_approved_routes(
-            &existing.approved_routes,
-            &available_routes,
-            approved_routes,
-        ),
-        None => approved_routes,
-    };
+    let approved_routes = existing_machine
+        .as_ref()
+        .map(|(_, existing)| existing.approved_routes.clone())
+        .unwrap_or_default();
     // P1 lifecycle: stamp `created_at` / `last_seen` at registration
     // time + propagate the preauth's `ephemeral` flag. `forced_tags`
     // adopts the preauth's tag list verbatim so the very first /map
@@ -451,9 +612,7 @@ async fn register_inner(
     let created_at = existing_machine
         .as_ref()
         .map_or(now, |(_, existing)| existing.created_at);
-    let ephemeral = existing_machine
-        .as_ref()
-        .map_or(redeemed.ephemeral, |(_, existing)| existing.ephemeral);
+    let ephemeral = redeemed.ephemeral;
     let auth_key_id = redeemed.auth_key_id.or_else(|| {
         existing_machine
             .as_ref()
@@ -461,10 +620,16 @@ async fn register_inner(
     });
     let node_id = existing_machine
         .as_ref()
-        .and_then(|(_, existing)| existing.node_id);
-    let user_id = existing_machine
-        .as_ref()
-        .and_then(|(_, existing)| existing.user_id);
+        .map(|(key, existing)| existing.stable_node_id_for_key(key));
+    let user_id = if forced_tags.is_empty() {
+        redeemed.user_id.or_else(|| {
+            existing_machine
+                .as_ref()
+                .and_then(|(_, existing)| existing.user_id)
+        })
+    } else {
+        None
+    };
     let user_display_name = existing_machine
         .as_ref()
         .map_or_else(String::new, |(_, existing)| {
@@ -475,6 +640,12 @@ async fn register_inner(
         .map_or_else(String::new, |(_, existing)| {
             existing.user_profile_pic_url.clone()
         });
+    let user_provider = existing_machine
+        .as_ref()
+        .map_or_else(String::new, |(_, existing)| existing.user_provider.clone());
+    let user_created_at = existing_machine
+        .as_ref()
+        .and_then(|(_, existing)| existing.user_created_at);
     let (disco_key, endpoints, home_derp) =
         existing_machine
             .as_ref()
@@ -493,58 +664,40 @@ async fn register_inner(
         .net_info
         .as_ref()
         .map_or(home_derp, |net_info| net_info.preferred_derp);
-    let ssh_host_keys = if requested_ssh_host_keys.is_empty() {
-        existing_machine
-            .as_ref()
-            .map(|(_, existing)| existing.ssh_host_keys.clone())
-            .unwrap_or_default()
-    } else {
-        requested_ssh_host_keys
-    };
-    let os = if requested_os.is_empty() {
-        existing_machine
-            .as_ref()
-            .map(|(_, existing)| existing.os.clone())
-            .unwrap_or_default()
-    } else {
-        requested_os
-    };
-    let os_version = if requested_os_version.is_empty() {
-        existing_machine
-            .as_ref()
-            .map(|(_, existing)| existing.os_version.clone())
-            .unwrap_or_default()
-    } else {
-        requested_os_version
-    };
     let expiry = if forced_tags.is_empty() {
-        effective_register_expiry(body.expiry, default_expiry, now)
-    } else {
-        None
-    };
-    let given_name = if let Some((_, existing)) = existing_machine.as_ref()
-        && !is_auto_derived_given_name(&existing.hostname, &existing.host_info_for_node().hostname)
-    {
-        existing.hostname.clone()
-    } else {
-        state.machines.resolve_auto_given_name(
-            &node_key_hex,
-            &hostname,
-            existing_machine
-                .as_ref()
-                .map(|(old_node_key, _)| old_node_key.as_str()),
+        effective_register_expiry(
+            body.expiry,
+            configured_node_expiry(state.runtime_config.as_ref(), now),
         )
+    } else {
+        // Tagged nodes do not acquire a client/default expiry, but an
+        // operator-scheduled future expiry belongs to the node and survives
+        // retagging. Clear only a stale logout/expired timestamp.
+        existing_machine
+            .as_ref()
+            .and_then(|(_, existing)| existing.expiry.filter(|expiry| *expiry >= now))
     };
-    let rec = MachineRecord {
+    let given_name = existing_machine.as_ref().map_or_else(
+        || super::wire::sanitize_hostname_for_given_name(&hostname),
+        |(_, existing)| existing.hostname.clone(),
+    );
+    let mut rec = MachineRecord {
         node_id,
         auth_key_id,
         node_key_hex: node_key_hex.clone(),
         machine_key_hex,
-        user,
+        user: if forced_tags.is_empty() {
+            user
+        } else {
+            String::new()
+        },
         user_id,
         user_display_name,
         user_profile_pic_url,
+        user_provider,
+        user_created_at,
         hostname: given_name,
+        raw_hostname: hostname,
         os,
         os_version,
         host_info,
@@ -567,54 +720,183 @@ async fn register_inner(
         register_method: 1,
     };
 
-    if let Some(store) = &state.registration_store {
-        let saved = match store
-            .create_or_update_auth_key_registration(
-                rec.clone(),
-                state.policy.as_ref(),
-                redeemed.auth_key_id,
-            )
-            .await
-        {
-            Ok(saved) => saved,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorBody {
-                        error: format!("persisting node registration failed: {error}"),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-        if let Some(old_node_key_hex) = saved.replaced_node_key_hex.as_deref() {
-            state.machines.replace_node_key_auth_completion(
-                old_node_key_hex,
-                saved.record.node_key_hex.clone(),
-                saved.record,
-            );
-        } else {
-            state
-                .machines
-                .upsert_auth_completion(saved.record.node_key_hex.clone(), saved.record);
-        }
-    } else if let Some((old_node_key_hex, _)) = existing_machine {
-        state.machines.replace_node_key_auth_completion(
-            &old_node_key_hex,
-            node_key_hex.clone(),
-            rec,
-        );
-    } else {
-        state
-            .machines
-            .upsert_auth_completion(node_key_hex.clone(), rec);
+    if rec.is_tagged() {
+        rec.clear_user_identity();
     }
 
-    let rec = state
+    let previous_hostinfo = match existing_machine.as_ref() {
+        Some((_, existing)) => match state.machines.map_hostinfo_value(existing) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return register_error_response(format!("encoding existing Hostinfo: {error}"));
+            }
+        },
+        None => None,
+    };
+    let native_hostinfo = match super::hostinfo::registration_value(
+        &requested_hostinfo,
+        &rec.host_info_for_node(),
+        previous_hostinfo
+            .as_ref()
+            .and_then(|value| value.get("NetInfo")),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return register_error_response(format!("encoding registration Hostinfo: {error}"));
+        }
+    };
+
+    if let Some(store) = &state.registration_store {
+        let store = store.clone();
+        let policy = state.policy.clone();
+        let machines = state.machines.clone();
+        let candidate = authkey.to_owned();
+        let auth_key_id = redeemed.auth_key_id;
+        let completed = super::complete_state_mutation(async move {
+            let _registration = registration_guard;
+            let _node_key_registration = node_key_registration_guard;
+            #[cfg(feature = "admin")]
+            let _publication = machines.registration_publication_scope(&rec);
+            let saved = if atomic_registration {
+                store
+                    .create_or_update_auth_key_registration_atomic_with_lookup(
+                        rec,
+                        policy.as_ref(),
+                        &candidate,
+                        auth_key_id,
+                        require_fresh,
+                        Some(native_hostinfo),
+                        lookup,
+                    )
+                    .await?
+            } else {
+                store
+                    .create_or_update_auth_key_registration_with_hostinfo(
+                        rec,
+                        policy.as_ref(),
+                        auth_key_id,
+                        Some(native_hostinfo),
+                    )
+                    .await
+                    .map_err(super::AuthKeyRegistrationError::Storage)?
+            };
+            let registered_key = saved.record.node_key_hex.clone();
+            if let Some(old_node_key) = saved.replaced_node_key_hex.as_deref() {
+                machines
+                    .try_replace_node_key_auth_completion(
+                        old_node_key,
+                        registered_key.clone(),
+                        saved.record,
+                    )
+                    .map_err(super::AuthKeyRegistrationError::Storage)?;
+            } else {
+                machines
+                    .try_upsert_auth_completion(registered_key.clone(), saved.record)
+                    .map_err(super::AuthKeyRegistrationError::Storage)?;
+            }
+            let record = machines.get(&registered_key).ok_or_else(|| {
+                super::AuthKeyRegistrationError::Storage(
+                    "registered node disappeared before publication".into(),
+                )
+            })?;
+            auto_approve_registered_routes(&machines, &policy, Some(store.as_ref()), &record)
+                .await
+                .map_err(|error| {
+                    super::AuthKeyRegistrationError::Storage(format!(
+                        "auto approving routes: {error}"
+                    ))
+                })?;
+            Ok(record)
+        })
+        .await;
+        return match completed {
+            Ok(Ok(record)) => {
+                register_json_response(&register_response_for_live_record(&state.machines, &record))
+            }
+            Ok(Err(super::AuthKeyRegistrationError::Credential(error))) => {
+                preauth_error_response(error)
+            }
+            Ok(Err(super::AuthKeyRegistrationError::Storage(error))) => {
+                register_error_response(format!("handling register with auth key: {error}"))
+            }
+            Err(error) => register_error_response(format!("finishing node registration: {error}")),
+        };
+    }
+    match state
         .machines
-        .get(&node_key_hex)
-        .expect("record was just inserted");
-    Json(register_response_for_record(&rec)).into_response()
+        .commit_volatile_auth_registration_with_hostinfo(
+            existing_machine.as_ref().map(|(key, _)| key.as_str()),
+            rec,
+            Some(native_hostinfo),
+        ) {
+        Ok(record) => {
+            if let Err(error) =
+                auto_approve_registered_routes(&state.machines, &state.policy, None, &record).await
+            {
+                return register_error_response(format!(
+                    "handling register with auth key: auto approving routes: {error}"
+                ));
+            }
+            register_json_response(&register_response_for_live_record(&state.machines, &record))
+        }
+        Err(error) => (
+            if matches!(&error, super::RegistryMutationError::Policy(_)) {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            Json(ErrorBody {
+                error: error.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// headscale-go `handleRegisterWithAuthKey` runs `State.AutoApproveRoutes`
+/// once `HandleNodeFromPreAuthKey` has put the node in the NodeStore and the
+/// policy manager (the approvers resolve against the node's own addresses).
+/// A changed approval is applied like `State.SetApprovedRoutes`: NodeStore
+/// first, then the database row and policy refresh, then the
+/// `change.PolicyChange()` sent after the registration's own change.
+/// Callers hold the per-machine registration guard, as runtime sync requires.
+/// The OIDC / CLI web-registration completion (`web_registration.rs`) runs the
+/// same step after `HandleNodeFromAuthPath`.
+pub(super) async fn auto_approve_registered_routes(
+    machines: &super::MachineRegistry,
+    policy: &crate::policy::PolicyStore,
+    store: Option<&dyn super::MachineRegistrationStore>,
+    record: &MachineRecord,
+) -> Result<(), String> {
+    let user = (!record.user.is_empty()).then_some(record.user.as_str());
+    let approved = super::routes::auto_approved_routes_for_node(
+        policy,
+        &record.address_strings(),
+        user,
+        record.user_id,
+        &record.forced_tags,
+        &record.approved_routes,
+        &record.available_routes,
+    )?;
+    if approved == record.approved_routes {
+        return Ok(());
+    }
+    let node_id = record.stable_node_id_for_key(&record.node_key_hex);
+    if machines
+        .apply_policy_route_approvals(vec![(node_id, approved)])
+        .is_empty()
+    {
+        return Err(format!("node no longer exists in NodeStore: {node_id}"));
+    }
+    if let Some(store) = store {
+        let updated = machines
+            .get(&record.node_key_hex)
+            .ok_or_else(|| format!("node no longer exists in NodeStore: {node_id}"))?;
+        store.sync_runtime_machine_state(updated, policy).await?;
+    }
+    machines.try_refresh_policy_node_inputs()?;
+    machines.wake_policy_change(None);
+    Ok(())
 }
 
 async fn register_interactive(
@@ -622,6 +904,7 @@ async fn register_interactive(
     node_key_hex: String,
     machine_key_hex: String,
     body: RegisterRequest,
+    requested_hostinfo: serde_json::Value,
 ) -> axum::response::Response {
     let RegisterHostInfoParts {
         host_info,
@@ -635,18 +918,17 @@ async fn register_interactive(
         Err(resp) => return resp,
     };
     let requested_tags = requested_tags_for_body(&body);
-    let (ipv4, ipv6) = match allocate_register_ips(&state, &format!("pending:{node_key_hex}")) {
-        Ok(ips) => ips,
-        Err(resp) => return resp,
-    };
     let now = chrono::Utc::now();
-    let default_expiry = configured_node_expiry(state.runtime_config.as_ref(), now);
     let registration_id = new_registration_id();
     let expiry = if requested_tags.is_empty() {
-        effective_register_expiry(body.expiry, default_expiry, now)
+        body.expiry.filter(|expiry| !is_go_zero_expiry(*expiry))
     } else {
         None
     };
+    let home_derp = host_info
+        .net_info
+        .as_ref()
+        .map_or(0, |info| info.preferred_derp);
     let record = MachineRecord {
         node_id: None,
         auth_key_id: None,
@@ -656,15 +938,18 @@ async fn register_interactive(
         user_id: None,
         user_display_name: String::new(),
         user_profile_pic_url: String::new(),
+        user_provider: String::new(),
+        user_created_at: None,
+        raw_hostname: hostname.clone(),
         hostname,
         os,
         os_version,
         host_info,
-        ipv4,
-        ipv6,
+        ipv4: None,
+        ipv6: None,
         disco_key: None,
         endpoints: Vec::new(),
-        home_derp: 0,
+        home_derp,
         expiry,
         last_seen: now,
         ephemeral: body.ephemeral,
@@ -675,11 +960,13 @@ async fn register_interactive(
         ssh_host_keys,
         register_method: 0,
     };
-    state
-        .registration_cache
-        .insert(registration_id.clone(), record);
+    state.registration_cache.insert_with_hostinfo(
+        registration_id.clone(),
+        record,
+        Some(requested_hostinfo),
+    );
 
-    Json(RegisterResponse {
+    register_json_response(&RegisterResponse {
         user: empty_simple_user(),
         login: empty_simple_login(),
         node_key_expired: false,
@@ -688,7 +975,6 @@ async fn register_interactive(
         error: String::new(),
         node_key_signature: None,
     })
-    .into_response()
 }
 
 struct RegisterHostInfoParts {
@@ -707,7 +993,18 @@ fn register_hostinfo_parts(
     let available_routes = body
         .hostinfo
         .as_ref()
-        .map(|h| normalize_advertised_routes(&h.routable_ips))
+        .map(|h| {
+            h.routable_ips
+                .iter()
+                .map(|route| {
+                    if route.is_empty() {
+                        Ok(String::new())
+                    } else {
+                        headscale_api_acl::go_netip::parse_prefix_text(route)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
         .transpose()
         .map_err(|e| {
             (
@@ -741,39 +1038,15 @@ fn preserve_net_info_from_existing(host_info: &mut HostInfo, existing: Option<&M
 fn requested_tags_for_body(body: &RegisterRequest) -> Vec<String> {
     body.hostinfo
         .as_ref()
-        .map(|hostinfo| normalize_requested_tags(&hostinfo.request_tags))
+        .map(|hostinfo| hostinfo.request_tags.clone())
         .unwrap_or_default()
 }
 
-fn normalize_requested_tags(tags: &[String]) -> Vec<String> {
-    tags.iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 fn invalid_requested_tags_response(tags: &[String]) -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorBody {
-            error: format!(
-                "requested tags [{}] are invalid or not permitted",
-                tags.join(" ")
-            ),
-        }),
-    )
-        .into_response()
-}
-
-fn merge_existing_approved_routes(
-    existing_approved_routes: &[String],
-    _available_routes: &[String],
-    auto_approved_routes: Vec<String>,
-) -> Vec<String> {
-    let mut merged: BTreeSet<String> = existing_approved_routes.iter().cloned().collect();
-    merged.extend(auto_approved_routes);
-    merged.into_iter().collect()
+    register_error_response(format!(
+        "handling register with auth key: creating new node: requested tags [{}] are invalid or not permitted",
+        tags.join(" "),
+    ))
 }
 
 fn configured_node_expiry(
@@ -794,9 +1067,10 @@ fn configured_node_expiry(
 fn effective_register_expiry(
     expiry: Option<chrono::DateTime<chrono::Utc>>,
     default_expiry: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    expiry.filter(|expiry| *expiry > now).or(default_expiry)
+    expiry
+        .filter(|expiry| !is_go_zero_expiry(*expiry))
+        .or(default_expiry)
 }
 
 fn is_go_zero_expiry(expiry: chrono::DateTime<chrono::Utc>) -> bool {
@@ -808,45 +1082,110 @@ fn is_go_zero_expiry(expiry: chrono::DateTime<chrono::Utc>) -> bool {
             .and_utc()
 }
 
-fn preauth_error_response(err: RedeemError) -> axum::response::Response {
-    let error = match err {
-        RedeemError::Unknown => "preauth key not recognised",
-        RedeemError::Expired => "preauth key expired",
-        RedeemError::AlreadyUsed => "preauth key already used",
-    };
-    register_error_response(error)
+fn preauth_error_response(
+    error: impl Into<super::RegistrationRedeemError>,
+) -> axum::response::Response {
+    register_error_response(error.into().message)
 }
 
-fn failed_authkey_belongs_to_existing_node(
+fn existing_node_can_refresh_with_key(
     existing: &MachineRecord,
-    presented_auth_key_id: Option<i64>,
+    key: &super::RedeemOk,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    match (existing.auth_key_id, presented_auth_key_id) {
-        (Some(existing_auth_key_id), Some(presented_auth_key_id)) => {
-            existing_auth_key_id == presented_auth_key_id
-        }
-        _ => true,
+    let tagged = !existing.forced_tags.is_empty();
+    if !tagged && existing.is_expired_at(now) {
+        return false;
     }
+    if !key.tags.is_empty() {
+        return tagged && existing.auth_key_id.is_some() && existing.auth_key_id == key.auth_key_id;
+    }
+    true
 }
 
-fn logout_existing_node(
+async fn logout_existing_node(
     state: &WireState,
     node_key_hex: &str,
-    record: &MachineRecord,
+    original: &MachineRecord,
     expiry: chrono::DateTime<chrono::Utc>,
 ) -> axum::response::Response {
-    if record.ephemeral {
-        state.machines.delete(node_key_hex);
-        return Json(node_key_expired_response(false)).into_response();
+    let registration_guard = state
+        .machines
+        .lock_registration(&original.machine_key_hex)
+        .await;
+    let Some(record) = state.machines.get(node_key_hex) else {
+        return register_json_response(&node_key_expired_response(false));
+    };
+    if let Err(response) = validate_existing_machine_key(
+        &original.machine_key_hex,
+        &record,
+        REGISTER_LOGOUT_MACHINE_KEY_MISMATCH,
+    ) {
+        return response;
     }
-
-    state.machines.set_expiry(node_key_hex, Some(expiry));
-    let updated = state.machines.get(node_key_hex).unwrap_or_else(|| {
-        let mut updated = record.clone();
-        updated.expiry = Some(expiry);
-        updated
-    });
-    Json(register_response_for_record(&updated)).into_response()
+    let now = chrono::Utc::now();
+    if record.is_expired_at(now) {
+        return register_json_response(&node_key_expired_response(false));
+    }
+    // Tagged logout does not override a deliberate admin expiry. Ephemeral
+    // nodes are removed even when tagged, following Go's branch ordering.
+    if record.is_tagged() && !record.ephemeral {
+        return register_json_response(&register_response_for_live_record(
+            &state.machines,
+            &record,
+        ));
+    }
+    let state = state.clone();
+    let node_key_hex = node_key_hex.to_owned();
+    super::complete_state_mutation(async move {
+        let _registration = registration_guard;
+        let expiry = expiry.max(chrono::Utc::now());
+        if record.ephemeral {
+            if let Some(store) = &state.registration_store {
+                let saved = if store.supports_guarded_ephemeral_deletion() {
+                    store.delete_ephemeral_registration(&record).await
+                } else {
+                    store.persist_wire_logout(&record, expiry).await
+                };
+                if let Err(error) = saved {
+                    return register_error_response(format!(
+                        "handling logout: deleting ephemeral node: {error}"
+                    ));
+                }
+            }
+            if let Err(error) = state.machines.try_delete(&node_key_hex) {
+                // The explicit removal is already dispatched if policy
+                // refresh fails after the durable deletion.
+                return register_error_response(format!(
+                    "handling logout: deleting ephemeral node: {error}"
+                ));
+            }
+            return register_json_response(&node_key_expired_response(false));
+        }
+        let node_id = record.stable_node_id_for_key(&node_key_hex);
+        let Some((updated, online_changed)) =
+            state.machines.set_node_expiry_quiet(node_id, Some(expiry))
+        else {
+            return register_error_response(format!(
+                "handling logout: setting node expiry: node no longer exists in NodeStore: {node_id}"
+            ));
+        };
+        if let Some(store) = &state.registration_store
+            && let Err(error) = store.persist_wire_logout(&updated, expiry).await
+        {
+            return register_error_response(format!("handling logout: setting node expiry: {error}"));
+        }
+        let policy_changed = match state.machines.try_refresh_policy_node_inputs() {
+            Ok(changed) => changed == Some(true),
+            Err(error) => return register_error_response(format!(
+                "handling logout: setting node expiry: updating policy manager after setting expiry: {error}"
+            )),
+        };
+        state.machines.wake_node_expiry_change(node_id, policy_changed, online_changed);
+        register_json_response(&register_response_for_live_record(&state.machines, &updated))
+    })
+    .await
+    .unwrap_or_else(|error| register_error_response(format!("finishing node logout: {error}")))
 }
 
 fn require_noise_machine_key(
@@ -896,11 +1235,43 @@ fn reject_unsupported_capability(version: u32) -> Result<(), axum::response::Res
 }
 
 fn plain_register_error(status: StatusCode, message: &str) -> axum::response::Response {
-    (status, format!("{message}\n")).into_response()
+    (
+        status,
+        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        format!("{message}\n"),
+    )
+        .into_response()
+}
+
+fn register_json_response(response: &RegisterResponse) -> axum::response::Response {
+    let mut body = match super::register_json::encode(response) {
+        Ok(body) => body,
+        Err(error) => {
+            // Go writes its 200 response headers before Encoder.Encode.
+            tracing::error!(%error, "failed to encode RegisterResponse");
+            return (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json; charset=utf-8",
+                )],
+                Vec::<u8>::new(),
+            )
+                .into_response();
+        }
+    };
+    body.push(b'\n');
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 fn register_error_response(error: impl Into<String>) -> axum::response::Response {
-    Json(RegisterResponse {
+    register_json_response(&RegisterResponse {
         user: empty_simple_user(),
         login: empty_simple_login(),
         node_key_expired: false,
@@ -909,51 +1280,19 @@ fn register_error_response(error: impl Into<String>) -> axum::response::Response
         error: error.into(),
         node_key_signature: None,
     })
-    .into_response()
 }
 
 fn allocate_register_ips(
     state: &WireState,
     alloc_input: &str,
 ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), axum::response::Response> {
-    let ipv4 = if state.ip_allocator.ipv4_enabled() {
-        Some(state.ip_allocator.allocate(alloc_input).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: format!("ip allocation failed: {e}"),
-                }),
-            )
-                .into_response()
-        })?)
-    } else {
-        None
-    };
-    let ipv6 = state.ip_allocator.allocate_ipv6(alloc_input).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: format!("ip allocation failed: {e}"),
-            }),
-        )
-            .into_response()
-    })?;
-    if ipv4.is_none() && ipv6.is_none() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody {
-                error: "ip allocation failed: no IP prefixes enabled".into(),
-            }),
-        )
-            .into_response());
-    }
-    Ok((ipv4, ipv6))
-}
-
-fn policy_addr(ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) -> String {
-    ipv4.map(|addr| addr.to_string())
-        .or_else(|| ipv6.map(|addr| addr.to_string()))
-        .unwrap_or_default()
+    super::allocate_registration_addresses(state.ip_allocator.as_ref(), alloc_input).map_err(
+        |error| {
+            register_error_response(format!(
+                "handling register with auth key: creating new node: {error}"
+            ))
+        },
+    )
 }
 
 fn empty_simple_user() -> SimpleUser {
@@ -987,6 +1326,62 @@ fn node_key_expired_response(machine_authorized: bool) -> RegisterResponse {
     }
 }
 
+fn register_response_for_live_record(
+    registry: &super::MachineRegistry,
+    record: &MachineRecord,
+) -> RegisterResponse {
+    let response = register_response_for_record(record);
+    if record.is_tagged() {
+        return response;
+    }
+    #[cfg(feature = "admin")]
+    let mut response = response;
+    #[cfg(feature = "admin")]
+    match registry.cached_native_user(record) {
+        Some(None) => {
+            response.user = empty_simple_user();
+            response.login = empty_simple_login();
+        }
+        Some(Some(user)) => {
+            let login_name = if !user.email.is_empty() {
+                user.email.clone()
+            } else if !user.name.is_empty() {
+                user.name.clone()
+            } else if !user.provider_id.is_empty() {
+                user.provider_id.clone()
+            } else {
+                user.id.to_string()
+            };
+            let display_name = if user.display_name.is_empty() {
+                login_name.clone()
+            } else {
+                user.display_name
+            };
+            response.user = SimpleUser {
+                id: user.id,
+                display_name: display_name.clone(),
+                profile_pic_url: user.profile_pic_url.clone(),
+                created: user.created_at_precise.or_else(|| {
+                    i64::try_from(user.created_at)
+                        .ok()
+                        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                }),
+            };
+            response.login = SimpleLogin {
+                id: user.id,
+                provider: user.provider,
+                login_name,
+                display_name,
+                profile_pic_url: user.profile_pic_url,
+            };
+        }
+        None => {}
+    }
+    #[cfg(not(feature = "admin"))]
+    let _ = registry;
+    response
+}
+
 fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
     let profile = record.tailscale_user_profile();
     RegisterResponse {
@@ -994,18 +1389,18 @@ fn register_response_for_record(record: &MachineRecord) -> RegisterResponse {
             id: profile.id,
             display_name: profile.display_name.clone(),
             profile_pic_url: profile.profile_pic_url.clone(),
-            created: None,
+            created: if record.is_tagged() {
+                None
+            } else {
+                record.user_created_at
+            },
         },
         login: SimpleLogin {
             id: profile.id,
             provider: if record.is_tagged() {
                 String::new()
-            } else if record.register_method == 3 {
-                "oidc".into()
-            } else if record.register_method == 2 {
-                "cli".into()
             } else {
-                "octravpn-preauth".into()
+                record.user_provider.clone()
             },
             login_name: profile.login_name,
             display_name: profile.display_name,
@@ -1029,28 +1424,25 @@ fn auth_url_for_registration(state: &WireState, registration_id: &str) -> String
     }
 }
 
-fn registration_id_from_followup(followup: &str) -> Result<String, &'static str> {
-    let without_query = followup.split_once('?').map_or(followup, |(path, _)| path);
-    let path = without_query
-        .split_once('#')
-        .map_or(without_query, |(path, _)| path);
-    let marker = "/register/";
-    let Some((_, registration_id)) = path.rsplit_once(marker) else {
-        return Err("invalid followup URL");
-    };
-
-    if registration_id.contains('/') {
+fn registration_id_from_followup(followup: &str) -> Result<Option<String>, &'static str> {
+    let path = crate::go_url::Url::parse(followup).map_err(|_| "invalid followup URL")?;
+    // strings.ReplaceAll removes every occurrence from decoded URL.Path.
+    let mut id = Vec::new();
+    let mut rest = path.path();
+    const MARKER: &[u8] = b"/register/";
+    while let Some(at) = rest.windows(MARKER.len()).position(|part| part == MARKER) {
+        id.extend_from_slice(&rest[..at]);
+        rest = &rest[at + MARKER.len()..];
+    }
+    id.extend_from_slice(rest);
+    if id.len() != AUTH_ID_LENGTH || !id.starts_with(AUTH_ID_PREFIX.as_bytes()) {
         return Err("invalid registration ID");
     }
-
-    registration_id_from_register_path(registration_id)
-        .map(str::to_owned)
-        .ok_or("invalid registration ID")
-}
-
-fn registration_id_from_register_path(segment: &str) -> Option<&str> {
-    let rest = segment.strip_prefix(AUTH_ID_PREFIX)?;
-    (segment.len() == AUTH_ID_LENGTH && rest.len() == REGISTRATION_ID_LENGTH).then_some(rest)
+    // AuthIDs are only shape-validated by Go. Preserve a non-UTF-8 ID as
+    // an explicit cache miss, never a lossy or sentinel lookup key.
+    Ok(std::str::from_utf8(&id[AUTH_ID_PREFIX.len()..])
+        .ok()
+        .map(str::to_owned))
 }
 
 fn new_registration_id() -> String {
@@ -1109,7 +1501,7 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         primary_routes: rec.approved_routes.clone(),
         hostinfo: rec.host_info_for_node(),
         created: Some(rec.created_at),
-        key_expiry: rec.expiry,
+        key_expiry: rec.expiry.filter(|expiry| !is_go_zero_expiry(*expiry)),
         cap: 0,
         tags: rec.forced_tags.clone(),
         last_seen: Some(rec.last_seen),
@@ -1132,7 +1524,11 @@ pub fn record_to_map_node(rec: &MachineRecord, domain: &str) -> MapNode {
         // out so `wgengine.Reconfig` materialises this peer. Empty /
         // None ⇒ omitted on the wire (see `skip_serializing_if` on
         // `MapNode.disco_key` + `MapNode.endpoints`).
-        disco_key: rec.disco_key.clone(),
+        disco_key: rec
+            .disco_key
+            .as_ref()
+            .filter(|key| !key.is_empty() && key.as_str() != ZERO_DISCO_KEY)
+            .cloned(),
         endpoints: rec.endpoints.clone(),
         ..MapNode::default()
     }
@@ -1170,6 +1566,35 @@ mod tests {
 
     const TEST_MACHINE_KEY_HEX: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn register_response_uses_owner_metadata_and_serializes_null_signature() {
+        let created_at = chrono::Utc::now();
+        let mut record = MachineRecord::new_at_with_addresses(
+            created_at,
+            "ab".repeat(32),
+            TEST_MACHINE_KEY_HEX.to_string(),
+            "alice".to_string(),
+            "alice-node".to_string(),
+            Some(Ipv4Addr::new(100, 64, 0, 1)),
+            None,
+            false,
+        );
+        record.set_user_identity(Some(7), "alice".into(), "Alice".into(), String::new());
+        record.set_user_account_metadata("google".into(), Some(created_at));
+        record.register_method = 1;
+
+        let response = serde_json::to_value(register_response_for_record(&record)).unwrap();
+        assert_eq!(response["User"]["ID"], 7);
+        let serialized_created = response["User"]["Created"].as_str().unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(serialized_created).unwrap(),
+            created_at
+        );
+        assert_eq!(response["Login"]["Provider"], "google");
+        assert!(response.get("NodeKeySignature").is_some());
+        assert!(response["NodeKeySignature"].is_null());
+    }
 
     fn router(state: WireState) -> axum::Router {
         machine_router(state).layer(axum::middleware::from_fn(
@@ -1552,11 +1977,14 @@ mod tests {
         let id = "3oYCOZYA2zZmGB4PQ7aHBaMi";
         let auth_id = format!("{AUTH_ID_PREFIX}{id}");
         assert_eq!(
-            registration_id_from_followup(&format!("/register/{auth_id}")).unwrap(),
+            registration_id_from_followup(&format!("/register/{auth_id}"))
+                .unwrap()
+                .unwrap(),
             id
         );
         assert_eq!(
             registration_id_from_followup(&format!("https://headscale.example/register/{auth_id}"))
+                .unwrap()
                 .unwrap(),
             id
         );
@@ -2134,7 +2562,10 @@ mod tests {
         assert!(state.machines.get(&first_node_key).is_none());
         let rotated = state.machines.get(&second_node_key).unwrap();
         assert_eq!(rotated.machine_key_hex, machine_key_hex);
-        assert_eq!(rotated.hostname, "peer-rotated");
+        // headscale-go v0.29.5 HandleNodeFromPreAuthKey re-registration sets
+        // node.Hostname (raw) and keeps node.GivenName.
+        assert_eq!(rotated.hostname, "peer-a");
+        assert_eq!(rotated.raw_hostname, "peer-rotated");
         assert_eq!(rotated.ipv4, first_ip);
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
@@ -2150,6 +2581,8 @@ mod tests {
         .unwrap();
         assert_eq!(raw.auth_key_id, Some(second_key.id as i64));
         assert_eq!(raw.ipv4, first_ip.map(|ip| ip.to_string()));
+        assert_eq!(raw.hostname, "peer-rotated");
+        assert_eq!(raw.given_name, "peer-a");
     }
 
     #[tokio::test]
@@ -2219,12 +2652,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(
-            ev["error"],
-            "requested tags [tag:db tag:server] are invalid or not permitted"
+            ev["Error"],
+            "handling register with auth key: creating new node: requested tags [tag:server tag:server tag:db] are invalid or not permitted"
         );
         assert!(state.machines.get(&node_key_hex).is_none());
     }
@@ -2564,7 +2997,10 @@ mod tests {
         assert_eq!(rotated.user, "alice");
         assert_eq!(rotated.node_id, Some(8800));
         assert_eq!(rotated.user_id, Some(42));
-        assert_eq!(rotated.hostname, "peer-rotated");
+        // headscale-go v0.29.5 HandleNodeFromPreAuthKey re-registration sets
+        // node.Hostname (raw) and keeps node.GivenName.
+        assert_eq!(rotated.hostname, "peer-a");
+        assert_eq!(rotated.raw_hostname, "peer-rotated");
         assert_eq!(rotated.ipv4, first_ipv4);
         assert_eq!(rotated.created_at, first_created_at);
         assert_eq!(rotated.disco_key.as_deref(), Some("discokey:old"));
@@ -2710,7 +3146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authkey_register_same_machine_tagged_key_can_create_tag_owned_node() {
+    async fn authkey_register_same_machine_tagged_key_converts_user_node_in_place() {
         let (state, redeemer, _dir) = fixture();
         let first_authkey = "hskey-auth-tagged-different-user-first";
         let tagged_authkey = "hskey-auth-tagged-different-user-second";
@@ -2735,6 +3171,7 @@ mod tests {
             .insert(NoisePeerMachineKey(machine_key_hex.clone()));
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        let first = state.machines.get(&first_node_key).unwrap();
 
         let mut req = axum::http::Request::builder()
             .method("POST")
@@ -2751,11 +3188,86 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
 
-        assert_eq!(state.machines.len(), 2);
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.machines.get(&first_node_key).is_none());
         let tagged = state.machines.get(&tagged_node_key).unwrap();
-        assert_eq!(tagged.user, "bob");
+        assert!(tagged.user.is_empty());
         assert_eq!(tagged.forced_tags, vec!["tag:server"]);
+        assert_eq!(tagged.ipv4, first.ipv4);
         assert!(!redeemer.contains(tagged_authkey));
+    }
+
+    #[tokio::test]
+    async fn tagged_reauth_same_key_keeps_admin_tags_but_new_key_retags_in_place() {
+        let (state, redeemer, _dir) = fixture();
+        let first_key = "hskey-auth-tagged-retag-first";
+        let second_key = "hskey-auth-tagged-retag-second";
+        redeemer.insert_full(
+            first_key,
+            RedeemOk::for_user("alice")
+                .tags(vec!["tag:server".into()])
+                .auth_key_id(101),
+        );
+        redeemer.insert_full(
+            second_key,
+            RedeemOk::for_user("alice")
+                .tags(vec!["tag:database".into()])
+                .auth_key_id(102),
+        );
+        let app = router(state.clone());
+        let first_node_key = "8a".repeat(32);
+        let second_node_key = "8b".repeat(32);
+        let machine_key = "c8".repeat(32);
+
+        for (step, (node_key, auth_key)) in [
+            (&first_node_key, first_key),
+            (&first_node_key, first_key),
+            (&second_node_key, second_key),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if auth_key == first_key && state.machines.get(&first_node_key).is_some() {
+                let mut admin_override = state.machines.get(&first_node_key).unwrap();
+                admin_override.forced_tags = vec!["tag:manual".into()];
+                admin_override.expiry = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+                state
+                    .machines
+                    .upsert(first_node_key.clone(), admin_override);
+            }
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/machine/nodekey:{node_key}/register"))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&req_body(node_key, auth_key)).unwrap(),
+                ))
+                .unwrap();
+            req.extensions_mut()
+                .insert(NoisePeerMachineKey(machine_key.clone()));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{auth_key}");
+            if step == 1 {
+                let unchanged = state.machines.get(&first_node_key).unwrap();
+                assert_eq!(unchanged.forced_tags, vec!["tag:manual"]);
+                assert_eq!(unchanged.auth_key_id, Some(101));
+                assert!(
+                    unchanged
+                        .expiry
+                        .is_some_and(|expiry| expiry > chrono::Utc::now())
+                );
+            }
+        }
+
+        assert_eq!(state.machines.len(), 1);
+        assert!(state.machines.get(&first_node_key).is_none());
+        let retagged = state.machines.get(&second_node_key).unwrap();
+        assert_eq!(retagged.forced_tags, vec!["tag:database"]);
+        assert_eq!(retagged.auth_key_id, Some(102));
+        assert!(
+            retagged
+                .expiry
+                .is_some_and(|expiry| expiry > chrono::Utc::now())
+        );
     }
 
     #[tokio::test]
@@ -2901,10 +3413,19 @@ mod tests {
             .insert(NoisePeerMachineKey(alice_machine_key.clone()));
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // headscale-go v0.29.5: HandleNodeFromPreAuthKey's in-place update
+        // rejects a NodeKey bound to another machine with ErrNodeKeyInUse
+        // ("node key already in use by another machine"); handleRegister wraps
+        // it as "handling register with auth key: %w" and RegistrationHandler
+        // always answers 200 with RegisterResponse.Error (regErr).
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "node key already exists");
+        let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            rr.error,
+            "handling register with auth key: node key already in use by another machine"
+        );
+        assert!(!rr.machine_authorized);
         assert_eq!(state.machines.len(), 2);
         assert_eq!(
             state.machines.get(&bob_node_key).unwrap().machine_key_hex,
@@ -2961,10 +3482,11 @@ mod tests {
         assert!(rr.machine_authorized);
         assert!(!rr.node_key_expired);
         assert_eq!(state.machines.len(), 1);
-        assert_eq!(
-            state.machines.get(&node_key_hex).unwrap().hostname,
-            "peer-restarted"
-        );
+        // Re-registration updates the raw Hostname but keeps GivenName (Go
+        // HandleNodeFromPreAuthKey).
+        let restarted = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(restarted.hostname, "peer-a");
+        assert_eq!(restarted.raw_hostname, "peer-restarted");
         let second_expiry = state
             .machines
             .get(&node_key_hex)
@@ -2986,12 +3508,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "preauth key already used");
+        assert_eq!(rr.error, "authkey already used");
         assert_eq!(state.machines.len(), 1);
     }
 
     #[tokio::test]
-    async fn authkey_used_key_reregister_requires_original_auth_key_id_when_known() {
+    async fn authkey_used_key_reregister_accepts_another_key_for_the_same_user() {
         let (state, redeemer, _dir) = fixture();
         let first_authkey = "hskey-auth-used-original-id";
         let second_authkey = "hskey-auth-used-other-id";
@@ -3033,10 +3555,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "preauth key already used");
-        let unchanged = state.machines.get(&node_key_hex).unwrap();
-        assert_eq!(unchanged.auth_key_id, Some(101));
-        assert_ne!(unchanged.hostname, "wrong-used-key");
+        assert!(rr.machine_authorized);
+        let refreshed = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(refreshed.auth_key_id, Some(202));
+        // Re-registration updates the raw Hostname but keeps GivenName (Go
+        // HandleNodeFromPreAuthKey).
+        assert_eq!(refreshed.hostname, "peer-a");
+        assert_eq!(refreshed.raw_hostname, "wrong-used-key");
 
         let mut original_key_body = req_body(&node_key_hex, first_authkey);
         original_key_body["Hostinfo"]["Hostname"] = serde_json::json!("original-used-key");
@@ -3056,7 +3581,8 @@ mod tests {
         assert!(rr.machine_authorized);
         let reauthed = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(reauthed.auth_key_id, Some(101));
-        assert_eq!(reauthed.hostname, "original-used-key");
+        assert_eq!(reauthed.hostname, "peer-a");
+        assert_eq!(reauthed.raw_hostname, "original-used-key");
     }
 
     #[tokio::test]
@@ -3094,10 +3620,11 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.machine_authorized);
-        assert_eq!(
-            state.machines.get(&node_key_hex).unwrap().hostname,
-            "peer-expired-restart"
-        );
+        // Re-registration updates the raw Hostname but keeps GivenName (Go
+        // HandleNodeFromPreAuthKey).
+        let restarted = state.machines.get(&node_key_hex).unwrap();
+        assert_eq!(restarted.hostname, "peer-a");
+        assert_eq!(restarted.raw_hostname, "peer-expired-restart");
 
         let expired_new_key = "hskey-auth-expired-new-node";
         redeemer.insert_expired(expired_new_key, RedeemOk::for_user("alice"));
@@ -3114,7 +3641,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "preauth key expired");
+        assert_eq!(rr.error, "authkey expired");
     }
 
     #[tokio::test]
@@ -3336,10 +3863,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["error"], "extending key is not allowed");
+        assert_eq!(ev["Error"], "extending key is not allowed");
         assert!(state.machines.get(&node_key_hex).unwrap().expiry.is_none());
         assert!(state.registration_cache.is_empty());
     }
@@ -3517,9 +4044,16 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
+        // headscale-go handleRegisterWithAuthKey runs State.AutoApproveRoutes
+        // right after HandleNodeFromPreAuthKey; SetApprovedRoutes' change is
+        // a change.PolicyChange() sent after the registration change.
         let rec = state.machines.get(&node_key_hex).unwrap();
         assert_eq!(rec.available_routes, vec!["10.30.1.0/24", "10.99.0.0/24"]);
         assert_eq!(rec.approved_routes, vec!["10.30.1.0/24"]);
+        let changes = state.machines.map_change_history();
+        let last = changes.last().expect("registration records map changes");
+        assert_eq!(last.reason_labels(), vec!["policy change"]);
+        assert!(last.content.include_policy);
     }
 
     #[tokio::test]
@@ -3542,7 +4076,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert!(rr.error.contains("not recognised"));
+        // The mock redeemer reports an unknown key (RedeemError::Unknown), i.e.
+        // headscale-go's GetPreAuthKey -> ErrPreAuthKeyNotFound (wraps
+        // gorm.ErrRecordNotFound), which handleRegisterWithAuthKey maps to
+        // HTTPError(401, "invalid pre auth key"); RegistrationHandler returns
+        // it as RegisterResponse.Error with HTTP 200.
+        assert_eq!(rr.error, "invalid pre auth key");
+        assert!(!rr.machine_authorized);
     }
 
     #[tokio::test]
@@ -3592,6 +4132,101 @@ mod tests {
         assert_eq!(pending.available_routes, vec!["10.44.0.0/24"]);
         assert!(pending.expiry.is_none());
         assert!(pending.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn completed_followup_requires_the_registered_machine_key() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        let node_key_hex = "c1".repeat(32);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "followup-machine-binding" },
+        });
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let pending_response: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let registration_id = pending_response
+            .auth_url
+            .strip_prefix("https://headscale.example/register/hskey-authreq-")
+            .unwrap()
+            .to_string();
+        let mut registered = state.registration_cache.get(&registration_id).unwrap();
+        registered.user = "alice".into();
+        registered.user_id = Some(42);
+
+        let followup_body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Followup": pending_response.auth_url,
+            "Hostinfo": { "Hostname": "followup-machine-binding" },
+        });
+        let attacker_node_key_hex = "c2".repeat(32);
+        let mut attacker_body = followup_body.clone();
+        attacker_body["NodeKey"] = serde_json::json!(format!("nodekey:{attacker_node_key_hex}"));
+        let cancellation = NoiseRequestCancellation::new();
+        let rightful = {
+            let state = state.clone();
+            let node_key_hex = node_key_hex.clone();
+            let body: RegisterRequest = serde_json::from_value(followup_body.clone()).unwrap();
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                register_inner(
+                    state,
+                    node_key_hex,
+                    TEST_MACHINE_KEY_HEX.to_string(),
+                    body,
+                    Some(cancellation),
+                )
+                .await
+            })
+        };
+        let attacker = {
+            let state = state.clone();
+            let body: RegisterRequest = serde_json::from_value(attacker_body).unwrap();
+            tokio::spawn(async move {
+                register_inner(state, attacker_node_key_hex, "11".repeat(32), body, None).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            state
+                .registration_cache
+                .complete(&registration_id, registered)
+        );
+        cancellation.cancel();
+
+        let rightful = tokio::time::timeout(Duration::from_secs(1), rightful)
+            .await
+            .unwrap()
+            .unwrap();
+        let attacker = tokio::time::timeout(Duration::from_secs(1), attacker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rightful.status(), StatusCode::OK);
+        assert_eq!(attacker.status(), StatusCode::OK);
+        let rightful: RegisterResponse =
+            serde_json::from_slice(&to_bytes(rightful.into_body(), 8192).await.unwrap()).unwrap();
+        let attacker: RegisterResponse =
+            serde_json::from_slice(&to_bytes(attacker.into_body(), 8192).await.unwrap()).unwrap();
+        assert!(rightful.machine_authorized);
+        assert_eq!(rightful.user.id, 42);
+        assert!(!attacker.machine_authorized);
+        assert_eq!(attacker.user.id, 0);
+        assert_eq!(attacker.error, REGISTER_EXISTING_NODE_MACHINE_KEY_MISMATCH);
     }
 
     #[tokio::test]
@@ -3734,13 +4369,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_authkey_interactive_registration_applies_node_expiry_default() {
+    async fn missing_authkey_interactive_registration_does_not_apply_node_expiry_default() {
         let (mut state, _redeemer, _dir) = fixture();
         state.public_control_url = Some("https://headscale.example".into());
         state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
         let app = router(state.clone());
         let node_key_hex = "d4".repeat(32);
-        let before = chrono::Utc::now();
         let body = serde_json::json!({
             "Version": 113,
             "NodeKey": format!("nodekey:{node_key_hex}"),
@@ -3769,10 +4403,46 @@ mod tests {
             .strip_prefix(AUTH_ID_PREFIX)
             .expect("AuthURL uses current-upstream auth ID prefix");
         let pending = state.registration_cache.get(registration_id).unwrap();
-        let expiry = pending.expiry.expect("node.expiry default applied");
+        assert!(
+            pending.expiry.is_none(),
+            "only client-requested expiry is cached"
+        );
+    }
 
-        assert!(expiry >= before + chrono::Duration::seconds(3600));
-        assert!(expiry <= chrono::Utc::now() + chrono::Duration::seconds(3600));
+    #[tokio::test]
+    async fn missing_authkey_interactive_registration_preserves_client_expiry() {
+        let (mut state, _redeemer, _dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        state.runtime_config = Arc::new(runtime_config_with_node_expiry(Duration::from_secs(3600)));
+        let node_key_hex = "d5".repeat(32);
+        let requested_expiry = chrono::Utc::now() + chrono::Duration::hours(2);
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending-requested-expiry" },
+            "Expiry": requested_expiry,
+        });
+        let resp = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/machine/nodekey:{node_key_hex}/register"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let response: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let registration_id = response
+            .auth_url
+            .strip_prefix("https://headscale.example/register/")
+            .and_then(|id| id.strip_prefix(AUTH_ID_PREFIX))
+            .unwrap();
+        let pending = state.registration_cache.get(registration_id).unwrap();
+        assert_eq!(pending.expiry, Some(requested_expiry));
     }
 
     #[tokio::test]
@@ -3914,7 +4584,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(rr.error, "preauth key not recognised");
+        assert_eq!(rr.error, "invalid pre auth key");
     }
 
     #[tokio::test]

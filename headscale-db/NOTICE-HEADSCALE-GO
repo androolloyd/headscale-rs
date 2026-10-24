@@ -1,0 +1,52 @@
+Headscale compatibility implementation
+
+Copyright (c) 2020, Juan Font
+All rights reserved.
+
+Typed text serialization rules and transactional IP backfill primitives in src/stored_text.rs and src/headscale_nodes.rs.
+Behavior/source reference: github.com/juanfont/headscale v0.29.5,
+commit 0f7d1e536bed9f01dd7161f7637af19bb0908335.
+The original BSD 3-Clause terms are retained in LICENSE-HEADSCALE-GO.
+
+Typed policy approval vectors and per-node policy persistence ordering follow
+hscontrol/policy/policy.go and state/state.go (autoApproveNodes) at the same pin.
+
+CachedNodeSnapshot and SQLite/Postgres selected-column updates in
+src/headscale_nodes.rs follow hscontrol/state/state.go (persistNode and
+nodeUpdateColumns) at the same v0.29.5 pin.
+
+Policy history INSERT RETURNING and timestamp projection in src/policies.rs
+follow hscontrol/db/policy.go and hscontrol/types/policy.go (gorm.Model) at
+the same pinned v0.29.5 source.
+
+Native expiry-only UPDATE and its automatic clock follow NodeSetExpiry in
+hscontrol/db/node.go at the same pinned v0.29.5 source.
+
+Cached-ID DELETE success for zero affected rows follows hscontrol/db/node.go
+DeleteNode at the same v0.29.5 pin.
+
+headscale_nodes/cached_registration.rs and cached auth-key transaction entry
+points follow state/state.go applyAuthNodeUpdate/RegisterNodeWithPreAuthKey
+selected-column and credential-consumption behavior at the same v0.29.5 pin.
+
+headscale_nodes/new_registration.rs and fresh auth-key transaction entry points
+follow state/state.go createAndSaveNewNode's original node fields and atomic
+credential consumption before NodeStore publication at the same v0.29.5 pin.
+
+The empty preauth-key display fallback follows hscontrol/types/preauth_key.go
+PreAuthKey.Proto at the same v0.29.5 pin.
+
+Direct native preauth list/mint projection, numeric-owner binding, original
+insert timestamps, fractional expiry, scoped deletion and distinct node/key
+zero-time expiry rules follow hscontrol/grpcv1.go, db/preauth_keys.go,
+types/preauth_key.go and types/node.go at the same v0.29.5 pin.
+
+Preauth user/key transaction capture, batched user preload, SQLite immediate
+read/write transactions and context-independent handler completion follow
+hscontrol/db/db.go, db/sqliteconfig/config.go, db/preauth_keys.go and grpcv1.go
+at the same v0.29.5 pin.
+
+Credential user preload before bcrypt, first-ID lookup, captured native
+validation/planning and existing-node selection ordering follow
+hscontrol/db/preauth_keys.go, types/preauth_key.go and state/state.go
+at the same v0.29.5 pin.

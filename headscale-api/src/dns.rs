@@ -1,3 +1,7 @@
+// Copyright 2009 The Go Authors. All rights reserved.
+// Copyright (c) 2020, Juan Font
+// Selected query/receiver behavior adapts Go 1.26.9 net/url and Headscale
+// v0.29.5; BSD terms are retained in LICENSE-GO-STDLIB/NOTICE-GO-STDLIB.
 //! MagicDNS / `tailcfg.DNSConfig` build + hot-reload.
 //!
 //! Closes the P1 entry in `docs/headscale-gap-analysis.md` (§MagicDNS):
@@ -17,24 +21,11 @@
 //!
 //! ## Hot-reload mechanism
 //!
-//! We poll the extra-records file's `mtime` every
-//! [`EXTRA_RECORDS_POLL_INTERVAL`] (default 5s) rather than pulling in
-//! the `notify` crate. Reasons:
-//!
-//! - The constraint set on this PR says "no new heavy deps; mtime poll
-//!   is OK."
-//! - `notify`'s cross-platform abstraction (inotify on Linux, kqueue
-//!   on macOS, ReadDirectoryChangesW on Windows) is mostly useful for
-//!   high-frequency edits — operator-edited DNS records change once
-//!   per ops session, where a 5s polling lag is invisible.
-//! - mtime polling has zero filesystem-event-loss failure modes; the
-//!   `notify` crate is famously lossy on macOS and across bind mounts
-//!   (see issue tracker history).
-//!
-//! On every detected change we (1) re-read the file, (2) parse to a
-//! `Vec<DnsRecord>`, (3) swap it into the store, (4)
-//! `notify_waiters()` so parked `/map` long-pollers wake and emit a
-//! refreshed `MapResponse`.
+//! Linux and supported BSD/Apple filesystem events wake the loader immediately. Every platform also
+//! reads and fingerprints the current path at the configured polling interval,
+//! so timestamp-preserving writes, replacements and missed events cannot leave
+//! the live records stale indefinitely. Invalid or nil updates keep the last
+//! accepted records; an empty JSON array clears them.
 //!
 //! ## MagicDNS host records
 //!
@@ -53,16 +44,19 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::tailscale_wire::wire::{DnsConfig, DnsRecord, DnsResolver};
 use ipnet::{Ipv4Net, Ipv6Net};
+
+#[path = "dns/watch.rs"]
+mod extra_records_watch;
 
 const NEXTDNS_DOH_PREFIX: &str = "https://dns.nextdns.io";
 const NEXTDNS_ATTR_PREFIX: &str = "nextdns:";
@@ -79,10 +73,8 @@ type NameserverParts = (
     SplitResolverObjects,
 );
 
-/// How often the background poller checks the extra-records file's
-/// `mtime`. Operators expect "edit a JSON file; new records appear
-/// within a few seconds" — 5s is the same cadence the upstream Go
-/// `ExtraRecordsMan` debounces redundant updates to.
+/// Fallback content-check interval for extra records. Supported file events also
+/// trigger immediate reads; no modification timestamp gates a reload.
 pub const EXTRA_RECORDS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Operator-supplied DNS configuration block. Parses from the `[dns]`
@@ -494,25 +486,37 @@ pub struct MagicDnsReversePrefixes {
 ///
 /// The store owns:
 /// * the parsed [`DnsConfigSpec`],
-/// * the most-recently-loaded `ExtraRecords` (swapped via
-///   `notify_waiters` on every reload),
-/// * a [`Notify`] that fans out to every parked `/map` long-poller.
+/// * the most-recently-loaded `ExtraRecords`,
+/// * a retained watch channel for `/map` connections, and
+/// * a [`Notify`] for existing one-shot waiters.
 ///
-/// `/map` long-pollers register a `notified()` future in their
-/// `select!` loop next to the existing machine-registry / policy
-/// notifies; an extra-records file edit wakes the same fan-out.
+/// Map connections subscribe before their initial snapshot and keep the
+/// receiver between frames, including while encoding and yielding bytes.
 #[derive(Clone, Default)]
 pub struct DnsStore {
     inner: Arc<Inner>,
 }
 
-#[derive(Default)]
 struct Inner {
     spec: RwLock<Arc<DnsConfigSpec>>,
     extra_records: RwLock<Arc<Vec<DnsRecord>>>,
     magic_dns_reverse_prefixes: RwLock<MagicDnsReversePrefixes>,
     /// Wakes parked `/map` long-pollers on extra-records edits.
     notify: Notify,
+    /// Retains changes while a map stream is encoding or yielding a frame.
+    changes: watch::Sender<()>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            spec: RwLock::default(),
+            extra_records: RwLock::default(),
+            magic_dns_reverse_prefixes: RwLock::default(),
+            notify: Notify::new(),
+            changes: watch::channel(()).0,
+        }
+    }
 }
 
 impl DnsStore {
@@ -556,6 +560,7 @@ impl DnsStore {
                 extra_records: RwLock::new(extra_records),
                 magic_dns_reverse_prefixes: RwLock::new(MagicDnsReversePrefixes::default()),
                 notify: Notify::new(),
+                changes: watch::channel(()).0,
             }),
         }
     }
@@ -578,7 +583,7 @@ impl DnsStore {
         let extra_records = Arc::new(spec.extra_records.clone());
         *self.inner.spec.write() = Arc::new(spec);
         *self.inner.extra_records.write() = extra_records;
-        self.inner.notify.notify_waiters();
+        self.notify_changed();
     }
 
     /// Snapshot the current extra-records list. Cheap (Arc clone).
@@ -591,7 +596,7 @@ impl DnsStore {
     /// changes in subsequent `DNSConfig` payloads.
     pub fn set_magic_dns_reverse_prefixes(&self, prefixes: MagicDnsReversePrefixes) {
         *self.inner.magic_dns_reverse_prefixes.write() = prefixes;
-        self.inner.notify.notify_waiters();
+        self.notify_changed();
     }
 
     /// Parse and set MagicDNS reverse-DNS prefixes from server config
@@ -624,12 +629,23 @@ impl DnsStore {
     /// by both the synchronous test path and the file-watcher.
     pub fn set_extra_records(&self, records: Vec<DnsRecord>) {
         *self.inner.extra_records.write() = Arc::new(records);
+        self.notify_changed();
+    }
+
+    fn notify_changed(&self) {
+        self.inner.changes.send_replace(());
         self.inner.notify.notify_waiters();
     }
 
+    /// Subscribe before building an initial map, then retain this receiver
+    /// for the connection's lifetime so updates between frames are observed.
+    pub(crate) fn subscribe_changes(&self) -> watch::Receiver<()> {
+        self.inner.changes.subscribe()
+    }
+
     /// Wait for the next DnsStore change (extra-records edit OR
-    /// spec swap). Used by the `/map` streaming select! loop next to
-    /// the registry / policy notifies.
+    /// spec swap). This one-shot API observes only notifications sent after
+    /// its future is registered; map connections use a retained receiver.
     pub async fn wait_for_change(&self) {
         self.inner.notify.notified().await;
     }
@@ -664,9 +680,18 @@ impl DnsStore {
         machines: &[MachineDnsRecord],
         requester: Option<&DnsRequester>,
     ) -> DnsConfig {
+        self.build_for_requester_with_hostinfo(machines, requester, true)
+    }
+
+    pub(crate) fn build_for_requester_with_hostinfo(
+        &self,
+        machines: &[MachineDnsRecord],
+        requester: Option<&DnsRequester>,
+        has_hostinfo: bool,
+    ) -> DnsConfig {
         let mut config = self.build(machines);
         if let Some(requester) = requester {
-            apply_nextdns_requester_config(&mut config, requester);
+            apply_nextdns_requester_config_with_hostinfo(&mut config, requester, has_hostinfo);
         }
         config
     }
@@ -767,7 +792,16 @@ fn build_dns_config_with_reverse_prefixes(
         proxied: magic_dns_enabled,
         nameservers: Vec::new(),
         cert_domains: normalise_domain_list(&spec.cert_domains),
-        extra_records: extra.to_vec(),
+        // headscale-go v0.29.4+ lowercases operator record names before
+        // putting them on the client wire. Record values keep their case.
+        extra_records: extra
+            .iter()
+            .cloned()
+            .map(|mut record| {
+                record.name = record.name.to_lowercase();
+                record
+            })
+            .collect(),
         exit_node_filtered_set: spec.exit_node_filtered_set.clone(),
         temp_corp_issue_13969: String::new(),
         authoritative_suffixes: authoritative,
@@ -858,6 +892,14 @@ pub fn try_build_dns_config(
 }
 
 pub fn apply_nextdns_requester_config(config: &mut DnsConfig, requester: &DnsRequester) {
+    apply_nextdns_requester_config_with_hostinfo(config, requester, true);
+}
+
+fn apply_nextdns_requester_config_with_hostinfo(
+    config: &mut DnsConfig,
+    requester: &DnsRequester,
+    has_hostinfo: bool,
+) {
     if let Some(profile) = nextdns_profile_from_attrs(&requester.node_attrs) {
         apply_nextdns_profile(&mut config.resolvers, &profile);
         apply_nextdns_profile(&mut config.fallback_resolvers, &profile);
@@ -874,10 +916,10 @@ pub fn apply_nextdns_requester_config(config: &mut DnsConfig, requester: &DnsReq
         return;
     }
 
-    add_nextdns_metadata(&mut config.resolvers, requester);
-    add_nextdns_metadata(&mut config.fallback_resolvers, requester);
+    add_nextdns_metadata(&mut config.resolvers, requester, has_hostinfo);
+    add_nextdns_metadata(&mut config.fallback_resolvers, requester, has_hostinfo);
     for resolvers in config.routes.values_mut() {
-        add_nextdns_metadata(resolvers, requester);
+        add_nextdns_metadata(resolvers, requester, has_hostinfo);
     }
 }
 
@@ -923,83 +965,83 @@ fn apply_nextdns_profile(resolvers: &mut [DnsResolver], profile: &str) {
     }
 }
 
-fn add_nextdns_metadata(resolvers: &mut [DnsResolver], requester: &DnsRequester) {
+fn add_nextdns_metadata(
+    resolvers: &mut [DnsResolver],
+    requester: &DnsRequester,
+    has_hostinfo: bool,
+) {
     for resolver in resolvers {
         if is_nextdns_doh_addr(&resolver.addr) {
-            resolver.addr = add_nextdns_metadata_to_addr(&resolver.addr, requester);
+            resolver.addr = nextdns_metadata_to_addr(&resolver.addr, requester, has_hostinfo);
         }
     }
 }
 
-fn add_nextdns_metadata_to_addr(addr: &str, requester: &DnsRequester) -> String {
-    let (without_fragment, fragment) = split_once(addr, '#');
-    let (base, query) = split_once(without_fragment, '?');
-    let mut params = parse_query(query.unwrap_or_default());
-    params.insert("device_name".to_string(), vec![requester.hostname.clone()]);
-    params.insert("device_model".to_string(), vec![requester.os.clone()]);
-    if let Some(ip) = requester.primary_ip.as_ref() {
-        params.insert("device_ip".to_string(), vec![ip.clone()]);
-    }
-
-    let query = encode_query(&params);
-    let mut out = if query.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}?{query}")
+fn nextdns_metadata_to_addr(addr: &str, requester: &DnsRequester, has_hostinfo: bool) -> String {
+    let Ok(mut url) = crate::go_url::Url::parse(addr) else {
+        return addr.to_owned();
     };
-    if let Some(fragment) = fragment {
-        out.push('#');
-        out.push_str(fragment);
+    let mut params = parse_query_bytes(url.raw_query());
+    params.insert(
+        b"device_name".to_vec(),
+        vec![requester.hostname.as_bytes().to_vec()],
+    );
+    if has_hostinfo {
+        params.insert(
+            b"device_model".to_vec(),
+            vec![requester.os.as_bytes().to_vec()],
+        );
     }
-    out
+    if let Some(ip) = requester.primary_ip.as_ref() {
+        params.insert(b"device_ip".to_vec(), vec![ip.as_bytes().to_vec()]);
+    }
+    url.set_raw_query(encode_query_bytes(&params).into_bytes());
+    // Parse receives UTF-8 and String escapes all decoded non-UTF-8 bytes.
+    String::from_utf8(url.as_bytes())
+        .expect("URL.String preserves UTF-8 source and escapes components")
 }
 
-fn split_once(input: &str, delimiter: char) -> (&str, Option<&str>) {
-    input
-        .split_once(delimiter)
-        .map_or((input, None), |(left, right)| (left, Some(right)))
-}
-
-fn parse_query(query: &str) -> BTreeMap<String, Vec<String>> {
+// net/url.ParseQuery drops malformed pairs, preserves arbitrary decoded bytes,
+// and rejects a raw semicolon in a pair. Values.Encode sorts byte strings.
+fn parse_query_bytes(query: &[u8]) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut params = BTreeMap::new();
-    for part in query.split('&').filter(|part| !part.is_empty()) {
-        let (key, value) = split_once(part, '=');
-        params
-            .entry(percent_decode_query(key))
-            .or_insert_with(Vec::new)
-            .push(percent_decode_query(value.unwrap_or_default()));
+    // The number of `&`-separated pairs is the number of `&` plus one.
+    if !crate::go_url::query_params_within_max(query.split(|byte| *byte == b'&').count()) {
+        return params;
+    }
+    for pair in query.split(|byte| *byte == b'&') {
+        if pair.is_empty() || pair.contains(&b';') {
+            continue;
+        }
+        let (key, value) = pair
+            .iter()
+            .position(|byte| *byte == b'=')
+            .map_or((pair, &[][..]), |at| (&pair[..at], &pair[at + 1..]));
+        let (Some(key), Some(value)) = (decode_query_bytes(key), decode_query_bytes(value)) else {
+            continue;
+        };
+        params.entry(key).or_insert_with(Vec::new).push(value);
     }
     params
 }
 
-fn percent_decode_query(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
+fn decode_query_bytes(input: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut at = 0;
+    while at < input.len() {
+        match input[at] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let high = hex_value(*input.get(at + 1)?)?;
+                let low = hex_value(*input.get(at + 2)?)?;
+                out.push(high << 4 | low);
+                at += 2;
             }
-            b'%' if i + 2 < bytes.len() => {
-                let hi = hex_value(bytes[i + 1]);
-                let lo = hex_value(bytes[i + 2]);
-                if let (Some(hi), Some(lo)) = (hi, lo) {
-                    out.push((hi << 4) | lo);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
+            byte => out.push(byte),
         }
+        at += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Some(out)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -1011,39 +1053,36 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn encode_query(params: &BTreeMap<String, Vec<String>>) -> String {
-    params
-        .iter()
-        .flat_map(|(key, values)| {
-            values.iter().map(move |value| {
-                format!(
-                    "{}={}",
-                    percent_encode_query(key),
-                    percent_encode_query(value)
-                )
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("&")
+fn encode_query_bytes(params: &BTreeMap<Vec<u8>, Vec<Vec<u8>>>) -> String {
+    let mut output = String::new();
+    for (key, values) in params {
+        for value in values {
+            if !output.is_empty() {
+                output.push('&');
+            }
+            encode_query_part(key, &mut output);
+            output.push('=');
+            encode_query_part(value, &mut output);
+        }
+    }
+    output
 }
 
-fn percent_encode_query(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
+fn encode_query_part(input: &[u8], output: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in input.iter().copied() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
+                output.push(byte as char);
             }
-            b' ' => out.push('+'),
+            b' ' => output.push('+'),
             _ => {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                out.push('%');
-                out.push(HEX[(byte >> 4) as usize] as char);
-                out.push(HEX[(byte & 0x0f) as usize] as char);
+                output.push('%');
+                output.push(HEX[(byte >> 4) as usize] as char);
+                output.push(HEX[(byte & 15) as usize] as char);
             }
         }
     }
-    out
 }
 
 fn resolver_from_addr(s: &str) -> DnsResolver {
@@ -1055,14 +1094,18 @@ fn resolver_from_addr(s: &str) -> DnsResolver {
 }
 
 fn effective_global_resolvers(spec: &DnsConfigSpec) -> Vec<DnsResolver> {
-    if spec.nameserver_resolvers.is_empty() {
+    let resolvers: Vec<DnsResolver> = if spec.nameserver_resolvers.is_empty() {
         spec.nameservers
             .iter()
             .map(|addr| resolver_from_addr(addr))
             .collect()
     } else {
         spec.nameserver_resolvers.clone()
-    }
+    };
+    resolvers
+        .into_iter()
+        .filter(go_accepts_resolver_address)
+        .collect()
 }
 
 fn effective_fallback_resolvers(spec: &DnsConfigSpec) -> Vec<DnsResolver> {
@@ -1083,7 +1126,7 @@ fn effective_split_resolvers(spec: &DnsConfigSpec) -> HashMap<String, Vec<DnsRes
 
     let mut routes = HashMap::new();
     for suffix in keys {
-        let resolvers = spec
+        let resolvers: Vec<DnsResolver> = spec
             .restricted_resolvers
             .get(suffix)
             .cloned()
@@ -1095,9 +1138,20 @@ fn effective_split_resolvers(spec: &DnsConfigSpec) -> HashMap<String, Vec<DnsRes
                     .map(|addr| resolver_from_addr(addr))
                     .collect()
             });
-        routes.insert(suffix.clone(), resolvers);
+        routes.insert(
+            suffix.clone(),
+            resolvers
+                .into_iter()
+                .filter(go_accepts_resolver_address)
+                .collect(),
+        );
     }
     routes
+}
+
+fn go_accepts_resolver_address(resolver: &DnsResolver) -> bool {
+    headscale_api_acl::go_netip::parse_addr(&resolver.addr).is_ok()
+        || crate::go_url::Url::parse(&resolver.addr).is_ok()
 }
 
 pub fn normalise_domain(input: &str) -> String {
@@ -1237,20 +1291,56 @@ pub fn normalise_hostname(input: &str) -> String {
 /// and keeps the previous record set. Whitespace-only files are not
 /// special-cased; they fail JSON parsing like upstream Go.
 ///
-/// The file format intentionally accepts both `type` (canonical) and
-/// `Type` (PascalCase) as the type-field key, because operators tend
-/// to copy paste from tailcfg dumps which use PascalCase. We match by
-/// custom deserialisation through the `ExtraRecordsFile` wrapper.
+/// Fields use Go's case folding, duplicate assignment, scalar-null and legacy
+/// Unicode replacement rules. Missing strings and null array elements retain
+/// the zero-value record.
 pub fn parse_extra_records(bytes: &[u8]) -> Result<Vec<DnsRecord>, serde_json::Error> {
-    if bytes.is_empty() {
-        return Ok(Vec::new());
+    Ok(parse_extra_records_value(bytes)?.unwrap_or_default())
+}
+
+// A nil slice is accepted at startup but ignored by updateRecords. An empty,
+// non-nil array deliberately clears the live records.
+fn parse_extra_records_value(bytes: &[u8]) -> Result<Option<Vec<DnsRecord>>, serde_json::Error> {
+    use headscale_api_acl::{
+        go_json,
+        go_tailcfg_json::{self, Kind},
+    };
+    fn error(message: impl std::fmt::Display) -> serde_json::Error {
+        <serde_json::Error as serde::de::Error>::custom(message)
     }
-    // Accept both lowercase and PascalCase keys via the same
-    // permissive wrapper used for config-file inline extra records.
-    let loose: Vec<LooseDnsRecord> = serde_json::from_slice(bytes)?;
-    let mut records: Vec<DnsRecord> = loose.into_iter().map(Into::into).collect();
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    go_json::check_valid(bytes).map_err(error)?;
+    if go_json::trim(bytes) == b"null" {
+        return Ok(None);
+    }
+    let mut records = Vec::new();
+    for raw in go_json::array(bytes).map_err(error)? {
+        let value = go_tailcfg_json::struct_value(
+            raw.get(),
+            &[
+                ("Name", Kind::String),
+                ("Type", Kind::String),
+                ("Value", Kind::String),
+            ],
+        )
+        .map_err(error)?;
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        records.push(DnsRecord {
+            name: field("Name"),
+            record_type: field("Type"),
+            value: field("Value"),
+        });
+    }
     dedupe_extra_records(&mut records);
-    Ok(records)
+    Ok(Some(records))
 }
 
 fn dedupe_extra_records(records: &mut Vec<DnsRecord>) {
@@ -1268,17 +1358,11 @@ fn dedupe_extra_records(records: &mut Vec<DnsRecord>) {
     });
 }
 
-/// Spawn a background task that polls the extra-records file's
-/// `mtime` and replaces the store's record list whenever it changes.
+/// Spawn an event-driven (Linux/Android/BSD/Apple) and content-polled records loader.
 ///
-/// Returns immediately; the watcher runs until the returned join
-/// handle is dropped (or aborted). On parse errors we leave the
-/// previous record set in place and log a warning — operators get a
-/// clear signal that their edit didn't land, but the running tailnet
-/// keeps the previous MagicDNS state.
-///
-/// `interval` defaults to [`EXTRA_RECORDS_POLL_INTERVAL`] when
-/// `None` is passed.
+/// Invalid, absent or nil updates retain the last accepted record set. The
+/// returned task owns its event descriptor; aborting it releases the watch.
+/// `interval` controls fallback content checks on every platform.
 pub fn spawn_extra_records_watcher(
     store: DnsStore,
     path: PathBuf,
@@ -1286,43 +1370,38 @@ pub fn spawn_extra_records_watcher(
 ) -> tokio::task::JoinHandle<()> {
     let poll = interval.unwrap_or(EXTRA_RECORDS_POLL_INTERVAL);
     tokio::spawn(async move {
-        let mut last_mtime: Option<SystemTime> = None;
-        let mut last_fingerprint: Option<[u8; 32]> = None;
-        // Best-effort: load the file once at start so the initial
-        // `/map` response carries the operator's records without
-        // waiting one poll-interval.
-        if let Some(load) = load_and_apply(&store, &path, true, None).await {
-            last_mtime = Some(load.mtime);
-            last_fingerprint = load.fingerprint;
-        }
+        // Arm before the initial read so edits racing that read also wake us.
+        let mut events = extra_records_watch::Events::new(&path);
+        let mut fingerprint = load_and_apply(&store, &path, true, None)
+            .await
+            .and_then(|load| load.fingerprint);
+        let mut deadline = tokio::time::Instant::now() + poll;
         loop {
-            tokio::time::sleep(poll).await;
-            match tokio::fs::metadata(&path).await {
-                Ok(meta) => match meta.modified() {
-                    Ok(m) if Some(m) != last_mtime => {
-                        if let Some(load) =
-                            load_and_apply(&store, &path, false, last_fingerprint).await
-                        {
-                            last_mtime = Some(load.mtime);
-                            last_fingerprint = load.fingerprint;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(?path, ?e, "extra-records mtime read failed"),
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Match headscale-go's ExtraRecordsMan: remove/
-                    // rename events do not clear the live record set.
-                    // The manager keeps serving the last good records
-                    // while it waits for the file to reappear.
-                    if last_mtime.take().is_some() {
-                        tracing::warn!(
-                            ?path,
-                            "extra-records file disappeared; keeping previous set"
-                        );
-                    }
+            let event = async {
+                match events.as_ref() {
+                    Some(events) => events.changed().await,
+                    None => std::future::pending().await,
                 }
-                Err(e) => tracing::warn!(?path, ?e, "extra-records stat failed"),
+            };
+            let event_failed = tokio::select! {
+                result = event => result.is_err(),
+                () = tokio::time::sleep_until(deadline) => false,
+            };
+            // A timer independent of event traffic guarantees content fallback
+            // even under a busy parent directory or a lost/overflowed watch.
+            if tokio::time::Instant::now() >= deadline {
+                deadline = tokio::time::Instant::now() + poll;
+            }
+            if event_failed {
+                events = None;
+            }
+            if let Some(events) = &mut events {
+                events.refresh();
+            } else {
+                events = extra_records_watch::Events::new(&path);
+            }
+            if let Some(next) = load_and_apply(&store, &path, false, fingerprint).await {
+                fingerprint = next.fingerprint;
             }
         }
     })
@@ -1330,48 +1409,53 @@ pub fn spawn_extra_records_watcher(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExtraRecordsLoad {
-    mtime: SystemTime,
     fingerprint: Option<[u8; 32]>,
 }
 
 async fn load_and_apply(
     store: &DnsStore,
     path: &Path,
-    apply_empty: bool,
+    apply_nil: bool,
     previous_fingerprint: Option<[u8; 32]>,
 ) -> Option<ExtraRecordsLoad> {
     let bytes = match tokio::fs::read(path).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(?path, ?e, "extra-records read failed");
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                ?path,
+                ?error,
+                "extra-records read failed; keeping previous set"
+            );
             return None;
         }
     };
-    let meta = tokio::fs::metadata(path).await.ok()?;
-    let mtime = meta.modified().ok()?;
-    if !apply_empty && bytes.is_empty() {
-        tracing::warn!(
-            ?path,
-            "extra-records reload read empty file; keeping previous set"
-        );
+    let fingerprint = extra_records_fingerprint(&bytes);
+    if Some(fingerprint) == previous_fingerprint {
         return Some(ExtraRecordsLoad {
-            mtime,
-            fingerprint: previous_fingerprint,
+            fingerprint: Some(fingerprint),
         });
     }
-    let fingerprint = Some(extra_records_fingerprint(&bytes));
-    if !apply_empty && fingerprint == previous_fingerprint {
-        return Some(ExtraRecordsLoad { mtime, fingerprint });
-    }
-    match parse_extra_records(&bytes) {
-        Ok(records) => {
+    match parse_extra_records_value(&bytes) {
+        Ok(Some(records)) => {
             store.set_extra_records(records);
-            Some(ExtraRecordsLoad { mtime, fingerprint })
+            Some(ExtraRecordsLoad {
+                fingerprint: Some(fingerprint),
+            })
         }
-        Err(e) => {
+        Ok(None) if apply_nil => {
+            store.set_extra_records(Vec::new());
+            Some(ExtraRecordsLoad {
+                fingerprint: Some(fingerprint),
+            })
+        }
+        // Go updateRecords ignores a nil slice without updating its hash.
+        Ok(None) => Some(ExtraRecordsLoad {
+            fingerprint: previous_fingerprint,
+        }),
+        Err(error) => {
             tracing::warn!(
                 ?path,
-                ?e,
+                ?error,
                 "extra-records parse failed; keeping previous set"
             );
             None
@@ -1497,6 +1581,21 @@ mod tests {
             !cfg.extra_records
                 .iter()
                 .any(|r| r.name.starts_with("peer-"))
+        );
+    }
+
+    #[test]
+    fn dnsconfig_lowercases_operator_record_names() {
+        let store = DnsStore::from_spec(magic_spec());
+        store.set_extra_records(vec![record(
+            "MiXeD.Headscale.Test",
+            "CNAME",
+            "Host.Example",
+        )]);
+        let cfg = store.build(&[]);
+        assert_eq!(
+            cfg.extra_records,
+            vec![record("mixed.headscale.test", "CNAME", "Host.Example")]
         );
     }
 
@@ -2065,6 +2164,33 @@ mod tests {
         assert!(cfg.routes.contains_key("Corp.Internal."));
         assert!(cfg.authoritative_suffixes.is_empty());
         assert!(cfg.proxied);
+    }
+
+    #[test]
+    fn numeric_resolver_with_port_is_ignored_like_headscale_go() {
+        let spec = DnsConfigSpec {
+            nameservers: vec!["192.0.2.10:5353".into(), "192.0.2.11".into()],
+            restricted_nameservers: HashMap::from([(
+                "corp.example".to_string(),
+                vec!["192.0.2.12:5353".into(), "192.0.2.13".into()],
+            )]),
+            ..magic_spec()
+        };
+        let cfg = DnsStore::from_spec(spec).build(&[]);
+        assert_eq!(
+            cfg.fallback_resolvers
+                .iter()
+                .map(|resolver| resolver.addr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["192.0.2.11"]
+        );
+        assert_eq!(
+            cfg.routes["corp.example"]
+                .iter()
+                .map(|resolver| resolver.addr.as_str())
+                .collect::<Vec<_>>(),
+            vec!["192.0.2.13"]
+        );
     }
 
     #[test]

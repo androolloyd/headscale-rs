@@ -1,0 +1,56 @@
+Go standard library netip text and string compatibility
+
+Copyright 2020 The Go Authors. All rights reserved.
+Copyright 2009 The Go Authors. All rights reserved.
+Copyright 2013 The Go Authors. All rights reserved.
+
+src/go_netip.rs adapts text acceptance and canonicalization rules from
+Go 1.26.9 src/net/netip/netip.go. src/go_strconv.rs and its unicode.rs
+adapt src/strconv/quote.go and isprint.go. The Unicode tables and quoting
+were extracted from the CLI logging implementation. The BSD license is
+in LICENSE-GO-STDLIB.
+
+go_strconv::quote_bytes also follows strconv.Quote's malformed UTF-8 byte
+escaping: each invalid byte is emitted as a hexadecimal escape while valid
+Unicode runes keep the same pinned printable-table behavior.
+
+src/go_unicode.rs adapts Go 1.26.9 unicode/letter.go SimpleFold/ToLower and the
+Unicode 15.0.0 CaseRanges, asciiFold and caseOrbit tables from unicode/tables.go.
+It supplies strings.EqualFold and strings.ToLower at valid UTF-8 boundaries. Original
+Go Authors BSD terms are retained in LICENSE-GO-STDLIB.
+
+Go JSON struct compatibility
+Copyright 2010 The Go Authors. All rights reserved.
+src/go_json.rs adapts Go 1.26.9 encoding/json scanner.go and decode.go.
+src/go_tailcfg_json.rs follows its field folding, null/duplicate/array reuse
+and saved-type-error versus immediate custom-unmarshaler error behavior.
+
+Go P-256 public encoding validation references
+Copyright 2011 The Go Authors. All rights reserved.
+Copyright 2013 The Go Authors. All rights reserved.
+Copyright 2022 The Go Authors. All rights reserved.
+src/go_key.rs follows crypto/ecdsa.ParseUncompressedPublicKey, the elliptic
+P-256 parameters and nistec point/coordinate acceptance and error order.
+It checks fixed-size public data only; no secret scalar or signature operation.
+The original BSD terms are retained in LICENSE-GO-STDLIB.
+
+Go fmt signed decimal scanning
+Copyright 2010 The Go Authors. All rights reserved.
+src/go_tailcfg_json.rs follows fmt/scan.go's pinned whitespace, signed decimal
+scan and partial-assignment rules for Tailscale SignatureType text conversion.
+The original BSD terms remain in LICENSE-GO-STDLIB.
+
+src/go_strconv.rs also supplies Go QuoteRune escaping for DNS label byte
+diagnostics, using the same pinned strconv/Unicode sources and BSD terms.
+
+Go JSON output
+Copyright 2010 The Go Authors. All rights reserved.
+The shared ACL src/go_json_output.rs follows Go 1.26.9 encoding/json/indent.go
+compact/HTML/indent behavior for opaque policy payloads and map frames.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Go time quoting
+Copyright 2009 The Go Authors. All rights reserved.
+Shared src/go_strconv.rs time.quote follows Go 1.26.9 src/time/format.go.
+Source SHA-256 f288c56858ab25828551681778f006b591ed140fc12e60122b6a9a7e35b07eb7.
+Original BSD terms remain in LICENSE-GO-STDLIB.

@@ -1,0 +1,11 @@
+grpc-gateway JSON decoder compatibility
+
+The HTTP request decode staging in src/grpc_gateway.rs follows
+github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
+runtime/marshal_jsonpb.go: encoding/json.Decoder into RawMessage followed by
+protobuf JSON decoding. Generated Headscale v0.29.5 handlers ignore clean EOF
+and drain remaining HTTP body bytes after this single decode.
+
+Copyright (c) 2015, Gengo, Inc. All rights reserved.
+Upstream BSD-3-Clause terms are retained in LICENSE-GRPC-GATEWAY.
+See UPSTREAM.md for exact source hashes and unqualified boundaries.

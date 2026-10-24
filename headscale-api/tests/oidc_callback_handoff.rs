@@ -35,8 +35,10 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+// Non-zero: tailcfg.Node.Machine is `omitzero`, so headscale-go omits an
+// all-zero machine key from peers and the peer could not be matched by it.
 const TEST_MACHINE_KEY_HEX: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+    "2222222222222222222222222222222222222222222222222222222222222222";
 const VIEWER_MACHINE_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
 
@@ -156,9 +158,31 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         )
         .await
         .unwrap();
-    assert_eq!(callback_response.status(), StatusCode::OK);
-    let confirm_cookie_header = single_set_cookie_header(callback_response.headers());
-    let callback_body = body_string(callback_response).await;
+    assert_eq!(callback_response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        callback_response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("https://headscale.example/register/confirm/{auth_id}")
+    );
+    let confirm_cookie_header = confirm_cookie_after_callback_clears(callback_response.headers());
+    let confirmation_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/register/confirm/{auth_id}"))
+                .header(header::COOKIE, &confirm_cookie_header)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirmation_page.status(), StatusCode::OK);
+    let callback_body = body_string(confirmation_page).await;
     assert!(callback_body.contains("Confirm node registration"));
     assert!(callback_body.contains("User Info Name"));
     assert!(callback_body.contains("oidc-client"));
@@ -299,11 +323,18 @@ async fn oidc_register_confirm_rejects_wire_ssh_check_auth_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body_string(response).await,
-        "auth session is not for node registration"
-    );
+    // headscale-go v0.29.5 RegisterConfirmHandler never checks
+    // IsRegistration: an SSH-check auth request has no PendingConfirmation,
+    // so it is refused with 403 "registration not OIDC-authorized"
+    // (oidc.go:936-940; confirmed by running the Go handler). The browser
+    // gets httpUserError's page; the technical message is only logged.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = body_string(response).await;
+    assert!(body.contains("<title>Headscale - Error</title>"));
+    assert!(body.contains(
+        ">Forbidden</strong>You are not authorized. Please contact your administrator.</div>"
+    ));
+    assert!(!body.contains("registration not OIDC-authorized"));
     assert_eq!(
         state.registration_cache.ssh_binding(raw_auth_id),
         Some(SshCheckBinding {
@@ -534,32 +565,46 @@ fn callback_cookie_header(headers: &HeaderMap) -> String {
     cookies.join("; ")
 }
 
-fn single_set_cookie_header(headers: &HeaderMap) -> String {
+/// headscale-go v0.29.5 OIDCCallbackHandler deletes the state and nonce
+/// callback cookies (clearOIDCCallbackCookie) before
+/// beginRegistrationConfirmation sets the register-confirm CSRF cookie, so
+/// the 303 carries three Set-Cookie headers in that order (confirmed against
+/// the Go handler). Returns the Cookie header a browser then sends.
+fn confirm_cookie_after_callback_clears(headers: &HeaderMap) -> String {
     let cookies = headers
         .get_all(header::SET_COOKIE)
         .iter()
-        .map(|value| {
-            value
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .to_string()
-        })
+        .map(|value| value.to_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(cookies.len(), 1);
-    cookies.join("; ")
+    assert_eq!(cookies.len(), 3, "{cookies:?}");
+    for (cookie, base) in cookies[..2].iter().zip(["state_", "nonce_"]) {
+        assert!(cookie.starts_with(base), "{cookies:?}");
+        assert!(
+            cookie.ends_with("=; Path=/oidc/callback; Max-Age=0"),
+            "{cookies:?}"
+        );
+    }
+    let confirm = cookies[2].split(';').next().unwrap().to_string();
+    assert!(
+        confirm.starts_with("headscale_register_confirm="),
+        "{cookies:?}"
+    );
+    confirm
 }
 
+/// Mirrors upstream's oidc_test.go csrfInputRe,
+/// `name="headscale_register_confirm"[^>]*value="([^"]+)"`: elem-go sorts
+/// attributes, so `type="hidden"` sits between name and value.
 fn csrf_from_confirm_body(body: &str) -> String {
-    let marker = "name=\"headscale_register_confirm\" value=\"";
-    let rest = body
-        .split_once(marker)
-        .map(|(_before, after)| after)
+    let tag = body
+        .split_once("name=\"headscale_register_confirm\"")
+        .and_then(|(_before, after)| after.split_once('>'))
+        .map(|(tag, _after)| tag)
         .expect("confirm form contains CSRF field");
-    rest.split_once('"')
+    tag.split_once("value=\"")
+        .and_then(|(_before, value)| value.split_once('"'))
         .map(|(csrf, _after)| csrf.to_string())
+        .filter(|csrf| !csrf.is_empty())
         .expect("confirm form CSRF field has value")
 }
 

@@ -1,0 +1,62 @@
+
+Go JSON output
+Copyright 2010 The Go Authors. All rights reserved.
+The shared ACL src/go_json_output.rs follows Go 1.26.9 encoding/json/indent.go
+compact/HTML/indent behavior for opaque policy payloads and map frames.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Native ACME lifecycle
+Copyright 2016 The Go Authors. All rights reserved.
+src/acme_issuer/lazy.rs and native_order.rs adapt selected x/crypto/acme/autocert
+certificate state, creation/renewal publication, timing and verifyRFC challenge
+ordering. CSR subject/DNS SAN and key reuse follow certRequest/authorizedCert.
+Source pins and implementation boundaries are recorded in UPSTREAM.md.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Go time quoting
+Copyright 2009 The Go Authors. All rights reserved.
+Shared src/go_strconv.rs time.quote follows Go 1.26.9 src/time/format.go.
+Source SHA-256 f288c56858ab25828551681778f006b591ed140fc12e60122b6a9a7e35b07eb7.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Go environment expansion
+Copyright 2010 The Go Authors. All rights reserved.
+Native src/config/secret_file.rs follows Go 1.26.9 src/os/env.go Expand and
+getShellName for one-pass OIDC client-secret path expansion.
+Source SHA-256 e7eb15de93fccf8c0706285c350f32eab6c4a1f752bb8594ce7da3a0215ee92b.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Native ACME retry and authorization cleanup
+Copyright 2016, 2018 The Go Authors. All rights reserved.
+src/acme_issuer/native_order.rs follows selected autocert verifyRFC deferred
+pending cleanup, polling and finalization phases. Explicit native SDK methods
+adapt selected x/crypto/acme http.go, acme.go and rfc8555.go; vendor/instant-acme
+retains the original Go BSD terms and adaptation notice in LICENSE-GO*. Source
+pins and scope are in both UPSTREAM.md files. Existing Go BSD terms remain in
+LICENSE-GO-STDLIB.
+
+Native certificate PEM decoding
+Copyright 2009 The Go Authors. All rights reserved.
+vendor/instant-acme/src/go_native/pem.rs adapts selected Go encoding/pem.Decode
+for the bounded native certificate-chain path. Its package retains the Go BSD
+terms/notice; source pins are in vendor/instant-acme/UPSTREAM.md.
+
+Native ACME resource framing and HTTP dates
+Copyright 2009, 2010, 2011, 2013, 2022 The Go Authors. All rights reserved.
+The native CLI calls explicitly selected vendor/instant-acme raw resource,
+first-value JSON framing, Go quoting and HTTP-date/Unix Local helpers. The vendor
+package retains original BSD terms and pinned IANA archive attribution; source
+pins and remaining behavior boundaries are in its UPSTREAM.md.
+
+Native shared ACME account-key cache
+Copyright 2016 The Go Authors. All rights reserved.
+src/acme_issuer.rs and acme_issuer/lazy.rs follow selected autocert accountKey
+cache miss/error ordering and key persistence before discovery/registration.
+Private native JWK/JWS, discovery and nonce helpers are attributed within
+vendor/instant-acme. Original Go BSD terms remain in LICENSE-GO-STDLIB.
+
+Native DERP JSON error receiver
+Copyright 2010 The Go Authors. All rights reserved.
+src/derp_config/native_json.rs follows selected Go1.26.9 encoding/json
+finite typed assignment and first-error traversal. Original BSD terms remain
+in LICENSE-GO-STDLIB; source hashes and boundaries are in UPSTREAM.md.

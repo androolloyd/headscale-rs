@@ -1,0 +1,116 @@
+Go time JSON compatibility
+
+Copyright 2009 The Go Authors. All rights reserved.
+Copyright 2010 The Go Authors. All rights reserved.
+Copyright 2022 The Go Authors. All rights reserved.
+
+src/tailscale_wire/go_time.rs adapts Go 1.26.9 Time.UnmarshalJSON and
+RFC3339/Parse fallback grammar from time/time.go, time/format.go and
+time/format_rfc3339.go. The original BSD terms are in LICENSE-GO-STDLIB.
+
+Go JSON output
+Copyright 2010 The Go Authors. All rights reserved.
+The shared ACL src/go_json_output.rs follows Go 1.26.9 encoding/json/indent.go
+compact/HTML/indent behavior for opaque policy payloads and map frames.
+Original BSD terms remain in LICENSE-GO-STDLIB.
+
+Go JSON field assignment and MIME response diagnostics
+Copyright 2010 The Go Authors. All rights reserved.
+src/oidc/discovery.rs follows Go 1.26.9 encoding/json/decode.go slice/string
+assignment and mime/mediatype.go, mime/grammar.go parameter-parse success rules.
+The shared ACL scanner supplies encoding/json/scanner.go diagnostics. Source
+hashes are retained in NOTICE-GO-OIDC and headscale-api-acl/UPSTREAM.md.
+
+Native ordinary HTTP shutdown
+Copyright 2009 The Go Authors. All rights reserved.
+src/tailscale_wire/http_shutdown.rs adapts Go 1.26.9 net/http/server.go
+Shutdown/closeIdleConns ordering, shared deadline behavior and integer-second
+StateNew aging. Original BSD terms remain in LICENSE-GO-STDLIB. The private
+Hyper driver uses existing APIs; no Hyper implementation was copied.
+
+ACME ALPN and challenge certificate selection
+Copyright 2016 The Go Authors. All rights reserved.
+src/tailscale_wire/tls.rs follows golang.org/x/crypto v0.53.0
+acme/autocert/autocert.go's ALPN ordering, sole acme-tls/1 offer rule,
+hostname-policy phases and cache-name identity. The private hostname helper is
+in src/tailscale_wire/tls/acme_hostname.rs; CLI cache/issuance uses its shared
+normalizer.
+The private tls/acme_hostname/punycode.rs adapts x/net v0.56.0
+idna/punycode.go's arithmetic and legacy delimiter behavior (Go Authors 2016).
+The private hostname profile, trie, bidi, NFC and converted static data follow
+selected x/net v0.56.0 IDNA and x/text v0.38.0 Unicode 15 tables and algorithms.
+Copyright 2011, 2016 The Go Authors. All rights reserved.
+The committed converter copies only SHA-pinned table data into Rust syntax;
+source pins and scope are recorded in UPSTREAM.md.
+The HTTP/2 preface and initial-frame budgets follow Go 1.26.9
+net/http/h2_bundle.go.
+Original BSD terms remain in LICENSE-GO-STDLIB; source pins are in UPSTREAM.md.
+
+HTTP/2 first-frame SETTINGS rule
+Copyright 2014 The Go Authors. All rights reserved.
+The optional guard in vendor/h2/src/codec/framed_read.rs follows the first-frame
+type rule in Go 1.26.9 net/http/h2_bundle.go and selected x/net/http2/server.go.
+Private offending-frame metadata and current-ID graceful selection in the
+vendored codec/proto modules follow those servers' GOAWAY phases.
+The underlying h2 implementation retains its original MIT license in
+vendor/h2/LICENSE. Original Go BSD terms remain in LICENSE-GO-STDLIB.
+The ordinary TLS and Noise builder limits in http_shutdown.rs and noise.rs
+follow the bundled and selected x/net server configuration defaults.
+The optional per-server idle and post-GOAWAY timers in vendored h2 follow
+the same selected Go servers. Hyper retains its MIT license in vendor/hyper.
+Native per-stream read/write deadlines and body timeout behavior in the
+vendored stream/connection modules follow Go net/http/h2_bundle.go as well.
+The native handshake in vendor/h2/src/server.rs follows the selected Go
+servers' independent initial SETTINGS write and client-preface read.
+Native immediate SETTINGS application/coalesced ACKs, pending PONG/refusal
+queues and the bounded control-reply closure follow the same Go servers.
+The optional native raw SETTINGS loader follows Go frame-parse/process count,
+duplicate and value validation phases; vendor/h2 retains BSD terms/notices too.
+
+Native ACME cache eligibility
+Copyright 2009, 2011, 2016 The Go Authors. All rights reserved.
+src/tailscale_wire/tls/acme_cache.rs follows selected autocert cacheGet/validCert,
+its token-key variant and crypto/x509/verify.go hostname matching.
+tls/acme_token_cache.rs follows autocert token lookup/publication/deletion and
+DirCache persistence (Go Authors 2016). acme_cache/pem.rs adapts selected
+encoding/pem.Decode. CLI canonical cache publication uses these helpers and
+validates before replacing the entry. BSD terms remain in LICENSE-GO-STDLIB;
+source pins and remaining Rust X.509/provider limits are in UPSTREAM.md.
+
+Native lazy ACME preparation and certificate-kind selection
+Copyright 2016 The Go Authors. All rights reserved.
+The full-only async provider, ordinary ECDSA/RSA selection/cache classification
+and empty initial resolver follow selected autocert.GetCertificate/cert/cacheGet.
+raw_tls.rs early certificate-failure alerts follow Go crypto/tls server
+handshake error handling (Copyright 2009, 2018 The Go Authors).
+Original BSD terms remain in LICENSE-GO-STDLIB; source pins are in UPSTREAM.md.
+
+Native raw ClientHello hostname preparation
+Copyright 2009, 2016, 2018 The Go Authors. All rights reserved.
+raw_tls.rs and tls/acme_hostname.rs follow selected crypto/tls raw SNI and
+x/crypto/autocert GetCertificate name/diagnostic phases. The optional vendored
+rustls parser/session changes retain additional Go terms inside vendor/rustls
+in LICENSE-GO and LICENSE-GO-NOTICE. Source pins/scope are in both UPSTREAM.md
+files. Existing BSD terms remain in LICENSE-GO-STDLIB.
+
+Native deferred certificate preparation
+Copyright 2009, 2018 The Go Authors. All rights reserved.
+raw_tls/acme_handshake.rs and the explicit native rustls continuations follow
+Go TLS1.2/TLS1.3 GetCertificate/resumption/HRR/ALPN phase ordering. Original BSD
+terms remain here and inside vendor/rustls; UPSTREAM.md records source pins.
+
+Grouped native registration, identity and DNS compatibility
+Copyright 2009, 2010, 2011, 2013, 2014, 2021, 2023 The Go Authors. All rights reserved.
+Private go_url.rs and go_url/godebug.rs follow selected Go1.26.9 net/url,
+internal/godebug and internal/bisect phases. oidc/mailbox.rs follows selected
+net/mail and mime encoded-word admission; oidc/username.rs retains pinned
+Unicode15 Letter/Nd tables and native byte-first validation. DNS query handling
+uses the same byte URL/query profile. Existing BSD terms remain in
+LICENSE-GO-STDLIB; exact sources, hashes and boundaries are in UPSTREAM.md.
+
+Native DERP nonfinite encoding and debug JSON
+Copyright 2010 The Go Authors. All rights reserved.
+The private native DERP encoder follows selected Go1.26.9 encoding/json
+float-error text and sorted map traversal. Native debug output reuses the
+existing Go compact/HTML/indent adaptation. Original BSD terms remain in
+LICENSE-GO-STDLIB; source hashes and boundaries are in UPSTREAM.md.

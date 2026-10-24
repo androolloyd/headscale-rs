@@ -186,7 +186,7 @@ impl EmbeddedDerpConfig {
 
 /// OpenID Connect configuration, matching the headscale-go v0.28 server config
 /// keys.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct OidcConfig {
     /// Config-only validation guard used by headscale-go for OIDC-specific
@@ -233,6 +233,21 @@ pub struct OidcConfig {
     pub pkce: PkceConfig,
 }
 
+impl std::fmt::Debug for OidcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("scope", &self.scope)
+            .field(
+                "only_start_if_oidc_is_available",
+                &self.only_start_if_oidc_is_available,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for OidcConfig {
     fn default() -> Self {
         Self {
@@ -275,9 +290,27 @@ impl OidcConfig {
         K: AsRef<str>,
         V: AsRef<str>,
     {
+        self.apply_headscale_env_overrides_unchecked_from(vars)?;
+        self.validate()
+    }
+
+    /// Apply overrides while deferring startup validation to the command
+    /// consuming the loaded config. Utility commands do not validate OIDC.
+    pub fn apply_headscale_env_overrides_unchecked_from<I, K, V>(
+        &mut self,
+        vars: I,
+    ) -> Result<(), ConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
         for (key, value) in vars {
             let key = key.as_ref();
             let value = value.as_ref();
+            if value.is_empty() {
+                continue;
+            }
 
             match key {
                 "HEADSCALE_OIDC_ENABLED" => {
@@ -322,12 +355,18 @@ impl OidcConfig {
             }
         }
 
-        self.validate()
+        Ok(())
     }
 
     /// Resolve `client_secret_path`, mirroring headscale-go's mutual exclusion
     /// check and whitespace trimming.
     pub fn resolve_client_secret(&mut self) -> Result<(), ConfigError> {
+        self.resolve_client_secret_unchecked()?;
+        self.validate()
+    }
+
+    /// Resolve the secret source without validating startup-only OIDC fields.
+    pub fn resolve_client_secret_unchecked(&mut self) -> Result<(), ConfigError> {
         if self.client_secret_path.is_some() && !self.client_secret.is_empty() {
             return Err(ConfigError::OidcClientSecretConflict);
         }
@@ -343,14 +382,33 @@ impl OidcConfig {
             self.client_secret = String::from_utf8_lossy(&secret).trim().to_string();
         }
 
-        self.validate()
+        Ok(())
     }
 
-    /// Validate the OIDC config values that headscale-go validates at config
-    /// load time.
+    /// Validate OIDC whenever an issuer activates it, as headscale-go does.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.enabled {
+        if self.enabled || !self.issuer.is_empty() {
             validate_pkce_method(&self.pkce.method)?;
+        }
+
+        if !self.issuer.is_empty() {
+            let valid_issuer = url::Url::parse(&self.issuer).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            });
+            if !valid_issuer {
+                return Err(ConfigError::OidcIssuerInvalid(self.issuer.clone()));
+            }
+            if self.client_id.is_empty() {
+                return Err(ConfigError::OidcClientIdRequired);
+            }
+            if self.client_secret.is_empty()
+                && self
+                    .client_secret_path
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+            {
+                return Err(ConfigError::OidcClientSecretRequired);
+            }
         }
 
         Ok(())
@@ -380,6 +438,18 @@ impl Default for PkceConfig {
 /// Configuration load errors.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Upstream v0.29.5 requires an explicit IPv4 or IPv6 node prefix.
+    #[error("no IPv4 or IPv6 prefix configured, minimum one prefix is required")]
+    NoPrefixConfigured,
+    /// The configured issuer is not a usable HTTP(S) URL.
+    #[error("oidc.issuer must be a valid http(s) URL: got {0:?}")]
+    OidcIssuerInvalid(String),
+    /// OIDC is enabled by issuer, but there is no client ID.
+    #[error("oidc.client_id is required when oidc.issuer is set")]
+    OidcClientIdRequired,
+    /// OIDC is enabled by issuer, but there is no client secret source.
+    #[error("oidc.client_secret or oidc.client_secret_path is required when oidc.issuer is set")]
+    OidcClientSecretRequired,
     /// `oidc.client_secret` and `oidc.client_secret_path` cannot both be set.
     #[error("oidc_client_secret and oidc_client_secret_path are mutually exclusive")]
     OidcClientSecretConflict,
@@ -746,6 +816,7 @@ mod tests {
             ("HEADSCALE_OIDC_ENABLED", "true"),
             ("HEADSCALE_OIDC_ISSUER", "https://issuer.example"),
             ("HEADSCALE_OIDC_CLIENT_ID", "client-id"),
+            ("HEADSCALE_OIDC_CLIENT_SECRET", "secret"),
             ("HEADSCALE_OIDC_SCOPE", "openid,profile,email,groups"),
             ("HEADSCALE_OIDC_ALLOWED_DOMAINS", "example.com,example.org"),
             ("HEADSCALE_OIDC_ALLOWED_USERS", "alice@example.com"),
@@ -835,6 +906,32 @@ mod tests {
         assert!(matches!(
             oidc.validate(),
             Err(ConfigError::InvalidPkceMethod)
+        ));
+    }
+
+    #[test]
+    fn oidc_issuer_activates_startup_validation_without_enabled_flag() {
+        let mut oidc = OidcConfig {
+            issuer: "https://issuer.example".into(),
+            ..OidcConfig::default()
+        };
+        assert!(matches!(
+            oidc.validate(),
+            Err(ConfigError::OidcClientIdRequired)
+        ));
+
+        oidc.client_id = "headscale".into();
+        assert!(matches!(
+            oidc.validate(),
+            Err(ConfigError::OidcClientSecretRequired)
+        ));
+
+        oidc.client_secret = "secret".into();
+        assert!(oidc.validate().is_ok());
+        oidc.issuer = "not-a-url".into();
+        assert!(matches!(
+            oidc.validate(),
+            Err(ConfigError::OidcIssuerInvalid(_))
         ));
     }
 }

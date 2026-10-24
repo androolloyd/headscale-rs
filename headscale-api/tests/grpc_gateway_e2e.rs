@@ -1797,9 +1797,12 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
         method: Method,
         uri: &'static str,
         body: &'static str,
-        message_fragment: &'static str,
+        expected_message: &'static str,
     }
 
+    // Messages are headscale-go v0.29.5's, byte for byte: encoding/json's own
+    // errors (the gateway first decodes a json.RawMessage) carry no prefix,
+    // protojson errors carry protobuf's "proto: " prefix.
     let (app, token) = fixture().await;
 
     for case in [
@@ -1808,35 +1811,35 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/user",
             body: "{",
-            message_fragment: "EOF while parsing",
+            expected_message: "unexpected EOF",
         },
         Case {
             name: "whole-message null",
             method: Method::POST,
             uri: "/api/v1/user",
             body: "null",
-            message_fragment: "unexpected token null",
+            expected_message: "proto: syntax error (line 1:1): unexpected token null",
         },
         Case {
             name: "whole-message array",
             method: Method::POST,
             uri: "/api/v1/preauthkey",
             body: "[]",
-            message_fragment: "unexpected token [",
+            expected_message: "proto: syntax error (line 1:1): unexpected token [",
         },
         Case {
             name: "set policy body",
             method: Method::PUT,
             uri: "/api/v1/policy",
             body: r#"{"policy":"#,
-            message_fragment: "EOF while parsing",
+            expected_message: "unexpected EOF",
         },
         Case {
             name: "debug node body",
             method: Method::POST,
             uri: "/api/v1/debug/node",
             body: r#"{"user":"node-user","routes":["10.0.0.0/24",]}"#,
-            message_fragment: "trailing comma",
+            expected_message: "invalid character ']' looking for beginning of value",
         },
     ] {
         let resp = app
@@ -1849,7 +1852,7 @@ async fn grpc_gateway_malformed_json_failures_are_status_json() {
             ))
             .await
             .unwrap();
-        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
     }
 }
 
@@ -1876,6 +1879,10 @@ async fn grpc_gateway_body_unknown_fields_are_discarded_like_grpc_gateway() {
 async fn grpc_gateway_body_null_fields_are_absent_like_protojson() {
     let (app, token) = fixture().await;
 
+    // protojson rejects a duplicate field before it skips a null value, so a
+    // null `displayName` followed by its `display_name` alias is a duplicate
+    // (verified against headscale-go v0.29.5: `proto: (line 1:44): duplicate
+    // field "display_name"` for this exact body).
     let resp = app
         .clone()
         .oneshot(req(
@@ -1884,6 +1891,27 @@ async fn grpc_gateway_body_null_fields_are_absent_like_protojson() {
             Some(&token),
             Body::from(
                 r#"{"name":"null-defaults","displayName":null,"display_name":"Alias Name","email":null,"pictureUrl":null}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_status_json_exact(
+        resp,
+        400,
+        3,
+        r#"proto: (line 1:44): duplicate field "display_name""#,
+        "null field followed by its alias is a duplicate",
+    )
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            Method::POST,
+            "/api/v1/user",
+            Some(&token),
+            Body::from(
+                r#"{"name":"null-defaults","display_name":"Alias Name","email":null,"pictureUrl":null}"#,
             ),
         ))
         .await
@@ -1983,7 +2011,7 @@ async fn grpc_gateway_body_duplicate_fields_are_status_json() {
         method: Method,
         uri: &'static str,
         body: &'static str,
-        message_fragment: &'static str,
+        expected_message: &'static str,
     }
 
     let (app, token) = fixture().await;
@@ -1994,14 +2022,14 @@ async fn grpc_gateway_body_duplicate_fields_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/user",
             body: r#"{"name":"alice","name":"bob"}"#,
-            message_fragment: r#"duplicate field "name""#,
+            expected_message: r#"proto: (line 1:17): duplicate field "name""#,
         },
         Case {
             name: "preauth json and proto field aliases conflict",
             method: Method::POST,
             uri: "/api/v1/preauthkey",
             body: r#"{"aclTags":[],"acl_tags":[]}"#,
-            message_fragment: "duplicate field",
+            expected_message: r#"proto: (line 1:15): duplicate field "acl_tags""#,
         },
     ] {
         let resp = app
@@ -2014,7 +2042,7 @@ async fn grpc_gateway_body_duplicate_fields_are_status_json() {
             ))
             .await
             .unwrap();
-        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
     }
 }
 
@@ -2036,21 +2064,21 @@ async fn grpc_gateway_remaining_parser_failures_are_status_json_exact() {
             method: Method::POST,
             uri: "/api/v1/auth/register",
             body: r#"{"user":"alice","authId":"a","auth_id":"b"}"#,
-            expected_message: r#"duplicate field "auth_id""#,
+            expected_message: r#"proto: (line 1:30): duplicate field "auth_id""#,
         },
         Case {
             name: "auth reject numeric auth id",
             method: Method::POST,
             uri: "/api/v1/auth/reject",
             body: r#"{"authId":42}"#,
-            expected_message: "invalid value for string field authId: 42",
+            expected_message: "proto: (line 1:11): invalid value for string field authId: 42",
         },
         Case {
             name: "set policy numeric body field",
             method: Method::PUT,
             uri: "/api/v1/policy",
             body: r#"{"policy":1}"#,
-            expected_message: "invalid value for string field policy: 1",
+            expected_message: "proto: (line 1:11): invalid value for string field policy: 1",
         },
         Case {
             name: "register node duplicate key query field",
@@ -2153,25 +2181,25 @@ async fn grpc_gateway_body_decoders_run_before_path_parsers_for_body_routes() {
             name: "set tags whole-message null preempts node id path",
             uri: "/api/v1/node/not-a-number/tags",
             body: "null",
-            expected_message: "syntax error (line 1:1): unexpected token null",
+            expected_message: "proto: syntax error (line 1:1): unexpected token null",
         },
         Case {
             name: "approve routes whole-message array preempts node id path",
             uri: "/api/v1/node/not-a-number/approve_routes",
             body: "[]",
-            expected_message: "syntax error (line 1:1): unexpected token [",
+            expected_message: "proto: syntax error (line 1:1): unexpected token [",
         },
         Case {
             name: "set tags repeated field parser preempts node id path",
             uri: "/api/v1/node/not-a-number/tags",
             body: r#"{"tags":"tag:server"}"#,
-            expected_message: r#"syntax error (line 1:1): unexpected token "tag:server""#,
+            expected_message: r#"proto: syntax error (line 1:9): unexpected token "tag:server""#,
         },
         Case {
             name: "approve routes repeated element parser preempts node id path",
             uri: "/api/v1/node/not-a-number/approve_routes",
             body: r#"{"routes":[null]}"#,
-            expected_message: "invalid value for string field routes: null",
+            expected_message: "proto: (line 1:12): invalid value for string field routes: null",
         },
     ] {
         let resp = app
@@ -2210,7 +2238,7 @@ async fn grpc_gateway_current_head_body_query_parser_matrix_is_exact() {
             body: r#"{"nodeId":"0x1","tags":["tag:server"]}"#,
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: r#"invalid value for uint64 field nodeId: "0x1""#,
+            expected_message: r#"proto: (line 1:11): invalid value for uint64 field nodeId: "0x1""#,
         },
         Case {
             name: "approve routes body node_id parser preempts service",
@@ -2219,7 +2247,7 @@ async fn grpc_gateway_current_head_body_query_parser_matrix_is_exact() {
             body: r#"{"node_id":-1,"routes":[]}"#,
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: "invalid value for uint64 field nodeId: -1",
+            expected_message: "proto: (line 1:12): invalid value for uint64 field nodeId: -1",
         },
         Case {
             name: "approve routes body path field aliases conflict",
@@ -2228,7 +2256,7 @@ async fn grpc_gateway_current_head_body_query_parser_matrix_is_exact() {
             body: r#"{"nodeId":"1","node_id":"2","routes":[]}"#,
             expected_http_status: 400,
             expected_grpc_code: 3,
-            expected_message: r#"duplicate field "node_id""#,
+            expected_message: r#"proto: (line 1:15): duplicate field "node_id""#,
         },
         Case {
             name: "backfill no-body route ignores malformed JSON body",
@@ -2460,8 +2488,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
         method: Method,
         uri: &'static str,
         body: &'static str,
-        message_fragment: &'static str,
-        exact_message: Option<&'static str>,
+        expected_message: &'static str,
     }
 
     let (app, token) = fixture().await;
@@ -2472,32 +2499,30 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/preauthkey/expire",
             body: r#"{"id":"0x1"}"#,
-            message_fragment: r#"invalid value for uint64 field id: "0x1""#,
-            exact_message: None,
+            expected_message: r#"proto: (line 1:7): invalid value for uint64 field id: "0x1""#,
         },
         Case {
             name: "object timestamp body field",
             method: Method::POST,
             uri: "/api/v1/apikey",
             body: r#"{"expiration":{"seconds":4102444800}}"#,
-            message_fragment: "unexpected token { for timestamp field expiration",
-            exact_message: None,
+            // headscale-go v0.29.5: protojson's Timestamp decoder reads a
+            // string token, anything else is a plain unexpected-token error.
+            expected_message: "proto: syntax error (line 1:15): unexpected token {",
         },
         Case {
             name: "timestamp body underflow",
             method: Method::POST,
             uri: "/api/v1/apikey",
             body: r#"{"expiration":"0001-01-01T00:00:00+01:00"}"#,
-            message_fragment: r#"google.protobuf.Timestamp value out of range: "0001-01-01T00:00:00+01:00""#,
-            exact_message: None,
+            expected_message: r#"proto: (line 1:15): google.protobuf.Timestamp value out of range: "0001-01-01T00:00:00+01:00""#,
         },
         Case {
             name: "string bool body field",
             method: Method::POST,
             uri: "/api/v1/preauthkey",
             body: r#"{"reusable":"true"}"#,
-            message_fragment: r#"invalid value for bool field reusable: "true""#,
-            exact_message: None,
+            expected_message: r#"proto: (line 1:13): invalid value for bool field reusable: "true""#,
         },
     ] {
         let resp = app
@@ -2510,11 +2535,7 @@ async fn grpc_gateway_body_scalar_type_failures_are_status_json() {
             ))
             .await
             .unwrap();
-        if let Some(expected_message) = case.exact_message {
-            assert_status_json_exact(resp, 400, 3, expected_message, case.name).await;
-        } else {
-            assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
-        }
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
     }
 }
 
@@ -2525,7 +2546,7 @@ async fn grpc_gateway_repeated_string_body_failures_are_status_json() {
         method: Method,
         uri: &'static str,
         body: &'static str,
-        message_fragment: &'static str,
+        expected_message: &'static str,
     }
 
     let (app, token) = fixture().await;
@@ -2536,28 +2557,28 @@ async fn grpc_gateway_repeated_string_body_failures_are_status_json() {
             method: Method::POST,
             uri: "/api/v1/node/1/tags",
             body: r#"{"tags":"tag:server"}"#,
-            message_fragment: r#"unexpected token "tag:server""#,
+            expected_message: r#"proto: syntax error (line 1:9): unexpected token "tag:server""#,
         },
         Case {
             name: "numeric node tags element",
             method: Method::POST,
             uri: "/api/v1/node/1/tags",
             body: r#"{"tags":[1]}"#,
-            message_fragment: "invalid value for string field tags: 1",
+            expected_message: "proto: (line 1:10): invalid value for string field tags: 1",
         },
         Case {
             name: "null route element",
             method: Method::POST,
             uri: "/api/v1/debug/node",
             body: r#"{"user":"alice","key":"abcdefghijklmnopqrstuvwx","routes":[null]}"#,
-            message_fragment: "invalid value for string field routes: null",
+            expected_message: "proto: (line 1:60): invalid value for string field routes: null",
         },
         Case {
             name: "object preauth acl tags field",
             method: Method::POST,
             uri: "/api/v1/preauthkey",
             body: r#"{"aclTags":{}}"#,
-            message_fragment: "unexpected token {",
+            expected_message: "proto: syntax error (line 1:12): unexpected token {",
         },
     ] {
         let resp = app
@@ -2570,7 +2591,7 @@ async fn grpc_gateway_repeated_string_body_failures_are_status_json() {
             ))
             .await
             .unwrap();
-        assert_status_json(resp, 400, 3, case.message_fragment, case.name).await;
+        assert_status_json_exact(resp, 400, 3, case.expected_message, case.name).await;
     }
 }
 
@@ -2766,7 +2787,8 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: r#"{"id":"999"}"#,
             expected_http_status: 500,
             expected_grpc_code: 2,
-            expected_message: "api key not found",
+            // headscale-go v0.29.5 surfaces gorm.ErrRecordNotFound verbatim.
+            expected_message: "record not found",
         },
         Case {
             name: "expire api key missing prefix",
@@ -2775,7 +2797,8 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: r#"{"prefix":"hskey-api-abcdefghijkl-***"}"#,
             expected_http_status: 500,
             expected_grpc_code: 2,
-            expected_message: "api key not found",
+            // headscale-go v0.29.5 surfaces gorm.ErrRecordNotFound verbatim.
+            expected_message: "record not found",
         },
         Case {
             name: "expire api key prefix too short",
@@ -2802,7 +2825,8 @@ async fn grpc_gateway_remaining_route_status_failures_are_status_json_exact() {
             body: "",
             expected_http_status: 500,
             expected_grpc_code: 2,
-            expected_message: "api key not found",
+            // headscale-go v0.29.5 surfaces gorm.ErrRecordNotFound verbatim.
+            expected_message: "record not found",
         },
         Case {
             name: "delete api key prefix invalid characters",
@@ -2964,7 +2988,10 @@ async fn grpc_gateway_preauth_missing_ids_are_noop_success() {
 
 #[tokio::test]
 async fn grpc_gateway_user_delete_non_empty_status_json() {
-    let (app, token, _registry, _db) = fixture_with_wire_registry().await;
+    // Go's DestroyUser checks node ownership in the durable store, so the
+    // owned node must be a persisted one (an in-memory wire registry node is
+    // invisible to a database-backed user store).
+    let (app, token, _db) = fixture_with_persistent_machines().await;
     let registration_key = "zyxwvutsrqponmlkjihgfedc";
 
     let created_user = app
@@ -3206,10 +3233,7 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let node_id = body["node"]["id"].as_str().unwrap().to_string();
-    let _guard =
-        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
-    assert!(!node_id.is_empty());
+    assert_eq!(body["node"]["id"], "0");
     assert!(
         body["node"]["machineKey"]
             .as_str()
@@ -3223,7 +3247,9 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
             .starts_with("nodekey:")
     );
     assert_eq!(body["node"]["name"], "debug-router");
-    assert_eq!(body["node"]["givenName"], "debug-router");
+    // DebugCreateNode echoes a synthetic node with only Hostname set; Go
+    // leaves GivenName empty until the node is really registered.
+    assert_eq!(body["node"]["givenName"], "");
     assert_eq!(body["node"]["user"]["name"], "node-user");
     assert_eq!(
         body["node"]["registerMethod"],
@@ -3249,7 +3275,10 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    assert_eq!(body["node"]["id"], node_id);
+    let node_id = body["node"]["id"].as_str().unwrap().to_string();
+    assert_ne!(node_id, "0");
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
     assert_eq!(body["node"]["registerMethod"], "REGISTER_METHOD_CLI");
 
     let resp = app
@@ -3324,10 +3353,10 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         body["node"]["approvedRoutes"],
         serde_json::json!(["10.10.0.0/24"])
     );
-    assert_eq!(
-        body["node"]["subnetRoutes"],
-        serde_json::json!(["10.10.0.0/24"])
-    );
+    // The routes passed to debug/node only live on the pending registration
+    // entry, so the registered node advertises nothing and nothing is served
+    // (Go's SubnetRoutes is PrimaryRoutes: approved AND announced).
+    assert_eq!(body["node"]["subnetRoutes"], serde_json::json!([]));
 
     let resp = app
         .clone()
@@ -3341,7 +3370,9 @@ async fn grpc_gateway_node_and_debug_paths_use_upstream_shapes() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    assert_eq!(body["node"]["name"], "new-router");
+    // RenameNode only changes the DNS given name; `name` stays the client's
+    // raw hostname (headscale-go v0.29.5 State.RenameNode).
+    assert_eq!(body["node"]["name"], "debug-router");
     assert_eq!(body["node"]["givenName"], "new-router");
 
     let resp = app
@@ -3660,9 +3691,7 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let node_id = body["node"]["id"].as_str().unwrap().to_string();
-    let _guard =
-        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
+    assert_eq!(body["node"]["id"], "0");
     assert_eq!(
         body["node"]["availableRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])
@@ -3679,6 +3708,11 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let registered = body_json(resp).await;
+    let node_id = registered["node"]["id"].as_str().unwrap().to_string();
+    assert_ne!(node_id, "0");
+    let _guard =
+        MachineRegistry::track_stream_connection(registry, node_id.parse().expect("numeric id"));
 
     let resp = app
         .clone()
@@ -3715,8 +3749,13 @@ async fn grpc_gateway_approve_exit_route_matches_upstream_route_shape() {
         .iter()
         .find(|node| node["id"] == node_id)
         .expect("listed exit node");
+    // The debug node's routes never reach the registered node (they only live
+    // on the pending entry), so the node announces nothing and serves no
+    // subnet routes even though both exit routes are approved. Verified
+    // against headscale-go v0.29.5 over the real gateway.
+    assert_eq!(node["subnetRoutes"], serde_json::json!([]));
     assert_eq!(
-        node["subnetRoutes"],
+        node["approvedRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])
     );
 }
@@ -3809,10 +3848,9 @@ async fn grpc_gateway_node_approve_routes_persists_go_nodes_approved_routes() {
         body["nodes"][0]["approvedRoutes"],
         serde_json::json!(["0.0.0.0/0", "::/0"])
     );
-    assert_eq!(
-        body["nodes"][0]["subnetRoutes"],
-        serde_json::json!(["0.0.0.0/0", "::/0"])
-    );
+    // Approved but never announced (debug-node routes stay on the pending
+    // entry), so nothing is served: Go's SubnetRoutes is PrimaryRoutes.
+    assert_eq!(body["nodes"][0]["subnetRoutes"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -3951,7 +3989,9 @@ async fn grpc_gateway_apikey_paths_use_protojson_names() {
         .iter()
         .find(|key| key["id"] == "1")
         .expect("bootstrap key row");
-    assert!(bootstrap_key_row.get("expiration").is_none());
+    // The gateway marshals with EmitUnpopulated: an unset Timestamp is an
+    // explicit `null` (headscale-go prints `"lastSeen":null` the same way).
+    assert_eq!(bootstrap_key_row.get("expiration"), Some(&Value::Null));
     let new_key_row = keys
         .iter()
         .find(|key| key["id"] == "2")
@@ -3960,7 +4000,8 @@ async fn grpc_gateway_apikey_paths_use_protojson_names() {
     assert!(new_prefix.starts_with("hskey-api-"));
     assert!(new_key_row["createdAt"].as_str().unwrap().ends_with('Z'));
     assert_eq!(new_key_row["expiration"], "0001-01-01T00:00:00Z");
-    assert!(new_key_row.get("lastSeen").is_none());
+    // Never used: explicit null, as headscale-go prints `"lastSeen":null`.
+    assert_eq!(new_key_row.get("lastSeen"), Some(&Value::Null));
 
     let resp = app
         .clone()

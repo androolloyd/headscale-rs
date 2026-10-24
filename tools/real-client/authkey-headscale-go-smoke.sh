@@ -1385,6 +1385,26 @@ assert_dns_debug_resolve() {
   local expected_value="$4"
   local output_path="$5"
   local raw_path="${output_path}.raw"
+  if [[ "${REAL_CLIENT_DNS_QUERY_INTERNAL:-false}" == "true" ]]; then
+    local qtype="a"
+    [[ "${network}" == "ip6" ]] && qtype="aaaa"
+    docker exec "${resolver_client}" tailscale dns query "${expected_name}" "${qtype}" \
+      >"${raw_path}" 2>"${output_path}.err" &&
+      ruby -rjson -e '
+        text = File.read(ARGV.fetch(0))
+        name = ARGV.fetch(1).sub(/\.\z/, "")
+        qtype = ARGV.fetch(2).upcase
+        expected = ARGV.fetch(3)
+        abort("internal DNS query failed: #{text}") unless text.include?("Response code: RCodeSuccess")
+        answers = text.lines.map do |line|
+          fields = line.split
+          fields.last if fields.length >= 5 && fields.first.sub(/\.\z/, "") == name && fields[-2] == "Type#{qtype}"
+        end.compact
+        abort("expected #{name} #{qtype} resolution #{expected.inspect}, got #{answers.inspect}: #{text}") unless answers == [expected]
+        puts JSON.pretty_generate({"Name" => name, "Network" => qtype, "Resolved" => answers})
+      ' "${raw_path}" "${expected_name}" "${qtype}" "${expected_value}" >"${output_path}"
+    return
+  fi
   docker exec "${resolver_client}" tailscale debug resolve "--net=${network}" "${expected_name}" \
     >"${raw_path}" 2>"${output_path}.err" &&
     ruby -rjson -e '
@@ -3570,6 +3590,24 @@ if [[ -n "${expected_route_health_all_unhealthy_route}" ]]; then
     fi
   done
   echo "::endgroup::"
+fi
+
+if [[ -n "${REAL_CLIENT_HANDOFF_SCRIPT:-}" ]]; then
+  if [[ ! -x "${REAL_CLIENT_HANDOFF_SCRIPT}" ]]; then
+    echo "REAL_CLIENT_HANDOFF_SCRIPT is not executable: ${REAL_CLIENT_HANDOFF_SCRIPT}" >&2
+    exit 2
+  fi
+  REAL_CLIENT_HANDOFF_WORK_DIR="${work_dir}" \
+  REAL_CLIENT_HANDOFF_GO_CONFIG="${config_path}" \
+  REAL_CLIENT_HANDOFF_GO_BIN="${headscale_bin}" \
+  REAL_CLIENT_HANDOFF_GO_PID="${server_pid}" \
+  REAL_CLIENT_HANDOFF_CLIENTS="${expected_client_names_csv}" \
+  REAL_CLIENT_HANDOFF_HTTP_PORT="${http_port}" \
+  REAL_CLIENT_HANDOFF_CONTROL_SCHEME="${control_scheme}" \
+  REAL_CLIENT_HANDOFF_METRICS_PORT="${metrics_port}" \
+  REAL_CLIENT_HANDOFF_GRPC_PORT="${grpc_port}" \
+  REAL_CLIENT_HANDOFF_SOCKET="${socket_path}" \
+    "${REAL_CLIENT_HANDOFF_SCRIPT}"
 fi
 
 echo "headscale-go ${login_mode} real-client smoke passed"

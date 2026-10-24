@@ -1,1 +1,1 @@
-Error: server error (500): pinging database: forced offline
+Error: checking health: rpc error: code = Unknown desc = pinging database: forced offline

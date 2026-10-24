@@ -1,3 +1,6 @@
+// Integer decoding portions: Copyright 2018 The Go Authors. All rights reserved.
+// SPDX-License-Identifier: BSD-3-Clause
+
 //! grpc-gateway-compatible HTTP routes for upstream `HeadscaleService`.
 //!
 //! Headscale-go mounts `/api/v1/*` by running `grpc-gateway` in front of
@@ -16,12 +19,8 @@ use axum::{
     routing::{any, delete, get, post},
 };
 use chrono::{SecondsFormat, TimeZone, Utc};
-use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value, json};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::collections::BTreeMap;
 use tonic::{Code, Request as TonicRequest, Status, metadata::MetadataMap};
 
 use crate::generated::headscale_service_server::HeadscaleService;
@@ -37,8 +36,12 @@ use crate::generated::{
 };
 use crate::grpc::upstream::HeadscaleAdminService;
 
+mod json;
+mod timestamp;
+use self::json::FieldKind as BodyKind;
+use self::json::Value as BodyValue;
+
 const BODY_LIMIT: usize = 1024 * 1024;
-const GO_RFC3339_NANO_LAYOUT: &str = "2006-01-02T15:04:05.999999999Z07:00";
 const MIN_TIMESTAMP_SECONDS: i64 = -62_135_596_800;
 const MAX_TIMESTAMP_SECONDS: i64 = 253_402_300_799;
 
@@ -116,8 +119,10 @@ async fn http_authentication_middleware(
         .await
     {
         Ok(()) => next.run(request).await,
-        Err(status) if status.code() == Code::Unauthenticated => plain_unauthorized_response(),
-        Err(status) => status_response(&status),
+        // httpAuthenticationMiddleware answers 401 for a missing prefix, a
+        // validation error and an invalid key alike. (Only the gRPC
+        // interceptor distinguishes Internal "validating token".)
+        Err(_) => plain_unauthorized_response(),
     }
 }
 
@@ -142,10 +147,10 @@ async fn create_user(
     let value = match read_json_value(
         request,
         &[
-            &["name"][..],
-            &["displayName", "display_name"],
-            &["email"],
-            &["pictureUrl", "picture_url"],
+            (&["name"][..], BodyKind::String),
+            (&["displayName", "display_name"], BodyKind::String),
+            (&["email"], BodyKind::String),
+            (&["pictureUrl", "picture_url"], BodyKind::String),
         ],
     )
     .await
@@ -268,11 +273,11 @@ async fn create_preauth_key(
     let value = match read_json_value(
         request,
         &[
-            &["user"][..],
-            &["reusable"],
-            &["ephemeral"],
-            &["expiration"],
-            &["aclTags", "acl_tags"],
+            (&["user"][..], BodyKind::Uint64),
+            (&["reusable"], BodyKind::Bool),
+            (&["ephemeral"], BodyKind::Bool),
+            (&["expiration"], BodyKind::Timestamp),
+            (&["aclTags", "acl_tags"], BodyKind::StringList),
         ],
     )
     .await
@@ -298,7 +303,7 @@ async fn expire_preauth_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["id"][..]]).await {
+    let value = match read_json_value(request, &[(&["id"][..], BodyKind::Uint64)]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -367,7 +372,8 @@ async fn create_api_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["expiration"][..]]).await {
+    let value = match read_json_value(request, &[(&["expiration"][..], BodyKind::Timestamp)]).await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -390,7 +396,15 @@ async fn expire_api_key(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["prefix"][..], &["id"]]).await {
+    let value = match read_json_value(
+        request,
+        &[
+            (&["prefix"][..], BodyKind::String),
+            (&["id"], BodyKind::Uint64),
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -462,11 +476,20 @@ async fn debug_create_node(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value =
-        match read_json_value(request, &[&["user"][..], &["key"], &["name"], &["routes"]]).await {
-            Ok(value) => value,
-            Err(status) => return status_response(&status),
-        };
+    let value = match read_json_value(
+        request,
+        &[
+            (&["user"][..], BodyKind::String),
+            (&["key"], BodyKind::String),
+            (&["name"], BodyKind::String),
+            (&["routes"], BodyKind::StringList),
+        ],
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(status) => return status_response(&status),
+    };
     let request = match debug_create_node_request(&value) {
         Ok(body) => tonic_request(&headers, body),
         Err(status) => return status_response(&status),
@@ -519,7 +542,15 @@ async fn auth_register(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["user"][..], &["authId", "auth_id"]]).await {
+    let value = match read_json_value(
+        request,
+        &[
+            (&["user"][..], BodyKind::String),
+            (&["authId", "auth_id"], BodyKind::String),
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -552,10 +583,11 @@ async fn auth_approve(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["authId", "auth_id"][..]]).await {
-        Ok(value) => value,
-        Err(status) => return status_response(&status),
-    };
+    let value =
+        match read_json_value(request, &[(&["authId", "auth_id"][..], BodyKind::String)]).await {
+            Ok(value) => value,
+            Err(status) => return status_response(&status),
+        };
     let auth_id = match string_field(&value, &["authId", "auth_id"], "authId") {
         Ok(auth_id) => auth_id,
         Err(status) => return status_response(&status),
@@ -575,10 +607,11 @@ async fn auth_reject(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["authId", "auth_id"][..]]).await {
-        Ok(value) => value,
-        Err(status) => return status_response(&status),
-    };
+    let value =
+        match read_json_value(request, &[(&["authId", "auth_id"][..], BodyKind::String)]).await {
+            Ok(value) => value,
+            Err(status) => return status_response(&status),
+        };
     let auth_id = match string_field(&value, &["authId", "auth_id"], "authId") {
         Ok(auth_id) => auth_id,
         Err(status) => return status_response(&status),
@@ -684,7 +717,15 @@ async fn set_tags(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["nodeId", "node_id"][..], &["tags"]]).await {
+    let value = match read_json_value(
+        request,
+        &[
+            (&["nodeId", "node_id"][..], BodyKind::Uint64),
+            (&["tags"], BodyKind::StringList),
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -718,7 +759,15 @@ async fn set_approved_routes(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["nodeId", "node_id"][..], &["routes"]]).await {
+    let value = match read_json_value(
+        request,
+        &[
+            (&["nodeId", "node_id"][..], BodyKind::Uint64),
+            (&["routes"], BodyKind::StringList),
+        ],
+    )
+    .await
+    {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -890,7 +939,7 @@ async fn set_policy(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["policy"][..]]).await {
+    let value = match read_json_value(request, &[(&["policy"][..], BodyKind::String)]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -919,7 +968,7 @@ async fn check_policy(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let value = match read_json_value(request, &[&["policy"][..]]).await {
+    let value = match read_json_value(request, &[(&["policy"][..], BodyKind::String)]).await {
         Ok(value) => value,
         Err(status) => return status_response(&status),
     };
@@ -967,82 +1016,28 @@ fn authorization_metadata(headers: &HeaderMap) -> MetadataMap {
     metadata
 }
 
-async fn read_json_value(request: Request, allowed_fields: &[&[&str]]) -> Result<Value, Status> {
+async fn read_json_value(
+    request: Request,
+    allowed_fields: &[(&[&str], BodyKind)],
+) -> Result<BodyValue, Status> {
     let body = to_bytes(request.into_body(), BODY_LIMIT)
         .await
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
-    if body.is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    let value: Value =
-        serde_json::from_slice(&body).map_err(|e| Status::invalid_argument(e.to_string()))?;
-    if !value.is_object() {
-        return Err(Status::invalid_argument(format!(
-            "syntax error (line 1:1): unexpected token {}",
-            json_token(&value)
-        )));
-    }
-    ensure_unique_top_level_fields(&body)?;
-    ensure_no_duplicate_field_aliases(&value, allowed_fields)?;
-    Ok(value)
-}
-
-fn ensure_unique_top_level_fields(body: &[u8]) -> Result<(), Status> {
-    let mut de = serde_json::Deserializer::from_slice(body);
-    de.deserialize_map(UniqueObjectVisitor)
-        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-    de.end()
-        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-    Ok(())
-}
-
-struct UniqueObjectVisitor;
-
-impl<'de> Visitor<'de> for UniqueObjectVisitor {
-    type Value = ();
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON object with unique fields")
-    }
-
-    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut seen = BTreeSet::<String>::new();
-        while let Some(key) = access.next_key::<String>()? {
-            if seen.contains(&key) {
-                return Err(de::Error::custom(format!("duplicate field {key:?}")));
-            }
-            seen.insert(key);
-            let _: Value = access.next_value()?;
-        }
-        Ok(())
-    }
-}
-
-fn ensure_no_duplicate_field_aliases(
-    value: &Value,
-    allowed_fields: &[&[&str]],
-) -> Result<(), Status> {
-    let Some(object) = value.as_object() else {
-        return Ok(());
+    // JSONPb.NewDecoder first decodes a single encoding/json.RawMessage.
+    // Its strict syntax pass precedes protobuf field decoding. Generated
+    // gateway handlers ignore clean EOF and drain any remaining HTTP bytes.
+    let Some(raw) =
+        headscale_api_acl::go_json::first_raw_value(&body).map_err(Status::invalid_argument)?
+    else {
+        return Ok(BodyValue::Object(Vec::new()));
     };
-
-    for aliases in allowed_fields {
-        let mut present = aliases
-            .iter()
-            .filter(|alias| object.get(**alias).is_some_and(|value| !value.is_null()));
-        if present.next().is_some()
-            && let Some(duplicate) = present.next()
-        {
-            return Err(Status::invalid_argument(format!(
-                "duplicate field {duplicate:?}"
-            )));
-        }
-    }
-
-    Ok(())
+    // protobuf-go's internal errors package renders every protojson failure
+    // with a "proto: " prefix (e.g. `proto: syntax error (line 1:1): ...`,
+    // `proto: (line 1:11): invalid value for ...`); the gateway forwards it
+    // verbatim as the InvalidArgument message. encoding/json's own syntax
+    // errors above carry no such prefix.
+    self::json::parse(raw, allowed_fields)
+        .map_err(|error| Status::invalid_argument(format!("proto: {error}")))
 }
 
 fn parse_list_users_query(query: Option<&str>) -> Result<ListUsersQuery, Status> {
@@ -1508,22 +1503,14 @@ fn api_key_json(key: &ApiKey) -> Value {
     Value::Object(out)
 }
 
+/// The gateway marshals with `EmitUnpopulated`, so an unset timestamp is an
+/// explicit `null` (e.g. `"lastSeen": null` for an API key never used).
 fn insert_timestamp_json(
     out: &mut Map<String, Value>,
     name: &str,
     ts: Option<&prost_types::Timestamp>,
 ) {
-    if let Some(value) = optional_timestamp_json(ts) {
-        out.insert(name.into(), value);
-    }
-}
-
-fn optional_timestamp_json(ts: Option<&prost_types::Timestamp>) -> Option<Value> {
-    let ts = ts?;
-    match timestamp_json(Some(ts)) {
-        Value::Null => None,
-        value => Some(value),
-    }
+    out.insert(name.into(), timestamp_json(ts));
 }
 
 fn timestamp_json(ts: Option<&prost_types::Timestamp>) -> Value {
@@ -1536,7 +1523,7 @@ fn timestamp_json(ts: Option<&prost_types::Timestamp>) -> Value {
     }
 }
 
-fn create_preauth_request(value: &Value) -> Result<CreatePreAuthKeyRequest, Status> {
+fn create_preauth_request(value: &BodyValue) -> Result<CreatePreAuthKeyRequest, Status> {
     Ok(CreatePreAuthKeyRequest {
         user: u64_field(value, &["user"], "user")?,
         reusable: bool_field(value, &["reusable"], "reusable")?,
@@ -1546,7 +1533,7 @@ fn create_preauth_request(value: &Value) -> Result<CreatePreAuthKeyRequest, Stat
     })
 }
 
-fn debug_create_node_request(value: &Value) -> Result<DebugCreateNodeRequest, Status> {
+fn debug_create_node_request(value: &BodyValue) -> Result<DebugCreateNodeRequest, Status> {
     Ok(DebugCreateNodeRequest {
         user: string_field(value, &["user"], "user")?,
         key: string_field(value, &["key"], "key")?,
@@ -1555,16 +1542,17 @@ fn debug_create_node_request(value: &Value) -> Result<DebugCreateNodeRequest, St
     })
 }
 
-fn field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
-    let object = value.as_object()?;
+fn field<'a>(value: &'a BodyValue, names: &[&str]) -> Option<&'a BodyValue> {
+    // Ordinary protobuf fields skip whole-field null before decoding their
+    // scalar, repeated or message value. Repeated elements are not skipped.
     names
         .iter()
-        .find_map(|name| object.get(*name).filter(|value| !value.is_null()))
+        .find_map(|name| value.get(name).filter(|value| !value.is_null()))
 }
 
-fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, Status> {
+fn string_field(value: &BodyValue, names: &[&str], display: &str) -> Result<String, Status> {
     match field(value, names) {
-        Some(Value::String(s)) => Ok(s.clone()),
+        Some(BodyValue::String { decoded, .. }) => Ok(decoded.clone()),
         None => Ok(String::new()),
         Some(value) => Err(Status::invalid_argument(format!(
             "invalid value for string field {display}: {}",
@@ -1573,9 +1561,9 @@ fn string_field(value: &Value, names: &[&str], display: &str) -> Result<String, 
     }
 }
 
-fn bool_field(value: &Value, names: &[&str], display: &str) -> Result<bool, Status> {
+fn bool_field(value: &BodyValue, names: &[&str], display: &str) -> Result<bool, Status> {
     match field(value, names) {
-        Some(Value::Bool(b)) => Ok(*b),
+        Some(BodyValue::Bool(b)) => Ok(*b),
         None => Ok(false),
         Some(value) => Err(Status::invalid_argument(format!(
             "invalid value for bool field {display}: {}",
@@ -1584,17 +1572,12 @@ fn bool_field(value: &Value, names: &[&str], display: &str) -> Result<bool, Stat
     }
 }
 
-fn u64_field(value: &Value, names: &[&str], display: &str) -> Result<u64, Status> {
+fn u64_field(value: &BodyValue, names: &[&str], display: &str) -> Result<u64, Status> {
     match field(value, names) {
-        Some(Value::String(s)) => {
-            parse_body_u64(s, display, &json_token(&Value::String(s.clone())))
-        }
+        Some(BodyValue::String { decoded, raw }) => parse_body_u64(decoded, display, raw),
         None => Ok(0),
-        Some(Value::Number(n)) => n.as_u64().ok_or_else(|| {
-            Status::invalid_argument(format!(
-                "invalid value for uint64 field {display}: {}",
-                json_token(&Value::Number(n.clone()))
-            ))
+        Some(BodyValue::Number(raw)) => protojson_u64(raw, true).ok_or_else(|| {
+            Status::invalid_argument(format!("invalid value for uint64 field {display}: {raw}"))
         }),
         Some(value) => Err(Status::invalid_argument(format!(
             "invalid value for uint64 field {display}: {}",
@@ -1603,12 +1586,16 @@ fn u64_field(value: &Value, names: &[&str], display: &str) -> Result<u64, Status
     }
 }
 
-fn string_array_field(value: &Value, names: &[&str], display: &str) -> Result<Vec<String>, Status> {
+fn string_array_field(
+    value: &BodyValue,
+    names: &[&str],
+    display: &str,
+) -> Result<Vec<String>, Status> {
     match field(value, names) {
-        Some(Value::Array(values)) => values
+        Some(BodyValue::Array(values)) => values
             .iter()
             .map(|value| match value {
-                Value::String(s) => Ok(s.clone()),
+                BodyValue::String { decoded, .. } => Ok(decoded.clone()),
                 _ => Err(Status::invalid_argument(format!(
                     "invalid value for string field {display}: {}",
                     json_token(value)
@@ -1624,30 +1611,146 @@ fn string_array_field(value: &Value, names: &[&str], display: &str) -> Result<Ve
 }
 
 fn parse_body_u64(value: &str, display: &str, raw: &str) -> Result<u64, Status> {
-    parse_go_uint64_base10(value).map_err(|_| {
+    protojson_u64(value, false).ok_or_else(|| {
         Status::invalid_argument(format!("invalid value for uint64 field {display}: {raw}"))
     })
 }
 
+/// Protobuf v1.36.11 Token.Uint and unmarshalUint use decimal digit shifting,
+/// not a floating-point conversion. The quoted form reads one JSON token;
+/// the upstream decoder does not require EOF after that token.
+fn protojson_u64(value: &str, validated_number: bool) -> Option<u64> {
+    if headscale_api_acl::go_unicode::trim_space(value).len() != value.len() {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    let negative = bytes.first() == Some(&b'-');
+    if negative {
+        cursor += 1;
+    }
+    let integer_start = cursor;
+    let integer = match bytes.get(cursor)? {
+        b'0' => {
+            cursor += 1;
+            // numberParts omits the integer part for a leading zero.
+            &bytes[integer_start..integer_start]
+        }
+        b'1'..=b'9' => {
+            cursor += 1;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cursor += 1;
+            }
+            &bytes[integer_start..cursor]
+        }
+        _ => return None,
+    };
+    let mut fraction = &bytes[cursor..cursor];
+    if bytes.get(cursor) == Some(&b'.') && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit) {
+        cursor += 1;
+        let start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        let mut end = cursor;
+        while end > start && bytes[end - 1] == b'0' {
+            end -= 1;
+        }
+        fraction = &bytes[start..end];
+    }
+    let mut exponent = &bytes[cursor..cursor];
+    if matches!(bytes.get(cursor), Some(b'e' | b'E')) && cursor + 1 < bytes.len() {
+        cursor += 1;
+        let start = cursor;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+            if cursor == bytes.len() {
+                return None;
+            }
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        exponent = &bytes[start..cursor];
+    }
+    // This is protobuf's isNotDelim predicate, including its acceptance of
+    // trailing delimiters in a quoted numeric value after the first token.
+    // A body Number has already passed parseNumber with its original
+    // delimiter. Token.Uint parses only its raw numberParts; in particular,
+    // an accepted raw exponent marker at EOF is not lexed a second time.
+    if !validated_number
+        && bytes.get(cursor).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'+' | b'.' | b'_')
+        })
+    {
+        return None;
+    }
+    // Normalize zero before parsing the exponent or restoring the sign.
+    if integer.is_empty() && fraction.is_empty() {
+        return Some(0);
+    }
+    if negative {
+        return None;
+    }
+    let exponent = if exponent.is_empty() {
+        0
+    } else {
+        std::str::from_utf8(exponent).ok()?.parse::<i32>().ok()?
+    };
+    let parse_digits = |digits: &[u8]| {
+        digits.iter().try_fold(0u64, |number, digit| {
+            number.checked_mul(10)?.checked_add(u64::from(digit - b'0'))
+        })
+    };
+    if exponent < 0 {
+        if !fraction.is_empty() {
+            return None;
+        }
+        let keep = integer
+            .len()
+            .checked_sub(exponent.unsigned_abs() as usize)?;
+        if integer[keep..].iter().any(|digit| *digit != b'0') {
+            return None;
+        }
+        return parse_digits(&integer[..keep]);
+    }
+    let exponent = exponent as usize;
+    // Upstream bounds the normalized width at 20 before allocating/padding.
+    if fraction.len() > exponent || integer.len().checked_add(exponent)? > 20 {
+        return None;
+    }
+    let mut number = parse_digits(integer)?;
+    for digit in fraction {
+        number = number
+            .checked_mul(10)?
+            .checked_add(u64::from(digit - b'0'))?;
+    }
+    for _ in 0..exponent - fraction.len() {
+        number = number.checked_mul(10)?;
+    }
+    Some(number)
+}
+
+fn validate_body_timestamp_string(value: &str, raw: &str) -> Result<(), String> {
+    timestamp::parse_body(value, raw).map(|_| ())
+}
+
 fn timestamp_field(
-    value: &Value,
+    value: &BodyValue,
     names: &[&str],
-    display: &str,
+    _display: &str,
 ) -> Result<Option<prost_types::Timestamp>, Status> {
     match field(value, names) {
-        Some(Value::String(s)) if !s.is_empty() => {
-            let parsed = chrono::DateTime::parse_from_rfc3339(s).map_err(|e| {
-                Status::invalid_argument(format!("invalid timestamp field {display}: {e}"))
-            })?;
-            validate_body_timestamp_range(display, s, parsed.timestamp())?;
+        Some(BodyValue::String { decoded, raw }) => {
+            let parsed = timestamp::parse_body(decoded, raw).map_err(Status::invalid_argument)?;
             Ok(Some(prost_types::Timestamp {
-                seconds: parsed.timestamp(),
-                nanos: parsed.timestamp_subsec_nanos() as i32,
+                seconds: parsed.seconds,
+                nanos: parsed.nanos,
             }))
         }
         None => Ok(None),
         Some(value) => Err(Status::invalid_argument(format!(
-            "syntax error (line 1:1): unexpected token {} for timestamp field {display}",
+            "syntax error (line 1:1): unexpected token {}",
             json_token(value)
         ))),
     }
@@ -1724,16 +1827,12 @@ fn reject_nested_timestamp_scalar_query_paths(
 }
 
 fn parse_query_timestamp_value(name: &str, value: &str) -> Result<prost_types::Timestamp, Status> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|e| {
-        Status::invalid_argument(format!(
-            "parsing field {name:?}: {}",
-            go_rfc3339_parse_error(value, e)
-        ))
-    })?;
-    validate_query_timestamp_range(name, value, parsed.timestamp())?;
+    let parsed = timestamp::parse(value)
+        .map_err(|error| Status::invalid_argument(format!("parsing field {name:?}: {error}")))?;
+    validate_query_timestamp_range(name, value, parsed.seconds)?;
     Ok(prost_types::Timestamp {
-        seconds: parsed.timestamp(),
-        nanos: parsed.timestamp_subsec_nanos() as i32,
+        seconds: parsed.seconds,
+        nanos: parsed.nanos,
     })
 }
 
@@ -1744,39 +1843,6 @@ fn validate_query_timestamp_range(name: &str, raw: &str, seconds: i64) -> Result
         )));
     }
     Ok(())
-}
-
-fn validate_body_timestamp_range(display: &str, raw: &str, seconds: i64) -> Result<(), Status> {
-    if !(MIN_TIMESTAMP_SECONDS..=MAX_TIMESTAMP_SECONDS).contains(&seconds) {
-        return Err(Status::invalid_argument(format!(
-            "invalid timestamp field {display}: google.protobuf.Timestamp value out of range: {raw:?}"
-        )));
-    }
-    Ok(())
-}
-
-fn go_rfc3339_parse_error(value: &str, fallback: chrono::ParseError) -> String {
-    if !starts_with_ascii_digits(value, 4) {
-        return format!(
-            "parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: cannot parse {value:?} as \"2006\""
-        );
-    }
-
-    for (offset, expected) in [(4, "-"), (7, "-"), (10, "T"), (13, ":"), (16, ":")] {
-        if value.as_bytes().get(offset).copied() != Some(expected.as_bytes()[0]) {
-            let rest = value.get(offset..).unwrap_or("");
-            return format!(
-                "parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: cannot parse {rest:?} as {expected:?}"
-            );
-        }
-    }
-
-    format!("parsing time {value:?} as {GO_RFC3339_NANO_LAYOUT:?}: {fallback}")
-}
-
-fn starts_with_ascii_digits(value: &str, count: usize) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() >= count && bytes[..count].iter().all(u8::is_ascii_digit)
 }
 
 fn query_bool(
@@ -1808,12 +1874,8 @@ fn parse_go_bool(value: &str) -> Result<bool, String> {
     }
 }
 
-fn json_token(value: &Value) -> String {
-    match value {
-        Value::Array(_) => "[".to_string(),
-        Value::Object(_) => "{".to_string(),
-        _ => value.to_string(),
-    }
+fn json_token(value: &BodyValue) -> String {
+    value.raw_token()
 }
 
 fn json_ok(value: Value) -> Response {
@@ -1826,13 +1888,21 @@ fn status_response(status: &Status) -> Response {
     }
 
     let status_code = http_status_from_grpc(status.code());
+    // google.rpc.Status marshalled by protojson: fields in proto order
+    // (`code`, `message`, `details`), which a serde_json map (sorted keys)
+    // cannot reproduce. String escaping matches protojson's for valid UTF-8.
+    let body = format!(
+        r#"{{"code":{},"message":{},"details":[]}}"#,
+        grpc_code_number(status.code()),
+        serde_json::to_string(status.message()).unwrap_or_else(|_| "\"\"".into()),
+    );
     (
         status_code,
-        Json(json!({
-            "code": grpc_code_number(status.code()),
-            "message": status.message(),
-            "details": [],
-        })),
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body,
     )
         .into_response()
 }
@@ -1944,6 +2014,14 @@ mod parser_tests {
                 "{code:?}: content type"
             );
             let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            // protojson field order of google.rpc.Status, as headscale-go
+            // prints it: code, message, details.
+            assert_eq!(
+                body.as_ref(),
+                format!(r#"{{"code":{grpc_code},"message":"matrix status","details":[]}}"#)
+                    .as_bytes(),
+                "{code:?}: status envelope bytes"
+            );
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 body,

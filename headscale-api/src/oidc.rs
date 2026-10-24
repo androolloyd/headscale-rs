@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
+#[cfg(feature = "full")]
+use std::sync::atomic::AtomicU8;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -26,6 +28,23 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const REGISTER_METHOD_OIDC: &str = "oidc";
+mod browser_html;
+#[cfg(feature = "full")]
+mod claim_maps;
+#[cfg(feature = "full")]
+mod discovery;
+mod error_html;
+mod form;
+#[cfg(feature = "full")]
+mod json;
+#[cfg(feature = "full")]
+mod jwk;
+mod mailbox;
+#[cfg(feature = "full")]
+mod rsa;
+#[cfg(feature = "full")]
+mod userinfo_json;
+mod username;
 const AUTH_ID_PREFIX: &str = "hskey-authreq-";
 const REGISTRATION_ID_LENGTH: usize = 24;
 const AUTH_ID_LENGTH: usize = AUTH_ID_PREFIX.len() + REGISTRATION_ID_LENGTH;
@@ -34,6 +53,27 @@ const OIDC_COOKIE_NAME_PREFIX_LEN: usize = 6;
 const OIDC_COOKIE_MAX_AGE_SECS: u64 = 60 * 60;
 const DEFAULT_OIDC_AUTH_CACHE_EXPIRY: StdDuration = StdDuration::from_secs(15 * 60);
 const DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES: usize = 1024;
+// headscale-go v0.29.5 NewHeadscale gives provider initialization a
+// 30-second context. Include response-body decoding in the same deadline.
+#[cfg(feature = "full")]
+const OIDC_DISCOVERY_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+#[cfg(feature = "full")]
+const OIDC_PROVIDER_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+#[cfg(feature = "full")]
+const OIDC_PROVIDER_BODY_LIMIT: usize = 1024 * 1024;
+#[cfg(feature = "full")]
+const MAX_PENDING_OIDC_CALLBACKS: usize = 128;
+#[cfg(feature = "full")]
+static OIDC_CRYPTO_WORKERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .clamp(1, 8);
+        Arc::new(tokio::sync::Semaphore::new(workers))
+    });
+const OIDC_SIGNING_ALGORITHMS: &[&str] = &[
+    "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA",
+];
 const REGISTER_CONFIRM_CSRF_COOKIE: &str = "headscale_register_confirm";
 const REGISTER_CONFIRM_BODY_LIMIT: usize = 4 * 1024;
 
@@ -77,7 +117,7 @@ impl Default for OidcPkceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OidcAuthConfig {
     pub issuer: String,
     pub authorization_endpoint: String,
@@ -93,23 +133,48 @@ pub struct OidcAuthConfig {
     pub policy: OidcPolicyConfig,
 }
 
+impl fmt::Debug for OidcAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcAuthConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_url", &self.redirect_url)
+            .field("scopes", &self.scopes)
+            .field("pkce", &self.pkce)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcProviderMetadata {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     pub issuer: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     pub authorization_endpoint: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     pub token_endpoint: String,
     #[serde(default)]
     pub userinfo_endpoint: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     pub jwks_uri: String,
+    #[serde(default, deserialize_with = "deserialize_go_string_list")]
+    pub id_token_signing_alg_values_supported: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct OidcAuthRuntime {
     config: Arc<OidcAuthConfig>,
+    signing_algorithms: Arc<Vec<String>>,
+    #[cfg(feature = "full")]
+    provider_client: reqwest::Client,
+    #[cfg(feature = "full")]
+    token_auth_style: Arc<AtomicU8>,
+    #[cfg(feature = "full")]
+    jwks: Arc<OidcJwksCache>,
+    #[cfg(feature = "full")]
+    pending_callbacks: Arc<tokio::sync::Semaphore>,
     registrations: Arc<OidcRegistrationCache>,
     confirmations: Arc<OidcRegistrationConfirmationCache>,
     users: Option<Arc<dyn OidcUserStore>>,
@@ -120,6 +185,7 @@ impl fmt::Debug for OidcAuthRuntime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OidcAuthRuntime")
             .field("config", &self.config)
+            .field("signing_algorithms", &self.signing_algorithms)
             .field("registrations", &self.registrations)
             .field("confirmations", &self.confirmations)
             .field("users", &self.users.as_ref().map(|_| "<configured>"))
@@ -127,7 +193,7 @@ impl fmt::Debug for OidcAuthRuntime {
                 "registration_handler",
                 &self.registration_handler.as_ref().map(|_| "<configured>"),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -135,6 +201,15 @@ impl OidcAuthRuntime {
     pub fn new(config: OidcAuthConfig) -> Self {
         Self {
             config: Arc::new(config),
+            signing_algorithms: Arc::new(vec!["RS256".into()]),
+            #[cfg(feature = "full")]
+            provider_client: reqwest::Client::new(),
+            #[cfg(feature = "full")]
+            token_auth_style: Arc::new(AtomicU8::new(0)),
+            #[cfg(feature = "full")]
+            jwks: Arc::new(OidcJwksCache::default()),
+            #[cfg(feature = "full")]
+            pending_callbacks: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OIDC_CALLBACKS)),
             registrations: Arc::new(OidcRegistrationCache::new(DEFAULT_OIDC_AUTH_CACHE_EXPIRY)),
             confirmations: Arc::new(OidcRegistrationConfirmationCache::new(
                 DEFAULT_OIDC_AUTH_CACHE_EXPIRY,
@@ -150,6 +225,15 @@ impl OidcAuthRuntime {
     ) -> Self {
         Self {
             config: Arc::new(config),
+            signing_algorithms: Arc::new(vec!["RS256".into()]),
+            #[cfg(feature = "full")]
+            provider_client: reqwest::Client::new(),
+            #[cfg(feature = "full")]
+            token_auth_style: Arc::new(AtomicU8::new(0)),
+            #[cfg(feature = "full")]
+            jwks: Arc::new(OidcJwksCache::default()),
+            #[cfg(feature = "full")]
+            pending_callbacks: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OIDC_CALLBACKS)),
             registrations,
             confirmations: Arc::new(OidcRegistrationConfirmationCache::new(
                 DEFAULT_OIDC_AUTH_CACHE_EXPIRY,
@@ -161,6 +245,21 @@ impl OidcAuthRuntime {
 
     pub fn with_user_store(mut self, users: Arc<dyn OidcUserStore>) -> Self {
         self.users = Some(users);
+        self
+    }
+
+    /// Mirror go-oidc's discovery allowlist. Empty or unsupported-only
+    /// metadata falls back to the mandatory RS256 algorithm.
+    pub fn with_provider_signing_algorithms(mut self, algorithms: Vec<String>) -> Self {
+        let algorithms: Vec<_> = algorithms
+            .into_iter()
+            .filter(|alg| OIDC_SIGNING_ALGORITHMS.contains(&alg.as_str()))
+            .collect();
+        self.signing_algorithms = Arc::new(if algorithms.is_empty() {
+            vec!["RS256".into()]
+        } else {
+            algorithms
+        });
         self
     }
 
@@ -239,6 +338,8 @@ impl OidcAuthRuntime {
                 registration,
             },
         );
+
+        tracing::debug!("redirecting to {} for authentication", auth_url);
 
         Ok(OidcAuthStart {
             auth_url,
@@ -550,19 +651,25 @@ pub enum OidcRuntimeError {
 pub enum OidcDiscoveryError {
     #[error("oidc issuer is empty")]
     EmptyIssuer,
-    #[error("failed to fetch OIDC discovery metadata from {url}: {message}")]
+    #[error("{message}")]
     Fetch { url: String, message: String },
-    #[error("failed to decode OIDC discovery metadata from {url}: {message}")]
+    #[error("oidc: failed to decode provider discovery object: {message}")]
     Decode { url: String, message: String },
+    #[error("{status}: {body}")]
+    HttpStatus { status: String, body: String },
     #[error("OIDC discovery metadata is missing {field}")]
     MissingField { field: &'static str },
-    #[error("OIDC discovery issuer mismatch: expected {expected}, got {actual}")]
+    #[error(
+        "oidc: issuer URL provided to client ({}) did not match the issuer URL returned by provider ({})",
+        headscale_api_acl::go_strconv::quote(.expected),
+        headscale_api_acl::go_strconv::quote(.actual)
+    )]
     IssuerMismatch { expected: String, actual: String },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OidcRuntimeBuildError {
-    #[error(transparent)]
+    #[error("creating OIDC provider from issuer config: {0}")]
     Discovery(#[from] OidcDiscoveryError),
     #[error("unsupported OIDC PKCE method {method:?}")]
     InvalidPkceMethod { method: String },
@@ -570,16 +677,15 @@ pub enum OidcRuntimeBuildError {
 
 impl OidcProviderMetadata {
     pub fn validate_for_issuer(&self, issuer: &str) -> Result<(), OidcDiscoveryError> {
-        let expected = normalize_issuer(issuer)?;
-        let actual = require_oidc_field(&self.issuer, "issuer")?;
-        require_oidc_field(&self.authorization_endpoint, "authorization_endpoint")?;
-        require_oidc_field(&self.token_endpoint, "token_endpoint")?;
-        require_oidc_field(&self.jwks_uri, "jwks_uri")?;
-
-        if normalize_issuer(actual)? != expected {
+        if issuer.is_empty() {
+            return Err(OidcDiscoveryError::EmptyIssuer);
+        }
+        // NewProvider checks issuer identity at discovery. Missing endpoints
+        // fail only when the corresponding OAuth/JWKS operation is attempted.
+        if self.issuer != issuer {
             return Err(OidcDiscoveryError::IssuerMismatch {
-                expected,
-                actual: actual.to_string(),
+                expected: issuer.to_string(),
+                actual: self.issuer.clone(),
             });
         }
 
@@ -610,6 +716,7 @@ pub async fn discover_oidc_metadata_with_client(
     let url = oidc_discovery_url(issuer)?;
     let response = client
         .get(&url)
+        .timeout(OIDC_DISCOVERY_TIMEOUT)
         .send()
         .await
         .map_err(|err| OidcDiscoveryError::Fetch {
@@ -618,20 +725,34 @@ pub async fn discover_oidc_metadata_with_client(
         })?;
 
     let status = response.status();
-    if !status.is_success() {
-        return Err(OidcDiscoveryError::Fetch {
-            url,
-            message: format!("HTTP {status}"),
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .map_or_else(Vec::new, |value| value.as_bytes().to_vec());
+    let body = oidc_response_body(response)
+        .await
+        .map_err(|message| OidcDiscoveryError::Fetch {
+            url: url.clone(),
+            message: format!("unable to read response body: {message}"),
+        })?;
+    if status != StatusCode::OK {
+        return Err(OidcDiscoveryError::HttpStatus {
+            status: status.to_string(),
+            body: String::from_utf8_lossy(&body).into_owned(),
         });
     }
 
-    let metadata = response
-        .json::<OidcProviderMetadata>()
-        .await
-        .map_err(|err| OidcDiscoveryError::Decode {
-            url: url.clone(),
-            message: err.to_string(),
-        })?;
+    let metadata = discovery::decode(&body).map_err(|err| OidcDiscoveryError::Decode {
+        url: url.clone(),
+        message: if discovery::has_json_content_type(&content_type) {
+            format!("got Content-Type = application/json, but could not unmarshal as JSON: {err}")
+        } else {
+            format!(
+                "expected Content-Type = application/json, got {}: {err}",
+                form::quote_bytes(&content_type)
+            )
+        },
+    })?;
     metadata.validate_for_issuer(issuer)?;
     Ok(metadata)
 }
@@ -645,7 +766,7 @@ pub fn auth_config_from_core_oidc(
     metadata.validate_for_issuer(&oidc.issuer)?;
 
     Ok(OidcAuthConfig {
-        issuer: normalize_issuer(&metadata.issuer)?,
+        issuer: metadata.issuer,
         authorization_endpoint: metadata.authorization_endpoint,
         token_endpoint: metadata.token_endpoint,
         userinfo_endpoint: metadata.userinfo_endpoint,
@@ -675,25 +796,28 @@ pub async fn runtime_from_core_oidc(
     oidc: &headscale_core::config::OidcConfig,
     server_url: &str,
 ) -> Result<Option<OidcAuthRuntime>, OidcRuntimeBuildError> {
-    if oidc.issuer.trim().is_empty() {
+    if oidc.issuer.is_empty() {
         return Ok(None);
     }
 
     let metadata = match discover_oidc_metadata(&oidc.issuer).await {
         Ok(metadata) => metadata,
         Err(err) if !oidc.only_start_if_oidc_is_available => {
+            let err = OidcRuntimeBuildError::Discovery(err);
             tracing::warn!(
                 error = %err,
-                "OIDC provider discovery failed; continuing without OIDC because oidc.only_start_if_oidc_is_available=false"
+                "failed to set up OIDC provider, falling back to CLI based authentication"
             );
             return Ok(None);
         }
         Err(err) => return Err(err.into()),
     };
 
-    Ok(Some(OidcAuthRuntime::new(auth_config_from_core_oidc(
-        oidc, server_url, metadata,
-    )?)))
+    let algorithms = metadata.id_token_signing_alg_values_supported.clone();
+    Ok(Some(
+        OidcAuthRuntime::new(auth_config_from_core_oidc(oidc, server_url, metadata)?)
+            .with_provider_signing_algorithms(algorithms),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -719,11 +843,11 @@ impl Default for OidcPolicyConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcClaims {
-    #[serde(default, rename = "sub")]
+    #[serde(default, rename = "sub", deserialize_with = "deserialize_go_string")]
     pub sub: String,
-    #[serde(default, rename = "iss")]
+    #[serde(default, rename = "iss", deserialize_with = "deserialize_go_string")]
     pub iss: String,
-    #[serde(default, rename = "name")]
+    #[serde(default, rename = "name", deserialize_with = "deserialize_go_string")]
     pub name: String,
     #[serde(
         default,
@@ -731,7 +855,7 @@ pub struct OidcClaims {
         deserialize_with = "deserialize_flexible_string_vec_default"
     )]
     pub groups: Vec<String>,
-    #[serde(default, rename = "email")]
+    #[serde(default, rename = "email", deserialize_with = "deserialize_go_string")]
     pub email: String,
     #[serde(
         default,
@@ -739,9 +863,17 @@ pub struct OidcClaims {
         deserialize_with = "deserialize_flexible_bool"
     )]
     pub email_verified: bool,
-    #[serde(default, rename = "picture")]
+    #[serde(
+        default,
+        rename = "picture",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub profile_picture_url: String,
-    #[serde(default, rename = "preferred_username")]
+    #[serde(
+        default,
+        rename = "preferred_username",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub username: String,
 }
 
@@ -757,8 +889,8 @@ impl OidcClaims {
             return clean_identifier(&self.iss);
         }
 
-        let issuer = self.iss.trim_end_matches('/');
-        let subject = self.sub.trim_start_matches('/');
+        let issuer = self.iss.strip_suffix('/').unwrap_or(&self.iss);
+        let subject = self.sub.strip_prefix('/').unwrap_or(&self.sub);
         clean_identifier(&format!("{issuer}/{subject}"))
     }
 
@@ -774,17 +906,29 @@ impl OidcClaims {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OidcUserInfo {
-    #[serde(default, rename = "sub")]
+    #[serde(default, rename = "sub", deserialize_with = "deserialize_go_string")]
     pub sub: String,
-    #[serde(default, rename = "name")]
+    #[serde(default, rename = "name", deserialize_with = "deserialize_go_string")]
     pub name: String,
-    #[serde(default, rename = "given_name")]
+    #[serde(
+        default,
+        rename = "given_name",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub given_name: String,
-    #[serde(default, rename = "family_name")]
+    #[serde(
+        default,
+        rename = "family_name",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub family_name: String,
-    #[serde(default, rename = "preferred_username")]
+    #[serde(
+        default,
+        rename = "preferred_username",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub preferred_username: String,
-    #[serde(default, rename = "email")]
+    #[serde(default, rename = "email", deserialize_with = "deserialize_go_string")]
     pub email: String,
     #[serde(
         default,
@@ -798,7 +942,11 @@ pub struct OidcUserInfo {
         deserialize_with = "deserialize_optional_flexible_string_vec"
     )]
     pub groups: Option<Vec<String>>,
-    #[serde(default, rename = "picture")]
+    #[serde(
+        default,
+        rename = "picture",
+        deserialize_with = "deserialize_go_string"
+    )]
     pub picture: String,
 }
 
@@ -829,8 +977,10 @@ impl OidcStoredUser {
             self.email.clone()
         } else if !self.name.is_empty() {
             self.name.clone()
-        } else {
+        } else if !self.provider_identifier.is_empty() {
             self.provider_identifier.clone()
+        } else {
+            self.id.to_string()
         }
     }
 }
@@ -841,6 +991,12 @@ pub trait OidcUserStore: Send + Sync {
         &self,
         profile: OidcUserProfile,
     ) -> Result<OidcStoredUser, String>;
+
+    /// Reload the pending account before confirmation. Legacy/custom stores
+    /// retain their cached profile by default; native stores resolve its ID.
+    async fn refresh_oidc_user(&self, user: &OidcStoredUser) -> Result<OidcStoredUser, String> {
+        Ok(user.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1051,9 +1207,17 @@ pub fn user_profile_from_claims(
 }
 
 pub async fn handle_register(runtime: OidcAuthRuntime, registration_id: String) -> Response {
+    handle_register_with_request_security(runtime, registration_id, false).await
+}
+
+pub async fn handle_register_with_request_security(
+    runtime: OidcAuthRuntime,
+    registration_id: String,
+    request_is_tls: bool,
+) -> Response {
     let start = match runtime.begin_registration(&registration_id) {
         Ok(start) => start,
-        Err(err) => return oidc_error_response(status_for_runtime_error(&err), err.to_string()),
+        Err(err) => return oidc_error_response(status_for_runtime_error(&err), &err.to_string()),
     };
 
     let mut response = StatusCode::FOUND.into_response();
@@ -1061,15 +1225,40 @@ pub async fn handle_register(runtime: OidcAuthRuntime, registration_id: String) 
         header::LOCATION,
         HeaderValue::from_str(&start.auth_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    append_cookie(response.headers_mut(), &csrf_cookie("state", &start.state));
-    append_cookie(response.headers_mut(), &csrf_cookie("nonce", &start.nonce));
+    let secure = runtime.config.redirect_url.starts_with("https://") || request_is_tls;
+    append_cookie(
+        response.headers_mut(),
+        &csrf_cookie(
+            "state",
+            &start.state,
+            secure,
+            &callback_cookie_path(&runtime.config.redirect_url),
+        ),
+    );
+    append_cookie(
+        response.headers_mut(),
+        &csrf_cookie(
+            "nonce",
+            &start.nonce,
+            secure,
+            &callback_cookie_path(&runtime.config.redirect_url),
+        ),
+    );
     response
 }
 
 pub async fn handle_auth(runtime: OidcAuthRuntime, auth_id: String) -> Response {
+    handle_auth_with_request_security(runtime, auth_id, false).await
+}
+
+pub async fn handle_auth_with_request_security(
+    runtime: OidcAuthRuntime,
+    auth_id: String,
+    request_is_tls: bool,
+) -> Response {
     let start = match runtime.begin_auth(&auth_id) {
         Ok(start) => start,
-        Err(err) => return oidc_error_response(status_for_runtime_error(&err), err.to_string()),
+        Err(err) => return oidc_error_response(status_for_runtime_error(&err), &err.to_string()),
     };
 
     let mut response = StatusCode::FOUND.into_response();
@@ -1077,8 +1266,25 @@ pub async fn handle_auth(runtime: OidcAuthRuntime, auth_id: String) -> Response 
         header::LOCATION,
         HeaderValue::from_str(&start.auth_url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    append_cookie(response.headers_mut(), &csrf_cookie("state", &start.state));
-    append_cookie(response.headers_mut(), &csrf_cookie("nonce", &start.nonce));
+    let secure = runtime.config.redirect_url.starts_with("https://") || request_is_tls;
+    append_cookie(
+        response.headers_mut(),
+        &csrf_cookie(
+            "state",
+            &start.state,
+            secure,
+            &callback_cookie_path(&runtime.config.redirect_url),
+        ),
+    );
+    append_cookie(
+        response.headers_mut(),
+        &csrf_cookie(
+            "nonce",
+            &start.nonce,
+            secure,
+            &callback_cookie_path(&runtime.config.redirect_url),
+        ),
+    );
     response
 }
 
@@ -1091,6 +1297,104 @@ pub async fn handle_register_confirm(
     handle_register_confirm_with_request_security(runtime, auth_id, headers, raw, false).await
 }
 
+/// Render the confirmation on a reloadable URL, after the callback has
+/// consumed the one-time OAuth code. The browser must present the CSRF cookie
+/// that the callback issued; knowing the auth ID alone is insufficient.
+pub fn handle_register_confirm_get(
+    runtime: &OidcAuthRuntime,
+    auth_id: &str,
+    headers: &HeaderMap,
+) -> Response {
+    match registration_confirmation_for_get(runtime, auth_id, headers) {
+        Ok(pending) => registration_confirmation_response(runtime, auth_id, &pending),
+        Err(response) => response,
+    }
+}
+
+/// Native HTTP entry point reloads the account after validating the browser
+/// cookie, matching Headscale's confirmation-time GetUserByID boundary.
+pub async fn handle_register_confirm_get_with_user_refresh(
+    runtime: &OidcAuthRuntime,
+    auth_id: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let mut pending = match registration_confirmation_for_get(runtime, auth_id, headers) {
+        Ok(pending) => pending,
+        Err(response) => return response,
+    };
+    if let Some(users) = &runtime.users {
+        pending.user = match users.refresh_oidc_user(&pending.user).await {
+            Ok(user) => user,
+            Err(error) => {
+                return oidc_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("looking up user: {error}"),
+                );
+            }
+        };
+    }
+    registration_confirmation_response(runtime, auth_id, &pending)
+}
+
+fn registration_confirmation_for_get(
+    runtime: &OidcAuthRuntime,
+    auth_id: &str,
+    headers: &HeaderMap,
+) -> Result<OidcPendingRegistrationConfirmation, Response> {
+    let Some(registration_id) = registration_id_from_register_path(auth_id) else {
+        return Err(oidc_error_response(
+            StatusCode::BAD_REQUEST,
+            &OidcRuntimeError::InvalidRegistrationId.to_string(),
+        ));
+    };
+    let Some(pending) = runtime.pending_confirmation(registration_id) else {
+        let err = match runtime
+            .registration_handler
+            .as_ref()
+            .and_then(|handler| handler.oidc_auth_request_kind(registration_id))
+        {
+            Some(_) => OidcRuntimeError::RegistrationNotOidcAuthorized,
+            None => return Err(registration_link_spent_response()),
+        };
+        return Err(oidc_error_response(
+            status_for_runtime_error(&err),
+            &err.to_string(),
+        ));
+    };
+    let Some(cookie_csrf) = cookie_value(headers, REGISTER_CONFIRM_CSRF_COOKIE) else {
+        return Err(oidc_error_response(
+            StatusCode::FORBIDDEN,
+            &OidcRuntimeError::MissingCsrfCookie.to_string(),
+        ));
+    };
+    if cookie_csrf != pending.csrf {
+        return Err(oidc_error_response(
+            StatusCode::FORBIDDEN,
+            &OidcRuntimeError::CsrfTokenMismatch.to_string(),
+        ));
+    }
+    Ok(pending)
+}
+
+fn registration_confirmation_response(
+    runtime: &OidcAuthRuntime,
+    auth_id: &str,
+    pending: &OidcPendingRegistrationConfirmation,
+) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        oidc_registration_confirm_html(
+            pending,
+            &register_confirm_url(&runtime.config.redirect_url, auth_id),
+        ),
+    )
+        .into_response()
+}
+
 pub async fn handle_register_confirm_with_request_security(
     runtime: OidcAuthRuntime,
     auth_id: String,
@@ -1098,84 +1402,96 @@ pub async fn handle_register_confirm_with_request_security(
     raw: Bytes,
     secure_cookies: bool,
 ) -> Response {
+    handle_register_confirm_with_request_security_and_query(
+        runtime,
+        auth_id,
+        headers,
+        raw,
+        secure_cookies,
+        None,
+    )
+    .await
+}
+
+/// Native ParseForm also validates URL-query syntax. Query values never
+/// provide the POST-only CSRF field used to authorize confirmation.
+pub async fn handle_register_confirm_with_request_security_and_query(
+    runtime: OidcAuthRuntime,
+    auth_id: String,
+    headers: HeaderMap,
+    raw: Bytes,
+    secure_cookies: bool,
+    query: Option<&str>,
+) -> Response {
     let Some(registration_id) = registration_id_from_register_path(&auth_id).map(str::to_string)
     else {
         return oidc_error_response(
             StatusCode::BAD_REQUEST,
-            OidcRuntimeError::InvalidRegistrationId.to_string(),
+            &OidcRuntimeError::InvalidRegistrationId.to_string(),
         );
     };
 
-    if !is_form_urlencoded_content_type(&headers) {
-        return oidc_error_response(
-            StatusCode::BAD_REQUEST,
-            OidcRuntimeError::MissingCsrfToken.to_string(),
-        );
-    }
-
-    if raw.len() > REGISTER_CONFIRM_BODY_LIMIT {
-        return oidc_error_response(
-            StatusCode::BAD_REQUEST,
-            OidcRuntimeError::InvalidForm.to_string(),
-        );
-    }
-
-    if !is_strict_urlencoded_form(&raw) {
-        return oidc_error_response(
-            StatusCode::BAD_REQUEST,
-            OidcRuntimeError::InvalidForm.to_string(),
-        );
-    }
-
-    let form_csrf = form_urlencoded::parse(&raw)
-        .find_map(|(key, value)| (key == REGISTER_CONFIRM_CSRF_COOKIE).then(|| value.into_owned()))
-        .filter(|value| !value.is_empty());
-    let Some(form_csrf) = form_csrf else {
-        return oidc_error_response(
-            StatusCode::BAD_REQUEST,
-            OidcRuntimeError::MissingCsrfToken.to_string(),
-        );
+    let form_csrf = match form::decode_confirmation_form(&headers, &raw, query) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return oidc_error_response(
+                StatusCode::BAD_REQUEST,
+                &OidcRuntimeError::MissingCsrfToken.to_string(),
+            );
+        }
+        Err(error) => {
+            return oidc_error_response(StatusCode::BAD_REQUEST, &format!("invalid form: {error}"));
+        }
     };
 
     let Some(cookie_csrf) = cookie_value(&headers, REGISTER_CONFIRM_CSRF_COOKIE) else {
         return oidc_error_response(
             StatusCode::FORBIDDEN,
-            OidcRuntimeError::MissingCsrfCookie.to_string(),
+            &OidcRuntimeError::MissingCsrfCookie.to_string(),
         );
     };
     if cookie_csrf != form_csrf {
         return oidc_error_response(
             StatusCode::FORBIDDEN,
-            OidcRuntimeError::CsrfTokenMismatch.to_string(),
+            &OidcRuntimeError::CsrfTokenMismatch.to_string(),
         );
     }
 
     let Some(registration_handler) = &runtime.registration_handler else {
         return oidc_error_response(
             StatusCode::NOT_IMPLEMENTED,
-            "OIDC callback completion is not implemented".to_string(),
+            "OIDC callback completion is not implemented",
         );
     };
 
-    let Some(pending) = registration_handler
+    let Some(mut pending) = registration_handler
         .oidc_pending_registration_confirmation(&registration_id)
         .or_else(|| runtime.confirmations.get(&registration_id))
     else {
         let err = match registration_handler.oidc_auth_request_kind(&registration_id) {
-            Some(OidcAuthRequestKind::Registration) => {
-                OidcRuntimeError::RegistrationNotOidcAuthorized
-            }
-            Some(OidcAuthRequestKind::SshCheck) => OidcRuntimeError::AuthSessionNotRegistration,
-            None => OidcRuntimeError::RegistrationSessionExpired,
+            Some(_) => OidcRuntimeError::RegistrationNotOidcAuthorized,
+            None => return registration_link_spent_response(),
         };
-        return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+        return oidc_error_response(status_for_runtime_error(&err), &err.to_string());
     };
 
     if pending.csrf != cookie_csrf {
         return oidc_error_response(
             StatusCode::FORBIDDEN,
-            OidcRuntimeError::CsrfTokenCacheMismatch.to_string(),
+            &OidcRuntimeError::CsrfTokenCacheMismatch.to_string(),
         );
+    }
+
+    if let Some(users) = &runtime.users {
+        pending.user = match users.refresh_oidc_user(&pending.user).await {
+            Ok(user) => user,
+            Err(error) => {
+                return oidc_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("looking up user: {error}"),
+                );
+            }
+        };
     }
 
     match registration_handler
@@ -1186,14 +1502,16 @@ pub async fn handle_register_confirm_with_request_security(
             registration_handler.remove_oidc_registration_confirmation(&registration_id);
             runtime.confirmations.remove(&registration_id);
             let mut response = oidc_registration_success_response(&pending.user, result.new_node);
-            clear_register_confirm_cookie(response.headers_mut(), &auth_id, secure_cookies);
+            clear_register_confirm_cookie(
+                response.headers_mut(),
+                &register_confirm_path(&runtime.config.redirect_url, &auth_id),
+                runtime.config.redirect_url.starts_with("https://") || secure_cookies,
+            );
             response
         }
-        Err(OidcRegistrationError::SessionExpired) => {
-            oidc_error_response(StatusCode::GONE, "registration session expired".to_string())
-        }
+        Err(OidcRegistrationError::SessionExpired) => registration_link_spent_response(),
         Err(OidcRegistrationError::Store(err)) => {
-            oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, err)
+            oidc_error_response(StatusCode::INTERNAL_SERVER_ERROR, &err)
         }
     }
 }
@@ -1212,166 +1530,358 @@ pub async fn handle_callback_with_request_security(
     Query(query): Query<OidcCallbackQuery>,
     secure_cookies: bool,
 ) -> Response {
-    if query.code.is_empty() || query.state.is_empty() {
+    handle_callback_bytes(
+        runtime,
+        headers,
+        query.code.into_bytes(),
+        query.state.into_bytes(),
+        secure_cookies,
+    )
+    .await
+}
+
+/// Native URL.Query().Get keeps the first successfully decoded byte value,
+/// including an empty value, despite malformed unrelated query pairs.
+pub(crate) async fn handle_callback_with_raw_query(
+    runtime: OidcAuthRuntime,
+    headers: HeaderMap,
+    query: Option<String>,
+    secure_cookies: bool,
+) -> Response {
+    let query = query.as_deref().unwrap_or_default().as_bytes();
+    handle_callback_bytes(
+        runtime,
+        headers,
+        form::query_first_value(query, b"code").unwrap_or_default(),
+        form::query_first_value(query, b"state").unwrap_or_default(),
+        secure_cookies,
+    )
+    .await
+}
+
+async fn handle_callback_bytes(
+    runtime: OidcAuthRuntime,
+    headers: HeaderMap,
+    code: Vec<u8>,
+    state: Vec<u8>,
+    secure_cookies: bool,
+) -> Response {
+    if code.is_empty() || state.is_empty() {
         return oidc_error_response(
             status_for_runtime_error(&OidcRuntimeError::MissingCodeOrState),
-            OidcRuntimeError::MissingCodeOrState.to_string(),
+            &OidcRuntimeError::MissingCodeOrState.to_string(),
         );
     }
 
-    match validate_state_cookie(&headers, &query.state) {
+    match validate_state_cookie_bytes(&headers, &state) {
         Ok(()) => {}
-        Err(err) => return oidc_error_response(status_for_runtime_error(&err), err.to_string()),
+        Err(err) => return oidc_error_response(status_for_runtime_error(&err), &err.to_string()),
     }
 
-    let Some(registration) = runtime.registration(&query.state) else {
-        return oidc_error_response(
-            status_for_runtime_error(&OidcRuntimeError::RegistrationNotFound),
-            OidcRuntimeError::RegistrationNotFound.to_string(),
-        );
-    };
+    // A matching Cookie value contains only ASCII cookie-octets, so this
+    // conversion follows exact byte equality instead of a lossy projection.
+    let state = String::from_utf8(state).expect("validated state cookie is ASCII");
+
+    let registration = runtime.registration(&state);
     #[cfg(not(feature = "full"))]
     let _ = (registration, secure_cookies);
 
     #[cfg(feature = "full")]
     {
-        let token = match exchange_oauth2_token(
-            &runtime.config,
-            &query.code,
-            registration.verifier.as_deref(),
-        )
-        .await
-        {
+        // Upstream needs cached state before the exchange only for PKCE.
+        // Otherwise code/core/nonce/application validation runs before the
+        // state is consumed, preserving provider errors and callback cleanup.
+        if runtime.config.pkce.enabled && registration.is_none() {
+            return oidc_error_response(StatusCode::NOT_FOUND, "registration not found");
+        }
+        let Ok(_callback) = Arc::clone(&runtime.pending_callbacks).try_acquire_owned() else {
+            return oidc_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many pending OIDC callbacks",
+            );
+        };
+        let verifier = runtime
+            .config
+            .pkce
+            .enabled
+            .then(|| {
+                registration
+                    .as_ref()
+                    .and_then(|info| info.verifier.as_deref())
+            })
+            .flatten();
+        let token = match exchange_oauth2_token(&runtime, &code, verifier).await {
             Ok(token) => token,
             Err(err) => {
-                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+                return oidc_error_response(status_for_runtime_error(&err), &err.to_string());
             }
         };
 
-        let id_token = match verify_id_token(&runtime.config, &token.id_token).await {
+        let id_token = match verify_id_token(&runtime, &token.id_token).await {
             Ok(id_token) => id_token,
             Err(err) => {
-                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+                return oidc_error_response(status_for_runtime_error(&err), &err.to_string());
             }
         };
 
         match validate_nonce_cookie(&headers, &id_token.nonce) {
             Ok(()) => {}
             Err(err) => {
-                return oidc_error_response(status_for_runtime_error(&err), err.to_string());
+                return oidc_error_response(status_for_runtime_error(&err), &err.to_string());
             }
         }
 
-        let mut claims = id_token.claims;
-        let userinfo = fetch_userinfo(&runtime.config, &token).await;
-        merge_userinfo_claims(&mut claims, userinfo.as_ref());
-        if let Err(err) = authorize_claims(&runtime.config.policy, &claims) {
-            let err = OidcRuntimeError::Authorization(err);
-            return oidc_error_response(status_for_runtime_error(&err), err.to_string());
-        }
-        let node_expiry =
-            determine_node_expiry(&runtime.config.policy, id_token.expiry, Utc::now());
-        let profile =
-            user_profile_from_claims(&claims, runtime.config.policy.email_verified_required);
-        let user = if let Some(users) = &runtime.users {
-            match users.create_or_update_oidc_user(profile).await {
-                Ok(user) => user,
-                Err(_) => {
+        // Every outcome after nonce binding expires both browser cookies,
+        // including application-claims failures and later store errors.
+        let mut response = async {
+            let node_expiry =
+                determine_node_expiry(&runtime.config.policy, id_token.expiry, Utc::now());
+            let mut claims = match json::application_claims(&id_token.payload) {
+                Ok(claims) => claims,
+                Err(error) => {
                     return oidc_error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Could not create or update user".to_string(),
+                        &format!("decoding ID token claims: {error}"),
                     );
                 }
-            }
-        } else {
-            stored_user_from_profile(profile)
-        };
-
-        if let Some(registration_handler) = &runtime.registration_handler {
-            if registration.registration {
-                match registration_handler.oidc_auth_request_kind(&registration.registration_id) {
-                    Some(OidcAuthRequestKind::Registration) => {}
-                    Some(OidcAuthRequestKind::SshCheck) => {
-                        let err = OidcRuntimeError::AuthSessionNotRegistration;
-                        return oidc_error_response(
-                            status_for_runtime_error(&err),
-                            err.to_string(),
-                        );
-                    }
-                    None => {
-                        return oidc_error_response(
-                            StatusCode::GONE,
-                            "login session expired, try again".to_string(),
-                        );
-                    }
-                }
-                let csrf = random_urlsafe(32);
-                let device = registration_handler
-                    .oidc_registration_confirmation_info(&registration.registration_id)
-                    .unwrap_or_default();
-                let pending = OidcPendingRegistrationConfirmation {
-                    registration_id: registration.registration_id.clone(),
-                    user: user.clone(),
-                    node_expiry,
-                    csrf,
-                    device,
-                };
-                if !registration_handler.store_oidc_registration_confirmation(pending.clone()) {
-                    runtime.confirmations.insert(pending.clone());
-                }
-                return oidc_registration_confirm_response(&pending, secure_cookies);
-            }
-
-            match registration_handler
-                .complete_oidc_auth_request(&registration.registration_id, &user)
-                .await
+            };
+            let userinfo = fetch_userinfo(&runtime, &token).await;
+            if userinfo
+                .as_ref()
+                .is_some_and(|userinfo| userinfo.sub != claims.sub)
             {
-                Ok(()) => return oidc_ssh_success_response(&user),
-                Err(err) => {
-                    return oidc_error_response(status_for_auth_error(&err), err.to_string());
+                tracing::error!("could not get userinfo; only using claims from id token");
+            }
+            merge_userinfo_claims(&mut claims, userinfo.as_ref());
+            if let Err(err) = authorize_claims(&runtime.config.policy, &claims) {
+                let err = OidcRuntimeError::Authorization(err);
+                return oidc_error_response(status_for_runtime_error(&err), &err.to_string());
+            }
+            let profile =
+                user_profile_from_claims(&claims, runtime.config.policy.email_verified_required);
+            let user = if let Some(users) = &runtime.users {
+                match users.create_or_update_oidc_user(profile).await {
+                    Ok(user) => user,
+                    Err(_) => {
+                        return oidc_error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "could not create or update user",
+                        );
+                    }
+                }
+            } else {
+                stored_user_from_profile(profile)
+            };
+
+            // The verified callback state is single-use. Consume it atomically
+            // before completing registration or SSH approval so concurrent or
+            // replayed callbacks cannot resolve the same auth request twice.
+            let Some(registration) = runtime.registrations.remove(&state) else {
+                tracing::debug!(
+                    state = %state,
+                    "state not found in cache, login session may have expired"
+                );
+                return oidc_error_response(
+                    StatusCode::GONE,
+                    "login session expired, try again",
+                );
+            };
+
+            if let Some(registration_handler) = &runtime.registration_handler {
+                if registration.registration {
+                    match registration_handler.oidc_auth_request_kind(&registration.registration_id)
+                    {
+                        Some(OidcAuthRequestKind::Registration) => {}
+                        Some(OidcAuthRequestKind::SshCheck) => {
+                            tracing::warn!(
+                                auth_id = %format_args!("{AUTH_ID_PREFIX}{}", registration.registration_id),
+                                "OIDC callback hit registration path with auth request that is not a node registration"
+                            );
+                            let err = OidcRuntimeError::AuthSessionNotRegistration;
+                            return oidc_error_response(
+                                status_for_runtime_error(&err),
+                                &err.to_string(),
+                            );
+                        }
+                        None => {
+                            tracing::debug!(
+                                auth_id = %format_args!("{AUTH_ID_PREFIX}{}", registration.registration_id),
+                                "registration session expired before authorization completed"
+                            );
+                            return oidc_error_response(
+                                StatusCode::GONE,
+                                "login session expired, try again",
+                            );
+                        }
+                    }
+                    let csrf = random_urlsafe(32);
+                    let device = registration_handler
+                        .oidc_registration_confirmation_info(&registration.registration_id)
+                        .unwrap_or_default();
+                    let pending = OidcPendingRegistrationConfirmation {
+                        registration_id: registration.registration_id.clone(),
+                        user: user.clone(),
+                        node_expiry,
+                        csrf,
+                        device,
+                    };
+                    if !registration_handler.store_oidc_registration_confirmation(pending.clone()) {
+                        runtime.confirmations.insert(pending.clone());
+                    }
+                    return oidc_registration_confirm_redirect(
+                        &runtime.config.redirect_url,
+                        &pending,
+                        runtime.config.redirect_url.starts_with("https://") || secure_cookies,
+                    );
+                }
+
+                match registration_handler
+                    .complete_oidc_auth_request(&registration.registration_id, &user)
+                    .await
+                {
+                    Ok(()) => return oidc_ssh_success_response(&user),
+                    Err(err) => {
+                        return oidc_error_response(status_for_auth_error(&err), &err.to_string());
+                    }
                 }
             }
+            oidc_error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "OIDC callback completion is not implemented",
+            )
         }
+        .await;
+        // Upstream deletes both callback cookies right after the nonce check,
+        // before a later step (the register-confirm redirect) sets its own
+        // cookie, so the deletions lead the Set-Cookie headers.
+        let later_cookies: Vec<HeaderValue> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .cloned()
+            .collect();
+        response.headers_mut().remove(header::SET_COOKIE);
+        clear_callback_cookies(
+            response.headers_mut(),
+            &runtime.config.redirect_url,
+            &state,
+            &id_token.nonce,
+        );
+        for cookie in later_cookies {
+            response.headers_mut().append(header::SET_COOKIE, cookie);
+        }
+        response
     }
 
-    oidc_error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "OIDC callback completion is not implemented".to_string(),
-    )
+    #[cfg(not(feature = "full"))]
+    {
+        oidc_error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "OIDC callback completion is not implemented",
+        )
+    }
 }
 
 #[cfg(feature = "full")]
-#[derive(Debug, Deserialize)]
+#[derive(Default, Deserialize)]
 struct OidcTokenResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     access_token: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_token_extra")]
     id_token: String,
+    // Extra("id_token").(string) distinguishes an empty string from an
+    // absent/non-string JSON value. Verification handles empty strings.
+    #[serde(skip)]
+    id_token_is_string: bool,
+    #[serde(default, deserialize_with = "deserialize_go_string")]
+    token_type: String,
+    #[serde(default, rename = "error", deserialize_with = "deserialize_go_string")]
+    error_code: String,
+    #[serde(
+        default,
+        rename = "error_description",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _error_description: String,
+    #[serde(
+        default,
+        rename = "error_uri",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _error_uri: String,
+    #[serde(
+        default,
+        rename = "refresh_token",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _refresh_token: String,
+    #[serde(
+        default,
+        rename = "expires_in",
+        deserialize_with = "deserialize_oauth_expiry"
+    )]
+    _expires_in: Option<i64>,
 }
 
 #[cfg(feature = "full")]
 async fn exchange_oauth2_token(
-    cfg: &OidcAuthConfig,
-    code: &str,
+    runtime: &OidcAuthRuntime,
+    code: &[u8],
     verifier: Option<&str>,
 ) -> Result<OidcTokenResponse, OidcRuntimeError> {
-    let client = reqwest::Client::new();
+    let cfg = &runtime.config;
+    let client = &runtime.provider_client;
 
-    for auth_in_header in [true, false] {
-        let mut form = vec![
+    // oauth2 caches the first successful style per endpoint/client ID.
+    // Both are immutable in this runtime, so its shared byte is sufficient.
+    let cached_style = runtime.token_auth_style.load(Ordering::Relaxed);
+    let styles: &[u8] = match cached_style {
+        1 => &[1],
+        2 => &[2],
+        _ => &[1, 2],
+    };
+    for (attempt, style) in styles.iter().copied().enumerate() {
+        let auth_in_header = style == 1;
+        let can_retry = attempt + 1 < styles.len();
+        let mut form = BTreeMap::from([
             ("grant_type".to_string(), "authorization_code".to_string()),
-            ("code".to_string(), code.to_string()),
-            ("redirect_uri".to_string(), cfg.redirect_url.clone()),
-        ];
+            ("code".to_string(), String::new()),
+        ]);
+        if !cfg.redirect_url.is_empty() {
+            form.insert("redirect_uri".to_string(), cfg.redirect_url.clone());
+        }
         if let Some(verifier) = verifier {
-            form.push(("code_verifier".to_string(), verifier.to_string()));
+            form.insert("code_verifier".to_string(), verifier.to_string());
         }
         if !auth_in_header {
-            form.push(("client_id".to_string(), cfg.client_id.clone()));
-            form.push(("client_secret".to_string(), cfg.client_secret.clone()));
+            if !cfg.client_id.is_empty() {
+                form.insert("client_id".to_string(), cfg.client_id.clone());
+            }
+            if !cfg.client_secret.is_empty() {
+                form.insert("client_secret".to_string(), cfg.client_secret.clone());
+            }
         }
 
-        let request = client.post(&cfg.token_endpoint).form(&form);
+        let request = client
+            .post(&cfg.token_endpoint)
+            .timeout(OIDC_PROVIDER_TIMEOUT)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(
+                form.iter()
+                    .map(|(key, value)| {
+                        let value = if key == "code" {
+                            code
+                        } else {
+                            value.as_bytes()
+                        };
+                        format!("{}={}", form_encode(key), form_encode_bytes(value))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&"),
+            );
         let request = if auth_in_header {
             request.header(
                 reqwest::header::AUTHORIZATION,
@@ -1388,22 +1898,20 @@ async fn exchange_oauth2_token(
             request
         };
 
-        let response = request
-            .send()
-            .await
-            .map_err(|_| OidcRuntimeError::InvalidCode)?;
-        if !response.status().is_success() {
-            if auth_in_header {
-                continue;
-            }
-            return Err(OidcRuntimeError::InvalidCode);
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) if can_retry => continue,
+            Err(_) => return Err(OidcRuntimeError::InvalidCode),
+        };
+        let token = match parse_oauth2_token_response(response).await {
+            Ok(token) => token,
+            Err(_) if can_retry => continue,
+            Err(_) => return Err(OidcRuntimeError::InvalidCode),
+        };
+        if cached_style == 0 {
+            runtime.token_auth_style.store(style, Ordering::Relaxed);
         }
-
-        let token = response
-            .json::<OidcTokenResponse>()
-            .await
-            .map_err(|_| OidcRuntimeError::InvalidCode)?;
-        if token.id_token.is_empty() {
+        if !token.id_token_is_string {
             return Err(OidcRuntimeError::MissingIdToken);
         }
         return Ok(token);
@@ -1413,59 +1921,564 @@ async fn exchange_oauth2_token(
 }
 
 #[cfg(feature = "full")]
-async fn fetch_userinfo(cfg: &OidcAuthConfig, token: &OidcTokenResponse) -> Option<OidcUserInfo> {
-    let endpoint = cfg.userinfo_endpoint.as_ref()?;
-    if token.access_token.is_empty() {
-        return None;
+async fn parse_oauth2_token_response(
+    response: reqwest::Response,
+) -> Result<OidcTokenResponse, String> {
+    let success = response.status().is_success();
+    let content_type = oidc_response_media_type(&response).0;
+    let body = oidc_oauth_response_body(response).await?;
+    let token = if matches!(
+        content_type.as_str(),
+        "application/x-www-form-urlencoded" | "text/plain"
+    ) {
+        let mut values = form::decode_token_form(&body)?;
+        OidcTokenResponse {
+            id_token_is_string: json::form_id_token_is_string(
+                values.get("id_token").map_or("", String::as_str),
+            ),
+            access_token: values.remove("access_token").unwrap_or_default(),
+            id_token: values.remove("id_token").unwrap_or_default(),
+            token_type: values.remove("token_type").unwrap_or_default(),
+            error_code: values.remove("error").unwrap_or_default(),
+            ..Default::default()
+        }
+    } else {
+        json::token_response(&body)?
+    };
+    if !success || !token.error_code.is_empty() || token.access_token.is_empty() {
+        return Err("invalid token response".into());
     }
+    Ok(token)
+}
 
-    let response = match reqwest::Client::new()
+#[cfg(feature = "full")]
+fn deserialize_token_extra<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
+}
+
+#[cfg(feature = "full")]
+fn deserialize_oauth_expiry<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let seconds = match value {
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(number) => {
+            oidc_json_number(&number).and_then(|number| number.as_i64())
+        }
+        _ => None,
+    };
+    seconds
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("invalid expires_in"))
+}
+
+#[cfg(feature = "full")]
+fn log_userinfo_provider_error(error: impl fmt::Display) {
+    // Pinned callback logs the failed Provider.UserInfo result, then reaches
+    // its failed merge branch and logs the same provider error a second time.
+    tracing::error!(error = %error, "could not get userinfo; only using claims from id token");
+    tracing::error!(error = %error, "could not get userinfo; only using claims from id token");
+}
+
+#[cfg(feature = "full")]
+fn userinfo_transport_error(endpoint: &str, error: reqwest::Error) -> String {
+    // net/http.Client.Do wraps transport failures in url.Error with the
+    // original Get operation and a quoted URL whose password is replaced.
+    // Preserve native transport causes: reqwest's outer Display omits them.
+    let request_error = !error.is_builder();
+    let mut url = error
+        .url()
+        .cloned()
+        .or_else(|| reqwest::Url::parse(endpoint).ok());
+    if let Some(url) = &mut url
+        && url.password().is_some()
+    {
+        let _ = url.set_password(Some("***"));
+    }
+    let error = error.without_url();
+    let cause = oidc_transport_causes(&error);
+    if request_error {
+        let url = url.as_ref().map_or(endpoint, |url| url.as_str());
+        format!("Get {}: {cause}", form::quote_bytes(url.as_bytes()))
+    } else {
+        // Native request construction and header errors retain their actual
+        // cause instead of pretending they came from Client.Do.
+        cause
+    }
+}
+
+#[cfg(feature = "full")]
+fn oidc_transport_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let _ = write!(message, ": {error}");
+        cause = error.source();
+    }
+    message
+}
+
+#[cfg(feature = "full")]
+fn userinfo_response_status(response: &reqwest::Response) -> String {
+    let status = response.status();
+    let reason = response
+        .extensions()
+        .get::<hyper::ext::ReasonPhrase>()
+        .map(|reason| String::from_utf8_lossy(reason.as_bytes()));
+    format!(
+        "{} {}",
+        status.as_str(),
+        reason
+            .as_deref()
+            .unwrap_or_else(|| status.canonical_reason().unwrap_or_default())
+    )
+}
+
+#[cfg(feature = "full")]
+async fn fetch_userinfo(
+    runtime: &OidcAuthRuntime,
+    token: &OidcTokenResponse,
+) -> Option<OidcUserInfo> {
+    let cfg = &runtime.config;
+    let Some(endpoint) = cfg
+        .userinfo_endpoint
+        .as_ref()
+        .filter(|endpoint| !endpoint.is_empty())
+    else {
+        log_userinfo_provider_error("oidc: user info endpoint is not supported by this provider");
+        return None;
+    };
+    let token_type = if token.token_type.is_empty()
+        || headscale_api_acl::go_unicode::equal_fold(&token.token_type, "bearer")
+    {
+        "Bearer"
+    } else if headscale_api_acl::go_unicode::equal_fold(&token.token_type, "basic") {
+        "Basic"
+    } else if headscale_api_acl::go_unicode::equal_fold(&token.token_type, "mac") {
+        "MAC"
+    } else {
+        token.token_type.as_str()
+    };
+
+    let response = match runtime
+        .provider_client
         .get(endpoint)
-        .bearer_auth(&token.access_token)
+        .timeout(OIDC_PROVIDER_TIMEOUT)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("{token_type} {}", token.access_token),
+        )
         .send()
         .await
     {
         Ok(response) => response,
         Err(err) => {
-            tracing::warn!(error = %err, "could not get OIDC userinfo; only using id_token claims");
+            log_userinfo_provider_error(userinfo_transport_error(endpoint, err));
             return None;
         }
     };
-    if !response.status().is_success() {
-        tracing::warn!(
-            status = %response.status(),
-            "could not get OIDC userinfo; only using id_token claims"
-        );
+
+    let success = response.status() == StatusCode::OK;
+    let status = userinfo_response_status(&response);
+    let (content_type, media_error) = oidc_response_media_type(&response);
+    let body = match oidc_response_body(response).await {
+        Ok(body) => body,
+        Err(error) => {
+            log_userinfo_provider_error(error);
+            return None;
+        }
+    };
+    // Provider.UserInfo reads the response body before checking its status.
+    // Keep the existing explicit resource bound on both success and error
+    // bodies; a read/size error therefore takes precedence over HTTP status.
+    if !success {
+        log_userinfo_provider_error(format!("{status}: {}", String::from_utf8_lossy(&body)));
         return None;
     }
-
-    match response.json::<OidcUserInfo>().await {
+    let body = if media_error.is_none() && content_type == "application/jwt" {
+        let raw = match std::str::from_utf8(&body) {
+            Ok(raw) => raw,
+            Err(error) => {
+                log_userinfo_provider_error(format!(
+                    "oidc: invalid userinfo jwt signature {error}"
+                ));
+                return None;
+            }
+        };
+        match verify_oidc_signed_payload(runtime, raw, None).await {
+            Ok(payload) => payload,
+            Err(error) => {
+                log_userinfo_provider_error(format!(
+                    "oidc: invalid userinfo jwt signature {error}"
+                ));
+                return None;
+            }
+        }
+    } else {
+        body
+    };
+    match userinfo_json::parse(&body) {
         Ok(userinfo) => Some(userinfo),
-        Err(err) => {
-            tracing::warn!(error = %err, "could not decode OIDC userinfo; only using id_token claims");
+        Err(userinfo_json::DecodeError::Provider(error)) => {
+            log_userinfo_provider_error(error);
+            None
+        }
+        Err(userinfo_json::DecodeError::Claims) => {
+            // A successful Provider.UserInfo left err=nil in the pinned
+            // callback, so a later Claims failure logs no error field.
+            tracing::error!("could not get userinfo; only using claims from id token");
             None
         }
     }
 }
 
 #[cfg(feature = "full")]
-#[derive(Debug, Deserialize)]
+fn oidc_response_media_type(response: &reqwest::Response) -> (String, Option<String>) {
+    // Keep raw parameter bytes for Go MIME duplicate comparison; HTTP
+    // HeaderValue need not be UTF-8. oauth2 ignores the error but UserInfo
+    // requires full parse success before interpreting a signed JWT body.
+    let value = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .map_or(&[][..], |value| value.as_bytes());
+    form::media_type_bytes(value)
+}
+
+#[cfg(feature = "full")]
+async fn oidc_crypto_work<T, F>(work: F) -> Result<T, OidcRuntimeError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = OIDC_CRYPTO_WORKERS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
+    tokio::task::spawn_blocking(move || {
+        // Cancellation of the caller must not release a still-running job's
+        // permit and allow more work into the blocking pool.
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)
+}
+
+#[cfg(feature = "full")]
+async fn oidc_oauth_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    // oauth2 reads io.LimitReader(body, 1<<20), not an oversize rejection.
+    // It closes after that prefix, so bytes/errors beyond it are unobserved.
+    let mut body = Vec::new();
+    while body.len() < OIDC_PROVIDER_BODY_LIMIT {
+        let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? else {
+            break;
+        };
+        let remaining = OIDC_PROVIDER_BODY_LIMIT - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "full")]
+async fn oidc_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > OIDC_PROVIDER_BODY_LIMIT as u64)
+    {
+        return Err("OIDC provider response exceeds 1 MiB".into());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| oidc_transport_causes(&err))?
+    {
+        if chunk.len() > OIDC_PROVIDER_BODY_LIMIT.saturating_sub(body.len()) {
+            return Err("OIDC provider response exceeds 1 MiB".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug)]
 struct OidcJwks {
-    #[serde(default)]
     keys: Vec<OidcJwk>,
 }
 
 #[cfg(feature = "full")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct OidcJwk {
     #[serde(default)]
     kid: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     kty: String,
     #[serde(default)]
     n: Option<String>,
     #[serde(default)]
     e: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_go_string")]
+    crv: String,
+    #[serde(default, deserialize_with = "deserialize_go_string")]
+    x: String,
+    #[serde(default, deserialize_with = "deserialize_go_string")]
+    y: String,
+    #[serde(skip)]
+    private_key: bool,
+}
+
+#[cfg(feature = "full")]
+#[derive(Default)]
+struct OidcJwksCache {
+    keys: RwLock<Arc<Vec<OidcJwk>>>,
+    generation: AtomicU64,
+    refresh: tokio::sync::Mutex<()>,
+}
+
+#[cfg(feature = "full")]
+struct OidcJwsHeader {
+    alg: String,
+    kid: String,
+}
+
+#[cfg(feature = "full")]
+struct OidcSignedPayload {
+    header: OidcJwsHeader,
+    input: Vec<u8>,
+    signature: String,
+    payload: Vec<u8>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Default, Deserialize)]
+struct OidcJsonSignature {
+    protected: Option<String>,
+    header: Option<serde_json::Map<String, serde_json::Value>>,
+    signature: Option<String>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Deserialize)]
+struct OidcJsonJws {
+    payload: Option<String>,
+    signatures: Option<Vec<OidcJsonSignature>>,
+    #[serde(flatten)]
+    flattened: OidcJsonSignature,
+}
+
+#[cfg(feature = "full")]
+fn decode_oidc_base64(value: &str) -> Option<Vec<u8>> {
+    let engine = base64::engine::general_purpose::GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        base64::engine::general_purpose::NO_PAD.with_decode_allow_trailing_bits(true),
+    );
+    // Go's RawURLEncoding accepts CR/LF and non-zero unused trailing bits.
+    let value = value.replace(['\r', '\n'], "");
+    engine.decode(value).ok()
+}
+
+#[cfg(feature = "full")]
+fn oidc_header_string(
+    header: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> Option<String> {
+    match header.get(name) {
+        None | Some(serde_json::Value::Null) => Some(String::new()),
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "full")]
+fn parse_oidc_signed_payload(raw: &str) -> Option<OidcSignedPayload> {
+    // ParseSigned strips Unicode whitespace before selecting a serialization.
+    let raw: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let (protected, unprotected, payload, signature, general) = if raw.starts_with('{') {
+        let jws = json::signed_json(raw.as_bytes())?;
+        let payload = jws.payload?;
+        let mut signatures = jws.signatures.unwrap_or_default();
+        if signatures.len() > 1 {
+            return None;
+        }
+        let general = !signatures.is_empty();
+        let signature = signatures.pop().unwrap_or(jws.flattened);
+        (
+            signature.protected,
+            signature.header.unwrap_or_default(),
+            payload,
+            signature.signature?,
+            general,
+        )
+    } else {
+        let mut parts = raw.split('.');
+        let protected = parts.next()?.to_string();
+        let payload = parts.next()?.to_string();
+        let signature = parts.next()?.to_string();
+        if parts.next().is_some() {
+            return None;
+        }
+        (
+            Some(protected),
+            serde_json::Map::new(),
+            payload,
+            signature,
+            false,
+        )
+    };
+    let protected_bytes = match protected.as_deref() {
+        Some(encoded) => Some(decode_oidc_base64(encoded)?),
+        None => None,
+    };
+    let protected_header = match &protected_bytes {
+        Some(bytes) => json::header(bytes)?,
+        None => serde_json::Map::new(),
+    };
+    if unprotected.contains_key("crit")
+        || !oidc_header_string(&unprotected, "nonce")
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return None;
+    }
+    let critical: Vec<String> = match protected_header.get("crit") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(value) => serde_json::from_value::<Vec<Option<String>>>(value.clone())
+            .ok()?
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect(),
+    };
+    if critical.iter().any(|name| name != "b64") {
+        return None;
+    }
+    let mut merged = protected_header.clone();
+    for (name, value) in &unprotected {
+        let present = merged
+            .get(name)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""));
+        if !present {
+            merged.insert(name.clone(), value.clone());
+        }
+    }
+    // Pinned go-jose's general form builds the exposed header from protected
+    // fields before attaching the unprotected map. Its kid lookup follows that
+    // exposed header; flattened form uses the merged header instead.
+    let selected = if general { &protected_header } else { &merged };
+    validate_oidc_jws_header(&protected_header, false)?;
+    if !general {
+        validate_oidc_jws_header(&unprotected, false)?;
+    }
+    validate_oidc_jws_header(selected, true)?;
+    let header = OidcJwsHeader {
+        alg: oidc_header_string(selected, "alg")?,
+        kid: oidc_header_string(selected, "kid")?,
+    };
+    let payload = decode_oidc_base64(&payload)?;
+    let signature = decode_oidc_base64(&signature)?;
+    if signature.is_empty() {
+        return None;
+    }
+    // Go reconstructs auth data from decoded buffers, not the original base64
+    // spelling. Its b64 flag controls auth data; serialized payload stays base64.
+    let mut input = protected_bytes
+        .as_ref()
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .unwrap_or_default()
+        .into_bytes();
+    input.push(b'.');
+    if protected_header
+        .get("b64")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+    {
+        input.extend_from_slice(URL_SAFE_NO_PAD.encode(&payload).as_bytes());
+    } else {
+        input.extend_from_slice(&payload);
+    }
+    Some(OidcSignedPayload {
+        header,
+        input,
+        signature: URL_SAFE_NO_PAD.encode(signature),
+        payload,
+    })
+}
+
+#[cfg(feature = "full")]
+fn oidc_certificate_chain(value: Option<&serde_json::Value>) -> Option<Vec<Vec<u8>>> {
+    let encoded = match value {
+        None | Some(serde_json::Value::Null) => return Some(Vec::new()),
+        Some(value) => serde_json::from_value::<Vec<Option<String>>>(value.clone()).ok()?,
+    };
+    let mut certificates = Vec::with_capacity(encoded.len());
+    for certificate in encoded {
+        let certificate = certificate.unwrap_or_default().replace(['\r', '\n'], "");
+        let engine = base64::engine::general_purpose::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::general_purpose::PAD.with_decode_allow_trailing_bits(true),
+        );
+        let certificate = engine.decode(certificate).ok()?;
+        let (remaining, _) = x509_parser::parse_x509_certificate(&certificate).ok()?;
+        if !remaining.is_empty() {
+            return None;
+        }
+        certificates.push(certificate);
+    }
+    Some(certificates)
+}
+
+#[cfg(feature = "full")]
+fn validate_oidc_jws_header(
+    header: &serde_json::Map<String, serde_json::Value>,
+    require_public_jwk: bool,
+) -> Option<()> {
+    for name in ["alg", "kid", "nonce"] {
+        oidc_header_string(header, name)?;
+    }
+    oidc_certificate_chain(header.get("x5c"))?;
+    if let Some(jwk) = header.get("jwk").filter(|jwk| !jwk.is_null()) {
+        let key = self::jwk::parse(jwk).ok()?;
+        if require_public_jwk
+            && (key.private_key
+                || key.kty == "oct"
+                || (key.kty == "RSA"
+                    && key
+                        .e
+                        .as_deref()
+                        .and_then(decode_oidc_base64)
+                        .is_none_or(|value| oidc_rsa_exponent(&value) == 0)))
+        {
+            return None;
+        }
+    }
+    Some(())
+}
+
+#[cfg(feature = "full")]
+fn oidc_integer_bytes(bytes: &[u8]) -> &[u8] {
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len());
+    &bytes[first..]
+}
+
+#[cfg(feature = "full")]
+fn oidc_rsa_exponent(bytes: &[u8]) -> i64 {
+    let bytes = &bytes[bytes.len().saturating_sub(8)..];
+    let mut word = [0; 8];
+    word[8 - bytes.len()..].copy_from_slice(bytes);
+    i64::from_be_bytes(word)
 }
 
 #[cfg(feature = "full")]
@@ -1473,16 +2486,95 @@ struct OidcJwk {
 struct OidcIdTokenClaims {
     #[serde(flatten)]
     claims: OidcClaims,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_go_string")]
     nonce: String,
-    exp: i64,
+    #[serde(default)]
+    exp: serde_json::Value,
+    #[serde(default)]
+    aud: serde_json::Value,
+    nbf: Option<serde_json::Value>,
+    // Missing iat is Go's zero time; explicit null invokes jsonTime's decoder
+    // and fails. Option<Value> alone would incorrectly collapse both cases.
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    iat: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "at_hash",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _at_hash: String,
+    #[serde(
+        default,
+        rename = "_claim_names",
+        deserialize_with = "deserialize_claim_names"
+    )]
+    claim_names: BTreeMap<String, String>,
+    #[serde(
+        default,
+        rename = "_claim_sources",
+        deserialize_with = "deserialize_claim_sources"
+    )]
+    claim_sources: BTreeMap<String, Option<OidcClaimSource>>,
+}
+
+#[cfg(feature = "full")]
+#[derive(Debug, Default, Deserialize)]
+struct OidcClaimSource {
+    #[serde(
+        default,
+        rename = "endpoint",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _endpoint: String,
+    #[serde(
+        default,
+        rename = "access_token",
+        deserialize_with = "deserialize_go_string"
+    )]
+    _access_token: String,
+}
+
+#[cfg(feature = "full")]
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+#[cfg(feature = "full")]
+fn deserialize_claim_names<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<BTreeMap<String, Option<String>>>::deserialize(deserializer)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, value)| (name, value.unwrap_or_default()))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "full")]
+fn deserialize_claim_sources<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Option<OidcClaimSource>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<BTreeMap<String, Option<OidcClaimSource>>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
 }
 
 #[cfg(feature = "full")]
 #[derive(Debug)]
 struct VerifiedOidcIdToken {
-    #[allow(dead_code)]
-    claims: OidcClaims,
+    payload: Vec<u8>,
     nonce: String,
     #[allow(dead_code)]
     expiry: DateTime<Utc>,
@@ -1490,130 +2582,394 @@ struct VerifiedOidcIdToken {
 
 #[cfg(feature = "full")]
 async fn verify_id_token(
-    cfg: &OidcAuthConfig,
+    runtime: &OidcAuthRuntime,
     raw_id_token: &str,
 ) -> Result<VerifiedOidcIdToken, OidcRuntimeError> {
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+    let payload = verify_oidc_signed_payload(
+        runtime,
+        raw_id_token,
+        Some(runtime.signing_algorithms.as_slice()),
+    )
+    .await?;
+    verify_id_token_claims(runtime, &payload)
+}
 
-    let header =
-        decode_header(raw_id_token).map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
-    let jwks = reqwest::Client::new()
-        .get(&cfg.jwks_uri)
-        .send()
-        .await
-        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
-    if !jwks.status().is_success() {
-        return Err(OidcRuntimeError::IdTokenVerificationFailed);
-    }
-    let jwks = jwks
-        .json::<OidcJwks>()
-        .await
-        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
-
-    let key = jwks
-        .keys
-        .iter()
-        .find(|key| {
-            key.kty == "RSA"
-                && match (&header.kid, &key.kid) {
-                    (Some(expected), Some(actual)) => expected == actual,
-                    (Some(_), None) => false,
-                    (None, _) => true,
-                }
-        })
-        .and_then(|key| Some((key.n.as_ref()?, key.e.as_ref()?)))
-        .and_then(|(n, e)| DecodingKey::from_rsa_components(n, e).ok())
-        .ok_or(OidcRuntimeError::IdTokenVerificationFailed)?;
-
-    if !matches!(
-        header.alg,
-        Algorithm::RS256
-            | Algorithm::RS384
-            | Algorithm::RS512
-            | Algorithm::PS256
-            | Algorithm::PS384
-            | Algorithm::PS512
-    ) {
-        return Err(OidcRuntimeError::IdTokenVerificationFailed);
+#[cfg(feature = "full")]
+async fn verify_oidc_signed_payload(
+    runtime: &OidcAuthRuntime,
+    raw_jws: &str,
+    algorithms: Option<&[String]>,
+) -> Result<Vec<u8>, OidcRuntimeError> {
+    let invalid = || OidcRuntimeError::IdTokenVerificationFailed;
+    let raw_jws = raw_jws.to_owned();
+    let mut signed = oidc_crypto_work(move || parse_oidc_signed_payload(&raw_jws))
+        .await?
+        .ok_or_else(invalid)?;
+    let payload = std::mem::take(&mut signed.payload);
+    let signed = Arc::new(signed);
+    let header = &signed.header;
+    let algorithm_allowed = algorithms.map_or_else(
+        || OIDC_SIGNING_ALGORITHMS.contains(&header.alg.as_str()),
+        |algorithms| algorithms.contains(&header.alg),
+    );
+    if !algorithm_allowed {
+        return Err(invalid());
     }
 
-    let mut validation = Validation::new(header.alg);
-    validation.set_audience(std::slice::from_ref(&cfg.client_id));
-    validation.set_issuer(std::slice::from_ref(&cfg.issuer));
+    // Match go-oidc: try every matching key, retain the successful key set,
+    // and refresh on a miss. Serialize/coalesce refreshes so concurrent
+    // logins do not each fetch the provider's signing keys.
+    let generation = runtime.jwks.generation.load(Ordering::Acquire);
+    let keys = runtime.jwks.keys.read().clone();
+    let cached = oidc_verify_with_keys(keys, signed.clone()).await?;
+    if !cached {
+        let _refresh = runtime.jwks.refresh.lock().await;
+        let changed = generation != runtime.jwks.generation.load(Ordering::Acquire);
+        let keys = runtime.jwks.keys.read().clone();
+        let matched = oidc_verify_with_keys(keys, signed.clone()).await?;
+        if !matched {
+            if changed {
+                return Err(invalid());
+            }
+            let fetched = fetch_oidc_jwks(runtime).await;
+            // Failed refreshes must also wake queued callers with the same
+            // result instead of serially retrying a stalled provider.
+            runtime.jwks.generation.fetch_add(1, Ordering::Release);
+            let jwks = fetched?;
+            let keys = Arc::new(jwks.keys);
+            let matched = oidc_verify_with_keys(keys.clone(), signed.clone()).await?;
+            *runtime.jwks.keys.write() = keys;
+            if !matched {
+                return Err(invalid());
+            }
+        }
+    }
 
-    let token = decode::<OidcIdTokenClaims>(raw_id_token, &key, &validation)
-        .map_err(|_| OidcRuntimeError::IdTokenVerificationFailed)?;
-    if token.claims.nonce.is_empty() {
+    // Return claim bytes only after signature and algorithm verification.
+    Ok(payload)
+}
+
+#[cfg(feature = "full")]
+async fn oidc_verify_with_keys(
+    keys: Arc<Vec<OidcJwk>>,
+    signed: Arc<OidcSignedPayload>,
+) -> Result<bool, OidcRuntimeError> {
+    oidc_crypto_work(move || {
+        oidc_signature_matches(&keys, &signed.header, &signed.input, &signed.signature)
+    })
+    .await
+}
+
+#[cfg(feature = "full")]
+fn verify_id_token_claims(
+    runtime: &OidcAuthRuntime,
+    payload: &[u8],
+) -> Result<VerifiedOidcIdToken, OidcRuntimeError> {
+    // go-oidc has no expiry grace period, but permits five minutes for nbf.
+    let invalid = || OidcRuntimeError::IdTokenVerificationFailed;
+    let token = json::id_token_claims(payload).ok_or_else(invalid)?;
+    let cfg = &runtime.config;
+    let valid_issuer = token.claims.iss == cfg.issuer
+        || (cfg.issuer == "https://accounts.google.com"
+            && token.claims.iss == "accounts.google.com");
+    let valid_audience = token.aud.as_str() == Some(cfg.client_id.as_str())
+        || token.aud.as_array().is_some_and(|audiences| {
+            audiences.iter().all(|aud| aud.is_string() || aud.is_null())
+                && audiences
+                    .iter()
+                    .any(|aud| aud.as_str() == Some(cfg.client_id.as_str()))
+        });
+    let expiry = oidc_numeric_date(&token.exp).ok_or_else(invalid)?;
+    let now = Utc::now();
+    if !valid_issuer || cfg.client_id.is_empty() || !valid_audience || expiry < now {
+        return Err(invalid());
+    }
+    if let Some(nbf) = &token.nbf
+        && oidc_numeric_date(nbf).ok_or_else(invalid)? > now + Duration::minutes(5)
+    {
+        return Err(invalid());
+    }
+    if token
+        .iat
+        .as_ref()
+        .is_some_and(|iat| !oidc_valid_json_time(iat))
+        || token
+            .claim_names
+            .values()
+            .any(|source| source.is_empty() || !token.claim_sources.contains_key(source))
+    {
+        return Err(invalid());
+    }
+    if token.nonce.is_empty() {
         return Err(OidcRuntimeError::NonceMissingInToken);
     }
-
-    let Some(expiry) = DateTime::<Utc>::from_timestamp(token.claims.exp, 0) else {
-        return Err(OidcRuntimeError::IdTokenVerificationFailed);
-    };
-
     Ok(VerifiedOidcIdToken {
-        claims: token.claims.claims,
-        nonce: token.claims.nonce,
+        payload: payload.to_vec(),
+        nonce: token.nonce,
         expiry,
     })
 }
 
+#[cfg(feature = "full")]
+async fn fetch_oidc_jwks(runtime: &OidcAuthRuntime) -> Result<OidcJwks, OidcRuntimeError> {
+    let invalid = || OidcRuntimeError::IdTokenVerificationFailed;
+    let response = runtime
+        .provider_client
+        .get(&runtime.config.jwks_uri)
+        .timeout(OIDC_PROVIDER_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| invalid())?;
+    if response.status() != StatusCode::OK {
+        return Err(invalid());
+    }
+    let body = oidc_response_body(response).await.map_err(|_| invalid())?;
+    oidc_crypto_work(move || jwk::decode(&body))
+        .await?
+        .map_err(|_| invalid())
+}
+
+#[cfg(feature = "full")]
+fn oidc_json_number(text: &str) -> Option<serde_json::Number> {
+    let bytes = text.as_bytes();
+    // Number's serde visitor recognizes an internal object transport in
+    // arbitrary-precision mode. json.Number accepts only numeric grammar.
+    if !matches!(bytes.first(), Some(b'-' | b'0'..=b'9'))
+        || headscale_api_acl::go_json::trim(bytes) != bytes
+    {
+        return None;
+    }
+    headscale_api_acl::go_json::check_valid(bytes).ok()?;
+    text.parse().ok()
+}
+
+#[cfg(feature = "full")]
+fn oidc_valid_json_time(value: &serde_json::Value) -> bool {
+    // IssuedAt is parsed but never date-compared by go-oidc. jsonTime accepts
+    // Int64 or finite Float64 even when Chrono cannot represent the timestamp.
+    let valid = |number: &serde_json::Number| {
+        number.as_i64().is_some() || number.as_f64().is_some_and(f64::is_finite)
+    };
+    match value {
+        serde_json::Value::Number(number) => valid(number),
+        serde_json::Value::String(text) => oidc_json_number(text).as_ref().is_some_and(valid),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "full")]
+fn oidc_numeric_date(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    // Go's float64(math.MinInt64) and float64(math.MaxInt64): -2^63 is exact
+    // and MaxInt64 rounds up to 2^63, so the upper bound is exclusive.
+    const I64_MIN_AS_F64: f64 = -9_223_372_036_854_775_808.0;
+    const I64_MAX_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+    // jsonTime attempts Int64 before Float64, for both JSON and quoted numbers.
+    let quoted;
+    let number = match value {
+        serde_json::Value::Number(number) => number,
+        serde_json::Value::String(text) => {
+            quoted = oidc_json_number(text)?;
+            &quoted
+        }
+        _ => return None,
+    };
+    let seconds = if let Some(integer) = number.as_i64() {
+        integer
+    } else {
+        let number = number.as_f64()?;
+        if !number.is_finite() || !(I64_MIN_AS_F64..I64_MAX_AS_F64).contains(&number) {
+            return None;
+        }
+        number.trunc() as i64
+    };
+    DateTime::from_timestamp(seconds, 0)
+}
+
+#[cfg(feature = "full")]
+fn oidc_signature_matches(
+    keys: &[OidcJwk],
+    header: &OidcJwsHeader,
+    input: &[u8],
+    signature: &str,
+) -> bool {
+    keys.iter()
+        .filter(|key| !key.private_key)
+        .filter(|key| header.kid.is_empty() || key.kid.as_deref() == Some(header.kid.as_str()))
+        .any(|key| oidc_verify_signature(key, &header.alg, input, signature))
+}
+
+#[cfg(feature = "full")]
+fn oidc_verify_signature(key: &OidcJwk, alg: &str, input: &[u8], signature: &str) -> bool {
+    use jsonwebtoken::{Algorithm, DecodingKey};
+
+    if matches!(
+        alg,
+        "RS256" | "RS384" | "RS512" | "PS256" | "PS384" | "PS512"
+    ) {
+        if key.kty != "RSA" {
+            return false;
+        }
+        let Some((n, e)) = key
+            .n
+            .as_deref()
+            .and_then(decode_oidc_base64)
+            .zip(key.e.as_deref().and_then(decode_oidc_base64))
+        else {
+            return false;
+        };
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
+            return false;
+        };
+        return self::rsa::verify(alg, &n, &e, input, &signature);
+    }
+    if alg == "ES512" {
+        if key.kty != "EC" || key.crv != "P-521" {
+            return false;
+        }
+        let Some(point) = oidc_ec_public_key(key, 66) else {
+            return false;
+        };
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
+            return false;
+        };
+        return aws_lc_rs::signature::UnparsedPublicKey::new(
+            &aws_lc_rs::signature::ECDSA_P521_SHA512_FIXED,
+            point,
+        )
+        .verify(input, &signature)
+        .is_ok();
+    }
+    let Ok(algorithm) = alg.parse::<Algorithm>() else {
+        return false;
+    };
+    let key = match algorithm {
+        Algorithm::ES256 if key.kty == "EC" && key.crv == "P-256" => {
+            oidc_ec_public_key(key, 32).map(|point| DecodingKey::from_ec_der(&point))
+        }
+        Algorithm::ES384 if key.kty == "EC" && key.crv == "P-384" => {
+            oidc_ec_public_key(key, 48).map(|point| DecodingKey::from_ec_der(&point))
+        }
+        Algorithm::EdDSA if key.kty == "OKP" && key.crv == "Ed25519" => decode_oidc_base64(&key.x)
+            .and_then(|public| {
+                DecodingKey::from_ed_components(&URL_SAFE_NO_PAD.encode(public)).ok()
+            }),
+        _ => None,
+    };
+    key.is_some_and(|key| {
+        jsonwebtoken::crypto::verify(signature, input, &key, algorithm).unwrap_or(false)
+    })
+}
+
+#[cfg(feature = "full")]
+fn oidc_ec_public_key(key: &OidcJwk, size: usize) -> Option<Vec<u8>> {
+    let x = decode_oidc_base64(&key.x)?;
+    let y = decode_oidc_base64(&key.y)?;
+    if x.len() != size || y.len() != size {
+        return None;
+    }
+    let mut point = vec![0; 1 + 2 * size];
+    point[0] = 4;
+    point[1..=size].copy_from_slice(&x);
+    point[1 + size..].copy_from_slice(&y);
+    Some(point)
+}
+
 pub fn clean_identifier(identifier: &str) -> String {
-    let identifier = identifier.trim();
+    let identifier = headscale_api_acl::go_unicode::trim_space(identifier);
     if identifier.is_empty() {
         return String::new();
     }
-
-    if let Some((scheme, rest)) = identifier.split_once("://")
-        && !scheme.is_empty()
-        && scheme
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    if let Ok(mut url) = crate::go_url::Url::parse(identifier)
+        && !url.scheme().is_empty()
     {
-        let (authority_and_path, suffix) = split_url_suffix(rest);
-        let (authority, path) = authority_and_path
-            .split_once('/')
-            .map_or((authority_and_path, ""), |(authority, path)| {
-                (authority, path)
-            });
-        let path = clean_slash_path(path);
-        if path.is_empty() {
-            return format!("{}://{}{}", scheme.to_ascii_lowercase(), authority, suffix);
+        let mut path = Vec::new();
+        for part in url
+            .path()
+            .split(|byte| *byte == b'/')
+            .map(trim_identifier_segment)
+            .filter(|part| !part.is_empty())
+        {
+            path.push(b'/');
+            path.extend_from_slice(part);
         }
-        return format!(
-            "{}://{}/{}{}",
-            scheme.to_ascii_lowercase(),
-            authority,
-            path,
-            suffix
-        );
+        // Go changes Path without clearing RawPath: String uses the old raw
+        // spelling only if it still decodes to exactly the cleaned Path.
+        url.set_decoded_path(path);
+        return String::from_utf8(url.as_bytes()).expect("serialized identifier is UTF-8");
     }
-
     clean_slash_path(identifier)
 }
 
+fn trim_identifier_segment(mut bytes: &[u8]) -> &[u8] {
+    // Go TrimSpace preserves invalid UTF-8 bytes in URL.Path; percent decoding
+    // must not create replacement runes or a different account identity.
+    const SPACE: &[&[u8]] = &[
+        b"\t",
+        b"\n",
+        b"\x0b",
+        b"\x0c",
+        b"\r",
+        b" ",
+        "\u{85}".as_bytes(),
+        "\u{a0}".as_bytes(),
+        "\u{1680}".as_bytes(),
+        "\u{2000}".as_bytes(),
+        "\u{2001}".as_bytes(),
+        "\u{2002}".as_bytes(),
+        "\u{2003}".as_bytes(),
+        "\u{2004}".as_bytes(),
+        "\u{2005}".as_bytes(),
+        "\u{2006}".as_bytes(),
+        "\u{2007}".as_bytes(),
+        "\u{2008}".as_bytes(),
+        "\u{2009}".as_bytes(),
+        "\u{200a}".as_bytes(),
+        "\u{2028}".as_bytes(),
+        "\u{2029}".as_bytes(),
+        "\u{202f}".as_bytes(),
+        "\u{205f}".as_bytes(),
+        "\u{3000}".as_bytes(),
+    ];
+    while let Some(prefix) = SPACE.iter().find(|space| bytes.starts_with(space)) {
+        bytes = &bytes[prefix.len()..];
+    }
+    while let Some(suffix) = SPACE.iter().find(|space| bytes.ends_with(space)) {
+        bytes = &bytes[..bytes.len() - suffix.len()];
+    }
+    bytes
+}
+
 fn normalize_issuer(issuer: &str) -> Result<String, OidcDiscoveryError> {
-    let issuer = issuer.trim().trim_end_matches('/');
     if issuer.is_empty() {
         return Err(OidcDiscoveryError::EmptyIssuer);
     }
-    Ok(issuer.to_string())
+    Ok(issuer.strip_suffix('/').unwrap_or(issuer).to_string())
 }
 
-fn require_oidc_field<'a>(
-    value: &'a str,
-    field: &'static str,
-) -> Result<&'a str, OidcDiscoveryError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(OidcDiscoveryError::MissingField { field });
-    }
-    Ok(value)
+fn deserialize_go_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_go_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<Option<String>>>::deserialize(deserializer)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect())
 }
 
 #[cfg(feature = "full")]
 fn oidc_redirect_url(server_url: &str) -> String {
-    format!("{}/oidc/callback", server_url.trim_end_matches('/'))
+    format!(
+        "{}/oidc/callback",
+        server_url.strip_suffix('/').unwrap_or(server_url)
+    )
 }
 
 #[cfg(feature = "full")]
@@ -1634,33 +2990,35 @@ fn build_auth_url(
     code_challenge: Option<&str>,
     pkce_method: Option<OidcPkceMethod>,
 ) -> String {
-    let mut params = vec![
+    let mut params = BTreeMap::from([
         ("client_id".to_string(), cfg.client_id.clone()),
-        ("redirect_uri".to_string(), cfg.redirect_url.clone()),
         ("response_type".to_string(), "code".to_string()),
-        ("scope".to_string(), scope_value(&cfg.scopes)),
-        ("state".to_string(), state.to_string()),
-    ];
+    ]);
+    if !cfg.redirect_url.is_empty() {
+        params.insert("redirect_uri".to_string(), cfg.redirect_url.clone());
+    }
+    if !cfg.scopes.is_empty() {
+        params.insert("scope".to_string(), scope_value(&cfg.scopes));
+    }
+    if !state.is_empty() {
+        params.insert("state".to_string(), state.to_string());
+    }
 
     if let (Some(challenge), Some(method)) = (code_challenge, pkce_method) {
-        params.push(("access_type".to_string(), "offline".to_string()));
-        params.push((
+        params.insert("access_type".to_string(), "offline".to_string());
+        params.insert(
             "code_challenge_method".to_string(),
             method.as_str().to_string(),
-        ));
-        params.push(("code_challenge".to_string(), challenge.to_string()));
+        );
+        params.insert("code_challenge".to_string(), challenge.to_string());
     }
 
     for (key, value) in &cfg.extra_params {
-        params.push((key.clone(), value.clone()));
+        params.insert(key.clone(), value.clone());
     }
-    params.push(("nonce".to_string(), nonce.to_string()));
+    params.insert("nonce".to_string(), nonce.to_string());
 
-    let query = params
-        .into_iter()
-        .map(|(key, value)| format!("{}={}", form_encode(&key), form_encode(&value)))
-        .collect::<Vec<_>>()
-        .join("&");
+    let query = encode_form_values(&params);
 
     if cfg.authorization_endpoint.contains('?') {
         format!("{}&{}", cfg.authorization_endpoint, query)
@@ -1673,38 +3031,124 @@ fn scope_value(scopes: &[String]) -> String {
     scopes.join(" ")
 }
 
-fn csrf_cookie(base_name: &str, value: &str) -> String {
+fn csrf_cookie(base_name: &str, value: &str, secure: bool, path: &str) -> String {
+    let secure = if secure { "; Secure" } else { "" };
     format!(
-        "{}={}; Path=/oidc/callback; Max-Age={OIDC_COOKIE_MAX_AGE_SECS}; HttpOnly",
+        "{}={}; Path={path}; Max-Age={OIDC_COOKIE_MAX_AGE_SECS}; HttpOnly{secure}; SameSite=Lax",
         cookie_name(base_name, value),
         value
     )
 }
 
+fn callback_cookie_path(redirect_url: &str) -> String {
+    sanitize_cookie_path(&decoded_url_path(redirect_url))
+}
+
+fn decoded_url_path(url: &str) -> String {
+    // Go url.URL.Path is percent-decoded. Keep display/form URL paths
+    // separate from the byte sanitization performed by Cookie.String.
+    let authority = url.find("://").map_or(0, |index| index + 3);
+    let start = url[authority..].find('/').map(|index| authority + index);
+    let Some(start) = start else {
+        return "/oidc/callback".to_owned();
+    };
+    let path = url[start..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .as_bytes();
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut index = 0;
+    while index < path.len() {
+        let value = if path[index] == b'%' && index + 2 < path.len() {
+            let digit = |byte: u8| (byte as char).to_digit(16).map(|value| value as u8);
+            if let (Some(high), Some(low)) = (digit(path[index + 1]), digit(path[index + 2])) {
+                index += 2;
+                high * 16 + low
+            } else {
+                path[index]
+            }
+        } else {
+            path[index]
+        };
+        decoded.push(value);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn sanitize_cookie_path(path: &str) -> String {
+    // Go drops non-ASCII/control/semicolon bytes from a cookie Path.
+    let bytes: Vec<u8> = path
+        .bytes()
+        .filter(|&byte| (0x20..0x7f).contains(&byte) && byte != b';')
+        .collect();
+    String::from_utf8(bytes).expect("cookie path is ASCII")
+}
+
+#[cfg(feature = "full")]
+fn clear_callback_cookies(headers: &mut HeaderMap, redirect_url: &str, state: &str, nonce: &str) {
+    let path = callback_cookie_path(redirect_url);
+    for (base, value) in [("state", state), ("nonce", nonce)] {
+        append_cookie(
+            headers,
+            &format!("{}=; Path={path}; Max-Age=0", cookie_name(base, value)),
+        );
+    }
+}
+
 fn append_cookie(headers: &mut HeaderMap, cookie: &str) {
+    if !cookie
+        .split_once('=')
+        .is_some_and(|(name, _)| valid_cookie_name(name))
+    {
+        return;
+    }
     if let Ok(value) = HeaderValue::from_str(cookie) {
         headers.append(header::SET_COOKIE, value);
     }
 }
 
 fn cookie_name(base_name: &str, value: &str) -> String {
-    format!(
-        "{}_{}",
-        base_name,
-        value.chars().take(6).collect::<String>()
-    )
+    // Go prefixes bytes, and a non-ASCII/broken UTF-8 prefix cannot be a
+    // valid cookie name. The name validator below rejects either spelling.
+    let prefix = &value.as_bytes()[..value.len().min(OIDC_COOKIE_NAME_PREFIX_LEN)];
+    format!("{base_name}_{}", String::from_utf8_lossy(prefix))
 }
 
-fn validate_state_cookie(headers: &HeaderMap, state: &str) -> Result<(), OidcRuntimeError> {
+fn valid_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn validate_state_cookie_bytes(headers: &HeaderMap, state: &[u8]) -> Result<(), OidcRuntimeError> {
     if state.len() < OIDC_COOKIE_NAME_PREFIX_LEN {
         return Err(OidcRuntimeError::InvalidStateParameter);
     }
-
-    let expected_name = cookie_name("state", state);
-    let Some(actual) = cookie_value(headers, &expected_name) else {
-        return Err(OidcRuntimeError::StateCookieMissing);
-    };
-    if actual == state {
+    let prefix = std::str::from_utf8(&state[..OIDC_COOKIE_NAME_PREFIX_LEN])
+        .map_err(|_| OidcRuntimeError::StateCookieMissing)?;
+    let name = format!("state_{prefix}");
+    let actual = cookie_value(headers, &name).ok_or(OidcRuntimeError::StateCookieMissing)?;
+    if actual.as_bytes() == state {
         Ok(())
     } else {
         Err(OidcRuntimeError::StateCookieMismatch)
@@ -1729,47 +3173,84 @@ fn validate_nonce_cookie(headers: &HeaderMap, nonce: &str) -> Result<(), OidcRun
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|part| part.trim().split_once('='))
-        .find_map(|(key, value)| (key == name).then(|| value.to_string()))
-}
-
-fn is_form_urlencoded_content_type(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-}
-
-fn is_strict_urlencoded_form(raw: &[u8]) -> bool {
-    if raw.contains(&b';') {
-        return false;
+    if !valid_cookie_name(name) {
+        return None;
     }
-
-    let mut index = 0;
-    while index < raw.len() {
-        if raw[index] == b'%' {
-            if index + 2 >= raw.len()
-                || !raw[index + 1].is_ascii_hexdigit()
-                || !raw[index + 2].is_ascii_hexdigit()
-            {
-                return false;
+    let lines = headers.get_all(header::COOKIE);
+    // Go counts candidate parts before filtering names or malformed values.
+    let count = lines.iter().try_fold(0usize, |count, line| {
+        count.checked_add(line.as_bytes().split(|&byte| byte == b';').count())
+    })?;
+    if !cookie_count_within_limit(count) {
+        return None;
+    }
+    fn trim(mut value: &[u8]) -> &[u8] {
+        while matches!(value.first(), Some(b' ' | b'\t')) {
+            value = &value[1..];
+        }
+        while matches!(value.last(), Some(b' ' | b'\t')) {
+            value = &value[..value.len() - 1];
+        }
+        value
+    }
+    for line in &lines {
+        // Invalid parts do not erase a valid cookie later in the same header.
+        for part in line.as_bytes().split(|&byte| byte == b';') {
+            let part = trim(part);
+            let (key, value) = match part.iter().position(|&byte| byte == b'=') {
+                Some(index) => (&part[..index], &part[index + 1..]),
+                None => (part, &b""[..]),
+            };
+            if trim(key) != name.as_bytes() {
+                continue;
             }
-            index += 3;
-        } else {
-            index += 1;
+            let value =
+                if value.len() > 1 && value.first() == Some(&b'"') && value.last() == Some(&b'"') {
+                    &value[1..value.len() - 1]
+                } else {
+                    value
+                };
+            if value
+                .iter()
+                .all(|&byte| (0x20..0x7f).contains(&byte) && !matches!(byte, b'"' | b';' | b'\\'))
+            {
+                return Some(String::from_utf8(value.to_vec()).expect("cookie value is ASCII"));
+            }
         }
     }
+    None
+}
 
-    true
+fn cookie_count_within_limit(count: usize) -> bool {
+    let default = count <= 3000;
+    let Some(settings) = std::env::var_os("GODEBUG") else {
+        return default;
+    };
+    // internal/godebug scans backwards: the last assigned value wins, even
+    // when that value is empty/invalid. Names and arguments are untrimmed.
+    let Some(value) = settings
+        .as_encoded_bytes()
+        .split(|&byte| byte == b',')
+        .rev()
+        .find_map(|entry| {
+            let equals = entry.iter().position(|&byte| byte == b'=')?;
+            (&entry[..equals] == b"httpcookiemaxnum").then_some(&entry[equals + 1..])
+        })
+    else {
+        return default;
+    };
+    // Go's optional #pattern is a Go-stack bisect facility. No equivalent
+    // Rust call stack is available; leave patterned settings at the default.
+    if value.contains(&b'#') {
+        return default;
+    }
+    let Ok(value) = std::str::from_utf8(value) else {
+        return default;
+    };
+    let Ok(limit) = value.parse::<isize>() else {
+        return default;
+    };
+    limit == 0 || (limit > 0 && count <= limit as usize)
 }
 
 fn status_for_runtime_error(err: &OidcRuntimeError) -> StatusCode {
@@ -1812,79 +3293,95 @@ fn status_for_auth_error(err: &OidcAuthError) -> StatusCode {
     }
 }
 
-fn oidc_error_response(status: StatusCode, message: String) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        message,
+fn oidc_error_response(status: StatusCode, message: &str) -> Response {
+    // Browser pages expose the status-derived actionable message; technical
+    // details stay in the server log, as httpUserError does upstream.
+    tracing::error!(status = status.as_u16(), error = %message, "OIDC browser error");
+    error_html::response(status)
+}
+
+fn registration_link_spent_response() -> Response {
+    tracing::error!(
+        status = 410,
+        error = "registration link already used or expired",
+        "OIDC browser error"
+    );
+    error_html::response_with_message(
+        StatusCode::GONE,
+        "This link has already been used or has expired. If your device is connected you are done; otherwise start the login again.",
     )
-        .into_response()
 }
 
 #[cfg(feature = "full")]
-fn oidc_registration_confirm_response(
+fn oidc_registration_confirm_redirect(
+    redirect_url: &str,
     pending: &OidcPendingRegistrationConfirmation,
     secure_cookie: bool,
 ) -> Response {
     let auth_id = format!("{}{}", AUTH_ID_PREFIX, pending.registration_id);
-    let cookie = register_confirm_cookie(&auth_id, &pending.csrf, secure_cookie);
-    let mut response = (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        oidc_registration_confirm_html(pending),
-    )
-        .into_response();
+    let destination = register_confirm_url(redirect_url, &auth_id);
+    let cookie = register_confirm_cookie(
+        &register_confirm_path(redirect_url, &auth_id),
+        &pending.csrf,
+        secure_cookie,
+    );
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&destination).expect("validated OIDC redirect URL"),
+    );
     append_cookie(response.headers_mut(), &cookie);
     response
 }
 
 #[cfg(feature = "full")]
-fn register_confirm_cookie(auth_id: &str, csrf: &str, secure: bool) -> String {
+fn register_confirm_cookie(path: &str, csrf: &str, secure: bool) -> String {
     let secure = if secure { "; Secure" } else { "" };
+    let path = sanitize_cookie_path(path);
     format!(
-        "{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}; Path=/register/confirm/{auth_id}; Max-Age={}{}; HttpOnly; SameSite=Strict",
+        "{REGISTER_CONFIRM_CSRF_COOKIE}={csrf}; Path={path}; Max-Age={}; HttpOnly{secure}; SameSite=Lax",
         DEFAULT_OIDC_AUTH_CACHE_EXPIRY.as_secs(),
-        secure,
     )
 }
 
-fn clear_register_confirm_cookie(headers: &mut HeaderMap, auth_id: &str, secure: bool) {
+fn register_confirm_url(redirect_url: &str, auth_id: &str) -> String {
+    let base = redirect_url
+        .strip_suffix("/oidc/callback")
+        .expect("validated OIDC callback URL");
+    format!("{base}/register/confirm/{auth_id}")
+}
+
+fn register_confirm_path(redirect_url: &str, auth_id: &str) -> String {
+    let url = register_confirm_url(redirect_url, auth_id);
+    decoded_url_path(&url)
+}
+
+fn clear_register_confirm_cookie(headers: &mut HeaderMap, path: &str, secure: bool) {
     let secure = if secure { "; Secure" } else { "" };
+    let path = sanitize_cookie_path(path);
     append_cookie(
         headers,
         &format!(
-            "{REGISTER_CONFIRM_CSRF_COOKIE}=; Path=/register/confirm/{auth_id}; Max-Age=0{secure}; HttpOnly; SameSite=Strict"
+            "{REGISTER_CONFIRM_CSRF_COOKIE}=; Path={path}; Max-Age=0; HttpOnly{secure}; SameSite=Lax"
         ),
     );
 }
 
-#[cfg(feature = "full")]
-fn oidc_registration_confirm_html(pending: &OidcPendingRegistrationConfirmation) -> String {
-    let auth_id = format!("{}{}", AUTH_ID_PREFIX, pending.registration_id);
-    let user = user_display_name(&pending.user);
-    let hostname = display_or_unknown(&pending.device.hostname);
-    let os = display_or_unknown(&pending.device.os);
-    let machine_key = display_or_unknown(&pending.device.machine_key);
-    format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale - Confirm node registration</title></head><body><main><h1>Confirm node registration</h1><p>A device is asking to be added to your tailnet. Please review the details below and confirm that this device is yours.</p><dl><dt>Hostname</dt><dd>{}</dd><dt>OS</dt><dd>{}</dd><dt>Machine key</dt><dd><code>{}</code></dd><dt>Registered to</dt><dd>{}</dd></dl><form method=\"POST\" action=\"/register/confirm/{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><button type=\"submit\">Confirm registration</button></form><p>If you do not recognise this device, close this window. The registration request will expire automatically.</p></main></body></html>",
-        html_escape(&hostname),
-        html_escape(&os),
-        html_escape(&machine_key),
-        html_escape(&user),
-        html_escape(&auth_id),
+fn oidc_registration_confirm_html(
+    pending: &OidcPendingRegistrationConfirmation,
+    action_url: &str,
+) -> String {
+    browser_html::register_confirm(
+        &user_display_name(&pending.user),
+        &pending.device.hostname,
+        &pending.device.os,
+        &pending.device.machine_key,
+        action_url,
         REGISTER_CONFIRM_CSRF_COOKIE,
-        html_escape(&pending.csrf)
+        &pending.csrf,
     )
 }
 
-#[cfg(feature = "full")]
-fn display_or_unknown(value: &str) -> String {
-    if value.trim().is_empty() {
-        "unknown".to_string()
-    } else {
-        value.to_string()
-    }
-}
 fn oidc_registration_success_response(user: &OidcStoredUser, new_node: bool) -> Response {
     let (title, heading, verb) = if new_node {
         (
@@ -1918,20 +3415,17 @@ fn oidc_ssh_success_response(user: &OidcStoredUser) -> Response {
 }
 
 fn oidc_registration_success_html(title: &str, heading: &str, verb: &str, user: &str) -> String {
-    format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>{}</title></head><body><main><h1>{}</h1><p>{} as <strong>{}</strong>. You can now close this window.</p></main></body></html>",
-        html_escape(title),
-        html_escape(heading),
-        html_escape(verb),
-        html_escape(user)
-    )
+    browser_html::auth_success(title, heading, verb, user, "You can now close this window.")
 }
 
 #[cfg(feature = "full")]
 fn oidc_ssh_success_html(user: &str) -> String {
-    format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Headscale - SSH Session Authorized</title></head><body><main><h1>SSH session authorized</h1><p>Authorized as <strong>{}</strong>. You may return to your terminal.</p></main></body></html>",
-        html_escape(user)
+    browser_html::auth_success(
+        "Headscale - SSH Session Authorized",
+        "SSH session authorized",
+        "Authorized",
+        user,
+        "You may return to your terminal.",
     )
 }
 
@@ -1963,8 +3457,10 @@ fn user_display_name(user: &OidcStoredUser) -> String {
         user.email.clone()
     } else if !user.name.is_empty() {
         user.name.clone()
-    } else {
+    } else if !user.provider_identifier.is_empty() {
         user.provider_identifier.clone()
+    } else {
+        user.id.to_string()
     }
 }
 
@@ -2003,8 +3499,12 @@ fn random_urlsafe(len: usize) -> String {
 }
 
 fn form_encode(value: &str) -> String {
+    form_encode_bytes(value.as_bytes())
+}
+
+fn form_encode_bytes(value: &[u8]) -> String {
     let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
+    for &byte in value {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char);
@@ -2018,72 +3518,30 @@ fn form_encode(value: &str) -> String {
     out
 }
 
-fn split_url_suffix(rest: &str) -> (&str, &str) {
-    let query = rest.find('?');
-    let fragment = rest.find('#');
-    let idx = match (query, fragment) {
-        (Some(q), Some(f)) => q.min(f),
-        (Some(q), None) => q,
-        (None, Some(f)) => f,
-        (None, None) => return (rest, ""),
-    };
-    rest.split_at(idx)
+fn encode_form_values(values: &BTreeMap<String, String>) -> String {
+    // url.Values.Encode sorts keys and uses Go QueryEscape rather than the
+    // WHATWG form safe set. Native auth options use Set, one value per key.
+    values
+        .iter()
+        .map(|(key, value)| format!("{}={}", form_encode(key), form_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn clean_slash_path(path: &str) -> String {
     path.split('/')
-        .map(str::trim)
+        .map(headscale_api_acl::go_unicode::trim_space)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("/")
 }
 
 fn is_valid_oidc_username(username: &str) -> bool {
-    if username.len() < 2 {
-        return false;
-    }
-
-    let Some(first) = username.chars().next() else {
-        return false;
-    };
-    if !first.is_alphabetic() {
-        return false;
-    }
-
-    let mut at_count = 0;
-    for ch in username.chars() {
-        match ch {
-            ch if ch.is_alphabetic() || ch.is_numeric() => {}
-            '-' | '.' | '_' => {}
-            '@' => {
-                at_count += 1;
-                if at_count > 1 {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-
-    true
+    username::valid_username(username)
 }
 
 fn looks_like_email_address(email: &str) -> bool {
-    looks_like_simple_email_address(email)
-        || email
-            .split_once('<')
-            .and_then(|(_, rest)| rest.split_once('>'))
-            .is_some_and(|(address, trailing)| {
-                trailing.trim().is_empty() && looks_like_simple_email_address(address)
-            })
-}
-
-fn looks_like_simple_email_address(email: &str) -> bool {
-    let email = email.trim();
-    let Some((local, domain)) = email.rsplit_once('@') else {
-        return false;
-    };
-    !local.is_empty() && !domain.is_empty() && !email.chars().any(char::is_whitespace)
+    mailbox::valid_address(email)
 }
 
 fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -2097,10 +3555,13 @@ where
         String(String),
     }
 
-    match Option::<FlexibleBool>::deserialize(deserializer)? {
-        Some(FlexibleBool::Bool(value)) => Ok(value),
-        Some(FlexibleBool::String(value)) => value.parse().map_err(serde::de::Error::custom),
-        None => Ok(false),
+    match FlexibleBool::deserialize(deserializer)? {
+        FlexibleBool::Bool(value) => Ok(value),
+        FlexibleBool::String(value) => match value.as_str() {
+            "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
+            "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+            _ => Err(serde::de::Error::custom("cannot parse boolean")),
+        },
     }
 }
 
@@ -2120,12 +3581,14 @@ where
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum FlexibleStringVec {
-        Vec(Vec<String>),
+        Vec(Vec<Option<String>>),
         String(String),
     }
 
     match Option::<FlexibleStringVec>::deserialize(deserializer)? {
-        Some(FlexibleStringVec::Vec(value)) => Ok(Some(value)),
+        Some(FlexibleStringVec::Vec(value)) => Ok(Some(
+            value.into_iter().map(Option::unwrap_or_default).collect(),
+        )),
         Some(FlexibleStringVec::String(value)) => Ok(Some(vec![value])),
         None => Ok(None),
     }
@@ -2342,13 +3805,14 @@ mod tests {
             token_endpoint: "https://issuer.example/oauth2/token".into(),
             userinfo_endpoint: Some("https://issuer.example/oauth2/userinfo".into()),
             jwks_uri: "https://issuer.example/oauth2/jwks".into(),
+            id_token_signing_alg_values_supported: vec!["RS256".into()],
         }
     }
 
     #[test]
     fn oidc_discovery_url_matches_issuer_path_rules() {
         assert_eq!(
-            oidc_discovery_url(" https://issuer.example/ ").unwrap(),
+            oidc_discovery_url("https://issuer.example/").unwrap(),
             "https://issuer.example/.well-known/openid-configuration"
         );
         assert_eq!(
@@ -2359,10 +3823,10 @@ mod tests {
     }
 
     #[test]
-    fn oidc_metadata_validates_required_fields_and_issuer() {
+    fn oidc_metadata_validates_issuer_and_defers_missing_endpoints() {
         let metadata = provider_metadata();
         assert_eq!(
-            metadata.validate_for_issuer("https://issuer.example/"),
+            metadata.validate_for_issuer("https://issuer.example"),
             Ok(())
         );
 
@@ -2370,9 +3834,7 @@ mod tests {
         missing_auth_endpoint.authorization_endpoint.clear();
         assert_eq!(
             missing_auth_endpoint.validate_for_issuer("https://issuer.example"),
-            Err(OidcDiscoveryError::MissingField {
-                field: "authorization_endpoint"
-            })
+            Ok(())
         );
 
         let mut mismatch = metadata;
@@ -2390,7 +3852,7 @@ mod tests {
     #[test]
     fn oidc_core_config_builds_runtime_config_from_discovery() {
         let oidc = headscale_core::config::OidcConfig {
-            issuer: "https://issuer.example/".into(),
+            issuer: "https://issuer.example".into(),
             client_id: "client-id".into(),
             client_secret: "client-secret".into(),
             scope: vec!["openid".into(), "email".into()],
@@ -2803,6 +4265,37 @@ mod tests {
                 .iter()
                 .any(|cookie| cookie.contains("Path=/oidc/callback"))
         );
+        assert!(cookies.iter().all(|cookie| cookie.contains("; Secure")));
+        assert!(cookies.iter().all(|cookie| cookie.contains("SameSite=Lax")));
+    }
+
+    #[tokio::test]
+    async fn oidc_state_cookies_follow_server_url_and_direct_tls() {
+        let mut config = auth_config(OidcPkceConfig::default());
+        config.redirect_url = "http://headscale.example/oidc/callback".into();
+        let runtime = OidcAuthRuntime::new(config);
+        let auth_id = format!("hskey-authreq-{}", "s".repeat(24));
+
+        let plain =
+            handle_register_with_request_security(runtime.clone(), auth_id.clone(), false).await;
+        assert!(
+            plain
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .all(|value| {
+                    let cookie = value.to_str().unwrap();
+                    !cookie.contains("; Secure") && cookie.contains("SameSite=Lax")
+                })
+        );
+
+        let tls = handle_auth_with_request_security(runtime, auth_id, true).await;
+        assert!(
+            tls.headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .all(|value| value.to_str().unwrap().contains("; Secure"))
+        );
     }
 
     #[tokio::test]
@@ -2890,6 +4383,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    fn cookie_headers(cookie: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        headers
+    }
+
+    /// Upstream OIDCCallbackHandler checks the state cookie before any token
+    /// exchange: a short state is "invalid state parameter" (400), a missing
+    /// state cookie is "state not found" (400) and a differing value is
+    /// "state did not match" (403).
+    #[test]
+    fn state_cookie_validation_follows_upstream_errors() {
+        let state = "abcdefghijklmnopqrstuvwxyz012345";
+        let name = cookie_name("state", state);
+        assert_eq!(name, "state_abcdef");
+
+        assert_eq!(
+            validate_state_cookie_bytes(&HeaderMap::new(), b"abcde"),
+            Err(OidcRuntimeError::InvalidStateParameter)
+        );
+        assert_eq!(
+            validate_state_cookie_bytes(&HeaderMap::new(), state.as_bytes()),
+            Err(OidcRuntimeError::StateCookieMissing)
+        );
+        // A cookie for a different state prefix does not satisfy the lookup.
+        assert_eq!(
+            validate_state_cookie_bytes(&cookie_headers("state_zzzzzz=whatever"), state.as_bytes()),
+            Err(OidcRuntimeError::StateCookieMissing)
+        );
+        assert_eq!(
+            validate_state_cookie_bytes(
+                &cookie_headers(&format!("{name}=wrong")),
+                state.as_bytes()
+            ),
+            Err(OidcRuntimeError::StateCookieMismatch)
+        );
+        // Same prefix, longer state: the whole value must match.
+        assert_eq!(
+            validate_state_cookie_bytes(
+                &cookie_headers(&format!("{name}={}", &state[..state.len() - 1])),
+                state.as_bytes()
+            ),
+            Err(OidcRuntimeError::StateCookieMismatch)
+        );
+        assert_eq!(
+            validate_state_cookie_bytes(
+                &cookie_headers(&format!("other=1; {name}={state}")),
+                state.as_bytes()
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_state_cookie_failures_render_upstream_error_pages() {
+        let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()));
+        let start = runtime
+            .begin_registration(&format!("hskey-authreq-{}", "r".repeat(24)))
+            .unwrap();
+        let callback = |headers: HeaderMap| {
+            handle_callback(
+                runtime.clone(),
+                headers,
+                Query(OidcCallbackQuery {
+                    code: "code".into(),
+                    state: start.state.clone(),
+                }),
+            )
+        };
+        let body = |response: Response| async {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+
+        // No state cookie at all: upstream 400, status-derived page message.
+        let response = callback(HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let page = body(response).await;
+        assert!(page.contains("Bad Request"), "{page}");
+        assert!(
+            page.contains("The request could not be processed. Please try again."),
+            "{page}"
+        );
+
+        // Mismatched state cookie: upstream 403 "not authorized" page.
+        let wrong = format!("{}=wrong", cookie_name("state", &start.state));
+        let response = callback(cookie_headers(&wrong)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let page = body(response).await;
+        assert!(page.contains("Forbidden"), "{page}");
+        assert!(
+            page.contains("You are not authorized. Please contact your administrator."),
+            "{page}"
+        );
+
+        // Neither failure may consume the pending registration.
+        assert!(runtime.registration(&start.state).is_some());
+    }
+
     #[cfg(feature = "full")]
     #[tokio::test]
     async fn oidc_callback_exchanges_code_verifies_id_token_and_nonce_before_completion() {
@@ -2931,6 +4525,25 @@ mod tests {
 
         let response = handle_callback(
             runtime.clone(),
+            headers.clone(),
+            Query(OidcCallbackQuery {
+                code: "auth-code".into(),
+                state: start.state.clone(),
+            }),
+        )
+        .await;
+
+        // Rust-only: a runtime without a registration handler cannot finish
+        // the flow; the error still uses upstream's browser error page.
+        assert_go_error_page(
+            response,
+            StatusCode::NOT_IMPLEMENTED,
+            GO_SERVER_ERROR_MSG,
+            "OIDC callback completion is not implemented",
+        )
+        .await;
+        let replay = handle_callback(
+            runtime,
             headers,
             Query(OidcCallbackQuery {
                 code: "auth-code".into(),
@@ -2938,12 +4551,17 @@ mod tests {
             }),
         )
         .await;
-
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(
-            response_body(response).await,
-            "OIDC callback completion is not implemented"
-        );
+        // The first callback consumed the state. With PKCE enabled upstream
+        // getOauth2Token needs the cached verifier before any code exchange,
+        // so the replay stops there: 404 "registration not found"
+        // (oidc.go:486-490).
+        assert_go_error_page(
+            replay,
+            StatusCode::NOT_FOUND,
+            GO_BAD_REQUEST_MSG,
+            "registration not found",
+        )
+        .await;
         let form = captured_form.read();
         assert_eq!(
             form.get("grant_type").map(String::as_str),
@@ -2994,8 +4612,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response_body(response).await, "nonce not found");
+        // Upstream oidc.go: missing nonce cookie -> 400 "nonce not found".
+        assert_go_error_page(
+            response,
+            StatusCode::BAD_REQUEST,
+            GO_BAD_REQUEST_MSG,
+            "nonce not found",
+        )
+        .await;
     }
 
     #[cfg(feature = "full")]
@@ -3031,8 +4655,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(response_body(response).await, "failed to verify id_token");
+        // Upstream oidc.go extractIDToken: 403 "failed to verify id_token".
+        assert_go_error_page(
+            response,
+            StatusCode::FORBIDDEN,
+            GO_UNAUTHORIZED_MSG,
+            "failed to verify id_token",
+        )
+        .await;
     }
 
     #[cfg(feature = "full")]
@@ -3195,11 +4825,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            response_body(response).await,
-            "Could not create or update user"
-        );
+        // Upstream oidc.go: 500 "could not create or update user".
+        assert_go_error_page(
+            response,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            GO_SERVER_ERROR_MSG,
+            "could not create or update user",
+        )
+        .await;
     }
 
     #[cfg(feature = "full")]
@@ -3245,13 +4878,54 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/html; charset=utf-8"
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://headscale.example/register/confirm/hskey-authreq-rrrrrrrrrrrrrrrrrrrrrrrr"
         );
+        // Upstream order (confirmed against the Go handler): the state and
+        // nonce callback cookies are deleted first, then the register-confirm
+        // CSRF cookie is set, scoped to the confirmation URL path.
+        let set_cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(set_cookies.len(), 3, "{set_cookies:?}");
+        assert_eq!(
+            set_cookies[0],
+            format!(
+                "{}=; Path=/oidc/callback; Max-Age=0",
+                cookie_name("state", &start.state)
+            )
+        );
+        assert_eq!(
+            set_cookies[1],
+            format!(
+                "{}=; Path=/oidc/callback; Max-Age=0",
+                cookie_name("nonce", &start.nonce)
+            )
+        );
+        let confirm_cookie = &set_cookies[2];
+        assert!(confirm_cookie.starts_with("headscale_register_confirm="));
+        assert!(confirm_cookie.ends_with(
+            "; Path=/register/confirm/hskey-authreq-rrrrrrrrrrrrrrrrrrrrrrrr; Max-Age=900; HttpOnly; Secure; SameSite=Lax"
+        ));
         let cookie_header = set_cookie_header(&response);
-        let body = response_body(response).await;
+        assert!(cookie_header.starts_with("headscale_register_confirm="));
+        assert!(!cookie_header.contains(';'), "{cookie_header}");
+        let auth_id = format!("hskey-authreq-{}", "r".repeat(24));
+        let unauthorized = handle_register_confirm_get(&runtime, &auth_id, &HeaderMap::new());
+        assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+        let page =
+            handle_register_confirm_get(&runtime, &auth_id, &confirm_headers(&cookie_header));
+        assert_eq!(page.status(), StatusCode::OK);
+        let body = response_body(page).await;
+        let reload =
+            handle_register_confirm_get(&runtime, &auth_id, &confirm_headers(&cookie_header));
+        assert_eq!(reload.status(), StatusCode::OK);
+        assert_eq!(response_body(reload).await, body);
         assert!(body.contains("Headscale - Confirm node registration"));
         assert!(body.contains("Confirm node registration"));
         assert!(body.contains("Confirm registration"));
@@ -3294,6 +4968,23 @@ mod tests {
         assert!(
             runtime.pending_confirmation(&"r".repeat(24)).is_none(),
             "successful confirmation should consume the staged auth-request confirmation"
+        );
+        let spent =
+            handle_register_confirm_get(&runtime, &auth_id, &confirm_headers(&cookie_header));
+        assert_eq!(spent.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn confirmation_url_and_cookie_path_keep_reverse_proxy_prefix() {
+        let redirect = "https://control.example/hs/oidc/callback";
+        let auth_id = "hskey-authreq-rrrrrrrrrrrrrrrrrrrrrrrr";
+        assert_eq!(
+            register_confirm_url(redirect, auth_id),
+            "https://control.example/hs/register/confirm/hskey-authreq-rrrrrrrrrrrrrrrrrrrrrrrr"
+        );
+        assert_eq!(
+            register_confirm_path(redirect, auth_id),
+            "/hs/register/confirm/hskey-authreq-rrrrrrrrrrrrrrrrrrrrrrrr"
         );
     }
 
@@ -3400,9 +5091,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let cookie_header = set_cookie_header(&response);
-        let body = response_body(response).await;
+        let page = handle_register_confirm_get(
+            &runtime,
+            &format!("hskey-authreq-{}", "r".repeat(24)),
+            &confirm_headers(&cookie_header),
+        );
+        assert_eq!(page.status(), StatusCode::OK);
+        let body = response_body(page).await;
         let csrf = csrf_from_confirm_body(&body);
         assert!(registrations.calls.read().is_empty());
 
@@ -3464,8 +5161,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(response_body(response).await, "csrf token mismatch");
+        // Upstream RegisterConfirmHandler: 403 "csrf token mismatch".
+        assert_go_error_page(
+            response,
+            StatusCode::FORBIDDEN,
+            GO_UNAUTHORIZED_MSG,
+            "csrf token mismatch",
+        )
+        .await;
         assert!(runtime.pending_confirmation(&registration_id).is_some());
         assert!(registrations.calls.read().is_empty());
     }
@@ -3486,11 +5189,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            response_body(response).await,
-            "registration not OIDC-authorized"
-        );
+        // Upstream RegisterConfirmHandler: no pending confirmation -> 403
+        // "registration not OIDC-authorized".
+        assert_go_error_page(
+            response,
+            StatusCode::FORBIDDEN,
+            GO_UNAUTHORIZED_MSG,
+            "registration not OIDC-authorized",
+        )
+        .await;
         assert!(registrations.calls.read().is_empty());
     }
 
@@ -3513,11 +5220,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::GONE);
-        assert_eq!(
-            response_body(response).await,
-            "registration session expired"
-        );
+        // Upstream RegisterConfirmHandler: auth session gone ->
+        // errRegistrationLinkSpent, a 410 carrying its own UserMsg.
+        assert_go_error_page(
+            response,
+            StatusCode::GONE,
+            GO_LINK_SPENT_MSG,
+            "registration link already used or expired",
+        )
+        .await;
         assert!(registrations.calls.read().is_empty());
     }
 
@@ -3540,12 +5251,19 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response_body(response).await,
-            "auth session is not for node registration"
-        );
+        // Upstream RegisterConfirmHandler never checks IsRegistration: an SSH
+        // check request carries no PendingConfirmation, so it is refused with
+        // 403 "registration not OIDC-authorized" (oidc.go:936-940; confirmed
+        // by running the Go handler on an SSH-check auth ID).
+        assert_go_error_page(
+            response,
+            StatusCode::FORBIDDEN,
+            GO_UNAUTHORIZED_MSG,
+            "registration not OIDC-authorized",
+        )
+        .await;
         assert!(registrations.calls.read().is_empty());
+        assert!(registrations.auth_calls.read().is_empty());
     }
 
     #[cfg(feature = "full")]
@@ -3567,11 +5285,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            response_body(response).await,
-            "csrf token does not match cached registration"
-        );
+        // Upstream RegisterConfirmHandler: 403 "csrf token does not match
+        // cached registration".
+        assert_go_error_page(
+            response,
+            StatusCode::FORBIDDEN,
+            GO_UNAUTHORIZED_MSG,
+            "csrf token does not match cached registration",
+        )
+        .await;
         assert!(runtime.pending_confirmation(&registration_id).is_some());
         assert!(registrations.calls.read().is_empty());
     }
@@ -3579,14 +5301,34 @@ mod tests {
     #[cfg(feature = "full")]
     #[tokio::test]
     async fn oidc_register_confirm_rejects_malformed_urlencoded_form_like_upstream() {
-        for (name, body) in [
-            ("short percent escape", "headscale_register_confirm=%"),
-            ("non-hex percent escape", "headscale_register_confirm=%zz"),
+        // The third column is Go's url.ParseQuery error, which upstream logs
+        // with "user msg: invalid form" (captured from the Go handler).
+        for (name, body, go_error) in [
+            (
+                "short percent escape",
+                "headscale_register_confirm=%",
+                "invalid URL escape \"%\"",
+            ),
+            (
+                "non-hex percent escape",
+                "headscale_register_confirm=%zz",
+                "invalid URL escape \"%zz\"",
+            ),
             (
                 "semicolon separator",
                 "headscale_register_confirm=expected-csrf;other=value",
+                "invalid semicolon separator in query",
             ),
         ] {
+            assert_eq!(
+                form::decode_confirmation_form(
+                    &confirm_headers("headscale_register_confirm=expected-csrf"),
+                    body.as_bytes(),
+                    None,
+                ),
+                Err(go_error.to_owned()),
+                "{name}"
+            );
             let registrations = Arc::new(MockOidcRegistrationHandler::default());
             let runtime = OidcAuthRuntime::new(auth_config(OidcPkceConfig::default()))
                 .with_registration_handler(registrations.clone());
@@ -3603,8 +5345,13 @@ mod tests {
             )
             .await;
 
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
-            assert_eq!(response_body(response).await, "invalid form", "{name}");
+            assert_go_error_page(
+                response,
+                StatusCode::BAD_REQUEST,
+                GO_BAD_REQUEST_MSG,
+                go_error,
+            )
+            .await;
             assert!(
                 runtime.pending_confirmation(&registration_id).is_some(),
                 "{name}: rejected POST must not clear pending confirmation"
@@ -3625,6 +5372,15 @@ mod tests {
             .insert(test_pending_confirmation(&registration_id, "expected-csrf"));
 
         let body = format!("headscale_register_confirm={}", "x".repeat(4096));
+        // Upstream http.MaxBytesReader(4 KiB) error, logged as "invalid form".
+        assert_eq!(
+            form::decode_confirmation_form(
+                &confirm_headers("headscale_register_confirm=expected-csrf"),
+                body.as_bytes(),
+                None,
+            ),
+            Err("http: request body too large".to_owned())
+        );
         let response = handle_register_confirm(
             runtime.clone(),
             format!("hskey-authreq-{registration_id}"),
@@ -3633,8 +5389,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response_body(response).await, "invalid form");
+        assert_go_error_page(
+            response,
+            StatusCode::BAD_REQUEST,
+            GO_BAD_REQUEST_MSG,
+            "request body too large",
+        )
+        .await;
         assert!(runtime.pending_confirmation(&registration_id).is_some());
         assert!(registrations.calls.read().is_empty());
     }
@@ -3655,6 +5416,16 @@ mod tests {
             "headscale_register_confirm=expected-csrf".parse().unwrap(),
         );
 
+        // Go ParseForm treats a missing Content-Type as octet-stream and
+        // leaves PostForm empty, so the token is "missing", not malformed.
+        assert_eq!(
+            form::decode_confirmation_form(
+                &headers,
+                b"headscale_register_confirm=expected-csrf",
+                None
+            ),
+            Ok(None)
+        );
         let response = handle_register_confirm(
             runtime,
             format!("hskey-authreq-{registration_id}"),
@@ -3663,8 +5434,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response_body(response).await, "missing csrf token");
+        // Upstream RegisterConfirmHandler: 400 "missing csrf token".
+        assert_go_error_page(
+            response,
+            StatusCode::BAD_REQUEST,
+            GO_BAD_REQUEST_MSG,
+            "missing csrf token",
+        )
+        .await;
         assert!(registrations.calls.read().is_empty());
     }
 
@@ -3684,6 +5461,16 @@ mod tests {
             "headscale_register_confirm=expected-csrf".parse().unwrap(),
         );
 
+        // A non-form body is never read by Go's ParseForm, so its size does
+        // not trip MaxBytesReader.
+        assert_eq!(
+            form::decode_confirmation_form(
+                &headers,
+                "x".repeat(REGISTER_CONFIRM_BODY_LIMIT + 1).as_bytes(),
+                None
+            ),
+            Ok(None)
+        );
         let response = handle_register_confirm(
             runtime.clone(),
             format!("hskey-authreq-{registration_id}"),
@@ -3692,8 +5479,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(response_body(response).await, "missing csrf token");
+        // Upstream RegisterConfirmHandler: 400 "missing csrf token".
+        assert_go_error_page(
+            response,
+            StatusCode::BAD_REQUEST,
+            GO_BAD_REQUEST_MSG,
+            "missing csrf token",
+        )
+        .await;
         assert!(runtime.pending_confirmation(&registration_id).is_some());
         assert!(registrations.calls.read().is_empty());
     }
@@ -3744,11 +5537,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::GONE);
-        assert_eq!(
-            response_body(response).await,
-            "login session expired, try again"
-        );
+        // Upstream beginRegistrationConfirmation: auth session gone -> 410
+        // "login session expired, try again".
+        assert_go_error_page(
+            response,
+            StatusCode::GONE,
+            GO_GONE_MSG,
+            "login session expired, try again",
+        )
+        .await;
     }
 
     #[cfg(feature = "full")]
@@ -3796,13 +5593,18 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response_body(response).await,
-            "auth session is not for node registration"
-        );
+        // Upstream beginRegistrationConfirmation: !IsRegistration -> 400
+        // "auth session is not for node registration".
+        assert_go_error_page(
+            response,
+            StatusCode::BAD_REQUEST,
+            GO_BAD_REQUEST_MSG,
+            "auth session is not for node registration",
+        )
+        .await;
         assert!(registrations.calls.read().is_empty());
         assert!(registrations.auth_calls.read().is_empty());
+        assert!(registrations.confirmations.read().is_empty());
     }
 
     #[cfg(feature = "full")]
@@ -3850,8 +5652,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response_body(response).await, "unauthorised group");
+        // Upstream validateOIDCAllowedGroups: 401 "unauthorised group".
+        assert_go_error_page(
+            response,
+            StatusCode::UNAUTHORIZED,
+            GO_UNAUTHORIZED_MSG,
+            "unauthorised group",
+        )
+        .await;
     }
 
     #[test]
@@ -4265,6 +6073,8 @@ mod tests {
         String::from_utf8(body.to_vec()).unwrap()
     }
 
+    /// Cookie header a browser jar would send back: deletions (Max-Age=0,
+    /// such as the callback's state/nonce clears) are dropped, not replayed.
     #[cfg(feature = "full")]
     fn set_cookie_header(response: &Response) -> String {
         response
@@ -4272,9 +6082,67 @@ mod tests {
             .get_all(header::SET_COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
+            .filter(|value| !value.contains("; Max-Age=0"))
             .filter_map(|value| value.split_once(';').map(|(cookie, _attrs)| cookie))
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    // headscale-go v0.29.5 httpUserError (handlers.go) answers every
+    // browser-facing OIDC error with the branded AuthError page: heading
+    // http.StatusText(code), message HTTPError.UserMsg or
+    // userMessageForStatusCode(code). HTTPError.Msg (the technical cause) is
+    // only logged. Texts below are copied from the Go source and were
+    // confirmed by running the Go handlers.
+    #[cfg(feature = "full")]
+    const GO_BAD_REQUEST_MSG: &str = "The request could not be processed. Please try again.";
+    #[cfg(feature = "full")]
+    const GO_UNAUTHORIZED_MSG: &str = "You are not authorized. Please contact your administrator.";
+    #[cfg(feature = "full")]
+    const GO_GONE_MSG: &str = "Your session has expired. Please try again.";
+    #[cfg(feature = "full")]
+    const GO_SERVER_ERROR_MSG: &str = "Something went wrong. Please try again later.";
+    #[cfg(feature = "full")]
+    const GO_LINK_SPENT_MSG: &str = "This link has already been used or has expired. If your device is connected you are done; otherwise start the login again.";
+
+    /// Assert the upstream AuthError page for `status` with `message`, and
+    /// that the technical cause (`hidden`) stays out of the page.
+    #[cfg(feature = "full")]
+    async fn assert_go_error_page(
+        response: Response,
+        status: StatusCode,
+        message: &str,
+        hidden: &str,
+    ) {
+        let heading = match status.as_u16() {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            410 => "Gone",
+            500 => "Internal Server Error",
+            501 => "Not Implemented",
+            other => panic!("no Go StatusText fixture for {other}"),
+        };
+        assert_eq!(response.status(), status, "{hidden}");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = response_body(response).await;
+        assert!(body.starts_with("<!DOCTYPE html>"), "{hidden}: {body}");
+        assert!(
+            body.contains("<title>Headscale - Error</title>"),
+            "{hidden}"
+        );
+        assert!(
+            body.contains(&format!(">{heading}</strong>{message}</div>")),
+            "{hidden}: expected heading {heading:?} and message {message:?}"
+        );
+        assert!(
+            !body.contains(hidden),
+            "technical cause {hidden:?} must only be logged, like upstream"
+        );
     }
 
     #[cfg(feature = "full")]
@@ -4314,15 +6182,21 @@ mod tests {
         }
     }
 
+    /// Mirrors upstream's oidc_test.go csrfInputRe,
+    /// `name="headscale_register_confirm"[^>]*value="([^"]+)"`: elem-go sorts
+    /// attributes, so `type="hidden"` sits between name and value.
     #[cfg(feature = "full")]
     fn csrf_from_confirm_body(body: &str) -> String {
-        let marker = format!("name=\"{REGISTER_CONFIRM_CSRF_COOKIE}\" value=\"");
-        let rest = body
+        let marker = format!("name=\"{REGISTER_CONFIRM_CSRF_COOKIE}\"");
+        let tag = body
             .split_once(&marker)
-            .map(|(_before, after)| after)
+            .and_then(|(_before, after)| after.split_once('>'))
+            .map(|(tag, _after)| tag)
             .expect("confirm form contains CSRF field");
-        rest.split_once('"')
+        tag.split_once("value=\"")
+            .and_then(|(_before, value)| value.split_once('"'))
             .map(|(csrf, _after)| csrf.to_string())
+            .filter(|csrf| !csrf.is_empty())
             .expect("confirm form CSRF field has value")
     }
 

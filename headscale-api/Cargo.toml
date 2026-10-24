@@ -3,7 +3,7 @@ name = "headscale-api"
 description = "gRPC/HTTP control plane API"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause AND MIT AND Apache-2.0"
 
 [features]
 default = ["full"]
@@ -17,6 +17,11 @@ default = ["full"]
 # That escape hatch is for embedders that need only the wire layer, not
 # the full headscale control plane.
 full = [
+    "h2/go-server-first-settings",
+    "h2/go-server-graceful-current-id",
+    "h2/go-server-lifecycle",
+    "hyper/go-server-lifecycle",
+    "rustls/go-server-client-hello",
     "dep:headscale-core",
     "dep:headscale-identity",
     "dep:headscale-resources",
@@ -28,6 +33,9 @@ full = [
     "dep:prost-types",
     "dep:reqwest",
     "dep:jsonwebtoken",
+    "dep:aws-lc-rs",
+    "dep:aws-lc-sys",
+    "dep:num-bigint",
     "dep:futures",
 ]
 # Admin GUI v0 — `admin::router()` returns an axum Router with
@@ -85,6 +93,16 @@ sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "sqlite
 # layer doesn't need them).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
+# The JWT crate does not expose ES512. Reuse the AWS-LC backend already used
+# by rustls for the upstream OIDC P-521 signature algorithm.
+aws-lc-rs = { version = "1.18.2", optional = true }
+# The safe RSA parameter presets exclude Go-compatible 1024-bit keys and
+# automatic PSS salt detection. The private OIDC wrapper uses this same
+# already-pinned backend for public-key verification only.
+aws-lc-sys = { version = "=0.46.0", optional = true }
+# Already pinned transitively by the JWT ASN.1 reader. Used only to validate
+# published RSA JWK components; private keys never enter signature verification.
+num-bigint = { version = "0.4.6", optional = true }
 tower = { version = "0.5", features = ["util"] }
 futures = { version = "0.3", optional = true }
 
@@ -121,11 +139,11 @@ snow = { version = "0.9.6", features = ["risky-raw-split"] }
 # crate version already used elsewhere in the workspace.
 chacha20poly1305 = "0.10"
 # `/ts2021` HTTP/2 server over the Noise-wrapped hijacked socket.
-h2 = "0.4"
+h2 = "0.4.19"
 # Hyper supplies `hyper::upgrade::OnUpgrade` (placed in request
 # extensions for `Upgrade:` requests) + the `http`/`bytes` types
 # traded with h2.
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 # `TokioIo` wraps `hyper::upgrade::Upgraded` into a tokio
 # AsyncRead+AsyncWrite — feeds the hijacked socket into the Framed
 # controlbase reader. The `server` feature is consumed by
@@ -152,7 +170,7 @@ parking_lot = "0.12"
 # bans `unsafe_code`, so we can't call libc directly. `nix` is
 # Unix-only — guarded by `#[cfg(unix)]` at the use site so the crate
 # still compiles on non-Unix hosts.
-nix = { version = "0.29", default-features = false, features = ["signal"] }
+nix = { version = "0.29", default-features = false, features = ["signal", "inotify", "event", "fs"] }
 bytes = "1"
 hex = "0.4"
 chrono = { workspace = true }
@@ -200,7 +218,7 @@ rand_core = { workspace = true }
 # for why we bypass axum-server on :443. Pinned to the same rustls
 # minor as above (0.23 ↔ tokio-rustls 0.26).
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 x509-parser = { version = "0.18.1", default-features = false }
 

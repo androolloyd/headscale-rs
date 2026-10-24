@@ -25,6 +25,8 @@ oidc_client_id="${REAL_CLIENT_OIDC_CLIENT_ID:-headscale-rs}"
 oidc_client_secret="${REAL_CLIENT_OIDC_CLIENT_SECRET:-secret}"
 oidc_flow_count="${REAL_CLIENT_OIDC_FLOW_COUNT:-3}"
 check_period_cache="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE:-false}"
+revoke_after_cache="${REAL_CLIENT_OIDC_SSH_REVOKE_AFTER_CACHE:-false}"
+callback_replay_after_check="${REAL_CLIENT_OIDC_SSH_CALLBACK_REPLAY_AFTER_CHECK:-false}"
 check_period_local_user="${REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_LOCAL_USER:-false}"
 policy_mutation_restart="${REAL_CLIENT_OIDC_SSH_POLICY_MUTATION_RESTART:-false}"
 check_result="${REAL_CLIENT_OIDC_SSH_CHECK_RESULT:-approve}"
@@ -72,6 +74,36 @@ case "${check_period_cache}" in
     ;;
   *)
     echo "REAL_CLIENT_OIDC_SSH_CHECK_PERIOD_CACHE must be true or false, got ${check_period_cache}" >&2
+    exit 2
+    ;;
+esac
+
+case "${revoke_after_cache}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    revoke_after_cache_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    revoke_after_cache_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_REVOKE_AFTER_CACHE must be true or false, got ${revoke_after_cache}" >&2
+    exit 2
+    ;;
+esac
+if ((revoke_after_cache_flag)) && { ((check_period_cache_flag == 0)) || [[ "${database_backend}" != postgres ]]; }; then
+  echo "REAL_CLIENT_OIDC_SSH_REVOKE_AFTER_CACHE requires Postgres checkPeriod cache" >&2
+  exit 2
+fi
+
+case "${callback_replay_after_check}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On)
+    callback_replay_after_check_flag=1
+    ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off)
+    callback_replay_after_check_flag=0
+    ;;
+  *)
+    echo "REAL_CLIENT_OIDC_SSH_CALLBACK_REPLAY_AFTER_CHECK must be true or false, got ${callback_replay_after_check}" >&2
     exit 2
     ;;
 esac
@@ -655,6 +687,12 @@ EOF
     sqlite)
       cat >>"${config_path}" <<EOF
 
+[database]
+type = "sqlite"
+
+[database.sqlite]
+path = "${db_path}"
+
 [policy]
 mode = "file"
 path = "${work_dir}/ssh-oidc-check.hujson"
@@ -1176,6 +1214,89 @@ run_cached_ssh_check() {
   echo "::endgroup::"
 }
 
+ssh_policy_revoked_in_netmap() {
+  docker exec "${client_two}" tailscale debug netmap >"${work_dir}/ssh-revoked-target.netmap.json" 2>/dev/null || return 1
+  ruby -rjson -e '
+    netmap = JSON.parse(File.read(ARGV.fetch(0)))
+    policy = netmap["SSHPolicy"]
+    exit(policy.nil? || Array(policy["Rules"]).empty? ? 0 : 1)
+  ' "${work_dir}/ssh-revoked-target.netmap.json"
+}
+
+revoke_cached_ssh_check_if_requested() {
+  ((revoke_after_cache_flag)) || return 0
+  echo "::group::revoke cached SSH check through live database policy"
+  load_database_policy "revoked SSH database policy" "$(cat tools/real-client/fixtures/ssh-no-ssh.hujson)"
+  if ! wait_for "target SSH netmap policy revocation" ssh_policy_revoked_in_netmap; then
+    echo "target did not receive SSH policy revocation" >&2
+    return 1
+  fi
+  local target_addr ssh_status=0
+  target_addr="$(docker exec "${client_two}" tailscale ip -4 | head -n 1)"
+  docker exec "${client_one}" sh -ceu \
+    'timeout "$1" tailscale ssh "$2@$3" hostname' \
+    sh "${attempt_timeout}" "${ssh_user}" "${target_addr}" \
+    >"${work_dir}/ssh-revoked-replay.stdout" \
+    2>"${work_dir}/ssh-revoked-replay.stderr" || ssh_status="$?"
+  printf '%s\n' "${ssh_status}" >"${work_dir}/ssh-revoked-replay.status"
+  if ((ssh_status == 0 || ssh_status == 124)) || [[ -s "${work_dir}/ssh-revoked-replay.stdout" ]] ||
+    ssh_auth_url_present "ssh-revoked-replay"; then
+    echo "cached SSH authorization survived policy revocation (status ${ssh_status})" >&2
+    cat "${work_dir}/ssh-revoked-replay.stdout" >&2 || true
+    cat "${work_dir}/ssh-revoked-replay.stderr" >&2 || true
+    return 1
+  fi
+  echo "revoked cached SSH replay denied with status ${ssh_status}"
+  echo "::endgroup::"
+}
+
+assert_oidc_callback_state_single_use_if_requested() {
+  ((callback_replay_after_check_flag)) || return 0
+  echo "::group::assert OIDC callback state is single-use"
+  local initial_headers="${work_dir}/${client_one}.oidc-callback.headers"
+  local authorize_url cookie_header callback_url authorize_status callback_status
+  local replay_inputs
+  replay_inputs="$(ruby -e '
+    headers = File.readlines(ARGV.fetch(0), chomp: true)
+    authorize = headers.find { |line| line.match?(/\ALocation:\s+.*\/oidc\/authorize\?/i) }
+    abort("missing original OIDC authorize URL") unless authorize
+    cookies = headers.each_with_object([]) do |line, pairs|
+      next unless line.match?(/\ASet-Cookie:/i) && line.include?("Path=/oidc/callback") && line.match?(/Max-Age=[1-9]/)
+      pairs << line.sub(/\ASet-Cookie:\s*/i, "").split(";", 2).first
+    end
+    abort("expected original state and nonce cookies") unless cookies.length == 2
+    puts authorize.sub(/\ALocation:\s*/i, "").strip
+    puts cookies.join("; ")
+  ' "${initial_headers}")"
+  authorize_url="${replay_inputs%%$'\n'*}"
+  cookie_header="${replay_inputs#*$'\n'}"
+  authorize_status="$(curl -sS -D "${work_dir}/oidc-replay-authorize.headers" \
+    -o "${work_dir}/oidc-replay-authorize.body" -w '%{http_code}' "${authorize_url}")"
+  if [[ "${authorize_status}" != 303 && "${authorize_status}" != 302 ]]; then
+    echo "expected fresh OIDC authorization redirect, got ${authorize_status}" >&2
+    return 1
+  fi
+  callback_url="$(ruby -e '
+    line = File.readlines(ARGV.fetch(0)).find { |entry| entry.match?(/\ALocation:\s+.*\/oidc\/callback\?/i) }
+    abort("missing fresh callback URL") unless line
+    puts line.sub(/\ALocation:\s*/i, "").strip
+  ' "${work_dir}/oidc-replay-authorize.headers")"
+  callback_status="$(curl -sS \
+    --cacert "${tls_cert_path}" \
+    --resolve "host.docker.internal:${control_port}:127.0.0.1" \
+    -H "Cookie: ${cookie_header}" \
+    -D "${work_dir}/oidc-replay-callback.headers" \
+    -o "${work_dir}/oidc-replay-callback.body" \
+    -w '%{http_code}' "${callback_url}")"
+  printf '%s\n' "${callback_status}" >"${work_dir}/oidc-replay-callback.status"
+  if [[ "${callback_status}" != 410 ]]; then
+    echo "expected consumed OIDC callback state to return 410, got ${callback_status}" >&2
+    return 1
+  fi
+  echo "fresh-code replay of consumed OIDC callback state returned 410"
+  echo "::endgroup::"
+}
+
 run_check_period_local_user_check() {
   local target_addr="$1"
   echo "::group::verify Tailscale SSH checkPeriod is scoped to local_user"
@@ -1400,8 +1521,12 @@ else
   load_database_policy_if_requested
 fi
 run_ssh_check
+revoke_cached_ssh_check_if_requested
+assert_oidc_callback_state_single_use_if_requested
 
-if ((check_period_cache_flag)); then
+if ((revoke_after_cache_flag)); then
+  echo "${target} OIDC SSH cached replay revocation real-client smoke passed"
+elif ((check_period_cache_flag)); then
   if ((check_period_local_user_flag)); then
     echo "${target} OIDC SSH checkPeriod local_user real-client smoke passed"
   else

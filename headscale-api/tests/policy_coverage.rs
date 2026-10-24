@@ -181,15 +181,32 @@ fn unknown_top_level_field_is_schema_error() {
 
 #[test]
 fn rule_missing_action_is_schema_error() {
+    // headscale-go v0.29.5 does NOT reject an ACL without `action`:
+    // Action.UnmarshalJSON only runs when the key is present, ACL
+    // validation never checks it, and aclToGrants ignores the action, so
+    // the rule compiles like an accept rule. Confirmed with a live Go
+    // server (`headscale policy check` -> "Policy is valid") and the
+    // differential harness's Go side (one allow-all FilterRule).
     let raw = r#"{
         "acls": [{"src":["*"],"dst":["*:*"]}]
     }"#;
-    let err = parse_hujson_policy(raw).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("action") || msg.contains("missing field"),
-        "rule missing `action` must error, got: {msg}"
+    let doc = parse_hujson_policy(raw)
+        .unwrap_or_else(|err| panic!("Go accepts an ACL without action, got: {err}"));
+    let rules = acl_to_filter_rules(&doc);
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert_eq!(
+        rules[0].src_ips,
+        vec![
+            "100.64.0.0-100.115.91.255",
+            "100.115.94.0-100.127.255.255",
+            "fd7a:115c:a1e0::/48",
+        ]
     );
+    assert_eq!(rules[0].dst_ports.len(), 1);
+    assert_eq!(rules[0].dst_ports[0].ip, "*");
+    assert_eq!(rules[0].dst_ports[0].ports.first, 0);
+    assert_eq!(rules[0].dst_ports[0].ports.last, 65535);
+    assert!(rules[0].ip_proto.is_empty());
 }
 
 #[test]

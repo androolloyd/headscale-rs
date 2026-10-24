@@ -41,6 +41,7 @@ CREATE UNIQUE INDEX idx_name_provider_identifier ON users(name, provider_identif
 CREATE UNIQUE INDEX idx_name_no_provider_identifier
     ON users(name)
     WHERE provider_identifier IS NULL;
+CREATE INDEX idx_users_deleted_at ON users(deleted_at);
 
 CREATE TABLE pre_auth_keys(
     id integer PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +104,7 @@ CREATE TABLE policies(
     updated_at datetime,
     deleted_at datetime
 );
+CREATE INDEX idx_policies_deleted_at ON policies(deleted_at);
 
 INSERT INTO users
     (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
@@ -124,7 +126,7 @@ VALUES
 INSERT INTO nodes
     (id, machine_key, node_key, disco_key, endpoints, host_info, ipv4, ipv6, hostname, given_name, user_id, register_method, tags, auth_key_id, last_seen, expiry, approved_routes, created_at, updated_at, deleted_at)
 VALUES
-    (1, 'mkey:modern', 'nodekey:modern', 'discokey:modern',
+    (1, 'mkey:1111111111111111111111111111111111111111111111111111111111111111', 'nodekey:2222222222222222222222222222222222222222222222222222222222222222', 'discokey:3333333333333333333333333333333333333333333333333333333333333333',
      '["1.2.3.4:41641","[2001:db8::1]:41641"]',
      '{"Hostname":"alice-router","RoutableIPs":["10.0.0.0/24"],"RequestTags":["tag:server"],"NetInfo":{"PreferredDERP":901}}',
      '100.64.0.10', 'fd7a:115c:a1e0::10', 'alice-router', 'alice-router',

@@ -13,6 +13,26 @@ This repo has four quality gates:
 - Real-client parity CI: selected paired Rust/headscale-go stock-client rows on
   matching pull requests, plus a scheduled full paired matrix.
 
+## Admin user text boundary
+
+The v0.29.5-compatible CreateUser/RenameUser state RPCs accept name text without
+the legacy username validation. Admin authentication still gates these methods.
+Names and profile strings may contain terminal controls; upstream-compatible
+CLI table rendering preserves their printed bytes. Treat the admin text source
+and the operator terminal as part of this boundary. These source changes have
+not received new protocol, terminal or security qualification, and imply no
+fresh dependency/advisory audit.
+
+## Local encrypted database key files
+
+The explicit native pgx bridge accepts Go's existing RFC 1423 encrypted key
+files, including weak DES keys and equal TripleDES subkeys. That compatibility
+is isolated to configured local PEM input; it does not enable TLS cipher
+suites. RFC 1423 encryption is unauthenticated, and this acceptance does not
+establish a secure key-storage format. The private DES adaptation, AES backend,
+padding/diagnostics and feature/package/container boundaries have not received
+new execution or security qualification. No fresh advisory check covers them.
+
 ## Local commands
 
 ```sh
@@ -34,7 +54,7 @@ for manifest in \
 done
 ./scripts/coverage.sh
 cargo deny check advisories licenses sources
-cargo generate-lockfile && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
+cargo audit --deny warnings --ignore RUSTSEC-2023-0071
 cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
 ./scripts/headscale_go_diff.sh
 ./scripts/headscale_rs_current_head_golden.sh
@@ -43,11 +63,12 @@ REAL_CLIENT_SMOKES=authkey,web-register,oidc,online-lastseen,restart-persistence
   tools/real-client/smoke-matrix.sh
 ```
 
-`cargo audit` is lockfile-only and currently reports `RUSTSEC-2023-0071`
-and `RUSTSEC-2026-0097` through optional `sqlx` MySQL/Postgres and
-`reqwest` QUIC packages. The workspace enables sqlite and HTTP over Rustls,
-not those optional backends, and the feature-aware
-`cargo deny check advisories` gate is clean.
+The application lockfile is committed and used by release builds. The
+lockfile-only audit still reports `RUSTSEC-2023-0071` through the disabled
+`sqlx-mysql` backend; RustSec has no patched version. The feature-aware
+`cargo deny check advisories` gate verifies that the active server graph does
+not include it. Keep the exception scoped to the lockfile audit and revisit
+it if MySQL support is enabled.
 
 ## Fuzzing
 
@@ -114,3 +135,14 @@ serving-topology gaps: TLS-ALPN controlled-CA ACME process coverage beyond the
 local issuer tests and HTTP-01 process smoke, API auth exactness, CLI over
 upstream gRPC exact snapshots, config-driven process wiring, and the remaining
 DNS/ACL/route edge matrices tracked in `docs/headscale-go-parity.md`.
+
+## Optional admin JSON session CSRF boundary — 2026-10-18
+
+The separately mounted optional admin GUI JSON API now requires the existing
+session-bound HMAC CSRF token in `x-csrf-token` for cookie-authenticated unsafe
+methods. Missing/invalid tokens return 403. Bearer authentication and safe
+methods preserve their existing contract. HTML forms keep their existing CSRF
+handling. Native serve uses the upstream-shaped gateway; the GUI router is an
+optional embedding surface. This is a source-reviewed hardening change, with no
+new executable or advisory/security qualification. The three replacement parity
+acceptance gates remain open.

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
+REAL_CLIENT_DATABASE_BACKEND=postgres \
+REAL_CLIENT_CLIENT_COUNT=1 \
+REAL_CLIENT_EXPECT_MACHINE_COUNT=1 \
+REAL_CLIENT_EXPECT_PEER_COUNT=0 \
+REAL_CLIENT_EXPECT_DEBUG_PING=true \
+REAL_CLIENT_FULL_PING_CHURN_COUNT=4 \
+REAL_CLIENT_TIMEOUT_SECS="${REAL_CLIENT_TIMEOUT_SECS:-180}" \
+REAL_CLIENT_TAILSCALE_UP_TIMEOUT="${REAL_CLIENT_TAILSCALE_UP_TIMEOUT:-30s}" \
+  tools/real-client/online-lastseen-common.sh

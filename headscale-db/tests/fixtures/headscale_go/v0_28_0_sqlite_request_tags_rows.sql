@@ -49,6 +49,7 @@ CREATE UNIQUE INDEX idx_name_provider_identifier ON users(name, provider_identif
 CREATE UNIQUE INDEX idx_name_no_provider_identifier
     ON users(name)
     WHERE provider_identifier IS NULL;
+CREATE INDEX idx_users_deleted_at ON users(deleted_at);
 
 CREATE TABLE pre_auth_keys(
     id integer PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +112,7 @@ CREATE TABLE policies(
     updated_at datetime,
     deleted_at datetime
 );
+CREATE INDEX idx_policies_deleted_at ON policies(deleted_at);
 
 INSERT INTO users
     (id, name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
@@ -130,13 +132,13 @@ VALUES
 INSERT INTO nodes
     (id, machine_key, node_key, disco_key, endpoints, host_info, ipv4, ipv6, hostname, given_name, user_id, register_method, tags, auth_key_id, last_seen, expiry, approved_routes, created_at, updated_at, deleted_at)
 VALUES
-    (1, 'mkey:mixed-request-tags', 'nodekey:mixed-request-tags', 'discokey:mixed-request-tags', '[]',
+    (1, 'mkey:4444444444444444444444444444444444444444444444444444444444444444', 'nodekey:5555555555555555555555555555555555555555555555555555555555555555', 'discokey:6666666666666666666666666666666666666666666666666666666666666666', '[]',
      '{"Hostname":"mixed-request-tags","RequestTags":["tag:server","tag:db"],"NetInfo":{"PreferredDERP":901}}',
      '100.64.0.20', 'fd7a:115c:a1e0::20', 'mixed-request-tags', 'mixed-request-tags',
      1, 'authkey', '["tag:server"]', 1, '2026-01-02 03:04:05',
      '0001-01-01 00:00:00+00:00', '[]',
      '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL),
-    (2, 'mkey:denied-request-tags', 'nodekey:denied-request-tags', 'discokey:denied-request-tags', '[]',
+    (2, 'mkey:7777777777777777777777777777777777777777777777777777777777777777', 'nodekey:8888888888888888888888888888888888888888888888888888888888888888', 'discokey:9999999999999999999999999999999999999999999999999999999999999999', '[]',
      '{"Hostname":"denied-request-tags","RequestTags":["tag:db"],"NetInfo":{"PreferredDERP":901}}',
      '100.64.0.21', 'fd7a:115c:a1e0::21', 'denied-request-tags', 'denied-request-tags',
      1, 'authkey', '[]', 1, '2026-01-02 03:04:05',

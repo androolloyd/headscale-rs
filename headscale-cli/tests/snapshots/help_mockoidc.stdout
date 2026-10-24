@@ -1,0 +1,12 @@
+This internal command runs a OpenID Connect for testing purposes
+
+Usage:
+  headscale mockoidc [flags]
+
+Flags:
+  -h, --help   help for mockoidc
+
+Global Flags:
+  -c, --config string   config file (default is /etc/headscale/config.yaml)
+      --force           Disable prompts and forces the execution
+  -o, --output string   Output format. Empty for human-readable, 'json', 'json-line' or 'yaml'

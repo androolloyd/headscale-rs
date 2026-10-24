@@ -31,6 +31,36 @@ async fn postgres_foundation_creates_and_stamps_database_versions() -> TestResul
 
         assert_eq!(row, (1, HEADSCALE_GO_CURRENT_VERSION.to_string(), true));
 
+        let migration_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM migrations ORDER BY id")
+                .fetch_all(&mut schema.conn)
+                .await?;
+        assert_eq!(migration_ids.len(), 19);
+        assert!(migration_ids.iter().any(|id| id == "SCHEMA_INIT"));
+        assert!(
+            migration_ids
+                .iter()
+                .any(|id| id == "202607241200-clear-tagged-node-expiry")
+        );
+        let defaults: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT
+                (SELECT column_default FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = 'database_versions'
+                   AND column_name = 'id'),
+                (SELECT column_default FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = 'pre_auth_keys'
+                   AND column_name = 'reusable')",
+        )
+        .fetch_one(&mut schema.conn)
+        .await?;
+        assert!(
+            defaults
+                .0
+                .unwrap()
+                .starts_with("nextval('database_versions_id_seq'")
+        );
+        assert_eq!(defaults.1, None);
+
         migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
         let row: (i64, String, bool) = sqlx::query_as(
             "
@@ -42,6 +72,10 @@ async fn postgres_foundation_creates_and_stamps_database_versions() -> TestResul
         .await?;
 
         assert_eq!(row, (1, HEADSCALE_GO_CURRENT_VERSION.to_string(), true));
+        let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM migrations")
+            .fetch_one(&mut schema.conn)
+            .await?;
+        assert_eq!(migration_count, 19);
         Ok::<(), headscale_db::DbError>(())
     }
     .await;
@@ -302,7 +336,9 @@ async fn postgres_foundation_accepts_supported_go_version_history() -> TestResul
         sqlx::query(
             "
             INSERT INTO migrations (id)
-            VALUES ('202601121700-migrate-hostinfo-request-tags')
+            VALUES
+                ('SCHEMA_INIT'),
+                ('202601121700-migrate-hostinfo-request-tags')
             ",
         )
         .execute(&mut schema.conn)
@@ -467,6 +503,110 @@ async fn postgres_foundation_clears_tagged_node_user_ids_on_go_import() -> TestR
 }
 
 #[tokio::test]
+async fn postgres_foundation_applies_v0295_release_repairs_to_older_go_rows() -> TestResult {
+    let Some(mut schema) = TempSchema::open("v0295_release_repairs").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE database_versions (
+                id BIGINT PRIMARY KEY, version TEXT NOT NULL, updated_at TIMESTAMPTZ
+            );
+            INSERT INTO database_versions VALUES (1, 'v0.29.0', CURRENT_TIMESTAMP);
+            CREATE TABLE migrations (id TEXT PRIMARY KEY);
+            INSERT INTO migrations (id) VALUES
+                ('202601121700-migrate-hostinfo-request-tags'),
+                ('202602201200-clear-tagged-node-user-id'),
+                ('202605221435-clear-zero-time-node-expiry');
+            CREATE TABLE users (
+                id BIGINT PRIMARY KEY, name TEXT, created_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ, deleted_at TIMESTAMPTZ,
+                provider_identifier TEXT
+            );
+            INSERT INTO users (id, name, created_at, updated_at)
+                VALUES (10, 'alice', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            CREATE TABLE pre_auth_keys (
+                id BIGINT PRIMARY KEY, user_id BIGINT, tags TEXT, prefix TEXT,
+                expiration TIMESTAMPTZ, created_at TIMESTAMPTZ
+            );
+            INSERT INTO pre_auth_keys (id, user_id, tags, created_at)
+                VALUES (20, 10, '[]', CURRENT_TIMESTAMP);
+            CREATE TABLE nodes (
+                id BIGINT PRIMARY KEY, node_key TEXT, hostname TEXT, given_name TEXT,
+                user_id BIGINT, auth_key_id BIGINT, tags TEXT, expiry TIMESTAMPTZ,
+                ipv4 TEXT, ipv6 TEXT, deleted_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+            );
+            INSERT INTO nodes
+                (id, node_key, hostname, given_name, user_id, auth_key_id, tags,
+                 expiry, created_at, updated_at)
+            VALUES
+                (1, 'nodekey:orphan', 'orphan', 'orphan', NULL, 20, 'null', NULL,
+                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (2, 'nodekey:tagged', 'tagged', 'tagged', NULL, 20, '["tag:server"]',
+                 '2020-06-01 00:00:00+00', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (3, 'nodekey:untagged', 'untagged', 'untagged', 10, NULL, 'null',
+                 '2020-06-01 00:00:00+00', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+                (4, 'nodekey:cli-orphan', 'cli-orphan', 'cli-orphan', NULL, NULL, 'null',
+                 NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            "#,
+        )
+        .execute(&mut schema.conn)
+        .await?;
+
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let nodes: Vec<(i64, Option<i64>, String, bool)> =
+            sqlx::query_as("SELECT id, user_id, tags, expiry IS NOT NULL FROM nodes ORDER BY id")
+                .fetch_all(&mut schema.conn)
+                .await?;
+        assert_eq!(
+            nodes,
+            vec![
+                (1, Some(10), "[]".into(), false),
+                (2, None, "[\"tag:server\"]".into(), false),
+                (3, Some(10), "[]".into(), true),
+                (4, None, "[]".into(), false),
+            ]
+        );
+
+        let version: String =
+            sqlx::query_scalar("SELECT version FROM database_versions WHERE id = 1")
+                .fetch_one(&mut schema.conn)
+                .await?;
+        assert_eq!(version, HEADSCALE_GO_CURRENT_VERSION);
+        let go_migrations: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM migrations ORDER BY id")
+                .fetch_all(&mut schema.conn)
+                .await?;
+        for id in [
+            "202602201200-clear-tagged-node-user-id",
+            "202605221435-clear-zero-time-node-expiry",
+            "202606181200-recover-null-tags-node-user-id",
+            "202607241200-clear-tagged-node-expiry",
+        ] {
+            assert!(go_migrations.iter().any(|applied| applied == id));
+        }
+
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+        let restarted: Vec<(i64, Option<i64>, String, bool)> =
+            sqlx::query_as("SELECT id, user_id, tags, expiry IS NOT NULL FROM nodes ORDER BY id")
+                .fetch_all(&mut schema.conn)
+                .await?;
+        assert_eq!(restarted, nodes);
+
+        Ok::<(), headscale_db::DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_policy_primitives_append_read_and_ignore_deleted_rows() -> TestResult {
     let Some(mut schema) = TempSchema::open("policies").await? else {
         return Ok(());
@@ -564,6 +704,18 @@ async fn postgres_user_primitives_match_sqlite_contract() -> TestResult {
         assert!(alice.created_at > 0);
         assert_eq!(alice.created_at, alice.updated_at);
         assert!(alice.deleted_at.is_none());
+        let (stored_created_at_us,): (i64,) = sqlx::query_as(
+            "SELECT (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT FROM users WHERE id = $1",
+        )
+        .bind(alice.id)
+        .fetch_one(&mut schema.conn)
+        .await?;
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&alice.created_at_text)
+                .unwrap()
+                .timestamp_micros(),
+            stored_created_at_us
+        );
 
         assert_eq!(
             users::get_postgres_by_id_on_connection(&mut schema.conn, alice.id)

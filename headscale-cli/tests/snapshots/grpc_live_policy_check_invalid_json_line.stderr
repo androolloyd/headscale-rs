@@ -1,1 +1,1 @@
-{"error":"bad request (400): checking policy: policy document failed schema validation: unknown field \"unknown\""}
+{"error":"rpc error: code = InvalidArgument desc = parsing policy: unknown field: \"unknown\""}

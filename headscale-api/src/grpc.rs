@@ -154,13 +154,13 @@ pub mod upstream {
     use parking_lot::Mutex;
     use prost::Message as _;
     use prost_types::FileDescriptorSet;
-    use rand_core::RngCore;
     use tonic::{Request, Response, Status, metadata::MetadataMap};
 
     use crate::admin::{
         ApiKeyAdmin, ApiKeyAdminError, ApiKeyAdminKey, ApiKeyMintRequest, MachineAdmin,
-        MachineAdminError, MachineAdminRecord, PreauthAdmin, PreauthAdminError, PreauthAdminKey,
-        PreauthMintRequest, UserAdmin, UserRecord, UserRegistry, UserRegistryError,
+        MachineAdminError, MachineAdminMutation, MachineAdminRecord, MachineAdminView,
+        PreauthAdmin, PreauthAdminError, PreauthAdminKey, PreauthAdminKeyView, PreauthMintRequest,
+        UserAdmin, UserRecord, UserRegistry, UserRegistryError,
     };
     use crate::generated::headscale_service_server::{HeadscaleService, HeadscaleServiceServer};
     use crate::generated::{
@@ -181,14 +181,15 @@ pub mod upstream {
         SetPolicyResponse, SetTagsRequest, SetTagsResponse, User as ProtoUser,
     };
     use crate::policy::{
-        PolicyCheckNode, PolicyDoc, PolicyStore, check_policy_semantics, parse_hujson_policy,
-        validate_requested_tags_for_node,
+        PolicyCheckNodeSnapshot, PolicyDoc, PolicyParseError, PolicyStore, PolicyUser,
+        check_policy_semantics_for_snapshot, compile_policy_for_snapshot,
+        warn_policy_tests_at_boot_for_snapshot,
     };
     use crate::tailscale_wire::routes::{
         PrimaryRouteState, active_approved_routes, active_exit_routes, normalize_advertised_routes,
         normalize_routes,
     };
-    use crate::tailscale_wire::wire::stable_id_from_key;
+    use crate::tailscale_wire::wire::{ZERO_DISCO_KEY, stable_id_from_key};
     use crate::tailscale_wire::{IpAllocator, MachineRecord, MachineRegistry};
 
     const AUTH_PREFIX: &str = "Bearer ";
@@ -240,6 +241,7 @@ pub mod upstream {
         Memory,
         Database,
         File { path: PathBuf },
+        Unsupported { mode: String },
     }
 
     #[async_trait]
@@ -257,6 +259,45 @@ pub mod upstream {
     pub trait PolicyPersistence: Send + Sync {
         async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String>;
         async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String>;
+
+        // Existing custom backends retain their whole-second contract. Native
+        // pools override these methods without changing PersistedPolicy fields.
+        async fn get_latest_policy_with_timestamp(
+            &self,
+        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
+            self.get_latest_policy().await.map(|policy| {
+                policy.map(|policy| {
+                    let updated_at = unix_to_timestamp(policy.updated_at);
+                    (policy, updated_at)
+                })
+            })
+        }
+
+        async fn set_policy_with_timestamp(
+            &self,
+            policy: &str,
+        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
+            self.set_policy(policy).await.map(|policy| {
+                let updated_at = unix_to_timestamp(policy.updated_at);
+                (policy, updated_at)
+            })
+        }
+    }
+
+    fn policy_with_timestamp(
+        value: headscale_db::policies::TimedPolicyRow,
+    ) -> (PersistedPolicy, prost_types::Timestamp) {
+        let updated_at = value.updated_at_datetime().map_or_else(
+            || unix_to_timestamp(value.row.updated_at),
+            datetime_to_timestamp,
+        );
+        (
+            PersistedPolicy {
+                policy: value.row.data,
+                updated_at: value.row.updated_at,
+            },
+            updated_at,
+        )
     }
 
     #[cfg(feature = "admin")]
@@ -285,25 +326,34 @@ pub mod upstream {
     #[async_trait]
     impl PolicyPersistence for sqlx::SqlitePool {
         async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
-            headscale_db::policies::get_latest(self)
+            self.get_latest_policy_with_timestamp()
                 .await
-                .map(|row| {
-                    row.map(|policy| PersistedPolicy {
-                        policy: policy.data,
-                        updated_at: policy.updated_at,
-                    })
-                })
-                .map_err(|e| e.to_string())
+                .map(|value| value.map(|(policy, _)| policy))
         }
 
         async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
-            headscale_db::policies::set(self, policy)
+            self.set_policy_with_timestamp(policy)
                 .await
-                .map(|policy| PersistedPolicy {
-                    policy: policy.data,
-                    updated_at: policy.updated_at,
-                })
-                .map_err(|e| e.to_string())
+                .map(|(policy, _)| policy)
+        }
+
+        async fn get_latest_policy_with_timestamp(
+            &self,
+        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
+            headscale_db::policies::get_latest_with_timestamp(self)
+                .await
+                .map(|value| value.map(policy_with_timestamp))
+                .map_err(|error| error.to_string())
+        }
+
+        async fn set_policy_with_timestamp(
+            &self,
+            policy: &str,
+        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
+            headscale_db::policies::set_with_timestamp(self, policy)
+                .await
+                .map(policy_with_timestamp)
+                .map_err(|error| error.to_string())
         }
     }
 
@@ -311,25 +361,34 @@ pub mod upstream {
     #[async_trait]
     impl PolicyPersistence for sqlx::PgPool {
         async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
-            headscale_db::policies::get_latest_postgres(self)
+            self.get_latest_policy_with_timestamp()
                 .await
-                .map(|row| {
-                    row.map(|policy| PersistedPolicy {
-                        policy: policy.data,
-                        updated_at: policy.updated_at,
-                    })
-                })
-                .map_err(|e| e.to_string())
+                .map(|value| value.map(|(policy, _)| policy))
         }
 
         async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
-            headscale_db::policies::set_postgres(self, policy)
+            self.set_policy_with_timestamp(policy)
                 .await
-                .map(|policy| PersistedPolicy {
-                    policy: policy.data,
-                    updated_at: policy.updated_at,
-                })
-                .map_err(|e| e.to_string())
+                .map(|(policy, _)| policy)
+        }
+
+        async fn get_latest_policy_with_timestamp(
+            &self,
+        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
+            headscale_db::policies::get_latest_postgres_with_timestamp(self)
+                .await
+                .map(|value| value.map(policy_with_timestamp))
+                .map_err(|error| error.to_string())
+        }
+
+        async fn set_policy_with_timestamp(
+            &self,
+            policy: &str,
+        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
+            headscale_db::policies::set_postgres_with_timestamp(self, policy)
+                .await
+                .map(policy_with_timestamp)
+                .map_err(|error| error.to_string())
         }
     }
 
@@ -390,6 +449,17 @@ pub mod upstream {
             mut self,
             policy_persistence: Arc<dyn PolicyPersistence>,
         ) -> Self {
+            let debug_persistence = policy_persistence.clone();
+            self.policy.set_debug_source(move || {
+                let persistence = debug_persistence.clone();
+                async move {
+                    persistence
+                        .get_latest_policy()
+                        .await?
+                        .map(|policy| policy.policy.into_bytes())
+                        .ok_or_else(|| "acl policy not found".to_owned())
+                }
+            });
             self.policy_persistence = Some(policy_persistence);
             self.policy_mode = PolicyMode::Database;
             self
@@ -406,7 +476,31 @@ pub mod upstream {
         }
 
         pub fn with_policy_file(mut self, path: impl Into<PathBuf>) -> Self {
-            self.policy_mode = PolicyMode::File { path: path.into() };
+            let path = path.into();
+            let debug_path = path.clone();
+            self.policy.set_debug_source(move || {
+                let path = debug_path.clone();
+                async move {
+                    if path.as_os_str().is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    tokio::fs::read(&path).await.map_err(|error| {
+                        format!("reading policy from path {}: {error}", path.display())
+                    })
+                }
+            });
+            self.policy_mode = PolicyMode::File { path };
+            self
+        }
+
+        pub fn with_unsupported_policy_mode(mut self, mode: impl Into<String>) -> Self {
+            let mode = mode.into();
+            let debug_mode = mode.clone();
+            self.policy.set_debug_source(move || {
+                let mode = debug_mode.clone();
+                async move { Err(format!("unsupported policy mode: {mode}")) }
+            });
+            self.policy_mode = PolicyMode::Unsupported { mode };
             self
         }
 
@@ -416,6 +510,17 @@ pub mod upstream {
         }
 
         pub async fn load_policy_from_persistence(&self) -> Result<bool, Status> {
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                service.load_policy_from_persistence_inner().await
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing policy load: {error}")))?
+        }
+
+        async fn load_policy_from_persistence_inner(&self) -> Result<bool, Status> {
             let Some(policy_persistence) = &self.policy_persistence else {
                 return Ok(false);
             };
@@ -426,53 +531,94 @@ pub mod upstream {
             else {
                 return Ok(false);
             };
-            let doc = parse_hujson_policy(&policy.policy).map_err(|e| {
-                Status::invalid_argument(format!("loading policy from database: {e}"))
+            if policy.policy.is_empty() {
+                return Ok(false);
+            }
+            // Same native decoder as set/check/file reload, so a stored policy
+            // that Go accepts is never rejected by a narrower admin-path parser.
+            let (mut doc, source) = crate::policy::parse_hujson_policy_bytes(
+                policy.policy.as_bytes(),
+            )
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "loading policy from database: {}",
+                    native_policy_parse_error(e)
+                ))
             })?;
+            self.validate_candidate_policy(&mut doc, &source, "reloading policy")
+                .await?;
             self.policy
-                .set_at_quiet(doc, policy.policy, policy.updated_at);
+                .try_set_at_quiet(doc, policy.policy, policy.updated_at)
+                .map_err(|error| Status::invalid_argument(format!("reloading policy: {error}")))?;
             Ok(true)
         }
 
         /// Reload the configured policy source and fan out route/policy changes.
         ///
-        /// This is the production SIGHUP path: headscale-go v0.28 reloads the
-        /// ACL policy on SIGHUP rather than reparsing the full server config.
+        /// This is the production v0.29.5 SIGHUP path. The result reports
+        /// whether nonempty policy bytes were loaded. A successful configured
+        /// reload still invalidates SSH approvals and rechecks routes when
+        /// those bytes are empty or the database has no policy row.
         pub async fn reload_policy_from_config(&self) -> Result<bool, Status> {
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                service.reload_policy_from_config_inner().await
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing policy reload: {error}")))?
+        }
+
+        async fn reload_policy_from_config_inner(&self) -> Result<bool, Status> {
+            let reload_requested = matches!(
+                &self.policy_mode,
+                PolicyMode::File { .. } | PolicyMode::Database | PolicyMode::Unsupported { .. }
+            );
             let loaded = match &self.policy_mode {
                 PolicyMode::File { path } => {
                     if path.as_os_str().is_empty() {
                         return Ok(false);
                     }
-                    let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
+                    let original = tokio::fs::read(path).await.map_err(|e| {
                         Status::unknown(format!("reloading policy file {}: {e}", path.display()))
                     })?;
-                    if raw.is_empty() {
-                        return Ok(false);
+                    if original.is_empty() {
+                        false
+                    } else {
+                        let (mut doc, raw) = crate::policy::parse_hujson_policy_bytes(&original)
+                            .map_err(|e| {
+                                Status::invalid_argument(format!(
+                                    "reloading policy file {}: {e}",
+                                    path.display()
+                                ))
+                            })?;
+                        self.validate_candidate_policy(&mut doc, &raw, "reloading policy")
+                            .await?;
+                        self.policy
+                            .try_set_bytes_quiet(doc, original, raw)
+                            .map_err(|error| {
+                                Status::invalid_argument(format!("reloading policy: {error}"))
+                            })?;
+                        true
                     }
-                    let doc = parse_hujson_policy(&raw).map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "reloading policy file {}: {e}",
-                            path.display()
-                        ))
-                    })?;
-                    self.validate_candidate_policy(&doc, "reloading policy")
-                        .await?;
-                    self.policy.set_quiet(doc, raw);
-                    true
                 }
-                PolicyMode::Database => self.load_policy_from_persistence().await?,
-                PolicyMode::Memory => false,
+                PolicyMode::Database => self.load_policy_from_persistence_inner().await?,
+                PolicyMode::Memory | PolicyMode::Unsupported { .. } => false,
             };
 
-            if loaded {
-                let auto_approvals = crate::admin::machines::apply_policy_auto_approvals(
+            if reload_requested {
+                if !loaded {
+                    self.policy.invalidate_ssh_auth();
+                }
+                self.registration_cache.clear_ssh_auth();
+                crate::admin::machines::apply_policy_auto_approvals(
                     &self.policy,
                     self.machines.as_ref(),
                 )
-                .await;
+                .await
+                .map_err(machine_error_to_status)?;
                 self.policy.notify_change();
-                auto_approvals.map_err(machine_error_to_status)?;
             }
 
             Ok(loaded)
@@ -486,10 +632,10 @@ pub mod upstream {
                 return Ok(());
             }
             let token = bearer_token(metadata)?.to_string();
-            if self.api_keys.validate(&token).await {
-                Ok(())
-            } else {
-                Err(Status::unauthenticated("invalid token"))
+            match self.api_keys.validate_for_state(&token).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(Status::unauthenticated("invalid token")),
+                Err(_) => Err(Status::internal("validating token")),
             }
         }
 
@@ -507,11 +653,55 @@ pub mod upstream {
         }
 
         pub fn with_wire_registry(mut self, wire_registry: Arc<MachineRegistry>) -> Self {
+            wire_registry.configure_policy(&self.policy);
+            if let Some(allocator) = &self.ip_allocator {
+                wire_registry.configure_ip_allocator(allocator);
+            }
             self.wire_registry = Some(wire_registry);
             self
         }
 
+        async fn node_proto(
+            &self,
+            machine: &MachineAdminRecord,
+            subnet_routes: &[String],
+            for_list: bool,
+        ) -> Result<Node, Status> {
+            let view = self
+                .machines
+                .get_view(&self.machines.mutation_selector(machine))
+                .await
+                .map_err(machine_error_to_status)?
+                .unwrap_or_else(|| MachineAdminView::from_record(machine.clone()));
+            self.node_view_proto(&view, subnet_routes, for_list).await
+        }
+
+        async fn node_view_proto(
+            &self,
+            view: &MachineAdminView,
+            subnet_routes: &[String],
+            for_list: bool,
+        ) -> Result<Node, Status> {
+            let mut node = machine_to_node_with_routes_and_user(
+                &view.record,
+                &self.users,
+                &self.preauth,
+                subnet_routes,
+                view.associations.user.clone(),
+                view.associations.auth_key.clone(),
+            )
+            .await?;
+            node.name.clone_from(&view.raw_hostname);
+            if for_list && !view.record.tags.is_empty() {
+                node.user = Some(tagged_devices_user_to_proto());
+            }
+            Ok(node)
+        }
+
         pub fn with_ip_allocator(mut self, ip_allocator: Arc<dyn IpAllocator>) -> Self {
+            if let Some(registry) = &self.wire_registry {
+                registry.configure_ip_allocator(&ip_allocator);
+            }
             self.ip_allocator = Some(ip_allocator);
             self
         }
@@ -587,102 +777,187 @@ pub mod upstream {
             self.authorize_api_key_metadata(request.metadata()).await
         }
 
-        async fn machine_by_id(&self, node_id: u64) -> Result<MachineAdminRecord, Status> {
-            self.machines
-                .list()
+        async fn machine_view_by_id(&self, node_id: u64) -> Result<MachineAdminView, Status> {
+            if let Some(view) = self
+                .machines
+                .get_view(&node_id.to_string())
                 .await
+                .map_err(machine_error_to_status)?
+                && machine_numeric_id(&view.record) == node_id
+            {
+                return Ok(view);
+            }
+            self.machines
+                .list_views()
+                .await
+                .map_err(machine_error_to_status)?
                 .into_iter()
-                .find(|node| machine_numeric_id(node) == node_id)
+                .find(|view| machine_numeric_id(&view.record) == node_id)
                 .ok_or_else(|| Status::not_found("node not found"))
+        }
+
+        async fn node_mutation_selector(&self, node_id: u64) -> Result<String, Status> {
+            if let Some(selector) = self.machines.numeric_mutation_selector(node_id) {
+                return Ok(selector);
+            }
+            self.machine_by_id(node_id)
+                .await
+                .map(|record| self.machines.mutation_selector(&record))
+        }
+
+        async fn machine_by_id(&self, node_id: u64) -> Result<MachineAdminRecord, Status> {
+            self.machine_view_by_id(node_id)
+                .await
+                .map(|view| view.record)
+        }
+
+        async fn refresh_policy_users(&self) -> Result<crate::policy::PolicyUserChange, String> {
+            let identities = self
+                .users
+                .policy_users()
+                .await
+                .map_err(|error| error.to_string())?;
+            self.policy.set_users_with_change_quiet(identities)
         }
 
         async fn validate_candidate_policy(
             &self,
-            doc: &PolicyDoc,
+            doc: &mut PolicyDoc,
+            raw: &str,
             context: &str,
         ) -> Result<(), Status> {
-            let machines = self.machines.list().await;
-            let nodes = machines
-                .iter()
-                .map(policy_check_node_from_machine)
-                .collect::<Vec<_>>();
-            check_policy_semantics(doc, &nodes)
-                .map_err(|e| Status::invalid_argument(format!("{context}: {e}")))
+            // Set/reload use the directory retained by the live manager.
+            // CheckPolicy supplies its separately loaded sandbox directory.
+            let identities = self.policy.users_snapshot();
+            Self::validate_candidate_policy_users(doc, raw, context, identities)?;
+            let nodes = self
+                .machines
+                .policy_nodes_for_check()
+                .await
+                .map_err(machine_error_to_status)?;
+            Self::validate_candidate_policy_nodes(doc, raw, context, &nodes)
         }
 
-        async fn debug_machine_record(
-            &self,
-            user: &str,
-            name: &str,
-            routes: Vec<String>,
-        ) -> MachineAdminRecord {
-            let node_key = self.unique_node_key().await;
-            let now = chrono::Utc::now().timestamp().max(0) as u64;
-            MachineAdminRecord {
-                node_id: 0,
-                ipv4: String::new(),
-                ipv6: None,
-                id: node_key,
-                name: name.to_string(),
-                user: user.to_string(),
-                user_id: None,
-                auth_key_id: None,
-                online: false,
-                last_seen: now,
-                created_at: now,
-                expiry: None,
-                machine_key_hex: random_key_hex(),
-                disco_key: String::new(),
-                os: "TestOS".into(),
-                version: "unknown".into(),
-                tags: Vec::new(),
-                routes,
-                approved_routes: Vec::new(),
-                register_method: RegisterMethod::Unspecified as i32,
-                expired: false,
+        fn validate_candidate_policy_users(
+            doc: &mut PolicyDoc,
+            raw: &str,
+            context: &str,
+            mut identities: Vec<PolicyUser>,
+        ) -> Result<(), Status> {
+            identities.sort_by_key(|user| user.id);
+            crate::policy::validate_policy_user_references_for_source(doc, raw, &identities)
+                .map_err(|error| {
+                    let message = format!("validating policy user references: {error}");
+                    if context == "setting policy" {
+                        Status::unknown(format!("{context}: {message}"))
+                    } else {
+                        Status::invalid_argument(message)
+                    }
+                })?;
+            doc.users = Some(identities);
+            Ok(())
+        }
+
+        fn validate_candidate_policy_nodes(
+            doc: &PolicyDoc,
+            raw: &str,
+            context: &str,
+            nodes: &[PolicyCheckNodeSnapshot],
+        ) -> Result<(), Status> {
+            if context == "checking policy" {
+                // CheckPolicy constructs an isolated manager before its
+                // SetPolicy test pass. Constructor errors take precedence
+                // over failed assertions; the live store is never changed.
+                compile_policy_for_snapshot(doc, raw, nodes).map_err(Status::invalid_argument)?;
+                // NewPolicyManager warns after constructor compilation, even
+                // when the following sandbox SetPolicy rejects its tests.
+                warn_policy_tests_at_boot_for_snapshot(doc, raw, nodes);
             }
+            check_policy_semantics_for_snapshot(doc, raw, nodes).map_err(|error| {
+                if context == "setting policy" {
+                    Status::unknown(format!("{context}: {error}"))
+                } else if context == "checking policy" {
+                    Status::invalid_argument(error)
+                } else {
+                    Status::invalid_argument(format!("{context}: {error}"))
+                }
+            })
+        }
+
+        async fn user_by_stored_name(&self, name: &str) -> Result<UserRecord, Status> {
+            let identities = self
+                .users
+                .policy_users()
+                .await
+                .map_err(user_lookup_error_to_unknown)?;
+            // Gorm ignores a zero Name field in its struct WHERE predicate.
+            let mut matching = identities
+                .into_iter()
+                .filter(|user| name.is_empty() || user.name == name);
+            let first = matching.next().ok_or_else(upstream_user_not_found_status)?;
+            let count = 1 + matching.count();
+            if count != 1 {
+                return Err(Status::unknown(format!(
+                    "expected exactly one user, found {count}"
+                )));
+            }
+            let mut user = self
+                .users
+                .get_by_id(first.id)
+                .await
+                .map_err(user_lookup_error_to_unknown)?
+                .ok_or_else(upstream_user_not_found_status)?;
+            user.name = first.name;
+            Ok(user)
         }
 
         async fn prepare_registration_addresses(
             &self,
             record: &mut MachineAdminRecord,
         ) -> Result<(), Status> {
-            if let Some(existing) = self.machines.existing_auth_path_record(record).await {
-                record.ipv4 = existing.ipv4;
-                record.ipv6 = existing.ipv6;
-                return Ok(());
-            }
-            let Some(ip_allocator) = self.ip_allocator.as_deref() else {
-                return Ok(());
-            };
-
-            let ipv4 = if ip_allocator.ipv4_enabled() {
-                Some(ip_allocator.allocate(&record.id).map_err(|e| {
-                    Status::internal(format!("allocating IPs: allocating IPv4 address: {e}"))
-                })?)
-            } else {
-                None
-            };
-            let ipv6 = ip_allocator.allocate_ipv6(&record.id).map_err(|e| {
-                Status::internal(format!("allocating IPs: allocating IPv6 address: {e}"))
-            })?;
-            if ipv4.is_none() && ipv6.is_none() {
-                return Err(Status::internal("allocating IPs: no IP prefixes enabled"));
-            }
-            record.ipv4 = ipv4.map(|ip| ip.to_string()).unwrap_or_default();
-            record.ipv6 = ipv6.map(|ip| ip.to_string());
-            Ok(())
+            crate::admin::machines::prepare_auth_path_addresses(
+                self.machines.as_ref(),
+                self.ip_allocator.as_deref(),
+                &self.policy,
+                record,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::admin::machines::AuthPathAddressError::Selection(error) => {
+                    machine_error_to_status(error)
+                }
+                crate::admin::machines::AuthPathAddressError::Tags(error) => {
+                    Status::invalid_argument(error)
+                }
+                crate::admin::machines::AuthPathAddressError::Allocation(error) => {
+                    Status::internal(error)
+                }
+            })
         }
 
-        async fn unique_node_key(&self) -> String {
+        async fn unique_node_key(&self) -> Result<String, Status> {
             loop {
-                let node_key = random_key_hex();
+                let node_key = random_key_hex()?;
                 if self.machines.get(&node_key).await.is_none()
                     && !self.registration_cache.contains_node_key(&node_key)
                 {
-                    return node_key;
+                    return Ok(node_key);
                 }
             }
+        }
+
+        /// `State.AutoApproveRoutes` for a node registered through the CLI path.
+        async fn auto_approve_registered_node(
+            &self,
+            node: &MachineAdminRecord,
+        ) -> Result<(), MachineAdminError> {
+            crate::admin::machines::auto_approve_registered_node(
+                self.machines.as_ref(),
+                &self.policy,
+                self.wire_registry.as_deref(),
+                node,
+            )
+            .await
         }
 
         async fn register_node_body(
@@ -690,15 +965,19 @@ pub mod upstream {
             body: RegisterNodeRequest,
         ) -> Result<RegisterNodeResponse, Status> {
             let registration_id = registration_cache_key_from_register_key(&body.key)?;
-            let user = self
+            let selected_user = self
                 .users
-                .get(&body.user)
+                .get_for_registration_by_name(&body.user)
                 .await
-                .map_err(user_error_to_status)?
+                .map_err(|error| {
+                    let status = user_lookup_error_to_unknown(error);
+                    Status::unknown(format!("looking up user: {}", status.message()))
+                })?
                 .ok_or_else(|| Status::unknown("looking up user: user not found"))?;
-            let pending = match self
+            let selected_user_id = selected_user.user.id;
+            let (mut pending, hostinfo, completion) = match self
                 .registration_cache
-                .get_pending_registration(&registration_id)
+                .pending_registration_completion(&registration_id)
             {
                 Some(pending) => pending,
                 None if self.registration_cache.get(&registration_id).is_some() => {
@@ -708,38 +987,138 @@ pub mod upstream {
                 }
                 None => return Err(Status::unknown("node not found in registration cache")),
             };
-            let mut record = wire_record_to_machine_admin(pending.clone());
-            record.user = user.name;
-            record.register_method = RegisterMethod::Cli as i32;
-            self.prepare_registration_addresses(&mut record).await?;
-            apply_requested_tags(&self.policy, &mut record)?;
-
-            let result = self
-                .machines
-                .complete_registration(record, &self.policy, Some(pending.clone()))
-                .await
-                .map_err(machine_error_to_status)?;
-            let node = result.record;
-            let wire_record = machine_admin_to_wire_record_with_pending(&node, &pending);
-            if let Some(registry) = &self.wire_registry {
-                if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
-                    registry.replace_node_key_auth_completion(
-                        old_node_key_hex,
-                        wire_record.node_key_hex.clone(),
-                        wire_record.clone(),
-                    );
-                } else {
-                    registry.upsert_auth_completion(
-                        wire_record.node_key_hex.clone(),
-                        wire_record.clone(),
-                    );
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                // State.HandleNodeFromAuthPath resolves the numeric user after
+                // the pending entry exists, before waiting for its machine lock.
+                let captured_user = service
+                    .users
+                    .get_for_registration(selected_user_id)
+                    .await
+                    .map_err(|error| {
+                        let status = user_lookup_error_to_unknown(error);
+                        Status::unknown(format!("finding user: {}", status.message()))
+                    })?
+                    .ok_or_else(|| Status::unknown("finding user: user not found"))?;
+                let user = captured_user.user.clone();
+                let machine_key = pending.machine_key_hex.clone();
+                let node_key = pending.node_key_hex.clone();
+                let registration_lock =
+                    match service.machines.registration_guard(&machine_key).await {
+                        Some(guard) => Some(guard),
+                        None => match &service.wire_registry {
+                            Some(registry) => Some(registry.lock_registration(&machine_key).await),
+                            None => None,
+                        },
+                    };
+                let node_key_lock = match service
+                    .machines
+                    .node_key_registration_guard(&node_key)
+                    .await
+                {
+                    Some(guard) => Some(guard),
+                    None => match &service.wire_registry {
+                        Some(registry) => {
+                            Some(registry.lock_node_key_registration(&node_key).await)
+                        }
+                        None => None,
+                    },
+                };
+                let publication_scope = service
+                    .wire_registry
+                    .as_ref()
+                    .map(|registry| registry.registration_publication_scope(&pending));
+                set_registration_user_identity(&mut pending, &user);
+                let mut record = wire_record_to_machine_admin(pending.clone());
+                record.user = user.name.clone();
+                record.user_id = Some(user.id);
+                record.register_method = RegisterMethod::Cli as i32;
+                if let Some(registry) = &service.wire_registry {
+                    registry
+                        .validate_registration_node_key(&record.id, &record.machine_key_hex)
+                        .map_err(Status::invalid_argument)?;
                 }
-            }
-            self.registration_cache
-                .complete(&registration_id, wire_record);
-            Ok(RegisterNodeResponse {
-                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
+                service.prepare_registration_addresses(&mut record).await?;
+
+                let result = service
+                    .machines
+                    .complete_registration_with_user_snapshot(
+                        record,
+                        &service.policy,
+                        Some(pending.clone()),
+                        hostinfo,
+                        captured_user,
+                    )
+                    .await
+                    .map_err(machine_error_to_status)?;
+                let node = result.record;
+                let mut wire_record = service
+                    .machines
+                    .wire_record_for_publication(&node.id, service.wire_registry.as_deref())
+                    .await
+                    .map_err(machine_error_to_status)?
+                    .unwrap_or_else(|| machine_admin_to_wire_record_with_pending(&node, &pending));
+                let saved_user = service
+                    .wire_registry
+                    .as_ref()
+                    .and_then(|registry| registry.cached_native_user(&wire_record))
+                    .flatten();
+                set_registration_user_identity(
+                    &mut wire_record,
+                    saved_user.as_ref().unwrap_or(&user),
+                );
+                if wire_record.is_tagged() {
+                    wire_record.clear_user_identity();
+                }
+                if let Some(registry) = &service.wire_registry {
+                    if let Some(old_node_key_hex) = result.replaced_node_key_hex.as_deref() {
+                        registry
+                            .try_replace_node_key_auth_completion(
+                                old_node_key_hex,
+                                wire_record.node_key_hex.clone(),
+                                wire_record.clone(),
+                            )
+                            .map_err(Status::unknown)?;
+                    } else {
+                        registry
+                            .try_upsert_auth_completion(
+                                wire_record.node_key_hex.clone(),
+                                wire_record.clone(),
+                            )
+                            .map_err(Status::unknown)?;
+                    }
+                }
+                service
+                    .registration_cache
+                    .finish_registration(completion, wire_record);
+                // Go answers with the NodeView returned by HandleNodeFromAuthPath,
+                // i.e. the node as it was before AutoApproveRoutes ran (verified
+                // against v0.29.5: RegisterNode reports empty approved_routes, a
+                // following GetNode reports the auto-approved ones).
+                let response = RegisterNodeResponse {
+                    node: Some(service.node_proto(&node, &[], false).await?),
+                };
+                // Go's HandleNodeFromAuthPath releases the machine-key lock on
+                // return; the approval below takes the same locks again.
+                drop(publication_scope);
+                drop(node_key_lock);
+                drop(registration_lock);
+                // grpcv1.go RegisterNode: the node is now persisted and known to
+                // the policy manager, so State.AutoApproveRoutes can match the
+                // owner's addresses against the autoApprovers.
+                service
+                    .auto_approve_registered_node(&node)
+                    .await
+                    .map_err(|error| {
+                        Status::unknown(format!(
+                            "auto approving routes: {}",
+                            machine_error_to_status(error).message()
+                        ))
+                    })?;
+                Ok(response)
             })
+            .await
+            .map_err(|error| Status::internal(format!("finishing node registration: {error}")))?
         }
     }
 
@@ -769,20 +1148,32 @@ pub mod upstream {
         ) -> Result<Response<CreateUserResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let user = self
-                .users
-                .create_detailed(
-                    &body.name,
-                    &body.display_name,
-                    &body.email,
-                    &body.picture_url,
-                )
-                .await
-                .map_err(|e| create_user_error_to_status(&e))?;
-            self.policy.refresh();
-            Ok(Response::new(CreateUserResponse {
-                user: Some(user_record_to_proto(&user)),
-            }))
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                let user = service
+                    .users
+                    .create_for_state(
+                        &body.name,
+                        &body.display_name,
+                        &body.email,
+                        &body.picture_url,
+                    )
+                    .await
+                    .map_err(|e| create_user_error_to_status(&e))?;
+                service.refresh_policy_users().await.map_err(|error| {
+                    Status::internal(format!(
+                        "creating user: updating policy manager after user creation: {error}"
+                    ))
+                })?;
+                service.policy.refresh();
+                Ok(Response::new(CreateUserResponse {
+                    user: Some(user_record_to_proto(&user)),
+                }))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing user creation: {error}")))?
         }
 
         async fn rename_user(
@@ -791,24 +1182,48 @@ pub mod upstream {
         ) -> Result<Response<RenameUserResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            if self
-                .users
-                .get_by_id(body.old_id)
-                .await
-                .map_err(direct_user_error_to_status)?
-                .is_none()
-            {
-                return Err(upstream_user_not_found_status());
-            }
-            let user = self
-                .users
-                .rename_by_id(body.old_id, &body.new_name)
-                .await
-                .map_err(direct_user_error_to_status)?;
-            self.policy.refresh();
-            Ok(Response::new(RenameUserResponse {
-                user: Some(user_record_to_proto(&user)),
-            }))
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                if service
+                    .users
+                    .get_for_registration(body.old_id)
+                    .await
+                    .map_err(direct_user_error_to_status)?
+                    .is_none()
+                {
+                    return Err(upstream_user_not_found_status());
+                }
+                service
+                    .users
+                    .rename_for_state(body.old_id, &body.new_name)
+                    .await
+                    .map_err(direct_user_error_to_status)?;
+                let change = service.refresh_policy_users().await.map_err(|error| {
+                    Status::unknown(format!(
+                        "updating policy manager after user update: {error}"
+                    ))
+                })?;
+                // Go UpdateUser refreshes the manager's account directory;
+                // cached Node.User associations retain their prior projection.
+                service.policy.notify_user_change(change);
+                // Go performs this lookup after committing and dispatching.
+                // Empty NewName is a zero struct-WHERE field: it selects all
+                // users, and a failed/ambiguous lookup does not undo the write.
+                let user = service
+                    .users
+                    .get_for_registration_by_name(&body.new_name)
+                    .await
+                    .map_err(direct_user_error_to_status)?
+                    .ok_or_else(upstream_user_not_found_status)?
+                    .user;
+                Ok(Response::new(RenameUserResponse {
+                    user: Some(user_record_to_proto(&user)),
+                }))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing user rename: {error}")))?
         }
 
         async fn delete_user(
@@ -817,29 +1232,47 @@ pub mod upstream {
         ) -> Result<Response<DeleteUserResponse>, Status> {
             self.authorize(&request).await?;
             let id = request.into_inner().id;
-            let Some(user) = self
-                .users
-                .get_by_id(id)
-                .await
-                .map_err(direct_user_error_to_status)?
-            else {
-                return Err(upstream_user_not_found_status());
-            };
-            if self
-                .machines
-                .list()
-                .await
-                .into_iter()
-                .any(|node| node.user == user.name && node.tags.is_empty())
-            {
-                return Err(upstream_user_not_empty_status());
-            }
-            self.users
-                .delete_by_id(id)
-                .await
-                .map_err(direct_user_error_to_status)?;
-            self.notify_user_removed_full_update();
-            Ok(Response::new(DeleteUserResponse {}))
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                let Some(user) = service
+                    .users
+                    .get_for_registration(id)
+                    .await
+                    .map_err(direct_user_error_to_status)?
+                else {
+                    return Err(upstream_user_not_found_status());
+                };
+                let user = user.user;
+                if !service.users.checks_user_owned_nodes_in_storage()
+                    && service.machines.list().await.into_iter().any(|node| {
+                        node.tags.is_empty()
+                            && node.user_id.map_or_else(
+                                || !user.name.is_empty() && node.user == user.name,
+                                |owner| owner == user.id,
+                            )
+                    })
+                {
+                    return Err(upstream_user_not_empty_status());
+                }
+                service
+                    .users
+                    .delete_by_id(id)
+                    .await
+                    .map_err(direct_user_error_to_status)?;
+                let change = service.refresh_policy_users().await.map_err(|error| {
+                    Status::unknown(format!("updating policy after user deletion: {error}"))
+                })?;
+                if change.policy_changed {
+                    service.policy.notify_user_change(change);
+                } else {
+                    service.notify_user_removed_full_update();
+                }
+                Ok(Response::new(DeleteUserResponse {}))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing user deletion: {error}")))?
         }
 
         async fn list_users(
@@ -848,35 +1281,11 @@ pub mod upstream {
         ) -> Result<Response<ListUsersResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let mut users = match (body.name.is_empty(), body.email.is_empty(), body.id) {
-                (false, _, _) => self
-                    .users
-                    .get(&body.name)
-                    .await
-                    .map_err(direct_user_error_to_status)?
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                (true, false, _) => self
-                    .users
-                    .all()
-                    .await
-                    .map_err(direct_user_error_to_status)?
-                    .into_iter()
-                    .filter(|u| u.email == body.email)
-                    .collect(),
-                (true, true, id) if id != 0 => self
-                    .users
-                    .get_by_id(id)
-                    .await
-                    .map_err(direct_user_error_to_status)?
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                _ => self
-                    .users
-                    .all()
-                    .await
-                    .map_err(direct_user_error_to_status)?,
-            };
+            let mut users = self
+                .users
+                .list_for_state(&body.name, &body.email, body.id)
+                .await
+                .map_err(direct_user_error_to_status)?;
             users.sort_by_key(|u| u.id);
             Ok(Response::new(ListUsersResponse {
                 users: users.iter().map(user_record_to_proto).collect(),
@@ -889,48 +1298,81 @@ pub mod upstream {
         ) -> Result<Response<CreatePreAuthKeyResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            for tag in &body.acl_tags {
-                validate_tag(tag)?;
-            }
-            if body.user == 0 && body.acl_tags.is_empty() {
-                return Err(Status::unknown(
-                    "auth-key must be either tagged or owned by user",
-                ));
-            }
-            let user = if body.user == 0 {
-                String::new()
-            } else {
-                self.users
-                    .get_by_id(body.user)
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                for tag in &body.acl_tags {
+                    validate_tag(tag)?;
+                }
+                if body.user == 0
+                    && body.acl_tags.is_empty()
+                    && !service.preauth.checks_key_owner_in_storage()
+                {
+                    return Err(Status::unknown(
+                        "auth-key must be either tagged or owned by user",
+                    ));
+                }
+                let user = if body.user == 0 {
+                    String::new()
+                } else {
+                    let user = service
+                        .users
+                        .get_for_registration(body.user)
+                        .await
+                        .map_err(direct_user_error_to_status)?
+                        .ok_or_else(|| Status::unknown("user not found"))?
+                        .user;
+                    // Native mint uses the numeric ID. Retain the established
+                    // display selector for adapters taking the fallback path.
+                    user_record_admin_name(&user)
+                };
+                let expiration = Some(match body.expiration.as_ref() {
+                    Some(timestamp) => {
+                        let nanos = i64::from(timestamp.nanos);
+                        let seconds = timestamp
+                            .seconds
+                            .checked_add(nanos.div_euclid(1_000_000_000))
+                            .ok_or_else(|| Status::invalid_argument("expiration out of range"))?;
+                        chrono::DateTime::from_timestamp(
+                            seconds,
+                            nanos.rem_euclid(1_000_000_000) as u32,
+                        )
+                        .ok_or_else(|| Status::invalid_argument("expiration out of range"))?
+                    }
+                    None => chrono::DateTime::from_timestamp(GO_ZERO_TIME_UNIX_SECONDS, 0)
+                        .expect("Go zero timestamp is representable"),
+                });
+                let mint = PreauthMintRequest {
+                    user,
+                    ttl_secs: 0,
+                    reusable: body.reusable,
+                    ephemeral: body.ephemeral,
+                    tags: body.acl_tags,
+                };
+                let native = service
+                    .preauth
+                    .mint_with_user_id(
+                        (body.user != 0).then_some(body.user),
+                        mint.clone(),
+                        expiration,
+                    )
                     .await
-                    .map_err(user_lookup_error_to_unknown)?
-                    .ok_or_else(|| Status::unknown("user not found"))?
-                    .name
-            };
-            let expiration = Some(
-                body.expiration
-                    .as_ref()
-                    .map(timestamp_to_unix)
-                    .transpose()?
-                    .unwrap_or(GO_ZERO_TIME_UNIX_SECONDS),
-            );
-            let created = self
-                .preauth
-                .mint_with_expiration(
-                    PreauthMintRequest {
-                        user,
-                        ttl_secs: 0,
-                        reusable: body.reusable,
-                        ephemeral: body.ephemeral,
-                        tags: body.acl_tags,
-                    },
-                    expiration,
-                )
-                .await
-                .map_err(preauth_error_to_status)?;
-            Ok(Response::new(CreatePreAuthKeyResponse {
-                pre_auth_key: Some(preauth_key_to_proto(&created, &self.users).await?),
-            }))
+                    .map_err(preauth_error_to_status)?;
+                let key = if let Some(view) = native {
+                    preauth_native_view_to_proto(&view)
+                } else {
+                    let created = service
+                        .preauth
+                        .mint_with_precise_expiration(mint, expiration)
+                        .await
+                        .map_err(preauth_error_to_status)?;
+                    preauth_key_to_proto(&created, &service.users).await?
+                };
+                Ok(Response::new(CreatePreAuthKeyResponse {
+                    pre_auth_key: Some(key),
+                }))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing preauth key creation: {error}")))?
         }
 
         async fn expire_pre_auth_key(
@@ -939,11 +1381,17 @@ pub mod upstream {
         ) -> Result<Response<ExpirePreAuthKeyResponse>, Status> {
             self.authorize(&request).await?;
             let id = request.into_inner().id;
-            self.preauth
-                .expire_by_id(id)
-                .await
-                .map_err(preauth_error_to_status)?;
-            Ok(Response::new(ExpirePreAuthKeyResponse {}))
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                service
+                    .preauth
+                    .expire_by_id(id)
+                    .await
+                    .map_err(preauth_error_to_status)?;
+                Ok(Response::new(ExpirePreAuthKeyResponse {}))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing preauth key expiry: {error}")))?
         }
 
         async fn delete_pre_auth_key(
@@ -952,11 +1400,17 @@ pub mod upstream {
         ) -> Result<Response<DeletePreAuthKeyResponse>, Status> {
             self.authorize(&request).await?;
             let id = request.into_inner().id;
-            self.preauth
-                .delete_by_id(id)
-                .await
-                .map_err(preauth_error_to_status)?;
-            Ok(Response::new(DeletePreAuthKeyResponse {}))
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                service
+                    .preauth
+                    .delete_by_id(id)
+                    .await
+                    .map_err(preauth_error_to_status)?;
+                Ok(Response::new(DeletePreAuthKeyResponse {}))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing preauth key deletion: {error}")))?
         }
 
         async fn list_pre_auth_keys(
@@ -964,11 +1418,25 @@ pub mod upstream {
             request: Request<ListPreAuthKeysRequest>,
         ) -> Result<Response<ListPreAuthKeysResponse>, Status> {
             self.authorize(&request).await?;
-            let keys = self.preauth.list().await;
-            let mut pre_auth_keys = Vec::with_capacity(keys.len());
-            for key in &keys {
-                pre_auth_keys.push(listed_preauth_key_to_proto(key, &self.users).await?);
-            }
+            let native_views = self
+                .preauth
+                .list_with_associations()
+                .await
+                .map_err(preauth_error_to_status)?;
+            let mut pre_auth_keys = if let Some(views) = native_views {
+                views.iter().map(preauth_native_view_to_proto).collect()
+            } else {
+                let keys = self
+                    .preauth
+                    .list_checked()
+                    .await
+                    .map_err(preauth_error_to_status)?;
+                let mut projected = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    projected.push(listed_preauth_key_to_proto(key, &self.users).await?);
+                }
+                projected
+            };
             pre_auth_keys.sort_by_key(|key| key.id);
             Ok(Response::new(ListPreAuthKeysResponse { pre_auth_keys }))
         }
@@ -979,22 +1447,52 @@ pub mod upstream {
         ) -> Result<Response<DebugCreateNodeResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
+            let user = self.user_by_stored_name(&body.user).await?;
+            // Go's StringToIPPrefix preserves input order and duplicates for
+            // this echo. Unlike approved routes, it adds no exit-route pair.
+            let mut routes = Vec::with_capacity(body.routes.len());
+            for route in &body.routes {
+                routes.extend(normalize_advertised_routes([route]).map_err(Status::unknown)?);
+            }
             let registration_id = registration_cache_key_from_register_key(&body.key)?;
-            let user = self
-                .users
-                .get(&body.user)
-                .await
-                .map_err(user_error_to_status)?
-                .ok_or_else(|| Status::not_found("user not found"))?;
-            let routes = normalize_advertised_routes(body.routes)
-                .map_err(|e| Status::invalid_argument(format!("parsing route: {e}")))?;
-            let record = self
-                .debug_machine_record(&user.name, &body.name, routes)
-                .await;
-            self.registration_cache
-                .insert(registration_id, machine_admin_to_wire_record(&record));
+            let node_key = self.unique_node_key().await?;
+            let machine_key = random_key_hex()?;
+            let zero_time = chrono::DateTime::from_timestamp(GO_ZERO_TIME_UNIX_SECONDS, 0)
+                .ok_or_else(|| Status::internal("Go zero timestamp is not representable"))?;
+            let mut pending = MachineRecord::new_at_with_addresses(
+                Utc::now(),
+                node_key.clone(),
+                machine_key.clone(),
+                String::new(),
+                body.name.clone(),
+                None,
+                None,
+                false,
+            );
+            pending.register_method = RegisterMethod::Unspecified as i32;
+            pending.expiry = Some(zero_time);
+            pending.replace_host_info(crate::tailscale_wire::wire::HostInfo {
+                hostname: body.name.clone(),
+                ..Default::default()
+            });
+            // Only the registration identity/name/zero expiry enter Go's
+            // auth cache. TestOS and routes belong to the synthetic echo.
+            self.registration_cache.insert(registration_id, pending);
             Ok(Response::new(DebugCreateNodeResponse {
-                node: Some(machine_to_node(&record, &self.users, &self.preauth).await?),
+                node: Some(Node {
+                    id: 0,
+                    node_key: prefix_key("nodekey:", &node_key),
+                    machine_key: prefix_key("mkey:", &machine_key),
+                    disco_key: ZERO_DISCO_KEY.to_owned(),
+                    name: body.name,
+                    user: Some(user_record_to_proto(&user)),
+                    last_seen: Some(unix_to_timestamp(GO_ZERO_TIME_UNIX_SECONDS)),
+                    expiry: Some(unix_to_timestamp(GO_ZERO_TIME_UNIX_SECONDS)),
+                    created_at: Some(unix_to_timestamp(GO_ZERO_TIME_UNIX_SECONDS)),
+                    available_routes: routes,
+                    register_method: RegisterMethod::Unspecified as i32,
+                    ..Default::default()
+                }),
             }))
         }
 
@@ -1003,9 +1501,11 @@ pub mod upstream {
             request: Request<GetNodeRequest>,
         ) -> Result<Response<GetNodeResponse>, Status> {
             self.authorize(&request).await?;
-            let node = self.machine_by_id(request.into_inner().node_id).await?;
+            let node = self
+                .machine_view_by_id(request.into_inner().node_id)
+                .await?;
             Ok(Response::new(GetNodeResponse {
-                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
+                node: Some(self.node_view_proto(&node, &[], false).await?),
             }))
         }
 
@@ -1021,7 +1521,7 @@ pub mod upstream {
                 ));
             }
             for tag in &body.tags {
-                validate_tag(tag)?;
+                validate_tag(tag).map_err(|error| Status::unknown(error.message()))?;
             }
             let node = self.machine_by_id(body.node_id).await?;
             let invalid_tags = body
@@ -1036,17 +1536,18 @@ pub mod upstream {
                     invalid_tags.join(" ")
                 )));
             }
-            self.machines
-                .set_tags(&node.id, body.tags)
-                .await
-                .map_err(machine_error_to_status)?;
-            let node = self
+            let view = self
                 .machines
-                .get(&node.id)
+                .mutate_with_view(
+                    &self.machines.mutation_selector(&node),
+                    MachineAdminMutation::Tags(body.tags),
+                )
                 .await
-                .ok_or_else(|| Status::not_found("node not found"))?;
+                .map_err(|error| {
+                    node_mutation_error_to_status(error, NodeMutationRpc::Tags, body.node_id)
+                })?;
             Ok(Response::new(SetTagsResponse {
-                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
+                node: Some(self.node_view_proto(&view, &[], false).await?),
             }))
         }
 
@@ -1056,26 +1557,40 @@ pub mod upstream {
         ) -> Result<Response<SetApprovedRoutesResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let node = self.machine_by_id(body.node_id).await?;
             let routes = normalize_routes(body.routes)
-                .map_err(|e| Status::invalid_argument(format!("parsing route: {e}")))?;
-            self.machines
-                .set_approved_routes(&node.id, routes)
+                .map_err(|e| Status::unknown(format!("parsing route: {e}")))?;
+            let missing_node = || {
+                Status::invalid_argument(format!(
+                    "node no longer exists in NodeStore: {}",
+                    body.node_id
+                ))
+            };
+            let selector = self
+                .node_mutation_selector(body.node_id)
+                .await
+                .map_err(|error| {
+                    if error.code() == tonic::Code::NotFound {
+                        missing_node()
+                    } else {
+                        error
+                    }
+                })?;
+            let view = self
+                .machines
+                .mutate_with_view(&selector, MachineAdminMutation::ApprovedRoutes(routes))
+                .await
+                .map_err(|error| {
+                    node_mutation_error_to_status(error, NodeMutationRpc::Routes, body.node_id)
+                })?;
+            let machines = self
+                .machines
+                .list_checked()
                 .await
                 .map_err(machine_error_to_status)?;
-            let node = self
-                .machines
-                .get(&node.id)
-                .await
-                .ok_or_else(|| Status::not_found("node not found"))?;
-            let machines = self.machines.list().await;
             let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
-            let primary_routes = route_sets.primary_routes_for(&node.id);
+            let primary_routes = route_sets.primary_routes_for(&view.record.id);
             Ok(Response::new(SetApprovedRoutesResponse {
-                node: Some(
-                    machine_to_node_with_routes(&node, &self.users, &self.preauth, &primary_routes)
-                        .await?,
-                ),
+                node: Some(self.node_view_proto(&view, &primary_routes, false).await?),
             }))
         }
 
@@ -1146,11 +1661,12 @@ pub mod upstream {
             request: Request<DeleteNodeRequest>,
         ) -> Result<Response<DeleteNodeResponse>, Status> {
             self.authorize(&request).await?;
-            let node = self.machine_by_id(request.into_inner().node_id).await?;
+            let body_node_id = request.into_inner().node_id;
+            let node = self.machine_by_id(body_node_id).await?;
             self.machines
-                .delete(&node.id)
+                .delete(&self.machines.mutation_selector(&node))
                 .await
-                .map_err(machine_error_to_status)?;
+                .map_err(|error| Status::unknown(node_state_error_message(error, body_node_id)))?;
             Ok(Response::new(DeleteNodeResponse {}))
         }
 
@@ -1165,36 +1681,41 @@ pub mod upstream {
                     "cannot set both disable_expiry and expiry",
                 ));
             }
-            let requested_expiry = body.expiry;
-            let node = self.machine_by_id(body.node_id).await?;
-            if body.disable_expiry {
-                self.machines
-                    .disable_expiry(&node.id)
-                    .await
-                    .map_err(machine_error_to_status)?;
-            } else {
-                let expiry = body
-                    .expiry
-                    .as_ref()
-                    .map(timestamp_to_datetime)
-                    .transpose()?
-                    .unwrap_or_else(chrono::Utc::now);
-                self.machines
-                    .expire_at(&node.id, Some(expiry))
-                    .await
-                    .map_err(machine_error_to_status)?;
-            }
-            let node = self
-                .machines
-                .get(&node.id)
+            let selector = self
+                .node_mutation_selector(body.node_id)
                 .await
-                .ok_or_else(|| Status::not_found("node not found"))?;
-            let mut node = machine_to_node(&node, &self.users, &self.preauth).await?;
-            // MachineAdminRecord stores expiry at Unix-second precision; keep
-            // the validated request timestamp exact in the immediate response.
-            if let Some(expiry) = requested_expiry {
-                node.expiry = Some(expiry);
-            }
+                .map_err(|error| {
+                    if error.code() == tonic::Code::NotFound {
+                        Status::unknown(format!(
+                            "node no longer exists in NodeStore: {}",
+                            body.node_id
+                        ))
+                    } else {
+                        error
+                    }
+                })?;
+            let expiry = if body.disable_expiry {
+                None
+            } else {
+                Some(
+                    body.expiry
+                        .as_ref()
+                        .map(timestamp_to_datetime)
+                        .transpose()?
+                        .unwrap_or_else(chrono::Utc::now),
+                )
+            };
+            let view = self
+                .machines
+                .mutate_with_view(&selector, MachineAdminMutation::Expiry(expiry))
+                .await
+                .map_err(|error| {
+                    node_mutation_error_to_status(error, NodeMutationRpc::Expiry, body.node_id)
+                })?;
+            let mut node = self.node_view_proto(&view, &[], false).await?;
+            // AsTime normalizes protobuf nanos. Preserve the applied instant
+            // even for a legacy adapter that stores whole seconds only.
+            node.expiry = expiry.map(datetime_to_timestamp);
             Ok(Response::new(ExpireNodeResponse { node: Some(node) }))
         }
 
@@ -1204,18 +1725,28 @@ pub mod upstream {
         ) -> Result<Response<RenameNodeResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
-            let node = self.machine_by_id(body.node_id).await?;
-            self.machines
-                .rename(&node.id, &body.new_name)
+            let selector = self
+                .node_mutation_selector(body.node_id)
                 .await
-                .map_err(machine_error_to_status)?;
-            let node = self
+                .map_err(|error| {
+                    if error.code() == tonic::Code::NotFound {
+                        Status::unknown(format!(
+                            "node no longer exists in NodeStore: {}",
+                            body.node_id
+                        ))
+                    } else {
+                        error
+                    }
+                })?;
+            let view = self
                 .machines
-                .get(&node.id)
+                .mutate_with_view(&selector, MachineAdminMutation::Rename(body.new_name))
                 .await
-                .ok_or_else(|| Status::not_found("node not found"))?;
+                .map_err(|error| {
+                    node_mutation_error_to_status(error, NodeMutationRpc::Rename, body.node_id)
+                })?;
             Ok(Response::new(RenameNodeResponse {
-                node: Some(machine_to_node(&node, &self.users, &self.preauth).await?),
+                node: Some(self.node_view_proto(&view, &[], false).await?),
             }))
         }
 
@@ -1225,30 +1756,41 @@ pub mod upstream {
         ) -> Result<Response<ListNodesResponse>, Status> {
             self.authorize(&request).await?;
             let filter_user = request.into_inner().user;
-            if !filter_user.is_empty() {
-                self.users
-                    .get(&filter_user)
-                    .await
-                    .map_err(user_lookup_error_to_unknown)?
-                    .ok_or_else(|| Status::unknown("user not found"))?;
-            }
-            let machines = self.machines.list().await;
+            let owner = if filter_user.is_empty() {
+                None
+            } else {
+                Some(
+                    self.users
+                        .get(&filter_user)
+                        .await
+                        .map_err(user_lookup_error_to_unknown)?
+                        .ok_or_else(|| Status::unknown("user not found"))?
+                        .id,
+                )
+            };
+            let views = self
+                .machines
+                .list_views()
+                .await
+                .map_err(machine_error_to_status)?;
+            let machines = views
+                .iter()
+                .map(|view| view.record.clone())
+                .collect::<Vec<_>>();
             let route_sets = route_sets_for_machines(&self.primary_routes, &machines);
-            let mut nodes = Vec::with_capacity(machines.len());
-            for node in machines {
-                if !filter_user.is_empty() && (!node.tags.is_empty() || node.user != filter_user) {
+            let mut nodes = Vec::with_capacity(views.len());
+            for view in views {
+                let record = &view.record;
+                if let Some(owner) = owner
+                    && (!record.tags.is_empty()
+                        || !record
+                            .user_id
+                            .map_or_else(|| record.user == filter_user, |id| id == owner))
+                {
                     continue;
                 }
-                let subnet_routes = route_sets.subnet_routes_for(&node.id);
-                nodes.push(
-                    machine_to_list_node_with_routes(
-                        &node,
-                        &self.users,
-                        &self.preauth,
-                        &subnet_routes,
-                    )
-                    .await?,
-                );
+                let subnet_routes = route_sets.subnet_routes_for(&record.id);
+                nodes.push(self.node_view_proto(&view, &subnet_routes, true).await?);
             }
             nodes.sort_by_key(|node| node.id);
             Ok(Response::new(ListNodesResponse { nodes }))
@@ -1266,7 +1808,10 @@ pub mod upstream {
                 .machines
                 .backfill_node_ips(self.ip_allocator.as_deref())
                 .await
-                .map_err(machine_error_to_status)?;
+                .map_err(|error| match error {
+                    MachineAdminError::BadRequest(message) => Status::unknown(message),
+                    error => Status::unknown(error.to_string()),
+                })?;
             Ok(Response::new(BackfillNodeIPsResponse { changes }))
         }
 
@@ -1276,21 +1821,27 @@ pub mod upstream {
         ) -> Result<Response<CreateApiKeyResponse>, Status> {
             self.authorize(&request).await?;
             let body = request.into_inner();
+            let expiration_precise = body
+                .expiration
+                .as_ref()
+                .map(timestamp_to_datetime)
+                .transpose()?;
             let expiration = Some(
-                body.expiration
-                    .as_ref()
-                    .map(timestamp_to_unix)
-                    .transpose()?
-                    .unwrap_or(GO_ZERO_TIME_UNIX_SECONDS),
+                expiration_precise.map_or(GO_ZERO_TIME_UNIX_SECONDS, |expiry| expiry.timestamp()),
             );
-            let created = self
-                .api_keys
-                .mint(ApiKeyMintRequest { expiration })
-                .await
-                .map_err(admin_error_to_status)?;
-            Ok(Response::new(CreateApiKeyResponse {
-                api_key: created.api_key,
-            }))
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let created = service
+                    .api_keys
+                    .mint_precise(ApiKeyMintRequest { expiration }, expiration_precise)
+                    .await
+                    .map_err(api_key_raw_error_to_status)?;
+                Ok(Response::new(CreateApiKeyResponse {
+                    api_key: created.api_key,
+                }))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing API key creation: {error}")))?
         }
 
         async fn expire_api_key(
@@ -1300,12 +1851,19 @@ pub mod upstream {
             self.authorize(&request).await?;
             let body = request.into_inner();
             let selector = ApiKeySelector::from_parts(body.prefix, body.id)?;
-            match selector {
-                ApiKeySelector::Id(id) => self.api_keys.expire_by_id(id).await,
-                ApiKeySelector::Prefix(prefix) => self.api_keys.expire_by_prefix(&prefix).await,
-            }
-            .map_err(api_key_raw_error_to_status)?;
-            Ok(Response::new(ExpireApiKeyResponse {}))
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                match selector {
+                    ApiKeySelector::Id(id) => service.api_keys.expire_by_id(id).await,
+                    ApiKeySelector::Prefix(prefix) => {
+                        service.api_keys.expire_by_prefix(&prefix).await
+                    }
+                }
+                .map_err(api_key_raw_error_to_status)?;
+                Ok(Response::new(ExpireApiKeyResponse {}))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing API key expiry: {error}")))?
         }
 
         async fn list_api_keys(
@@ -1315,8 +1873,9 @@ pub mod upstream {
             self.authorize(&request).await?;
             let mut api_keys = self
                 .api_keys
-                .list()
+                .list_for_state()
                 .await
+                .map_err(api_key_raw_error_to_status)?
                 .iter()
                 .map(admin_key_to_proto)
                 .collect::<Vec<_>>();
@@ -1331,12 +1890,19 @@ pub mod upstream {
             self.authorize(&request).await?;
             let body = request.into_inner();
             let selector = ApiKeySelector::from_parts(body.prefix, body.id)?;
-            match selector {
-                ApiKeySelector::Id(id) => self.api_keys.delete_by_id(id).await,
-                ApiKeySelector::Prefix(prefix) => self.api_keys.delete_by_prefix(&prefix).await,
-            }
-            .map_err(api_key_raw_error_to_status)?;
-            Ok(Response::new(DeleteApiKeyResponse {}))
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                match selector {
+                    ApiKeySelector::Id(id) => service.api_keys.delete_by_id(id).await,
+                    ApiKeySelector::Prefix(prefix) => {
+                        service.api_keys.delete_by_prefix(&prefix).await
+                    }
+                }
+                .map_err(api_key_raw_error_to_status)?;
+                Ok(Response::new(DeleteApiKeyResponse {}))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing API key deletion: {error}")))?
         }
 
         async fn get_policy(
@@ -1352,35 +1918,53 @@ pub mod upstream {
                         )
                     })?;
                     let policy = policy_persistence
-                        .get_latest_policy()
+                        .get_latest_policy_with_timestamp()
                         .await
                         .map_err(|e| Status::unknown(format!("loading ACL from database: {e}")))?;
-                    let Some(policy) = policy else {
+                    let Some((policy, updated_at)) = policy else {
                         return Err(Status::unknown(
                             "loading ACL from database: acl policy not found",
                         ));
                     };
                     Ok(Response::new(GetPolicyResponse {
                         policy: policy.policy,
-                        updated_at: Some(unix_to_timestamp(policy.updated_at)),
+                        updated_at: Some(updated_at),
                     }))
                 }
                 PolicyMode::File { path } => {
-                    let policy = tokio::fs::read_to_string(path).await.map_err(|e| {
+                    let bytes = tokio::fs::read(path).await.map_err(|e| {
                         Status::unknown(format!(
                             "reading policy from path {:?}: {e}",
                             path.display().to_string()
                         ))
+                    })?;
+                    // Go os.ReadFile permits these bytes, but protobuf rejects
+                    // invalid UTF-8 while grpc encodes the response string.
+                    let policy = String::from_utf8(bytes).map_err(|_| {
+                        Status::internal(
+                            "grpc: error while marshaling: string field contains invalid UTF-8",
+                        )
                     })?;
                     Ok(Response::new(GetPolicyResponse {
                         policy,
                         updated_at: None,
                     }))
                 }
-                PolicyMode::Memory => Ok(Response::new(GetPolicyResponse {
-                    policy: self.policy.raw().unwrap_or_default(),
-                    updated_at: self.policy.updated_at().map(unix_to_timestamp),
-                })),
+                PolicyMode::Memory => {
+                    let policy = String::from_utf8(self.policy.raw_bytes().unwrap_or_default())
+                        .map_err(|_| {
+                            Status::internal(
+                                "grpc: error while marshaling: string field contains invalid UTF-8",
+                            )
+                        })?;
+                    Ok(Response::new(GetPolicyResponse {
+                        policy,
+                        updated_at: self.policy.updated_at().map(unix_to_timestamp),
+                    }))
+                }
+                PolicyMode::Unsupported { mode } => Err(Status::unknown(format!(
+                    "no supported policy mode found in configuration, policy.mode: {mode:?}"
+                ))),
             }
         }
 
@@ -1390,49 +1974,107 @@ pub mod upstream {
         ) -> Result<Response<SetPolicyResponse>, Status> {
             self.authorize(&request).await?;
             let policy = request.into_inner().policy;
-            if matches!(self.policy_mode, PolicyMode::File { .. }) {
+            if matches!(
+                self.policy_mode,
+                PolicyMode::File { .. } | PolicyMode::Unsupported { .. }
+            ) {
                 return Err(Status::unknown(
                     "update is disabled for modes other than 'database'",
                 ));
             }
-            let doc = parse_hujson_policy(&policy)
-                .map_err(|e| Status::invalid_argument(format!("setting policy: {e}")))?;
-            self.validate_candidate_policy(&doc, "setting policy")
-                .await?;
-            let (policy, updated_at) = match &self.policy_mode {
-                PolicyMode::Database => {
-                    let policy_persistence = self.policy_persistence.as_ref().ok_or_else(|| {
-                        Status::unknown(
-                            "persisting policy to database: policy database is not configured",
-                        )
-                    })?;
-                    let persisted = policy_persistence.set_policy(&policy).await.map_err(|e| {
-                        Status::unknown(format!("persisting policy to database: {e}"))
-                    })?;
-                    self.policy
-                        .set_at_quiet(doc, persisted.policy.clone(), persisted.updated_at);
-                    (persisted.policy, persisted.updated_at)
-                }
-                PolicyMode::Memory => {
-                    self.policy.set_quiet(doc, policy.clone());
-                    (
-                        policy,
-                        self.policy.updated_at().unwrap_or_else(current_unix_i64),
-                    )
-                }
-                PolicyMode::File { .. } => unreachable!("file mode returned before parsing"),
+            // Go State.SetPolicy treats zero bytes as no replacement. It still
+            // clears SSH approvals before the database append and reload below.
+            // Go's unmarshalPolicy is the only policy entrypoint, so parse with
+            // the native bytes decoder; its metadata-stripped source feeds the
+            // validation below while the operator's original text is stored.
+            let parsed = if policy.is_empty() {
+                None
+            } else {
+                Some(
+                    crate::policy::parse_hujson_policy_bytes(policy.as_bytes()).map_err(
+                        |error| {
+                            Status::unknown(format!(
+                                "setting policy: {}",
+                                native_policy_parse_error(error)
+                            ))
+                        },
+                    )?,
+                )
             };
-            let auto_approvals = crate::admin::machines::apply_policy_auto_approvals(
-                &self.policy,
-                self.machines.as_ref(),
-            )
-            .await;
-            self.policy.notify_change();
-            auto_approvals.map_err(machine_error_to_status)?;
-            Ok(Response::new(SetPolicyResponse {
-                policy,
-                updated_at: Some(unix_to_timestamp(updated_at)),
-            }))
+            let guard = self.policy.lock_mutation().await;
+            let service = Self::clone(self);
+            crate::tailscale_wire::complete_state_mutation(async move {
+                let _guard = guard;
+                if let Some((mut doc, source)) = parsed {
+                    service
+                        .validate_candidate_policy(&mut doc, &source, "setting policy")
+                        .await?;
+                    // Install before persistence, as State.SetPolicy does.
+                    // A later database/reload failure leaves this live policy
+                    // in place and does not dispatch a success notification.
+                    service
+                        .policy
+                        .try_set_quiet(doc, policy.clone())
+                        .map_err(|error| Status::unknown(format!("setting policy: {error}")))?;
+                } else {
+                    service.policy.invalidate_ssh_auth();
+                }
+                service.registration_cache.clear_ssh_auth();
+
+                let (policy, updated_at) = match &service.policy_mode {
+                    PolicyMode::Database => {
+                        let policy_persistence = service.policy_persistence.as_ref().ok_or_else(|| {
+                            Status::unknown(
+                                "persisting policy to database: policy database is not configured",
+                            )
+                        })?;
+                        let (persisted, updated_at) = policy_persistence
+                            .set_policy_with_timestamp(&policy)
+                            .await
+                            .map_err(|e| {
+                                Status::unknown(format!("persisting policy to database: {e}"))
+                            })?;
+                        // Reload the actual latest row, not the request or the
+                        // append result. An external writer can have appended
+                        // another row; a failed second read is an RPC failure.
+                        service
+                            .reload_policy_from_config_inner()
+                            .await
+                            .map_err(|error| {
+                                Status::new(
+                                    error.code(),
+                                    format!("reloading policy: {}", error.message()),
+                                )
+                            })?;
+                        (persisted.policy, updated_at)
+                    }
+                    PolicyMode::Memory => {
+                        crate::admin::machines::apply_policy_auto_approvals(
+                            &service.policy,
+                            service.machines.as_ref(),
+                        )
+                        .await
+                        .map_err(machine_error_to_status)?;
+                        service.policy.notify_change();
+                        (
+                            policy,
+                            unix_to_timestamp(
+                                service.policy.updated_at().unwrap_or_else(current_unix_i64),
+                            ),
+                        )
+                    }
+                    PolicyMode::File { .. } => unreachable!("file mode returned before parsing"),
+                    PolicyMode::Unsupported { .. } => {
+                        unreachable!("unsupported mode returned before parsing")
+                    }
+                };
+                Ok(Response::new(SetPolicyResponse {
+                    policy,
+                    updated_at: Some(updated_at),
+                }))
+            })
+            .await
+            .map_err(|error| Status::internal(format!("finishing policy update: {error}")))?
         }
 
         async fn check_policy(
@@ -1441,10 +2083,34 @@ pub mod upstream {
         ) -> Result<Response<CheckPolicyResponse>, Status> {
             self.authorize(&request).await?;
             let policy = request.into_inner().policy;
-            let doc = parse_hujson_policy(&policy)
-                .map_err(|e| Status::invalid_argument(format!("checking policy: {e}")))?;
-            self.validate_candidate_policy(&doc, "checking policy")
-                .await?;
+            // The upstream RPC reads users and nodes before constructing the
+            // sandbox, so storage failures precede malformed-policy errors.
+            let identities = self.users.policy_users().await.map_err(|error| {
+                let error = match error {
+                    UserRegistryError::Store(message) => message,
+                    other => other.to_string(),
+                };
+                Status::internal(format!("loading users: {error}"))
+            })?;
+            let nodes = self
+                .machines
+                .policy_nodes_for_check()
+                .await
+                .map_err(machine_error_to_status)?;
+            // NewPolicyManager(nil) is a valid sandbox with no loaded policy.
+            let (mut doc, source) = if policy.is_empty() {
+                (PolicyDoc::default(), String::new())
+            } else {
+                crate::policy::parse_hujson_policy_bytes(policy.as_bytes())
+                    .map_err(|error| Status::invalid_argument(native_policy_parse_error(error)))?
+            };
+            Self::validate_candidate_policy_users(
+                &mut doc,
+                &source,
+                "checking policy",
+                identities,
+            )?;
+            Self::validate_candidate_policy_nodes(&doc, &source, "checking policy", &nodes)?;
             Ok(Response::new(CheckPolicyResponse {}))
         }
 
@@ -1463,6 +2129,13 @@ pub mod upstream {
                 database_connectivity: true,
             }))
         }
+    }
+
+    fn native_policy_parse_error(error: PolicyParseError) -> String {
+        let message = match error {
+            PolicyParseError::Json(message) | PolicyParseError::Schema(message) => message,
+        };
+        format!("parsing policy: {message}")
     }
 
     enum ApiKeySelector {
@@ -1487,9 +2160,18 @@ pub mod upstream {
         ApiKey {
             id: key.id,
             prefix: key.prefix.clone(),
-            expiration: key.expiration.map(unix_to_timestamp),
-            created_at: nonzero_i64_timestamp(key.created_at),
-            last_seen: key.last_seen.map(unix_to_timestamp),
+            expiration: key
+                .expiration_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| key.expiration.map(unix_to_timestamp)),
+            created_at: key
+                .created_at_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| nonzero_i64_timestamp(key.created_at)),
+            last_seen: key
+                .last_seen_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| key.last_seen.map(unix_to_timestamp)),
         }
     }
 
@@ -1497,11 +2179,11 @@ pub mod upstream {
         prost_types::Timestamp { seconds, nanos: 0 }
     }
 
-    fn timestamp_to_unix(ts: &prost_types::Timestamp) -> Result<i64, Status> {
-        if !(0..1_000_000_000).contains(&ts.nanos) {
-            return Err(Status::invalid_argument("timestamp nanos out of range"));
+    fn datetime_to_timestamp(value: chrono::DateTime<chrono::Utc>) -> prost_types::Timestamp {
+        prost_types::Timestamp {
+            seconds: value.timestamp(),
+            nanos: value.timestamp_subsec_nanos() as i32,
         }
-        Ok(ts.seconds)
     }
 
     fn current_unix_i64() -> i64 {
@@ -1510,17 +2192,25 @@ pub mod upstream {
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 
-    fn admin_error_to_status(e: ApiKeyAdminError) -> Status {
+    fn api_key_raw_error_to_status(e: ApiKeyAdminError) -> Status {
         match e {
-            ApiKeyAdminError::NotFound => Status::not_found("api key not found"),
-            ApiKeyAdminError::Store(msg) => Status::internal(msg),
+            ApiKeyAdminError::NotFound => Status::unknown("record not found"),
+            ApiKeyAdminError::Store(msg) => Status::unknown(msg),
         }
     }
 
-    fn api_key_raw_error_to_status(e: ApiKeyAdminError) -> Status {
-        match e {
-            ApiKeyAdminError::NotFound => Status::unknown("api key not found"),
-            ApiKeyAdminError::Store(msg) => Status::unknown(msg),
+    fn preauth_native_view_to_proto(view: &PreauthAdminKeyView) -> PreAuthKey {
+        let key = &view.key;
+        PreAuthKey {
+            user: view.user.as_ref().map(user_record_to_proto),
+            id: key.id,
+            key: key.key.clone(),
+            reusable: key.reusable,
+            ephemeral: key.ephemeral,
+            used: key.redemptions > 0,
+            acl_tags: key.tags.clone(),
+            created_at: view.created_at.map(datetime_to_timestamp),
+            expiration: view.expiration.map(datetime_to_timestamp),
         }
     }
 
@@ -1551,8 +2241,14 @@ pub mod upstream {
             reusable: key.reusable,
             ephemeral: key.ephemeral,
             used: key.redemptions > 0,
-            expiration: nonzero_preauth_expiration_timestamp(key.expires_at),
-            created_at: nonzero_u64_timestamp(key.created_at),
+            expiration: key
+                .expires_at_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| nonzero_preauth_expiration_timestamp(key.expires_at)),
+            created_at: key
+                .created_at_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| nonzero_u64_timestamp(key.created_at)),
             acl_tags: key.tags.clone(),
         })
     }
@@ -1586,18 +2282,25 @@ pub mod upstream {
         key: &PreauthAdminKey,
         users: &Arc<dyn UserAdmin>,
     ) -> Result<Option<ProtoUser>, Status> {
-        if key.user.is_empty() {
+        preauth_user_selector_to_proto(&key.user, users).await
+    }
+
+    async fn preauth_user_selector_to_proto(
+        selector: &str,
+        users: &Arc<dyn UserAdmin>,
+    ) -> Result<Option<ProtoUser>, Status> {
+        if selector.is_empty() {
             return Ok(None);
         }
         Ok(Some(
             users
-                .get(&key.user)
+                .get(selector)
                 .await
                 .map_err(user_error_to_status)?
                 .map_or_else(
                     || ProtoUser {
                         id: 0,
-                        name: key.user.clone(),
+                        name: selector.to_owned(),
                         created_at: None,
                         display_name: String::new(),
                         email: String::new(),
@@ -1614,22 +2317,48 @@ pub mod upstream {
         match e {
             PreauthAdminError::Unknown(_) => Status::not_found("preauth key not found"),
             PreauthAdminError::Invalid(msg) => Status::invalid_argument(msg),
+            PreauthAdminError::Store(msg) => Status::unknown(msg),
         }
     }
 
-    async fn machine_to_node(
-        machine: &MachineAdminRecord,
-        users: &Arc<dyn UserAdmin>,
-        preauth: &Arc<dyn PreauthAdmin>,
-    ) -> Result<Node, Status> {
-        machine_to_node_with_routes(machine, users, preauth, &[]).await
+    fn set_registration_user_identity(record: &mut MachineRecord, user: &UserRecord) {
+        let login_name = if !user.email.is_empty() {
+            user.email.clone()
+        } else if !user.name.is_empty() {
+            user.name.clone()
+        } else if !user.provider_id.is_empty() {
+            user.provider_id.clone()
+        } else {
+            user.id.to_string()
+        };
+        let display_name = if user.display_name.is_empty() {
+            login_name.clone()
+        } else {
+            user.display_name.clone()
+        };
+        record.set_user_identity(
+            Some(user.id),
+            login_name,
+            display_name,
+            user.profile_pic_url.clone(),
+        );
+        let user_created_at = user.created_at_precise.or_else(|| {
+            i64::try_from(user.created_at)
+                .ok()
+                .filter(|timestamp| *timestamp > 0)
+                .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+        });
+        record.set_user_account_metadata(user.provider.clone(), user_created_at);
     }
 
+    #[cfg(test)]
     fn machine_admin_to_wire_record(machine: &MachineAdminRecord) -> MachineRecord {
-        let created_at =
-            chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now);
-        let last_seen =
-            chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at);
+        let created_at = machine.created_at_precise.unwrap_or_else(|| {
+            chrono::DateTime::from_timestamp(machine.created_at as i64, 0).unwrap_or_else(Utc::now)
+        });
+        let last_seen = machine.last_seen_precise.unwrap_or_else(|| {
+            chrono::DateTime::from_timestamp(machine.last_seen as i64, 0).unwrap_or(created_at)
+        });
         let ipv4 = machine.ipv4.parse().ok().or_else(|| {
             machine
                 .ipv6
@@ -1653,9 +2382,11 @@ pub mod upstream {
         record.node_id = (machine.node_id != 0).then_some(machine.node_id);
         record.user_id = machine.user_id;
         record.auth_key_id = machine.auth_key_id;
-        record.expiry = machine
-            .expiry
-            .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
+        record.expiry = machine.expiry_precise.or_else(|| {
+            machine
+                .expiry
+                .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0))
+        });
         record.last_seen = last_seen;
         record.os.clone_from(&machine.os);
         record.os_version.clone_from(&machine.version);
@@ -1689,10 +2420,15 @@ pub mod upstream {
             .as_deref()
             .filter(|ipv6| !ipv6.is_empty())
             .and_then(|ipv6| ipv6.parse().ok());
-        record.expiry = machine
-            .expiry
-            .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0));
-        if let Some(last_seen) = chrono::DateTime::from_timestamp(machine.last_seen as i64, 0) {
+        record.expiry = machine.expiry_precise.or_else(|| {
+            machine
+                .expiry
+                .and_then(|expiry| chrono::DateTime::from_timestamp(expiry as i64, 0))
+        });
+        if let Some(last_seen) = machine
+            .last_seen_precise
+            .or_else(|| chrono::DateTime::from_timestamp(machine.last_seen as i64, 0))
+        {
             record.last_seen = last_seen;
         }
         record.os.clone_from(&machine.os);
@@ -1720,8 +2456,11 @@ pub mod upstream {
             ipv6: record.ipv6.map(|ipv6| ipv6.to_string()),
             online: !expired,
             last_seen: record.last_seen.timestamp().max(0) as u64,
+            last_seen_precise: Some(record.last_seen),
             created_at: record.created_at.timestamp().max(0) as u64,
+            created_at_precise: Some(record.created_at),
             expiry: record.expiry.map(|expiry| expiry.timestamp().max(0) as u64),
+            expiry_precise: record.expiry,
             machine_key_hex: record.machine_key_hex,
             disco_key: record.disco_key.unwrap_or_default(),
             os: if record.os.is_empty() {
@@ -1742,50 +2481,95 @@ pub mod upstream {
         }
     }
 
-    async fn machine_to_node_with_routes(
+    #[allow(clippy::option_option)] // tri-state: unset / explicit nil Go association / loaded value
+    async fn machine_to_node_with_routes_and_user(
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
         preauth: &Arc<dyn PreauthAdmin>,
         subnet_routes: &[String],
+        cached_user: Option<Option<UserRecord>>,
+        cached_key: Option<Option<crate::admin::machines::NativeAuthKey>>,
     ) -> Result<Node, Status> {
-        let user = machine_user_to_proto(machine, users).await?;
-        let pre_auth_key = machine_preauth_key_to_proto(machine, users, preauth).await?;
+        let user = match cached_user {
+            Some(user) => user.as_ref().map(user_record_to_proto),
+            None => machine_user_to_proto(machine, users).await?,
+        };
+        let pre_auth_key = match cached_key {
+            Some(Some(key)) => Some(native_auth_key_to_proto(&key, users).await?),
+            Some(None) => None,
+            None => machine_preauth_key_to_proto(machine, users, preauth).await?,
+        };
         Ok(Node {
             id: machine_numeric_id(machine),
             machine_key: prefix_key("mkey:", &machine.machine_key_hex),
             node_key: prefix_key("nodekey:", &machine.id),
-            disco_key: machine.disco_key.clone(),
+            disco_key: if machine.disco_key.is_empty() {
+                ZERO_DISCO_KEY.to_string()
+            } else {
+                machine.disco_key.clone()
+            },
             ip_addresses: node_ip_addresses(machine),
             name: machine.name.clone(),
             user,
-            last_seen: nonzero_u64_timestamp(machine.last_seen),
+            last_seen: machine
+                .last_seen_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| nonzero_u64_timestamp(machine.last_seen)),
             expiry: machine
-                .expiry
-                .map(saturating_u64_to_i64)
-                .map(unix_to_timestamp),
+                .expiry_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| {
+                    machine
+                        .expiry
+                        .map(saturating_u64_to_i64)
+                        .map(unix_to_timestamp)
+                }),
             pre_auth_key,
-            created_at: nonzero_u64_timestamp(machine.created_at),
+            created_at: machine
+                .created_at_precise
+                .map(datetime_to_timestamp)
+                .or_else(|| nonzero_u64_timestamp(machine.created_at)),
             register_method: machine.register_method,
             given_name: machine.name.clone(),
             online: machine.online,
-            approved_routes: machine.approved_routes.clone(),
+            approved_routes: machine
+                .approved_routes
+                .iter()
+                .map(|route| {
+                    // Go's proto projection uses Prefix.String, while the
+                    // persisted JSON slice uses the empty MarshalText value.
+                    if route.is_empty() {
+                        "invalid Prefix".into()
+                    } else {
+                        route.clone()
+                    }
+                })
+                .collect(),
             available_routes: machine.routes.clone(),
             subnet_routes: subnet_routes.to_vec(),
             tags: machine.tags.clone(),
         })
     }
 
-    async fn machine_to_list_node_with_routes(
-        machine: &MachineAdminRecord,
+    async fn native_auth_key_to_proto(
+        key: &crate::admin::machines::NativeAuthKey,
         users: &Arc<dyn UserAdmin>,
-        preauth: &Arc<dyn PreauthAdmin>,
-        subnet_routes: &[String],
-    ) -> Result<Node, Status> {
-        let mut node = machine_to_node_with_routes(machine, users, preauth, subnet_routes).await?;
-        if !machine.tags.is_empty() {
-            node.user = Some(tagged_devices_user_to_proto());
-        }
-        Ok(node)
+    ) -> Result<PreAuthKey, Status> {
+        let user = match &key.user {
+            Some(user) => user.as_ref().map(user_record_to_proto),
+            None => preauth_user_selector_to_proto(&key.user_selector, users).await?,
+        };
+        Ok(PreAuthKey {
+            user,
+            id: key.id,
+            key: key.display_key.clone(),
+            reusable: key.reusable,
+            ephemeral: key.ephemeral,
+            used: key.used(),
+            acl_tags: key.tags.clone(),
+            created_at: key.created_at.map(datetime_to_timestamp),
+            expiration: key.expiration.map(datetime_to_timestamp),
+        })
     }
 
     async fn machine_preauth_key_to_proto(
@@ -1799,7 +2583,20 @@ pub mod upstream {
         let Ok(auth_key_id) = u64::try_from(auth_key_id) else {
             return Ok(None);
         };
-        let keys = preauth.list().await;
+        if let Some(views) = preauth
+            .list_with_associations()
+            .await
+            .map_err(preauth_error_to_status)?
+        {
+            return Ok(views
+                .iter()
+                .find(|view| view.key.id == auth_key_id)
+                .map(preauth_native_view_to_proto));
+        }
+        let keys = preauth
+            .list_checked()
+            .await
+            .map_err(preauth_error_to_status)?;
         let Some(key) = keys.iter().find(|key| key.id == auth_key_id) else {
             return Ok(None);
         };
@@ -1810,7 +2607,7 @@ pub mod upstream {
         ProtoUser {
             id: 2_147_455_555,
             name: "tagged-devices".into(),
-            created_at: None,
+            created_at: Some(unix_to_timestamp(GO_ZERO_TIME_UNIX_SECONDS)),
             display_name: "Tagged Devices".into(),
             email: String::new(),
             provider_id: String::new(),
@@ -1828,17 +2625,6 @@ pub mod upstream {
             addresses.push(ipv6.clone());
         }
         addresses
-    }
-
-    fn policy_check_node_from_machine(machine: &MachineAdminRecord) -> PolicyCheckNode {
-        PolicyCheckNode {
-            id: machine_numeric_id(machine),
-            user_id: machine.user_id,
-            name: machine.name.clone(),
-            user: (!machine.user.is_empty()).then(|| machine.user.clone()),
-            addrs: node_ip_addresses(machine),
-            tags: machine.tags.clone(),
-        }
     }
 
     fn machine_numeric_id(machine: &MachineAdminRecord) -> u64 {
@@ -1887,19 +2673,23 @@ pub mod upstream {
 
         let mut primary_routes = BTreeMap::new();
         let mut exit_routes = BTreeMap::new();
-        for machine in machines
-            .iter()
-            .filter(|machine| machine.online && !machine.expired)
-        {
+        for machine in machines {
+            // Go's nodesToProto appends Node.ExitRoutes() (announced AND
+            // approved exit prefixes) without regard to online/expiry state;
+            // only the HA primary election is limited to serving nodes
+            // (verified in-process against v0.29.5: an offline and an expired
+            // node still list their approved exit routes).
+            let exit = active_exit_routes(&machine.routes, &machine.approved_routes);
+            if !exit.is_empty() {
+                exit_routes.insert(machine.id.clone(), exit);
+            }
+            if !machine.online || machine.expired {
+                continue;
+            }
             let node_id = machine_numeric_id(machine);
             let primary = state.primary_routes(node_id);
             if !primary.is_empty() {
                 primary_routes.insert(machine.id.clone(), primary);
-            }
-
-            let exit = active_exit_routes(&machine.routes, &machine.approved_routes);
-            if !exit.is_empty() {
-                exit_routes.insert(machine.id.clone(), exit);
             }
         }
 
@@ -1935,21 +2725,14 @@ pub mod upstream {
         validate_auth_id_cache_key(key).map_err(Status::unknown)
     }
 
-    fn random_key_hex() -> String {
-        let mut raw = [0u8; 32];
-        rand_core::OsRng.fill_bytes(&mut raw);
-        hex::encode(raw)
+    fn random_key_hex() -> Result<String, Status> {
+        crate::tailscale_wire::noise::generate_x25519_public()
+            .map(hex::encode)
+            .map_err(|error| Status::internal(format!("generating public key: {error}")))
     }
 
     fn cgnat_ip_from_key(key: &str) -> Ipv4Addr {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in key.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        let host = ((h as u32) % ((1u32 << 22) - 3)) + 2;
-        const CGNAT_BASE: u32 = 0x6440_0000;
-        Ipv4Addr::from((CGNAT_BASE | host).to_be_bytes())
+        crate::tailscale_wire::legacy_registration_ipv4(key)
     }
 
     fn prefix_key(prefix: &str, value: &str) -> String {
@@ -1980,6 +2763,13 @@ pub mod upstream {
         machine: &MachineAdminRecord,
         users: &Arc<dyn UserAdmin>,
     ) -> Result<Option<ProtoUser>, Status> {
+        if let Some(id) = machine.user_id {
+            return users
+                .get_for_node_association(id)
+                .await
+                .map(|user| user.as_ref().map(user_record_to_proto))
+                .map_err(user_lookup_error_to_unknown);
+        }
         if machine.user.is_empty() {
             return Ok(None);
         }
@@ -2007,17 +2797,59 @@ pub mod upstream {
     fn timestamp_to_datetime(
         ts: &prost_types::Timestamp,
     ) -> Result<chrono::DateTime<chrono::Utc>, Status> {
-        if !(0..1_000_000_000).contains(&ts.nanos) {
-            return Err(Status::invalid_argument("timestamp nanos out of range"));
-        }
-        chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+        let nanos = i64::from(ts.nanos);
+        let seconds = ts
+            .seconds
+            .checked_add(nanos.div_euclid(1_000_000_000))
+            .ok_or_else(|| Status::invalid_argument("timestamp out of range"))?;
+        chrono::DateTime::from_timestamp(seconds, nanos.rem_euclid(1_000_000_000) as u32)
             .ok_or_else(|| Status::invalid_argument("timestamp out of range"))
+    }
+
+    #[derive(Clone, Copy)]
+    enum NodeMutationRpc {
+        Tags,
+        Routes,
+        Expiry,
+        Rename,
+    }
+
+    fn node_state_error_message(error: MachineAdminError, node_id: u64) -> String {
+        match error {
+            MachineAdminError::NotFound(_) => {
+                format!("node no longer exists in NodeStore: {node_id}")
+            }
+            MachineAdminError::BadRequest(message)
+            | MachineAdminError::Storage(message)
+            | MachineAdminError::Policy(message) => message,
+        }
+    }
+
+    fn node_mutation_error_to_status(
+        error: MachineAdminError,
+        operation: NodeMutationRpc,
+        node_id: u64,
+    ) -> Status {
+        let message = if matches!(operation, NodeMutationRpc::Tags)
+            && matches!(&error, MachineAdminError::NotFound(_))
+        {
+            format!("node not found: {node_id}")
+        } else {
+            node_state_error_message(error, node_id)
+        };
+        match operation {
+            NodeMutationRpc::Tags | NodeMutationRpc::Routes => Status::invalid_argument(message),
+            NodeMutationRpc::Expiry | NodeMutationRpc::Rename => Status::unknown(message),
+        }
     }
 
     fn machine_error_to_status(e: MachineAdminError) -> Status {
         match e {
             MachineAdminError::NotFound(_) => Status::not_found("node not found"),
             MachineAdminError::BadRequest(msg) => Status::invalid_argument(msg),
+            MachineAdminError::Policy(msg) | MachineAdminError::Storage(msg) => {
+                Status::unknown(msg)
+            }
         }
     }
 
@@ -2027,7 +2859,7 @@ pub mod upstream {
                 "tag must start with the string 'tag:'",
             ));
         }
-        if tag.to_lowercase() != tag {
+        if headscale_api_acl::go_unicode::to_lowercase(tag) != tag {
             return Err(Status::invalid_argument("tag should be lowercase"));
         }
         if tag.split_whitespace().count() > 1 {
@@ -2036,47 +2868,35 @@ pub mod upstream {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn apply_requested_tags(
         policy: &PolicyStore,
         record: &mut MachineAdminRecord,
     ) -> Result<(), Status> {
-        if record.tags.is_empty() {
-            return Ok(());
-        }
-
-        if validate_requested_tags_for_node(
-            policy,
-            &machine_primary_addr(record),
-            record.user.as_str(),
-            &mut record.tags,
-        )
-        .map_err(Status::invalid_argument)?
-        {
-            record.expiry = None;
-        }
-
-        Ok(())
+        crate::admin::machines::validate_auth_path_tags(policy, record)
+            .map_err(Status::invalid_argument)
     }
 
-    fn machine_primary_addr(record: &MachineAdminRecord) -> String {
-        if record.ipv4.trim().is_empty() {
-            record
-                .ipv6
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_default()
-                .to_string()
+    fn user_record_admin_name(user: &UserRecord) -> String {
+        if !user.name.is_empty() {
+            user.name.clone()
+        } else if !user.email.is_empty() {
+            user.email.clone()
+        } else if !user.provider_id.is_empty() {
+            user.provider_id.clone()
         } else {
-            record.ipv4.trim().to_string()
+            user.id.to_string()
         }
     }
 
     fn user_record_to_proto(user: &UserRecord) -> ProtoUser {
         ProtoUser {
             id: user.id,
-            name: user.name.clone(),
-            created_at: Some(unix_to_timestamp(saturating_u64_to_i64(user.created_at))),
+            name: user_record_admin_name(user),
+            created_at: Some(user.created_at_precise.map_or_else(
+                || unix_to_timestamp(saturating_u64_to_i64(user.created_at)),
+                datetime_to_timestamp,
+            )),
             display_name: user.display_name.clone(),
             email: user.email.clone(),
             provider_id: user.provider_id.clone(),
@@ -2128,6 +2948,7 @@ pub mod upstream {
             UserRegistryError::Store(msg) if msg.contains("user not empty: node(s) found") => {
                 upstream_user_not_empty_status()
             }
+            UserRegistryError::Store(msg) => Status::unknown(msg),
             other => Status::unknown(other.to_string()),
         }
     }
@@ -2157,8 +2978,11 @@ pub mod upstream {
                 ipv6: None,
                 online: true,
                 last_seen: 1_780_000_000,
+                last_seen_precise: None,
                 created_at: 1_780_000_000,
+                created_at_precise: None,
                 expiry: None,
+                expiry_precise: None,
                 machine_key_hex: "bb".repeat(32),
                 disco_key: "discokey:abc".into(),
                 os: "linux".into(),
@@ -2389,6 +3213,23 @@ mod upstream_tests {
         (service, db)
     }
 
+    /// Create a user through the gRPC surface and return its numeric id.
+    async fn create_test_user(service: &HeadscaleAdminService, name: &str) -> u64 {
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: name.into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("created user")
+            .id
+    }
+
     fn fixture_machine(id: &str, user: &str, name: &str) -> MachineRecord {
         MachineRecord::new_at(
             Utc::now(),
@@ -2475,16 +3316,18 @@ mod upstream_tests {
     fn assert_via_routes(
         policy: &PolicyStore,
         nodes: &[PeerMapNode],
+        owners: &std::collections::BTreeMap<u64, u64>,
         viewer_key: &str,
         peer_key: &str,
         include: &[String],
         exclude: &[String],
     ) {
         let got = policy
-            .via_routes_for_peer(
+            .via_routes_for_peer_with_user_ids(
                 nodes,
                 stable_id_from_key(viewer_key),
                 stable_id_from_key(peer_key),
+                owners,
             )
             .expect("policy is loaded");
         assert_eq!(got.include.as_slice(), include);
@@ -2940,7 +3783,11 @@ mod upstream_tests {
 
     #[tokio::test]
     async fn upstream_user_grpc_delete_refuses_user_owned_nodes_but_allows_tagged_nodes() {
-        let (service, machines) = admin_service_with_machines().await;
+        // Go's DestroyUser checks the nodes table by user_id (ListNodesByUser);
+        // tagged nodes have user_id NULL and never block deletion. Use the
+        // persistent composition so the node actually lives in that table (a
+        // node held only in the volatile registry is invisible to the check).
+        let (service, db) = admin_service_with_persistent_machines().await;
         let alice = service
             .create_user(Request::new(CreateUserRequest {
                 name: "alice".into(),
@@ -2955,11 +3802,23 @@ mod upstream_tests {
             .expect("alice");
 
         let node_key = "ad".repeat(32);
-        machines.upsert(
-            node_key.clone(),
-            fixture_machine(&node_key, "alice", "alpha"),
-        );
-        let node_id = stable_id_from_key(&node_key);
+        headscale_db::headscale_nodes::create(
+            db.pool(),
+            headscale_db::headscale_nodes::CreateParams {
+                machine_key: format!("mkey:{}", "ae".repeat(32)),
+                node_key: format!("nodekey:{node_key}"),
+                host_info: serde_json::json!({"Hostname": "alpha"}),
+                ipv4: Some("100.64.0.7".into()),
+                hostname: "alpha".into(),
+                given_name: "alpha".into(),
+                user_id: Some(i64::try_from(alice.id).unwrap()),
+                register_method: headscale_db::headscale_nodes::REGISTER_METHOD_CLI.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let node_id = 1;
 
         let err = service
             .delete_user(Request::new(DeleteUserRequest { id: alice.id }))
@@ -3014,6 +3873,7 @@ mod upstream_tests {
             tagged.user.as_ref().expect("tagged node user").name,
             "tagged-devices"
         );
+        db.close().await;
     }
 
     #[tokio::test]
@@ -3023,41 +3883,54 @@ mod upstream_tests {
         let _mounted = service.clone().into_service_server();
         let _auth_mounted = service.clone().into_authenticated_service_server();
 
-        for (name, metadata, expected_message) in [
+        // Go's grpcAuthenticationInterceptor (app.go): a token that fails to
+        // parse/look up (empty, unknown, malformed) makes ValidateAPIKey return
+        // an error => `Internal "validating token"`; only a well-formed but
+        // expired key yields `Unauthenticated "invalid token"`. Verified against
+        // the real v0.29.5 server (bad key => Internal, expired key =>
+        // Unauthenticated).
+        for (name, metadata, expected_code, expected_message) in [
             (
                 "missing authorization metadata",
                 None,
+                tonic::Code::Unauthenticated,
                 "authorization token not supplied",
             ),
             (
                 "opaque authorization metadata",
                 Some(AsciiMetadataValue::try_from(&b"Bearer \xfa"[..]).unwrap()),
+                tonic::Code::Unauthenticated,
                 "invalid authorization metadata",
             ),
             (
                 "non-bearer authorization scheme",
                 Some("Token abc".parse().unwrap()),
+                tonic::Code::Unauthenticated,
                 r#"missing "Bearer " prefix in "Authorization" header"#,
             ),
             (
                 "bearer prefix without required space",
                 Some("Bearer".parse().unwrap()),
+                tonic::Code::Unauthenticated,
                 r#"missing "Bearer " prefix in "Authorization" header"#,
             ),
             (
                 "lowercase bearer prefix",
                 Some("bearer invalid".parse().unwrap()),
+                tonic::Code::Unauthenticated,
                 r#"missing "Bearer " prefix in "Authorization" header"#,
             ),
             (
                 "empty bearer token",
                 Some("Bearer ".parse().unwrap()),
-                "invalid token",
+                tonic::Code::Internal,
+                "validating token",
             ),
             (
                 "invalid bearer token",
                 Some("Bearer invalid".parse().unwrap()),
-                "invalid token",
+                tonic::Code::Internal,
+                "validating token",
             ),
         ] {
             let mut request = Request::new(HealthRequest {});
@@ -3068,7 +3941,7 @@ mod upstream_tests {
                 .health(request)
                 .await
                 .expect_err(&format!("{name} unexpectedly authenticated"));
-            assert_eq!(err.code(), tonic::Code::Unauthenticated, "{name}");
+            assert_eq!(err.code(), expected_code, "{name}");
             assert_eq!(err.message(), expected_message, "{name}");
         }
 
@@ -3083,6 +3956,30 @@ mod upstream_tests {
         );
         let health = service.health(valid).await.unwrap().into_inner();
         assert!(health.database_connectivity);
+
+        // A well-formed but expired key is the only `valid == false` path in
+        // Go's interceptor => `Unauthenticated "invalid token"`.
+        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let expired = api_keys
+            .mint_precise(
+                ApiKeyMintRequest {
+                    expiration: Some(expired_at.timestamp()),
+                },
+                Some(expired_at),
+            )
+            .await
+            .expect("mint expired api key");
+        let mut expired_request = Request::new(HealthRequest {});
+        expired_request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", expired.api_key).parse().unwrap(),
+        );
+        let err = service
+            .health(expired_request)
+            .await
+            .expect_err("expired key unexpectedly authenticated");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "expired key");
+        assert_eq!(err.message(), "invalid token", "expired key");
     }
 
     #[test]
@@ -3617,7 +4514,7 @@ mod upstream_tests {
             .expect("registered node");
         assert_eq!(registered.node_key, debug_node.node_key);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
-        assert_eq!(registered.available_routes, vec!["10.0.0.0/24"]);
+        assert!(registered.available_routes.is_empty());
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -3683,7 +4580,7 @@ mod upstream_tests {
             .node
             .expect("registered node");
         assert_eq!(registered.node_key, debug_node.node_key);
-        assert_eq!(registered.available_routes, vec!["0.0.0.0/0"]);
+        assert!(registered.available_routes.is_empty());
         assert!(registered.approved_routes.is_empty());
     }
 
@@ -3822,7 +4719,10 @@ mod upstream_tests {
             .expect("registered node");
         assert_eq!(registered.node_key, debug_node.node_key);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
-        assert_eq!(registered.available_routes, vec!["10.42.0.0/24"]);
+        // Go: routes live only on the DebugCreateNode echo; the registered node
+        // advertises none (cached RegistrationData has no Hostinfo).
+        assert_eq!(debug_node.available_routes, vec!["10.42.0.0/24"]);
+        assert!(registered.available_routes.is_empty());
 
         let err = service
             .auth_register(Request::new(AuthRegisterRequest {
@@ -4344,7 +5244,7 @@ mod upstream_tests {
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
         assert!(registration_cache.is_empty());
         let stored = machines.get(&node_key_hex).unwrap();
-        assert_eq!(stored.user, "alice");
+        assert!(stored.user.is_empty(), "tagged nodes have no user owner");
         assert_eq!(stored.forced_tags, vec!["tag:server"]);
         assert!(
             stored.expiry.is_none(),
@@ -4406,7 +5306,12 @@ mod upstream_tests {
         assert_eq!(registered.id, 1);
         assert_eq!(registered.node_key, pending.node_key);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
-        assert_eq!(registered.available_routes, vec!["10.0.0.0/24"]);
+        // Go's DebugCreateNode only echoes the routes back on the synthetic
+        // response; the cached RegistrationData carries no Hostinfo, so the node
+        // created by auth register advertises no routes (verified against the
+        // real v0.29.5 server).
+        assert_eq!(pending.available_routes, vec!["10.0.0.0/24"]);
+        assert!(registered.available_routes.is_empty());
 
         let got = service
             .get_node(Request::new(GetNodeRequest { node_id: 1 }))
@@ -4438,7 +5343,10 @@ mod upstream_tests {
             .into_inner()
             .node
             .expect("renamed node");
-        assert_eq!(renamed.name, "debug-renamed");
+        // Go RenameNode only changes given_name; `name` keeps the client's raw
+        // hostname (verified against the real v0.29.5 server).
+        assert_eq!(renamed.name, "debug-router");
+        assert_eq!(renamed.given_name, "debug-renamed");
 
         let given_name: String = sqlx::query_scalar("SELECT given_name FROM nodes WHERE id = 1")
             .fetch_one(db.pool())
@@ -4474,6 +5382,10 @@ mod upstream_tests {
             .into_inner()
             .user
             .expect("created user");
+        assert_ne!(
+            user.created_at.as_ref().expect("creation timestamp").nanos,
+            0
+        );
 
         let created_key = service
             .create_pre_auth_key(Request::new(CreatePreAuthKeyRequest {
@@ -4482,7 +5394,7 @@ mod upstream_tests {
                 ephemeral: true,
                 expiration: Some(prost_types::Timestamp {
                     seconds: 4_102_444_800,
-                    nanos: 0,
+                    nanos: 123_456_789,
                 }),
                 acl_tags: vec!["tag:server".into()],
             }))
@@ -4772,24 +5684,136 @@ mod upstream_tests {
 
         assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(registered.available_routes, vec!["10.70.1.0/24"]);
-        assert_eq!(registered.approved_routes, vec!["10.70.1.0/24"]);
+        // Go's RegisterNode replies with the NodeView taken before
+        // State.AutoApproveRoutes ran; the approval is visible afterwards
+        // (verified in-process against v0.29.5: response approved=[], a
+        // following GetNode approved=[10.70.1.0/24]).
+        assert!(registered.approved_routes.is_empty());
+        let got = service
+            .get_node(Request::new(GetNodeRequest {
+                node_id: registered.id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node after auto approval");
+        assert_eq!(got.approved_routes, vec!["10.70.1.0/24"]);
         let live = wire_registry.get(&node_key_hex).expect("live projection");
         assert_eq!(live.approved_routes, vec!["10.70.1.0/24"]);
 
         let changes = wire_registry.map_change_history();
         let new_changes = &changes[history_len..];
+        // Go: HandleNodeFromAuthPath returns reauthChange(.., policyChanged) =
+        // PolicyChange because the new node's addresses join alice's
+        // autoApprover set (a bare NodeAdded only when the policy is
+        // unaffected); RegisterNode then runs State.AutoApproveRoutes, whose
+        // SetApprovedRoutes always yields PolicyChange. Neither carries an
+        // origin node.
         assert_eq!(
             new_changes.len(),
             2,
-            "RegisterNode route autoapproval should project lifecycle plus policy churn"
+            "RegisterNode route autoapproval should project two policy changes"
         );
-        assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
-        assert_eq!(new_changes[0].origin_node_id, Some(registered.id));
-        assert_eq!(new_changes[0].content.peers_changed, vec![registered.id]);
-        assert_eq!(new_changes[1].reason_labels(), vec!["policy change"]);
-        assert_eq!(new_changes[1].origin_node_id, Some(registered.id));
-        assert!(new_changes[1].content.include_policy);
-        assert!(new_changes[1].content.requires_runtime_peer_computation);
+        for change in new_changes {
+            assert_eq!(change.reason_labels(), vec!["policy change"]);
+            assert_eq!(change.origin_node_id, None);
+            assert!(change.content.include_policy);
+            assert!(change.content.requires_runtime_peer_computation);
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_node_grpc_register_autoapproval_with_registry_owning_machine_admin() {
+        // Production composition: the persistent machine admin owns the live
+        // registry (headscale-cli server.rs), so RegisterNode's trailing
+        // State.AutoApproveRoutes step mutates the live node through it.
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let machines = Arc::new(
+            PersistentMachineAdmin::new(db.pool().clone())
+                .with_user_admin(users.clone())
+                .with_wire_registry(wire_registry.clone()),
+        );
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let policy = PolicyStore::new();
+        let raw_policy = r#"{
+            "autoApprovers": {
+                "routes": {"10.71.0.0/16": ["alice@"]}
+            }
+        }"#;
+        policy.set(
+            parse_hujson_policy(raw_policy).unwrap(),
+            raw_policy.to_string(),
+        );
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                    .with_user_admin(users.clone()),
+            ),
+            policy,
+            machines,
+        )
+        .with_database_pool(db.pool().clone())
+        .with_policy_pool(db.pool().clone())
+        .with_registration_cache(registration_cache.clone())
+        .with_wire_registry(wire_registry.clone());
+        create_test_user(&service, "alice").await;
+
+        let node_key_hex = "a9".repeat(32);
+        let registration_id = "routeautoapprovalowned0001";
+        let registration_id = &registration_id[..24];
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            node_key_hex.clone(),
+            "aa".repeat(32),
+            String::new(),
+            "owned-router".into(),
+            Ipv4Addr::new(100, 64, 0, 71),
+            false,
+        );
+        pending.available_routes = vec!["10.71.1.0/24".into(), "10.72.1.0/24".into()];
+        registration_cache.insert(registration_id.to_string(), pending);
+
+        let registered = service
+            .register_node(Request::new(RegisterNodeRequest {
+                user: "alice".into(),
+                key: format!("hskey-authreq-{registration_id}"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("registered node");
+        assert!(registered.approved_routes.is_empty());
+
+        let got = service
+            .get_node(Request::new(GetNodeRequest {
+                node_id: registered.id,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .node
+            .expect("node after auto approval");
+        assert_eq!(got.available_routes, vec!["10.71.1.0/24", "10.72.1.0/24"]);
+        assert_eq!(got.approved_routes, vec!["10.71.1.0/24"]);
+        let live = wire_registry.get(&node_key_hex).expect("live projection");
+        assert_eq!(live.approved_routes, vec!["10.71.1.0/24"]);
+        let row = headscale_db::headscale_nodes::get_by_id(
+            db.pool(),
+            i64::try_from(registered.id).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.approved_route_list(), vec!["10.71.1.0/24"]);
+        db.close().await;
     }
 
     #[tokio::test]
@@ -4839,6 +5863,9 @@ mod upstream_tests {
         let node_key_hex = "e1".repeat(32);
         let machine_key_hex = "e2".repeat(32);
         let registration_id = "r".repeat(24);
+        // Go's typed disco keys require `discokey:` + 64 hex chars.
+        let disco_key = format!("discokey:{}", "e3".repeat(32));
+        // Go endpoints are netip.AddrPort: IPv6 needs the bracketed form.
         let mut pending = MachineRecord::new_at(
             Utc::now(),
             node_key_hex.clone(),
@@ -4850,8 +5877,8 @@ mod upstream_tests {
         );
         pending.forced_tags = vec!["tag:server".into()];
         pending.available_routes = vec!["10.80.0.0/24".into()];
-        pending.disco_key = Some("discokey:web-restart".into());
-        pending.endpoints = vec!["192.0.2.80:41641".into(), "2001:db8::80:41641".into()];
+        pending.disco_key = Some(disco_key.clone());
+        pending.endpoints = vec!["192.0.2.80:41641".into(), "[2001:db8::80]:41641".into()];
         pending.home_derp = 8;
         pending.os = "linux".into();
         pending.os_version = "6.10.0".into();
@@ -4873,16 +5900,16 @@ mod upstream_tests {
         assert!(registered.user.is_none());
         assert_eq!(registered.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(registered.machine_key, format!("mkey:{machine_key_hex}"));
-        assert_eq!(registered.disco_key, "discokey:web-restart");
+        assert_eq!(registered.disco_key, disco_key);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
         assert_eq!(registered.tags, vec!["tag:server"]);
         assert_eq!(registered.available_routes, vec!["10.80.0.0/24"]);
         assert!(registered.expiry.is_none());
         let live = wire_registry.get(&node_key_hex).expect("live projection");
-        assert_eq!(live.disco_key.as_deref(), Some("discokey:web-restart"));
+        assert_eq!(live.disco_key.as_deref(), Some(disco_key.as_str()));
         assert_eq!(
             live.endpoints,
-            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+            vec!["192.0.2.80:41641", "[2001:db8::80]:41641"]
         );
         assert_eq!(live.home_derp, 8);
         assert_eq!(live.os, "linux");
@@ -4913,10 +5940,10 @@ mod upstream_tests {
         assert_eq!(row.machine_key, format!("mkey:{machine_key_hex}"));
         assert_eq!(row.ipv4.as_deref(), Some("100.64.0.80"));
         assert_eq!(row.tag_list(), vec!["tag:server"]);
-        assert_eq!(row.disco_key, "discokey:web-restart");
+        assert_eq!(row.disco_key, disco_key);
         assert_eq!(
             row.endpoint_list(),
-            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+            vec!["192.0.2.80:41641", "[2001:db8::80]:41641"]
         );
         let host_info = row.host_info_value();
         assert_eq!(host_info["RoutableIPs"][0], "10.80.0.0/24");
@@ -4953,10 +5980,10 @@ mod upstream_tests {
             1
         );
         let hydrated = fresh_registry.get(&node_key_hex).expect("hydrated node");
-        assert_eq!(hydrated.disco_key.as_deref(), Some("discokey:web-restart"));
+        assert_eq!(hydrated.disco_key.as_deref(), Some(disco_key.as_str()));
         assert_eq!(
             hydrated.endpoints,
-            vec!["192.0.2.80:41641", "2001:db8::80:41641"]
+            vec!["192.0.2.80:41641", "[2001:db8::80]:41641"]
         );
         assert_eq!(hydrated.home_derp, 8);
         assert_eq!(hydrated.ssh_host_keys, vec!["ssh-ed25519 AAAAC3NzaCli"]);
@@ -4977,7 +6004,7 @@ mod upstream_tests {
         assert_eq!(listed_user.name, "tagged-devices");
         assert_eq!(listed_node.node_key, format!("nodekey:{node_key_hex}"));
         assert_eq!(listed_node.machine_key, format!("mkey:{machine_key_hex}"));
-        assert_eq!(listed_node.disco_key, "discokey:web-restart");
+        assert_eq!(listed_node.disco_key, disco_key);
         assert_eq!(listed_node.register_method, RegisterMethod::Cli as i32);
         assert_eq!(listed_node.tags, vec!["tag:server"]);
         assert_eq!(listed_node.available_routes, vec!["10.80.0.0/24"]);
@@ -4991,7 +6018,7 @@ mod upstream_tests {
             .node
             .expect("node after restart");
         assert_eq!(got.node_key, listed_node.node_key);
-        assert_eq!(got.disco_key, "discokey:web-restart");
+        assert_eq!(got.disco_key, disco_key);
         assert_eq!(got.available_routes, listed_node.available_routes);
         drop(fresh_service);
         reopened.close().await;
@@ -5001,6 +6028,8 @@ mod upstream_tests {
     async fn persistent_node_grpc_set_approved_routes_survives_fresh_service() {
         let (service, db) = admin_service_with_persistent_machines().await;
         const REGISTRATION_ID: &str = "exitrouteabcdefghijklmno";
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let service = service.with_registration_cache(registration_cache.clone());
 
         service
             .create_user(Request::new(CreateUserRequest {
@@ -5012,15 +6041,20 @@ mod upstream_tests {
             .await
             .unwrap();
 
-        service
-            .debug_create_node(Request::new(DebugCreateNodeRequest {
-                user: "alice".into(),
-                key: format!("hskey-authreq-{REGISTRATION_ID}"),
-                name: "exit-router".into(),
-                routes: vec!["0.0.0.0/0".into(), "::/0".into()],
-            }))
-            .await
-            .unwrap();
+        // Go's DebugCreateNode registers a node with no Hostinfo, so it cannot
+        // announce the exit routes; queue a client registration that does (the
+        // routes come from the cached RegistrationData.Hostinfo in Go).
+        let mut pending = MachineRecord::new_at(
+            Utc::now(),
+            "ee".repeat(32),
+            "ef".repeat(32),
+            String::new(),
+            "exit-router".into(),
+            Ipv4Addr::new(100, 64, 0, 90),
+            false,
+        );
+        pending.available_routes = vec!["0.0.0.0/0".into(), "::/0".into()];
+        registration_cache.insert(REGISTRATION_ID.to_string(), pending);
 
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
@@ -5212,7 +6246,9 @@ mod upstream_tests {
             .into_inner()
             .node
             .expect("renamed node");
-        assert_eq!(renamed.name, "beta");
+        // Go RenameNode only changes given_name; `name` keeps the raw hostname.
+        assert_eq!(renamed.name, "alpha");
+        assert_eq!(renamed.given_name, "beta");
 
         let expired = service
             .expire_node(Request::new(ExpireNodeRequest {
@@ -5350,6 +6386,10 @@ mod upstream_tests {
         assert_eq!(user.id, 2_147_455_555);
         assert_eq!(user.name, "tagged-devices");
         assert_eq!(user.display_name, "Tagged Devices");
+        assert_eq!(
+            user.created_at.as_ref().map(|value| value.seconds),
+            Some(-62_135_596_800)
+        );
 
         let alice_nodes = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -5388,7 +6428,9 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        // Go SetTags returns validateTag's error unwrapped, which tonic maps to
+        // Unknown (verified against the real v0.29.5 server).
+        assert_eq!(err.code(), tonic::Code::Unknown);
         assert_eq!(err.message(), "tag must start with the string 'tag:'");
 
         let err = service
@@ -5421,7 +6463,13 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        // Go wraps netip.ParsePrefix's error with fmt.Errorf (no gRPC status),
+        // so the code is Unknown (verified against the real v0.29.5 server).
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(
+            err.message(),
+            "parsing route: netip.ParsePrefix(\"not-a-prefix\"): no '/'"
+        );
 
         let err = service
             .set_tags(Request::new(SetTagsRequest {
@@ -5435,6 +6483,19 @@ mod upstream_tests {
             err.message(),
             "cannot remove all tags from a node - tagged nodes must have at least one tag"
         );
+
+        // Go's DebugCreateNode resolves the user before parsing the auth ID
+        // (`user not found` otherwise), so the user must exist to reach the
+        // AuthIDFromString errors below.
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
 
         for (key, expected_message) in [
             (
@@ -5504,8 +6565,11 @@ mod upstream_tests {
             ipv6: None,
             online: true,
             last_seen: 0,
+            last_seen_precise: None,
             created_at: 0,
+            created_at_precise: None,
             expiry: Some(1_780_000_000),
+            expiry_precise: None,
             machine_key_hex: "bb".repeat(32),
             disco_key: String::new(),
             os: "unknown".into(),
@@ -5823,9 +6887,11 @@ mod upstream_tests {
 
         assert_eq!(
             changes,
+            // Go's db.BackfillNodeIPs (ip.go) runs, per node: assign v4, assign v6,
+            // remove v4, remove v6 - so the assignment line precedes the removal.
             vec![
-                "removing IPv4 \"100.64.0.10\" from Node(1) \"needs-v6\"",
-                "assigned IPv6 \"fd7a:115c:a1e0::77\" to Node(1) \"needs-v6\""
+                "assigned IPv6 \"fd7a:115c:a1e0::77\" to Node(1) \"needs-v6\"",
+                "removing IPv4 \"100.64.0.10\" from Node(1) \"needs-v6\""
             ]
         );
         assert!(row.ipv4.is_none());
@@ -6028,6 +7094,9 @@ mod upstream_tests {
 
     #[tokio::test]
     async fn upstream_api_key_grpc_missing_id_errors_before_mutation() {
+        // Go (grpcv1.go ExpireApiKey/DeleteApiKey) surfaces gorm's raw
+        // `record not found` (code Unknown) for a missing id or prefix; verified
+        // against the real v0.29.5 server.
         let service = admin_service().await;
 
         let err = service
@@ -6038,7 +7107,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(err.message(), "api key not found");
+        assert_eq!(err.message(), "record not found");
 
         let err = service
             .delete_api_key(Request::new(DeleteApiKeyRequest {
@@ -6048,7 +7117,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(err.message(), "api key not found");
+        assert_eq!(err.message(), "record not found");
 
         let err = service
             .expire_api_key(Request::new(ExpireApiKeyRequest {
@@ -6058,7 +7127,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(err.message(), "api key not found");
+        assert_eq!(err.message(), "record not found");
 
         let err = service
             .delete_api_key(Request::new(DeleteApiKeyRequest {
@@ -6068,7 +7137,7 @@ mod upstream_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unknown);
-        assert_eq!(err.message(), "api key not found");
+        assert_eq!(err.message(), "record not found");
     }
 
     #[tokio::test]
@@ -6095,7 +7164,7 @@ mod upstream_tests {
                 ephemeral: true,
                 expiration: Some(prost_types::Timestamp {
                     seconds: 4_102_444_800,
-                    nanos: 0,
+                    nanos: 123_456_789,
                 }),
                 acl_tags: vec!["tag:server".into()],
             }))
@@ -6110,7 +7179,17 @@ mod upstream_tests {
         assert!(created.ephemeral);
         assert_eq!(created.acl_tags, vec!["tag:server".to_string()]);
         assert_eq!(created.user.as_ref().unwrap().id, user.id);
+        assert_eq!(created.user.as_ref().unwrap().created_at, user.created_at,);
+        assert_ne!(
+            created
+                .created_at
+                .as_ref()
+                .expect("creation timestamp")
+                .nanos,
+            0
+        );
         assert_eq!(created.expiration.as_ref().unwrap().seconds, 4_102_444_800);
+        assert_eq!(created.expiration.as_ref().unwrap().nanos, 123_456_789);
         assert!(!created.key.ends_with("-***"));
 
         let listed = service
@@ -6126,6 +7205,10 @@ mod upstream_tests {
         assert_eq!(
             listed.pre_auth_keys[0].expiration.as_ref().unwrap().seconds,
             4_102_444_800
+        );
+        assert_eq!(
+            listed.pre_auth_keys[0].expiration.as_ref().unwrap().nanos,
+            123_456_789
         );
 
         service
@@ -6320,48 +7403,56 @@ mod upstream_tests {
             .into_inner();
         assert_eq!(got_after_check.policy, raw);
 
+        // Go SetPolicy wraps the parse error with fmt.Errorf (code Unknown) while
+        // CheckPolicy returns status.Error(InvalidArgument, ...); both verified
+        // against the real v0.29.5 server.
+        let parse_error = "parsing policy: parsing HuJSON: hujson: line 1, column 2: parsing value: unexpected EOF";
         let err = service
             .set_policy(Request::new(SetPolicyRequest { policy: "{".into() }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), format!("setting policy: {parse_error}"));
 
         let err = service
             .check_policy(Request::new(CheckPolicyRequest { policy: "{".into() }))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), parse_error);
     }
 
     #[tokio::test]
     async fn upstream_policy_grpc_evaluates_policy_tests_before_success() {
         let (service, machines) = admin_service_with_machines().await;
+        // Go resolves `alice@` through the users table and owns nodes by numeric
+        // user id, so the owners must exist and be referenced by id.
+        let alice_id = create_test_user(&service, "alice").await;
+        let bob_id = create_test_user(&service, "bob").await;
         let alice_key = "91".repeat(32);
         let server_key = "92".repeat(32);
-        machines.upsert(
+        let mut alice_node = MachineRecord::new_at(
+            Utc::now(),
             alice_key.clone(),
-            MachineRecord::new_at(
-                Utc::now(),
-                alice_key,
-                "93".repeat(32),
-                "alice".into(),
-                "alice-laptop".into(),
-                Ipv4Addr::new(100, 64, 0, 1),
-                false,
-            ),
+            "93".repeat(32),
+            "alice".into(),
+            "alice-laptop".into(),
+            Ipv4Addr::new(100, 64, 0, 1),
+            false,
         );
-        machines.upsert(
+        alice_node.user_id = Some(alice_id);
+        machines.upsert(alice_key, alice_node);
+        let mut server_node = MachineRecord::new_at(
+            Utc::now(),
             server_key.clone(),
-            MachineRecord::new_at(
-                Utc::now(),
-                server_key,
-                "94".repeat(32),
-                "bob".into(),
-                "server".into(),
-                Ipv4Addr::new(100, 64, 0, 2),
-                false,
-            ),
+            "94".repeat(32),
+            "bob".into(),
+            "server".into(),
+            Ipv4Addr::new(100, 64, 0, 2),
+            false,
         );
+        server_node.user_id = Some(bob_id);
+        machines.upsert(server_key, server_node);
 
         let passing = r#"{
           "acls": [
@@ -6398,8 +7489,12 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
+        // Go: CheckPolicy => InvalidArgument, SetPolicy => Unknown with a
+        // "setting policy: " prefix; the per-test breakdown comes from
+        // PolicyTestResults.Errors() (verified against the real v0.29.5 server).
+        let failure = "test(s) failed:\nalice@ -> 100.64.0.2:80: expected ALLOWED, got DENIED";
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("cannot reach accept destination"));
+        assert_eq!(err.message(), failure);
 
         let err = service
             .set_policy(Request::new(SetPolicyRequest {
@@ -6407,8 +7502,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("cannot reach accept destination"));
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), format!("setting policy: {failure}"));
 
         let got = service
             .get_policy(Request::new(GetPolicyRequest {}))
@@ -6421,19 +7516,21 @@ mod upstream_tests {
     #[tokio::test]
     async fn upstream_policy_grpc_evaluates_ssh_tests_before_success() {
         let (service, machines) = admin_service_with_machines().await;
+        // Go resolves `alice@` through the users table and owns nodes by numeric
+        // user id, so the owner must exist and be referenced by id.
+        let alice_id = create_test_user(&service, "alice").await;
         let node_key = "95".repeat(32);
-        machines.upsert(
+        let mut node = MachineRecord::new_at(
+            Utc::now(),
             node_key.clone(),
-            MachineRecord::new_at(
-                Utc::now(),
-                node_key,
-                "96".repeat(32),
-                "alice".into(),
-                "alice-laptop".into(),
-                Ipv4Addr::new(100, 64, 0, 3),
-                false,
-            ),
+            "96".repeat(32),
+            "alice".into(),
+            "alice-laptop".into(),
+            Ipv4Addr::new(100, 64, 0, 3),
+            false,
         );
+        node.user_id = Some(alice_id);
+        machines.upsert(node_key, node);
         let passing = r#"{
           "ssh": [
             {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]}
@@ -6470,11 +7567,12 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
+        // Go: CheckPolicy => InvalidArgument, SetPolicy => Unknown with a
+        // "setting policy: " prefix (verified against the real v0.29.5 server).
+        let failure =
+            "test(s) failed:\nalice@/ubuntu -> alice-laptop: expected ALLOWED, got DENIED";
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(
-            err.message()
-                .contains("alice@/ubuntu -> alice-laptop: expected ALLOWED, got DENIED")
-        );
+        assert_eq!(err.message(), failure);
 
         let err = service
             .set_policy(Request::new(SetPolicyRequest {
@@ -6482,11 +7580,8 @@ mod upstream_tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(
-            err.message()
-                .contains("alice@/ubuntu -> alice-laptop: expected ALLOWED, got DENIED")
-        );
+        assert_eq!(err.code(), tonic::Code::Unknown);
+        assert_eq!(err.message(), format!("setting policy: {failure}"));
 
         let got = service
             .get_policy(Request::new(GetPolicyRequest {}))
@@ -6533,8 +7628,82 @@ mod upstream_tests {
     }
 
     #[tokio::test]
+    async fn upstream_policy_grpc_unsupported_mode_matches_go_errors() {
+        let service = admin_service().await.with_unsupported_policy_mode("consul");
+        let get_error = service
+            .get_policy(Request::new(GetPolicyRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(get_error.code(), tonic::Code::Unknown);
+        assert_eq!(
+            get_error.message(),
+            "no supported policy mode found in configuration, policy.mode: \"consul\""
+        );
+        let set_error = service
+            .set_policy(Request::new(SetPolicyRequest { policy: "{".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(set_error.code(), tonic::Code::Unknown);
+        assert_eq!(
+            set_error.message(),
+            "update is disabled for modes other than 'database'"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_policy_reload_rejects_ambiguous_users_without_replacing_live_policy() {
+        let db = headscale_db::Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        sqlx::query("INSERT INTO users (id,name,email,provider_identifier,created_at,updated_at) VALUES (2,'yala','',NULL,0,0),(7,'yala','yala@example.com','https://idp.test/subject',0,0)")
+            .execute(db.pool()).await.unwrap();
+        let base = r#"{"acls":[]}"#;
+        let bad = r#"{"groups":{"group:admins":["yala@"]}}"#;
+        let policy = PolicyStore::new();
+        policy.set(
+            crate::policy::parse_hujson_policy(base).unwrap(),
+            base.into(),
+        );
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        // Go's ReloadPolicy validates against the policy manager's own user
+        // list (loaded at startup / refreshed on user changes), not a fresh
+        // database read; mirror the startup load for the rows inserted above.
+        policy
+            .set_users_quiet(
+                crate::admin::users::UserAdmin::policy_users(users.as_ref())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        let service = HeadscaleAdminService::with_user_admin(
+            users.clone(),
+            Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+            Arc::new(
+                PersistentPreauthAdmin::new_for_test(db.pool().clone()).with_user_admin(users),
+            ),
+            policy.clone(),
+            Arc::new(WireMachineAdmin::new(Arc::new(MachineRegistry::new()))),
+        )
+        .with_policy_pool(db.pool().clone());
+        headscale_db::policies::set(db.pool(), bad).await.unwrap();
+        let error = service.reload_policy_from_config().await.unwrap_err();
+        assert!(error.message().contains("multiple users found"));
+        assert_eq!(policy.raw().as_deref(), Some(base));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.hujson");
+        fs::write(&path, bad).unwrap();
+        let service = service.with_policy_file(path);
+        let error = service.reload_policy_from_config().await.unwrap_err();
+        assert!(error.message().contains("multiple users found"));
+        assert_eq!(policy.raw().as_deref(), Some(base));
+    }
+
+    #[tokio::test]
     async fn upstream_policy_reload_from_file_updates_live_policy_and_auto_approvals() {
         let (service, machines) = admin_service_with_machines().await;
+        // Go resolves `alice@` through the users table and owns nodes by numeric
+        // user id, so the owner must exist and be referenced by id.
+        let alice_id = create_test_user(&service, "alice").await;
         let node_key = "97".repeat(32);
         let mut rec = MachineRecord::new_at(
             Utc::now(),
@@ -6545,6 +7714,7 @@ mod upstream_tests {
             Ipv4Addr::new(100, 64, 0, 9),
             false,
         );
+        rec.user_id = Some(alice_id);
         rec.available_routes = vec!["10.88.1.0/24".into(), "10.99.1.0/24".into()];
         machines.upsert(node_key.clone(), rec);
 
@@ -6639,6 +7809,15 @@ mod upstream_tests {
             ),
         ];
 
+        // Go owns a node by numeric user id and resolves `alice@` through the
+        // users table: create both users and hand their ids to the evaluation.
+        let alice_user = create_test_user(&service, "alice").await;
+        let bob_user = create_test_user(&service, "bob").await;
+        let owners = std::collections::BTreeMap::from([
+            (stable_id_from_key(&alice), alice_user),
+            (stable_id_from_key(&bob), bob_user),
+        ]);
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("acl.hujson");
         fs::write(&path, route_via_policy("tag:router-a", "tag:router-b")).unwrap();
@@ -6648,6 +7827,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &alice,
             &router_a,
             std::slice::from_ref(&route),
@@ -6656,6 +7836,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &alice,
             &router_b,
             &[],
@@ -6664,6 +7845,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &bob,
             &router_a,
             &[],
@@ -6672,6 +7854,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &bob,
             &router_b,
             std::slice::from_ref(&route),
@@ -6684,6 +7867,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &alice,
             &router_a,
             &[],
@@ -6692,6 +7876,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &alice,
             &router_b,
             std::slice::from_ref(&route),
@@ -6700,6 +7885,7 @@ mod upstream_tests {
         assert_via_routes(
             service.policy_for_test(),
             &nodes,
+            &owners,
             &bob,
             &router_b,
             std::slice::from_ref(&route),
@@ -6777,6 +7963,20 @@ mod upstream_tests {
     #[tokio::test]
     async fn upstream_policy_grpc_auto_approves_existing_node_routes() {
         let (service, machines) = admin_service_with_machines().await;
+        // Go resolves `alice@` through the users table (policy manager users),
+        // and a node is owned by a numeric user id, so the owner must exist.
+        let alice = service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .user
+            .expect("alice");
         let node_key = "8d".repeat(32);
         let mut rec = MachineRecord::new_at(
             Utc::now(),
@@ -6787,6 +7987,7 @@ mod upstream_tests {
             Ipv4Addr::new(100, 64, 0, 8),
             false,
         );
+        rec.user_id = Some(alice.id);
         rec.available_routes = vec!["10.88.1.0/24".into(), "10.99.1.0/24".into()];
         machines.upsert(node_key.clone(), rec);
 

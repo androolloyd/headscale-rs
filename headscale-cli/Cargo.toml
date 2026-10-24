@@ -3,9 +3,10 @@ name = "headscale-cli"
 description = "CLI for headscale-rs mesh networking"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "(MIT OR Apache-2.0) AND Apache-2.0 AND BSD-3-Clause AND MIT"
 
 [features]
+default = ["postgres-sqlx"]
 postgres-sqlx = ["headscale-api/postgres-sqlx", "headscale-db/postgres-sqlx", "sqlx/postgres"]
 
 [lib]
@@ -21,7 +22,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -30,10 +31,17 @@ axum = "0.7"
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
 tonic = { workspace = true, features = ["tls-native-roots"] }
 prost-types = "0.14"
+prost.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+# Reuse the existing locked roots loader for owned CLI TLS/preface attempts.
+rustls-native-certs = "=0.8.5"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", features = ["util"] }
+# Locked transport types for bounded unary replay and REFUSED_STREAM handling.
+http-body = "=1.1.0"
+http-body-util = "0.1"
+h2 = "=0.4.20"
 
 headscale-core = { workspace = true }
 # The admin subcommands (users / nodes / preauthkeys / policy / tailnet)
@@ -44,10 +52,12 @@ headscale-core = { workspace = true }
 # WIP lands and those subcommands are refactored, the `full` feature
 # can be dropped here — the admin client surface itself never touches it.
 headscale-api = { path = "../headscale-api", default-features = false, features = ["admin", "full"] }
+# Shared Go-compatible quoting is also used by the logging implementation.
+headscale-api-acl.workspace = true
 headscale-identity = { workspace = true }
 headscale-payments = { workspace = true }
 headscale-resources = { workspace = true }
-headscale-db = { workspace = true }
+headscale-db = { workspace = true, features = ["go-pool-compat"] }
 
 # CLI argument parsing
 clap = { workspace = true }
@@ -55,9 +65,11 @@ clap_complete = { workspace = true }
 
 # Config file support
 toml = { workspace = true }
-serde_yaml = { workspace = true }
+serde-saphyr = { workspace = true }
 crc = "3.4"
 hex = "0.4"
+# Reuse the locked linear-time regex engine for pinned pterm escape patterns.
+regex = "=1.13.1"
 rand_core = { workspace = true }
 url = "2"
 
@@ -66,11 +78,17 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 sha2 = "0.10"
 serde_urlencoded = "0.7"
-instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "hyper-rustls", "rcgen"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "hyper-rustls", "rcgen", "go-native-client"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs", "x509-parser"] }
 
 # Local endpoint discovery
 hostname = { workspace = true }
-local-ip-address = { workspace = true }
+if-addrs = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Existing locked libc package, used only for the nonblocking socket-permission
+# probe's platform constants. No direct unsafe operations are introduced.
+libc = "=0.2.191"
 
 [dev-dependencies]
 # Mock HTTP server for the admin client unit tests. Keep this on the
@@ -81,7 +99,6 @@ httpmock = "0.8"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "service", "http1"] }
-rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs", "x509-parser"] }
 rustls-pki-types = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"

@@ -1,0 +1,7 @@
+Native token response and expiry decoding in src/oidc/json.rs follows
+golang.org/x/oauth2 v0.36.0 internal/token.go.
+
+Copyright 2009 The Go Authors.
+
+Original BSD redistribution terms are retained in LICENSE-GO-OAUTH2.
+Source hashes and implementation limits are recorded in UPSTREAM.md.

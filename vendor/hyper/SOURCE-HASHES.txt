@@ -1,0 +1,63 @@
+SHA-256 source comparison manifest. No code execution or runtime validation.
+
+Cargo.toml
+  upstream-1.12.0 dda7caddb7df155f479d2bd4764f201c57311f04969a0e7c893362765857161a
+  local 28d161ef9abbd4aa479bc7ba8ff80a982a614245833db9aba75ff717873ab2d3
+
+Cargo.toml.orig
+  upstream-1.12.0 226a36792ab1b4cfbb7082ca10d477858a8bd0ab7b6171071f4376b02f83a85f
+  local fdfa54696ba7aecf256ec3b702714b45dad543b4844607ca457b03401815acdf
+
+src/body/incoming.rs
+  upstream-1.12.0 11b8d262650730750721d6f93faf567e9cce6aa2e8a326aeb8f2cad908fdd485
+  local 1b5ae4eb46519c102496898f3f7c628e793a735ae417d932836eb4e91a656dff
+
+src/body/mod.rs
+  upstream-1.12.0 5296424f2f8148925c8cf18992e4d59b827b9fa84eb8b3a8dad040c532ce04ef
+  local 9077d5d2d5d1e5bc4f3b611ea555dbbdbe50f1636511d91e61ac62e4d2420638
+
+src/client/conn/http1.rs
+  upstream-1.12.0 6ec8124f5dc3f176baae99d9528d467e976e2522912d5bab13603a792fecb203
+  local 1511ec260e51358da9fe31d00fc74858a6fc02c5ee5868d932049e08d8ce51d4
+
+src/client/conn/http2.rs
+  upstream-1.12.0 0ec553b8106fbc1eec7ed2b84ce4f37128512e4bbbf73096b822c2c1a8bbfcb5
+  local 78afd3874c9821f076fc450e9696e8488a141f814eafb7ff4ad4dc5b99c46f69
+
+src/client/dispatch.rs
+  upstream-1.12.0 cce049418dcd9e1700b87701d6e78a4a021ba0e9912e9b669fec3d3f037d4e29
+  local f2081ab7b76a93f990b4c5f2c33feada6c7d2f0605c3489fcfb05093d71393ed
+
+src/proto/h1/conn.rs
+  upstream-1.12.0 59a6db81bd098c126d7929e1996a3a6bf9d6e997da76b47d88178fd8206ad44a
+  local 1ac653f79cf4f866dc377efa81b7ceb77448c756ab794543cb1eaba037a28ac1
+
+src/proto/h1/dispatch.rs
+  upstream-1.12.0 9cd6638c59ae4857ae43ee58857abf585cc6a52dfda616c3631e2e48c02eaba2
+  local d692686e716aec465c24c64e6bd9060650d2f884ae5cb65dac66fdadc2c1f3d9
+
+src/proto/h1/role.rs
+  upstream-1.12.0 ee27600c6d7ae2f23e148af5cef02fa029def6ea5999cce84af4aac058ceb03e
+  local a2d03c6fd9947ffa91c11dc237bbbc6da5534d73e4ee458a23e2dcd82d0ffc92
+
+src/proto/h2/client.rs
+  upstream-1.12.0 56d715d09cdeddb91606dd0a9cfaa3de360ef31c07179ab9df6d24d9da0868af
+  local 009052423b0228b61816e184b5a63e416f1679bdbb8ae09ee787a13b1fc21509
+
+src/proto/h2/mod.rs
+  upstream-1.12.0 8f10d6023aa310984b7e9450e9fe9db2dde3a5c34ad6f78c6a16210ad868258a
+  local ed3fad275fbb3ee1dd2d149c5ebfc5706acd686a4b6eab38ca94d38b5fa67ed8
+
+src/proto/h2/server.rs
+  upstream-1.12.0 4a31750ff85d513011234d497cd00114a6b8ebb83e7c416cdfbace185e9fb47f
+  local 3f423d75e8dd1d469c0506223ba9de4b0f1121413b0edaf61a6294a5885a8504
+
+src/server/conn/http2.rs
+  upstream-1.12.0 625bc621eab3dd7110574a8e5e0bc9bfe931556d062cfea8cef104c708802ea5
+  local 1712b6cbbf411f22d09b4254f22418032117a6a0b56fab9e33f1e893e8ed3a13
+
+src/body/go_h1.rs
+  upstream-1.12.0 (local-only adaptation)
+  local e3b8e8bfcb3dfd176c327daab41170fa7651fb8b312267aa4a7bd00eecb4f56d
+
+

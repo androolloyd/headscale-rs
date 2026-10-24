@@ -108,7 +108,14 @@ smoke_ids=(
   postgres-derp-native-restart
   postgres-online-lastseen
   postgres-ping-lifecycle
+  postgres-full-map-ping-churn
   postgres-policy-churn
+  postgres-policy-peer-removal-restart
+  postgres-rejected-policy-filter
+  postgres-self-filter-user-rename
+  postgres-invalid-fqdn-peer-restart
+  postgres-nextdns-nodeattrs-policy-reload
+  postgres-ephemeral-reconnect
   postgres-web-register-policy-churn
   postgres-web-register-policy-churn-restart
   postgres-web-register-policy-config-map-churn-restart
@@ -153,6 +160,7 @@ smoke_ids=(
   postgres-ssh-oidc-check
   postgres-ssh-cli-check
   postgres-ssh-oidc-check-period-cache
+  postgres-ssh-oidc-revocation
   postgres-ssh-oidc-check-period-local-user
   postgres-ssh-oidc-policy-restart
   postgres-ssh-oidc-check-wrong-user
@@ -294,6 +302,8 @@ smoke_ids=(
   ssh-profile-subdomain-deny
   ssh-accept-env
   postgres-web-register-custom-domain
+  node-key-expiry-clear
+  postgres-node-key-expiry-clear
 )
 
 smoke_areas=(
@@ -322,6 +332,14 @@ smoke_areas=(
   database
   database
   database
+  database
+  database
+  database
+  database
+  database
+  database
+  database
+  dns
   database
   database
   database
@@ -509,6 +527,8 @@ smoke_areas=(
   ssh
   ssh
   database
+  lifecycle
+  database
 )
 
 smoke_rust_scripts=(
@@ -538,7 +558,14 @@ smoke_rust_scripts=(
   tools/real-client/postgres-derp-native-restart-smoke.sh
   tools/real-client/postgres-online-lastseen-smoke.sh
   tools/real-client/postgres-ping-lifecycle-smoke.sh
+  tools/real-client/postgres-full-map-ping-churn-smoke.sh
   tools/real-client/postgres-policy-churn-smoke.sh
+  tools/real-client/postgres-policy-peer-removal-restart-smoke.sh
+  tools/real-client/postgres-rejected-policy-filter-smoke.sh
+  tools/real-client/postgres-self-filter-user-rename-smoke.sh
+  tools/real-client/postgres-invalid-fqdn-peer-restart-smoke.sh
+  tools/real-client/postgres-nextdns-nodeattrs-policy-reload-smoke.sh
+  tools/real-client/postgres-ephemeral-reconnect-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-restart-smoke.sh
   tools/real-client/postgres-web-register-policy-config-map-churn-restart-smoke.sh
@@ -583,6 +610,7 @@ smoke_rust_scripts=(
   tools/real-client/postgres-ssh-oidc-check-smoke.sh
   tools/real-client/postgres-ssh-cli-check-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-smoke.sh
+  tools/real-client/postgres-ssh-oidc-revocation-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-local-user-smoke.sh
   tools/real-client/postgres-ssh-oidc-policy-restart-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-smoke.sh
@@ -724,6 +752,8 @@ smoke_rust_scripts=(
   tools/real-client/ssh-profile-subdomain-deny-smoke.sh
   tools/real-client/ssh-accept-env-smoke.sh
   tools/real-client/postgres-web-register-custom-domain-smoke.sh
+  tools/real-client/node-key-expiry-clear-smoke.sh
+  tools/real-client/postgres-node-key-expiry-clear-smoke.sh
 )
 
 smoke_go_scripts=(
@@ -753,7 +783,14 @@ smoke_go_scripts=(
   tools/real-client/postgres-derp-native-restart-headscale-go-smoke.sh
   tools/real-client/postgres-online-lastseen-headscale-go-smoke.sh
   tools/real-client/postgres-ping-lifecycle-headscale-go-smoke.sh
+  tools/real-client/postgres-full-map-ping-churn-headscale-go-smoke.sh
   tools/real-client/postgres-policy-churn-headscale-go-smoke.sh
+  tools/real-client/postgres-policy-peer-removal-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-rejected-policy-filter-headscale-go-smoke.sh
+  tools/real-client/postgres-self-filter-user-rename-headscale-go-smoke.sh
+  tools/real-client/postgres-invalid-fqdn-peer-restart-headscale-go-smoke.sh
+  tools/real-client/postgres-nextdns-nodeattrs-policy-reload-headscale-go-smoke.sh
+  tools/real-client/postgres-ephemeral-reconnect-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-churn-restart-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-policy-config-map-churn-restart-headscale-go-smoke.sh
@@ -798,6 +835,7 @@ smoke_go_scripts=(
   tools/real-client/postgres-ssh-oidc-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-cli-check-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-cache-headscale-go-smoke.sh
+  tools/real-client/postgres-ssh-oidc-revocation-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-period-local-user-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-policy-restart-headscale-go-smoke.sh
   tools/real-client/postgres-ssh-oidc-check-wrong-user-headscale-go-smoke.sh
@@ -939,6 +977,8 @@ smoke_go_scripts=(
   tools/real-client/ssh-profile-subdomain-deny-headscale-go-smoke.sh
   tools/real-client/ssh-accept-env-headscale-go-smoke.sh
   tools/real-client/postgres-web-register-custom-domain-headscale-go-smoke.sh
+  tools/real-client/node-key-expiry-clear-headscale-go-smoke.sh
+  tools/real-client/postgres-node-key-expiry-clear-headscale-go-smoke.sh
 )
 
 smoke_assertions=(
@@ -968,7 +1008,14 @@ smoke_assertions=(
   "production Postgres native DERP stock clients reconnect, clear DERP status health, prove raw verify-client admissions, and relay after Rust server restart"
   "production Postgres online transition and LastSeen after disconnect"
   "production Postgres debug PingRequest lifecycle and online/LastSeen"
+  "production Postgres full-map user-removal churn overlaps stock-client debug pings without lost callbacks"
   "production Postgres auth-key registration plus database policy mutation wakes live peer maps"
+  "production Postgres live policy hides both peers and keeps them removed after restart"
+  "production Postgres rejected policy leaves active stock-client packet filters and peers unchanged across restart"
+  "production Postgres autogroup:self packet filter gains a renamed user live and persists through restart"
+  "production Postgres restart drops a persisted invalid-name peer from the surviving stock client's netmap without changing observer identity"
+  "production Postgres policy nodeAttrs reload changes a stock client NextDNS resolver profile without changing its login"
+  "production Postgres ephemeral auth-key client preserves node identity and observer netmap through three rapid reconnects"
   "production Postgres web registration plus database policy mutation wakes live peer maps"
   "production Postgres web-registration policy map churn survives server restart"
   "production Postgres web-registration policy/config map churn and MagicDNS peer resolution survive server restart"
@@ -995,7 +1042,7 @@ smoke_assertions=(
   "production Postgres web registration with owned requested tag"
   "production Postgres web registration rejects unowned requested tag"
   "production Postgres route advertisement without approval"
-  "production Postgres route advertisement/approval, stock-client netmap, and online/LastSeen"
+  "production Postgres route approval reaches the router's live self netmap and persists across server restart and online/LastSeen"
   "production Postgres primary route selection"
   "production Postgres primary route owner survives server restart"
   "production Postgres primary route failover after unapproval"
@@ -1013,6 +1060,7 @@ smoke_assertions=(
   "production Postgres OIDC-backed Tailscale SSH check approval"
   "production Postgres CLI-approved Tailscale SSH check approval"
   "production Postgres OIDC-backed Tailscale SSH checkPeriod cache"
+  "production Postgres cached SSH check is denied after live policy revocation, and OIDC callback state is single-use"
   "production Postgres OIDC-backed Tailscale SSH checkPeriod is scoped to local_user"
   "production Postgres OIDC SSH database policy mutation survives server restart"
   "production Postgres wrong-user OIDC-backed Tailscale SSH check denial status/stdout/stderr"
@@ -1154,6 +1202,8 @@ smoke_assertions=(
   "current-head Tailscale SSH localpart profile email subdomain denial status/stderr"
   "current-head Tailscale SSH acceptEnv forwards accepted LANG and LC_* env"
   "production Postgres web registration with custom MagicDNS base domain"
+  "live peer netmap receives a key expiry then its explicit removal"
+  "production Postgres peer netmap receives a key expiry then its explicit removal"
 )
 
 assert_matrix_lengths() {

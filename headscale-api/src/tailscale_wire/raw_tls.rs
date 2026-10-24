@@ -62,7 +62,7 @@ use std::{
 
 use axum::Router;
 use hyper::body::Incoming as HyperBody;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
@@ -73,8 +73,11 @@ use tower::ServiceExt;
 use super::WireState;
 #[cfg(feature = "full")]
 use super::derp::drive_native_derp;
-use super::noise::{UPGRADE_PROTOCOL, drive_ts2021_be_with_init};
+use super::noise::{UPGRADE_PROTOCOL, drive_ts2021_be_with_init_remote_addr};
 use super::tls::ReloadableServerConfig;
+
+#[cfg(feature = "full")]
+mod acme_handshake;
 
 /// HTTP header carrying a base64-encoded controlbase Initiation
 /// frame. Stock Tailscale clients (v1.42+) populate this on the
@@ -127,6 +130,34 @@ pub async fn serve_bound_raw_tls(
     router: Router,
     wire_state: WireState,
 ) -> io::Result<()> {
+    serve_bound_raw_tls_with_shutdown(
+        listener,
+        addr,
+        tls,
+        router,
+        wire_state,
+        None,
+        super::serve::TrustedProxyConfig::default(),
+    )
+    .await
+}
+
+pub(super) async fn serve_bound_raw_tls_with_shutdown(
+    listener: TcpListener,
+    addr: SocketAddr,
+    tls: ReloadableServerConfig,
+    router: Router,
+    wire_state: WireState,
+    native: Option<(
+        std::sync::Arc<super::http_shutdown::Group>,
+        super::http_shutdown::ListenerWork,
+    )>,
+    trusted_proxies: super::serve::TrustedProxyConfig,
+) -> io::Result<()> {
+    let (group, _listener_work) = match native {
+        Some((group, work)) => (Some(group), Some(work)),
+        None => (None, None),
+    };
     tracing::info!(
         target = "tailscale_wire::raw_tls",
         %addr,
@@ -134,7 +165,18 @@ pub async fn serve_bound_raw_tls(
     );
 
     loop {
-        let (tcp, peer) = match listener.accept().await {
+        let accepted = match &group {
+            Some(group) => tokio::select! {
+                biased;
+                () = group.closing() => {
+                    drop(listener);
+                    return Ok(());
+                },
+                accepted = listener.accept() => accepted,
+            },
+            None => listener.accept().await,
+        };
+        let (tcp, peer) = match accepted {
             Ok(pair) => pair,
             Err(e) => {
                 // EMFILE etc. — log and keep going.
@@ -146,11 +188,37 @@ pub async fn serve_bound_raw_tls(
                 continue;
             }
         };
-        let acceptor = TlsAcceptor::from(tls.current());
+        let tls = tls.clone();
         let router = router.clone();
         let wire_state = wire_state.clone();
+        let trusted_proxies = trusted_proxies.clone();
+        let tracking = match &group {
+            Some(group) => match group.connection() {
+                Some(connection) => Some(connection),
+                None => continue,
+            },
+            None => None,
+        };
         tokio::spawn(async move {
-            if let Err(e) = handle_one(acceptor, tcp, peer, router, wire_state).await {
+            let cancelled = tracking.clone();
+            let connection = Box::pin(handle_one(
+                tls,
+                tcp,
+                peer,
+                router,
+                wire_state,
+                tracking,
+                trusted_proxies,
+            ));
+            let result = match cancelled {
+                Some(cancelled) => tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => Ok(()),
+                    result = connection => result,
+                },
+                None => connection.await,
+            };
+            if let Err(e) = result {
                 tracing::debug!(
                     target = "tailscale_wire::raw_tls",
                     %peer,
@@ -162,15 +230,47 @@ pub async fn serve_bound_raw_tls(
     }
 }
 
+/// Complete a TLS handshake using the reloader's optional native ACME provider.
+/// The caller owns admission and the deadline for the entire handshake.
+#[doc(hidden)]
+pub async fn accept_tls_with_config<IO>(
+    reloader: ReloadableServerConfig,
+    io: IO,
+) -> io::Result<TlsStream<IO>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    #[cfg(feature = "full")]
+    if let Some(provider) = reloader.certificate_provider() {
+        return acme_handshake::accept(reloader.current(), provider, io).await;
+    }
+
+    TlsAcceptor::from(reloader.current()).accept(io).await
+}
+
 async fn handle_one(
-    acceptor: TlsAcceptor,
+    reloader: ReloadableServerConfig,
     tcp: TcpStream,
     peer: SocketAddr,
     router: Router,
     wire_state: WireState,
+    tracking: Option<std::sync::Arc<super::http_shutdown::Connection>>,
+    trusted_proxies: super::serve::TrustedProxyConfig,
 ) -> io::Result<()> {
     // 1. TLS handshake.
-    let mut tls = acceptor.accept(tcp).await?;
+    let pending_handshake = wire_state
+        .server_noise_key
+        .handshake_permit()
+        .map_err(io::Error::other)?;
+    let deadline = tokio::time::Instant::now() + super::noise::CONTROL_HANDSHAKE_TIMEOUT;
+    let mut tls = tokio::time::timeout_at(deadline, accept_tls_with_config(reloader, tcp))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
+
+    if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+        drop(pending_handshake);
+        return super::http_shutdown::serve_h2_connection(tls, router, peer, tracking).await;
+    }
 
     // 2. Peek bytes until we can identify the request line + Upgrade
     //    header. We keep reading until either we see "\r\n\r\n" (end
@@ -180,7 +280,9 @@ async fn handle_one(
     let mut tmp = [0u8; 256];
     let mut saw_header_end = false;
     while buf.len() < PEEK_BUFFER_BYTES {
-        let n = tls.read(&mut tmp).await?;
+        let n = tokio::time::timeout_at(deadline, tls.read(&mut tmp))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP headers timed out"))??;
         if n == 0 {
             break;
         }
@@ -190,6 +292,7 @@ async fn handle_one(
             break;
         }
     }
+    drop(pending_handshake);
 
     // Log the request line + dispatch decision so the docker harness
     // has a breadcrumb when things go sideways. Strip control chars
@@ -213,6 +316,14 @@ async fn handle_one(
     let is_ts2021 = saw_header_end && is_ts2021_upgrade(&buf);
 
     if is_ts2021 {
+        if tracking.as_ref().is_some_and(|tracking| !tracking.admit()) {
+            return Ok(());
+        }
+        let remote_addr = raw_request_log_remote_addr(&buf, peer, &trusted_proxies);
+        let _request_event = wire_state
+            .machines
+            .policy_routes_require_persistence()
+            .then(|| super::request_log::Event::raw(&buf, remote_addr.clone(), 101));
         let body_after_headers = body_tail(&buf);
         // Extract the optional `X-Tailscale-Handshake` header — newer
         // clients (v1.42+) send the entire framed Initiation in this
@@ -247,11 +358,14 @@ async fn handle_one(
         //     by hand (bypassing hyper) so the post-101 bytes from the
         //     client land on the unbuffered TLS stream.
         write_101(&mut tls).await?;
+        if let Some(tracking) = &tracking {
+            tracking.hijack();
+        }
         let stream = PrefixedStream::new(body_after_headers.to_vec(), tls);
         // `drive_ts2021_be_with_init` switches to BE-nonce transport
         // ChaCha20Poly1305 records after the snow IK handshake completes.
         // Closes Wall 4 from `docs/tailscale-interop-blocker.md`.
-        drive_ts2021_be_with_init(wire_state, stream, initial_frame)
+        drive_ts2021_be_with_init_remote_addr(wire_state, stream, initial_frame, Some(remote_addr))
             .await
             .map_err(|e| io::Error::other(format!("ts2021: {e}")))?;
         return Ok(());
@@ -259,6 +373,19 @@ async fn handle_one(
 
     #[cfg(feature = "full")]
     if saw_header_end && is_derp_fast_start_upgrade(&buf) {
+        if tracking.as_ref().is_some_and(|tracking| !tracking.admit()) {
+            return Ok(());
+        }
+        let _request_event = wire_state
+            .machines
+            .policy_routes_require_persistence()
+            .then(|| {
+                super::request_log::Event::raw(
+                    &buf,
+                    raw_request_log_remote_addr(&buf, peer, &trusted_proxies),
+                    0,
+                )
+            });
         let body_after_headers = body_tail(&buf);
         let Some(runtime) = wire_state.native_derp.clone() else {
             return Err(io::Error::other(
@@ -272,6 +399,9 @@ async fn handle_one(
             "dispatching /derp fast-start to native DERP runtime"
         );
         let stream = PrefixedStream::new(body_after_headers.to_vec(), tls);
+        if let Some(tracking) = &tracking {
+            tracking.hijack();
+        }
         drive_native_derp(runtime, stream)
             .await
             .map_err(|e| io::Error::other(format!("DERP fast-start: {e}")))?;
@@ -282,6 +412,17 @@ async fn handle_one(
     //     http1 and hand requests off to the axum router as a tower
     //     service.
     let prefixed = PrefixedStream::new(buf, tls);
+    if let Some(tracking) = tracking {
+        return super::http_shutdown::serve_connection(
+            prefixed,
+            router,
+            peer,
+            true,
+            tracking,
+            Some(super::noise::CONTROL_HANDSHAKE_TIMEOUT),
+        )
+        .await;
+    }
     let svc = hyper::service::service_fn(move |req: hyper::Request<HyperBody>| {
         let router = router.clone();
         async move {
@@ -304,11 +445,37 @@ async fn handle_one(
         }
     });
     hyper::server::conn::http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(super::noise::CONTROL_HANDSHAKE_TIMEOUT)
         .serve_connection(TokioIo::new(prefixed), svc)
         .with_upgrades()
         .await
         .map_err(|e| io::Error::other(format!("hyper http1: {e}")))?;
     Ok(())
+}
+
+fn raw_request_log_remote_addr(
+    head: &[u8],
+    peer: SocketAddr,
+    trusted: &super::serve::TrustedProxyConfig,
+) -> super::request_log::RequestLogRemoteAddr {
+    let mut headers = http::HeaderMap::new();
+    let end = find_header_end(head).unwrap_or(head.len());
+    for line in head[..end].split(|byte| *byte == b'\n') {
+        let line = trim_trailing_cr(line);
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        for name in ["true-client-ip", "x-real-ip", "x-forwarded-for"] {
+            if eq_ignore_ascii_case(&line[..colon], name.as_bytes())
+                && let Ok(value) = http::HeaderValue::from_bytes(trim_ascii(&line[colon + 1..]))
+            {
+                headers.append(name, value);
+                break;
+            }
+        }
+    }
+    super::serve::request_log_remote_addr(&headers, peer, trusted)
 }
 
 /// Write the `101 Switching Protocols` response by hand. We don't go
@@ -643,7 +810,7 @@ mod tests {
 
     #[test]
     fn rejects_non_ts2021_path() {
-        let req = b"GET /key?v=39 HTTP/1.1\r\n\
+        let req = b"GET /key?v=138 HTTP/1.1\r\n\
             Host: tsi-mesh-control\r\n\
             \r\n";
         assert!(!is_ts2021_upgrade(req));

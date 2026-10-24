@@ -1,0 +1,24 @@
+Go JSON v2 policy decoding
+
+Copyright (c) 2020 The Go Authors. All rights reserved.
+Copyright 2023 The Go Authors. All rights reserved.
+
+src/go_policy_json.rs and src/go_policy_shape.rs follow duplicate-name,
+case-insensitive schema-name and JSON-pointer error behavior from
+github.com/go-json-experiment/json v0.0.0-20260601182631-00ed12fed2a6,
+as imported by Headscale v0.29.5. The implementation uses the shared Go JSON
+scanner and leaves public policy field types unchanged. Original BSD terms
+are retained in LICENSE-GO-JSON-EXPERIMENT.
+
+Native byte policy decoding also follows arshal_methods.go's complete ReadValue
+pass before invoking custom UnmarshalJSON methods. The iterative syntax pass
+checks retained strings and duplicate names before policy element semantics.
+
+src/go_policy_json/string_syntax.rs adapts internal/jsonwire/decode.go and
+wire.go, plus jsontext/errors.go, for strict UTF-8/surrogate diagnostics,
+Go error quoting, JSON pointers and offsets into the actual packed source.
+
+Native typed kind gates and SemanticError rendering in src/go_policy_json.rs
+also adapt arshal_default.go, arshal_methods.go and errors.go. Struct, map,
+slice and boolean decoders reject wrong kinds after ReadToken; string and
+text decoders validate the complete ReadValue before rejecting its kind.

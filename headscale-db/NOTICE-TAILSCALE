@@ -1,0 +1,11 @@
+Tailscale Hostinfo JSON compatibility
+
+Copyright (c) 2020 Tailscale Inc & contributors.
+
+src/stored_hostinfo.rs adapts the Hostinfo, NetInfo, Service, Location and TPMInfo
+schema from tailscale.com v1.98.3 tailcfg/tailcfg.go and opt.Bool JSON behavior
+from types/opt/bool.go. JSON merge/null behavior follows Go encoding/json.
+The original BSD 3-Clause terms are retained in LICENSE-TAILSCALE.
+
+The schema/decoder has since moved to headscale-api-acl/src/go_tailcfg_json.rs.
+src/stored_hostinfo.rs retains the native Gorm adapter and error envelope.

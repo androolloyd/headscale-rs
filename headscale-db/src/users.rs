@@ -1,15 +1,34 @@
-//! User persistence matching headscale-go v0.28.0.
+//! User persistence matching headscale-go v0.29.5.
 //!
 //! Upstream stores users in a `users` table with optional OIDC
 //! provider identity fields and uniqueness rules around
 //! `(name, provider_identifier)`. This module exposes that table with
-//! Unix-second timestamps at the Rust boundary.
+//! Unix-second timestamps at the Rust boundary, with the original user
+//! creation timestamp retained for Tailscale register responses.
 
 use crate::{DbError, Result};
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 #[cfg(feature = "postgres-sqlx")]
 use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{SqliteConnection, SqlitePool};
+
+mod delete_preloads;
+mod oidc_registration;
+mod state_mutations;
+mod state_queries;
+pub use oidc_registration::create_or_update_oidc_user_for_registration;
+#[cfg(feature = "postgres-sqlx")]
+pub use oidc_registration::{
+    create_or_update_oidc_user_postgres_for_registration,
+    create_or_update_oidc_user_postgres_for_registration_on_connection,
+};
+pub use state_mutations::{create_for_state, rename_for_state};
+#[cfg(feature = "postgres-sqlx")]
+pub use state_mutations::{create_postgres_for_state, rename_postgres_for_state};
+#[cfg(feature = "postgres-sqlx")]
+pub use state_queries::list_postgres_for_state;
+pub use state_queries::{UserListFilter, list_for_state};
 
 const REGISTER_METHOD_OIDC: &str = "oidc";
 const USER_COLUMNS: &str = r"
@@ -25,6 +44,7 @@ const USER_COLUMNS: &str = r"
             WHEN typeof(created_at) = 'integer' THEN created_at
             ELSE unixepoch(created_at)
         END AS created_at,
+        COALESCE(CAST(created_at AS TEXT), '') AS created_at_text,
         CASE
             WHEN updated_at IS NULL THEN 0
             WHEN typeof(updated_at) = 'integer' THEN updated_at
@@ -42,7 +62,7 @@ fn user_select(suffix: &str) -> String {
 }
 
 #[cfg(feature = "postgres-sqlx")]
-const POSTGRES_USER_COLUMNS: &str = r"
+const POSTGRES_USER_COLUMNS: &str = r#"
         id,
         COALESCE(name, '') AS name,
         COALESCE(display_name, '') AS display_name,
@@ -51,9 +71,10 @@ const POSTGRES_USER_COLUMNS: &str = r"
         COALESCE(provider, '') AS provider,
         COALESCE(profile_pic_url, '') AS profile_pic_url,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS created_at_text,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT, 0) AS updated_at,
         FLOOR(EXTRACT(EPOCH FROM deleted_at))::BIGINT AS deleted_at
-";
+"#;
 
 #[cfg(feature = "postgres-sqlx")]
 fn postgres_user_select(suffix: &str) -> String {
@@ -70,8 +91,132 @@ pub struct UserRow {
     pub provider: String,
     pub profile_pic_url: String,
     pub created_at: i64,
+    pub created_at_text: String,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
+}
+
+/// Ephemeral Gorm association insert material. Keep raw model timestamps in
+/// the original preload so fresh saves do not reread a later user version.
+#[derive(Clone, sqlx::FromRow)]
+pub struct UserWriteSnapshot {
+    #[sqlx(flatten)]
+    pub row: UserRow,
+    pub updated_at_text: String,
+    pub deleted_at_text: Option<String>,
+}
+
+pub async fn get_for_registration(pool: &SqlitePool, id: i64) -> Result<UserWriteSnapshot> {
+    let mut connection = pool.acquire().await?;
+    get_for_registration_on_connection(&mut connection, id).await
+}
+
+pub async fn get_for_registration_on_connection(
+    connection: &mut SqliteConnection,
+    id: i64,
+) -> Result<UserWriteSnapshot> {
+    let query = format!(
+        "SELECT {USER_COLUMNS}, COALESCE(CAST(updated_at AS TEXT), '') AS updated_at_text, CAST(deleted_at AS TEXT) AS deleted_at_text FROM users WHERE id = ? AND deleted_at IS NULL"
+    );
+    sqlx::query_as(&query)
+        .bind(id)
+        .fetch_one(connection)
+        .await
+        .map_err(map_not_found)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_for_registration(pool: &PgPool, id: i64) -> Result<UserWriteSnapshot> {
+    let mut connection = pool.acquire().await?;
+    get_postgres_for_registration_on_connection(&mut connection, id).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_for_registration_on_connection(
+    connection: &mut PgConnection,
+    id: i64,
+) -> Result<UserWriteSnapshot> {
+    let query = format!(
+        r#"SELECT {POSTGRES_USER_COLUMNS}, COALESCE(to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS updated_at_text, to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at_text FROM users WHERE id = $1 AND deleted_at IS NULL"#
+    );
+    sqlx::query_as(&query)
+        .bind(id)
+        .fetch_one(connection)
+        .await
+        .map_err(map_not_found)
+}
+
+pub async fn get_by_name_for_registration(
+    pool: &SqlitePool,
+    name: &str,
+) -> Result<UserWriteSnapshot> {
+    let mut connection = pool.acquire().await?;
+    get_by_name_for_registration_on_connection(&mut connection, name).await
+}
+
+pub async fn list_for_registration(pool: &SqlitePool) -> Result<Vec<UserWriteSnapshot>> {
+    let query = format!(
+        "SELECT {USER_COLUMNS}, COALESCE(CAST(updated_at AS TEXT), '') AS updated_at_text, CAST(deleted_at AS TEXT) AS deleted_at_text FROM users WHERE deleted_at IS NULL ORDER BY id"
+    );
+    Ok(sqlx::query_as(&query).fetch_all(pool).await?)
+}
+
+pub async fn get_by_name_for_registration_on_connection(
+    connection: &mut SqliteConnection,
+    name: &str,
+) -> Result<UserWriteSnapshot> {
+    let query = format!(
+        "SELECT {USER_COLUMNS}, COALESCE(CAST(updated_at AS TEXT), '') AS updated_at_text, CAST(deleted_at AS TEXT) AS deleted_at_text FROM users WHERE name = ? AND deleted_at IS NULL ORDER BY id"
+    );
+    let rows = sqlx::query_as::<_, UserWriteSnapshot>(&query)
+        .bind(name)
+        .fetch_all(connection)
+        .await?;
+    match rows.len() {
+        0 => Err(DbError::NotFound(format!("user name={name}"))),
+        1 => Ok(rows.into_iter().next().expect("length checked")),
+        n => Err(DbError::General(format!(
+            "expected exactly one user, found {n}"
+        ))),
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_name_for_registration(
+    pool: &PgPool,
+    name: &str,
+) -> Result<UserWriteSnapshot> {
+    let mut connection = pool.acquire().await?;
+    get_postgres_by_name_for_registration_on_connection(&mut connection, name).await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_for_registration(pool: &PgPool) -> Result<Vec<UserWriteSnapshot>> {
+    let query = format!(
+        r#"SELECT {POSTGRES_USER_COLUMNS}, COALESCE(to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS updated_at_text, to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at_text FROM users WHERE deleted_at IS NULL ORDER BY id"#
+    );
+    Ok(sqlx::query_as(&query).fetch_all(pool).await?)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_name_for_registration_on_connection(
+    connection: &mut PgConnection,
+    name: &str,
+) -> Result<UserWriteSnapshot> {
+    let query = format!(
+        r#"SELECT {POSTGRES_USER_COLUMNS}, COALESCE(to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS updated_at_text, to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS deleted_at_text FROM users WHERE name = $1 AND deleted_at IS NULL ORDER BY id"#
+    );
+    let rows = sqlx::query_as::<_, UserWriteSnapshot>(&query)
+        .bind(name)
+        .fetch_all(connection)
+        .await?;
+    match rows.len() {
+        0 => Err(DbError::NotFound(format!("user name={name}"))),
+        1 => Ok(rows.into_iter().next().expect("length checked")),
+        n => Err(DbError::General(format!(
+            "expected exactly one user, found {n}"
+        ))),
+    }
 }
 
 impl UserRow {
@@ -195,12 +340,12 @@ pub fn validate_hostname(name: &str) -> std::result::Result<(), UserError> {
 pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<UserRow> {
     validate_username(&params.name).map_err(|e| DbError::General(e.to_string()))?;
     let provider_identifier = normalize_provider_identifier(params.provider_identifier);
-    let now = now_unix();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
     let id: i64 = sqlx::query_scalar(
         "
         INSERT INTO users
             (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'), datetime(?, 'unixepoch'), NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
         RETURNING id
         ",
     )
@@ -210,8 +355,8 @@ pub async fn create(pool: &SqlitePool, params: CreateParams) -> Result<UserRow> 
     .bind(&provider_identifier)
     .bind(&params.provider)
     .bind(&params.profile_pic_url)
-    .bind(now)
-    .bind(now)
+    .bind(&now)
+    .bind(&now)
     .fetch_one(pool)
     .await
     .map_err(map_create_sqlx_err)?;
@@ -222,54 +367,35 @@ pub async fn create_or_update_oidc_user(
     pool: &SqlitePool,
     params: OidcUserParams,
 ) -> Result<UserRow> {
-    let provider_identifier = normalize_oidc_provider_identifier(params.provider_identifier)
-        .map_err(|e| DbError::General(e.to_string()))?;
-    let now = now_unix();
-    let id: i64 = sqlx::query_scalar(
-        "
-        INSERT INTO users
-            (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'), datetime(?, 'unixepoch'), NULL)
-        ON CONFLICT(provider_identifier) WHERE provider_identifier IS NOT NULL DO UPDATE SET
-            name = CASE WHEN excluded.name != '' THEN excluded.name ELSE users.name END,
-            display_name = excluded.display_name,
-            email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
-            provider_identifier = excluded.provider_identifier,
-            provider = excluded.provider,
-            profile_pic_url = excluded.profile_pic_url,
-            updated_at = excluded.updated_at
-        WHERE users.deleted_at IS NULL
-        RETURNING id
-        ",
-    )
-    .bind(&params.name)
-    .bind(&params.display_name)
-    .bind(&params.email)
-    .bind(&provider_identifier)
-    .bind(REGISTER_METHOD_OIDC)
-    .bind(&params.profile_pic_url)
-    .bind(now)
-    .bind(now)
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx_err)?;
-    get_by_id(pool, id).await
+    create_or_update_oidc_user_for_registration(pool, params)
+        .await
+        .map(|user| user.row)
 }
 
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    get_by_id_on_connection(&mut conn, id).await
+}
+
+pub async fn get_by_id_on_connection(conn: &mut SqliteConnection, id: i64) -> Result<UserRow> {
     let query = user_select("WHERE id = ? AND deleted_at IS NULL");
     sqlx::query_as::<_, UserRow>(&query)
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(map_not_found)
 }
 
 pub async fn get_by_name(pool: &SqlitePool, name: &str) -> Result<UserRow> {
+    let mut conn = pool.acquire().await?;
+    get_by_name_on_connection(&mut conn, name).await
+}
+
+pub async fn get_by_name_on_connection(conn: &mut SqliteConnection, name: &str) -> Result<UserRow> {
     let query = user_select("WHERE name = ? AND deleted_at IS NULL ORDER BY id");
     let rows = sqlx::query_as::<_, UserRow>(&query)
         .bind(name)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
     match rows.len() {
         0 => Err(DbError::NotFound(format!("user name={name}"))),
@@ -278,6 +404,50 @@ pub async fn get_by_name(pool: &SqlitePool, name: &str) -> Result<UserRow> {
             "expected exactly one user, found {n}"
         ))),
     }
+}
+
+/// Gorm's association preload batches the referenced users in one query.
+pub async fn list_by_ids_on_connection(
+    conn: &mut SqliteConnection,
+    ids: &[i64],
+) -> Result<Vec<UserRow>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
+        "SELECT {USER_COLUMNS} FROM users WHERE deleted_at IS NULL AND id IN ("
+    ));
+    let mut values = query.separated(", ");
+    for id in ids {
+        values.push_bind(*id);
+    }
+    values.push_unseparated(")");
+    Ok(query
+        .build_query_as::<UserRow>()
+        .fetch_all(&mut *conn)
+        .await?)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_postgres_by_ids_on_connection(
+    conn: &mut PgConnection,
+    ids: &[i64],
+) -> Result<Vec<UserRow>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
+        "SELECT {POSTGRES_USER_COLUMNS} FROM users WHERE deleted_at IS NULL AND id IN ("
+    ));
+    let mut values = query.separated(", ");
+    for id in ids {
+        values.push_bind(*id);
+    }
+    values.push_unseparated(")");
+    Ok(query
+        .build_query_as::<UserRow>()
+        .fetch_all(&mut *conn)
+        .await?)
 }
 
 pub async fn get_by_oidc_identifier(pool: &SqlitePool, id: &str) -> Result<UserRow> {
@@ -346,47 +516,22 @@ pub async fn touch_by_name(pool: &SqlitePool, name: &str) -> Result<()> {
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
-    let user_exists: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE id = ? AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if user_exists.is_none() {
-        return Err(DbError::NotFound("user".into()));
+    let user = get_by_id_on_connection(&mut tx, id).await?;
+
+    let keys = delete_preloads::load_keys_for_deletion(&mut tx, id).await?;
+    for key in keys {
+        crate::preauth_keys::destroy_on_connection(&mut tx, key.id).await?;
     }
 
-    let owned_nodes: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE user_id = ? AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if owned_nodes > 0 {
-        return Err(DbError::Constraint("user not empty: node(s) found".into()));
+    // Unscoped Delete(&user) still enforces Gorm's primary-key WHERE guard.
+    // Keep this after key cleanup so failures roll back the whole transaction.
+    if user.id == 0 {
+        return Err(DbError::General("WHERE conditions required".into()));
     }
-
-    let key_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM pre_auth_keys WHERE user_id = ?")
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await?;
-    for key_id in key_ids {
-        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = ?")
-            .bind(key_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
-            .bind(key_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    let affected = sqlx::query("DELETE FROM users WHERE id = ?")
-        .bind(id)
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(user.id)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("user id={id}")));
-    }
+        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -404,12 +549,11 @@ pub async fn create_postgres_on_connection(
 ) -> Result<UserRow> {
     validate_username(&params.name).map_err(|e| DbError::General(e.to_string()))?;
     let provider_identifier = normalize_provider_identifier(params.provider_identifier);
-    let now = now_unix();
     let id: i64 = sqlx::query_scalar(
         "
         INSERT INTO users
             (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), to_timestamp($7), NULL)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
         RETURNING id
         ",
     )
@@ -419,7 +563,6 @@ pub async fn create_postgres_on_connection(
     .bind(&provider_identifier)
     .bind(&params.provider)
     .bind(&params.profile_pic_url)
-    .bind(now)
     .fetch_one(&mut *conn)
     .await
     .map_err(map_create_sqlx_err)?;
@@ -440,37 +583,9 @@ pub async fn create_or_update_oidc_user_postgres_on_connection(
     conn: &mut PgConnection,
     params: OidcUserParams,
 ) -> Result<UserRow> {
-    let provider_identifier = normalize_oidc_provider_identifier(params.provider_identifier)
-        .map_err(|e| DbError::General(e.to_string()))?;
-    let now = now_unix();
-    let id: i64 = sqlx::query_scalar(
-        "
-        INSERT INTO users
-            (name, display_name, email, provider_identifier, provider, profile_pic_url, created_at, updated_at, deleted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), to_timestamp($7), NULL)
-        ON CONFLICT (provider_identifier) WHERE provider_identifier IS NOT NULL DO UPDATE SET
-            name = CASE WHEN excluded.name != '' THEN excluded.name ELSE users.name END,
-            display_name = excluded.display_name,
-            email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
-            provider_identifier = excluded.provider_identifier,
-            provider = excluded.provider,
-            profile_pic_url = excluded.profile_pic_url,
-            updated_at = excluded.updated_at
-        WHERE users.deleted_at IS NULL
-        RETURNING id
-        ",
-    )
-    .bind(&params.name)
-    .bind(&params.display_name)
-    .bind(&params.email)
-    .bind(&provider_identifier)
-    .bind(REGISTER_METHOD_OIDC)
-    .bind(&params.profile_pic_url)
-    .bind(now)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(map_sqlx_err)?;
-    get_postgres_by_id_on_connection(conn, id).await
+    create_or_update_oidc_user_postgres_for_registration_on_connection(conn, params)
+        .await
+        .map(|user| user.row)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -625,41 +740,18 @@ pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
 pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
     let mut tx = conn.begin().await?;
 
-    let user_exists: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if user_exists.is_none() {
-        return Err(DbError::NotFound("user".into()));
+    let user = get_postgres_by_id_on_connection(&mut tx, id).await?;
+
+    let keys = delete_preloads::load_postgres_keys_for_deletion(&mut tx, id).await?;
+    for key in keys {
+        crate::preauth_keys::destroy_postgres_on_connection(&mut tx, key.id).await?;
     }
 
-    let owned_nodes: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE user_id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if owned_nodes > 0 {
-        return Err(DbError::Constraint("user not empty: node(s) found".into()));
+    if user.id == 0 {
+        return Err(DbError::General("WHERE conditions required".into()));
     }
-
-    let key_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM pre_auth_keys WHERE user_id = $1")
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await?;
-    for key_id in key_ids {
-        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = $1")
-            .bind(key_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
-            .bind(key_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
     sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(id)
+        .bind(user.id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -877,11 +969,23 @@ mod tests {
         .id
     }
 
+    /// A well-formed key (`<prefix>:` plus 64 hex digits) derived from `name`;
+    /// the node tables reject anything else, as Go's typed keys do.
+    fn test_key(prefix: &str, name: &str) -> String {
+        use std::fmt::Write as _;
+        let mut hex = String::new();
+        for byte in name.bytes() {
+            write!(hex, "{byte:02x}").unwrap();
+        }
+        hex.truncate(64);
+        format!("{prefix}:{hex:0<64}")
+    }
+
     fn node_params(user_id: Option<i64>, auth_key_id: Option<i64>, name: &str) -> NodeCreateParams {
         NodeCreateParams {
-            machine_key: format!("mkey:{name}"),
-            node_key: format!("nodekey:{name}"),
-            disco_key: format!("discokey:{name}"),
+            machine_key: test_key("mkey", name),
+            node_key: test_key("nodekey", name),
+            disco_key: test_key("discokey", name),
             endpoints: Vec::new(),
             host_info: json!({ "Hostname": name }),
             ipv4: None,
@@ -893,7 +997,9 @@ mod tests {
             tags: Vec::new(),
             auth_key_id,
             expiry: None,
+            expiry_precise: None,
             last_seen: None,
+            last_seen_precise: None,
             approved_routes: Vec::new(),
         }
     }

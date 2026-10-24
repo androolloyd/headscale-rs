@@ -475,9 +475,6 @@ unix_socket_permission = 448
 [noise]
 private_key_path = "${work_dir}/state/noise_private.key"
 
-[node]
-expiry = "180d"
-
 [dns]
 magic_dns = true
 base_domain = "${base_domain}"
@@ -770,7 +767,28 @@ drive_oidc_login() {
   grep -Eiq "Location: .*host\.docker\.internal:${control_port}/oidc/callback\\?" "${callback_headers}"
   if grep -Eq "Confirm node registration" "${callback_html}"; then
     local confirm_csrf
-    confirm_csrf="$(sed -n 's/.*name="headscale_register_confirm" value="\([^"]*\)".*/\1/p' "${callback_html}" | head -n 1)"
+    confirm_csrf="$(python3 - "${callback_html}" <<'PY'
+from html.parser import HTMLParser
+from pathlib import Path
+import sys
+
+class ConfirmationTokenParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.token = ''
+
+    def handle_starttag(self, tag, attrs):
+        if tag != 'input':
+            return
+        fields = dict(attrs)
+        if fields.get('name') == 'headscale_register_confirm':
+            self.token = fields.get('value', '')
+
+parser = ConfirmationTokenParser()
+parser.feed(Path(sys.argv[1]).read_text())
+print(parser.token)
+PY
+)"
     if [[ -z "${confirm_csrf}" ]]; then
       echo "OIDC confirmation page did not contain CSRF token" >&2
       exit 1
@@ -1065,7 +1083,7 @@ assert_sqlite_oidc_state() {
     exit 1
   }
   [[ "${ipv4}" == 100.* ]] || { echo "expected CGNAT IPv4, got ${ipv4}" >&2; exit 1; }
-  [[ -n "${expiry}" ]] || { echo "expected non-empty OIDC node expiry" >&2; exit 1; }
+  [[ -z "${expiry}" ]] || { echo "expected no OIDC node expiry without token or client expiry, got ${expiry}" >&2; exit 1; }
   [[ -n "${user_id}" ]] || { echo "expected node user_id" >&2; exit 1; }
   [[ "${user_name}" == "${oidc_username}" ]] || { echo "expected OIDC user name ${oidc_username}, got ${user_name}" >&2; exit 1; }
   [[ "${email}" == "${oidc_email}" ]] || { echo "expected OIDC email ${oidc_email}, got ${email}" >&2; exit 1; }
@@ -1125,7 +1143,7 @@ assert_oidc_node_row() {
     exit 1
   }
   [[ "${ipv4}" == 100.* ]] || { echo "expected CGNAT IPv4, got ${ipv4}" >&2; exit 1; }
-  [[ -n "${expiry}" ]] || { echo "expected non-empty OIDC node expiry" >&2; exit 1; }
+  [[ -z "${expiry}" ]] || { echo "expected no OIDC node expiry without token or client expiry, got ${expiry}" >&2; exit 1; }
   [[ -n "${user_id}" ]] || { echo "expected node user_id" >&2; exit 1; }
   [[ "${user_name}" == "${oidc_username}" ]] || { echo "expected OIDC user name ${oidc_username}, got ${user_name}" >&2; exit 1; }
   [[ "${email}" == "${oidc_email}" ]] || { echo "expected OIDC email ${oidc_email}, got ${email}" >&2; exit 1; }
@@ -1195,7 +1213,7 @@ assert_cli_nodes_json() {
     abort("expected user #{ARGV.fetch(2)} or #{ARGV.fetch(3)}, got #{user.inspect}") unless [ARGV.fetch(2), ARGV.fetch(3)].include?(user_name)
     abort("expected CGNAT IPv4, got #{addresses.inspect}") unless addresses.any? { |ip| ip.to_s.start_with?("100.") }
     abort("expected OIDC register method, got #{register_method.inspect}") unless register_method.to_s.match?(/oidc/i) || register_method.to_s == "3"
-    abort("expected node expiry in CLI output") if expiry.to_s.empty?
+    abort("expected no node expiry in CLI output, got #{expiry.inspect}") unless expiry.to_s.empty?
     expected_available.each do |route|
       abort("expected available route #{route.inspect}, got #{available_routes.inspect}") unless available_routes.include?(route)
     end

@@ -153,14 +153,17 @@ fn json_keys(value: &Value) -> Vec<String> {
 #[test]
 fn register_request_accepts_headscale_go_auth_key_shape() {
     let raw = json!({
-        "NodeKey": "nodekey:012345",
+        "NodeKey": "nodekey:0123450123450123450123450123450123450123450123450123450123450123",
         "Auth": { "AuthKey": "hskey-auth-deadbeef" },
         "Hostinfo": { "Hostname": "linux-a", "OS": "linux", "OSVersion": "6.8" },
         "Followup": "auth"
     });
 
     let req: RegisterRequest = serde_json::from_value(raw).unwrap();
-    assert_eq!(req.node_key, "nodekey:012345");
+    assert_eq!(
+        req.node_key,
+        "nodekey:0123450123450123450123450123450123450123450123450123450123450123"
+    );
     assert_eq!(req.auth.unwrap().auth_key, "hskey-auth-deadbeef");
     assert_eq!(req.hostinfo.unwrap().os, "linux");
 }
@@ -205,8 +208,10 @@ fn map_response_emits_required_stock_client_fields() {
             stable_id: "n7".into(),
             name: "linux-a.octra.test".into(),
             user: 42,
-            key: "nodekey:aa".into(),
-            machine: Some("mkey:bb".into()),
+            key: "nodekey:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            machine: Some(
+                "mkey:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            ),
             addresses: vec!["100.64.0.7/32".into()],
             allowed_ips: vec!["100.64.0.7/32".into()],
             primary_routes: Vec::new(),
@@ -230,7 +235,9 @@ fn map_response_emits_required_stock_client_fields() {
             cap_map: std::collections::BTreeMap::new(),
             expired: false,
             home_derp: 0,
-            disco_key: Some("discokey:cc".into()),
+            disco_key: Some(
+                "discokey:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            ),
             endpoints: vec!["198.51.100.7:41641".into()],
             ..MapNode::default()
         }),
@@ -258,7 +265,10 @@ fn map_response_emits_required_stock_client_fields() {
     assert!(value.get("DnsConfig").is_none());
     assert_eq!(value["Node"]["ID"], 7);
     assert_eq!(value["Node"]["AllowedIPs"], json!(["100.64.0.7/32"]));
-    assert_eq!(value["Node"]["DiscoKey"], "discokey:cc");
+    assert_eq!(
+        value["Node"]["DiscoKey"],
+        "discokey:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    );
 }
 
 #[test]
@@ -303,7 +313,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
     assert_eq!(replay.status(), StatusCode::OK);
     let replay = decode_register_response(replay).await;
     assert!(!replay.machine_authorized);
-    assert_eq!(replay.error, "preauth key already used");
+    assert_eq!(replay.error, "authkey already used");
 
     let stored = state.machines.get(&node_key_hex).unwrap();
     assert_eq!(stored.machine_key_hex, original_machine_key);
@@ -324,7 +334,10 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
 
     let stored = state.machines.get(&node_key_hex).unwrap();
     assert_eq!(stored.machine_key_hex, original_machine_key);
-    assert_eq!(stored.hostname, "legitimate-restart");
+    // Go's in-place re-registration updates Node.Hostname (the client's raw
+    // name) and keeps the node's GivenName.
+    assert_eq!(stored.raw_hostname, "legitimate-restart");
+    assert_eq!(stored.hostname, "original-host");
     assert_eq!(state.machines.len(), 1);
 }
 

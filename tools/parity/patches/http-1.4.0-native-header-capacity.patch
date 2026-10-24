@@ -1,0 +1,136 @@
+--- a/vendor/http/Cargo.toml
++++ b/vendor/http/Cargo.toml
+@@ -38,6 +38,8 @@
+ [features]
+ default = ["std"]
+ std = []
++# Explicit native Go byte-budget response profile; defaults retain u16 indices.
++go-native-header-capacity = []
+ 
+ [lib]
+ name = "http"
+--- a/vendor/http/Cargo.toml.orig
++++ b/vendor/http/Cargo.toml.orig
+@@ -34,6 +34,8 @@
+ [features]
+ default = ["std"]
+ std = []
++# Explicit native Go byte-budget response profile; defaults retain u16 indices.
++go-native-header-capacity = []
+ 
+ [dependencies]
+ bytes = "1"
+--- a/vendor/http/src/header/map.rs
++++ b/vendor/http/src/header/map.rs
+@@ -273,10 +273,20 @@
+ /// You may notice that `u16` may represent more than 32,768 values. This is
+ /// true, but 32,768 should be plenty and it allows us to reserve the top bit
+ /// for future usage.
++// Native response admission needs more entries within its 10-MiB budget.
++// Feature unification widens this private representation for the build.
++#[cfg(not(feature = "go-native-header-capacity"))]
+ type Size = u16;
++#[cfg(feature = "go-native-header-capacity")]
++type Size = u32;
+ 
+ /// This limit falls out from above.
++#[cfg(not(feature = "go-native-header-capacity"))]
+ const MAX_SIZE: usize = 1 << 15;
++// Larger than the native 10-MiB response byte budget permits, including raw
++// minimal fields. Preserve the all-ones empty sentinel.
++#[cfg(feature = "go-native-header-capacity")]
++const MAX_SIZE: usize = 1 << 22;
+ 
+ /// An entry in the hash table. This represents the full hash code for an entry
+ /// as well as the position of the entry in the `entries` vector.
+@@ -293,7 +303,9 @@
+ /// bits is fine since we know that the `indices` vector will never grow beyond
+ /// that size.
+ #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+-struct HashValue(u16);
++// Keep hash width in step with the selected index width; otherwise larger
++// tables would put every key into the original 16-bit bucket range.
++struct HashValue(Size);
+ 
+ /// Stores the data associated with a `HeaderMap` entry. Only the first value is
+ /// included in this struct. If a header name has more than one associated
+@@ -3671,7 +3683,7 @@
+         }
+     };
+ 
+-    HashValue((hash & MASK) as u16)
++    HashValue((hash & MASK) as Size)
+ }
+ 
+ struct FnvHasher(u64);
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,6 +16,7 @@
+     "headscale-cli",
+ ]
+ exclude = [
++    "vendor/http",
+     "vendor/h2",
+     "vendor/hyper",
+     "vendor/hyper-rustls",
+@@ -34,6 +35,7 @@
+ ]
+ 
+ [patch.crates-io]
++http = { path = "vendor/http" }
+ h2 = { path = "vendor/h2" }
+ hyper = { path = "vendor/hyper" }
+ hyper-rustls = { path = "vendor/hyper-rustls" }
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1724,8 +1724,6 @@
+ [[package]]
+ name = "http"
+ version = "1.4.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+ dependencies = [
+  "bytes",
+  "itoa",
+--- a/vendor/instant-acme/Cargo.toml
++++ b/vendor/instant-acme/Cargo.toml
+@@ -59,7 +59,7 @@
+ ]
+ 
+ [features]
+-go-native-client = ["dep:tower-service", "tokio/net", "tokio/io-util", "hyper-rustls?/go-native-http-proxy", "hyper-util?/go-native-client"]
++go-native-client = ["http/go-native-header-capacity", "dep:tower-service", "tokio/net", "tokio/io-util", "hyper-rustls?/go-native-http-proxy", "hyper-util?/go-native-client"]
+ aws-lc-rs = [
+     "dep:aws-lc-rs",
+     "hyper-rustls?/aws-lc-rs",
+--- a/vendor/instant-acme/Cargo.toml.orig
++++ b/vendor/instant-acme/Cargo.toml.orig
+@@ -12,7 +12,7 @@
+ categories = ["web-programming", "api-bindings"]
+ 
+ [features]
+-go-native-client = ["dep:tower-service", "tokio/net", "tokio/io-util", "hyper-rustls?/go-native-http-proxy", "hyper-util?/go-native-client"]
++go-native-client = ["http/go-native-header-capacity", "dep:tower-service", "tokio/net", "tokio/io-util", "hyper-rustls?/go-native-http-proxy", "hyper-util?/go-native-client"]
+ default = ["aws-lc-rs", "hyper-rustls"]
+ aws-lc-rs = ["dep:aws-lc-rs", "hyper-rustls?/aws-lc-rs", "rcgen/aws_lc_rs"]
+ fips = ["aws-lc-rs", "aws-lc-rs?/fips"]
+--- a/deploy/docker/Dockerfile
++++ b/deploy/docker/Dockerfile
+@@ -34,6 +34,7 @@
+ 
+ # Copy binary from builder
+ COPY --from=builder /build/target/release/headscale /usr/local/bin/headscale
++COPY vendor/http/LICENSE* /usr/share/licenses/headscale-rs/http/
+ COPY vendor/h2/LICENSE* /usr/share/licenses/headscale-rs/h2/
+ COPY vendor/hyper/LICENSE* /usr/share/licenses/headscale-rs/hyper/
+ COPY vendor/hyper-rustls/LICENSE* /usr/share/licenses/headscale-rs/hyper-rustls/
+--- a/deploy/docker/Dockerfile.node
++++ b/deploy/docker/Dockerfile.node
+@@ -31,6 +31,7 @@
+ 
+ # Copy binary from builder
+ COPY --from=builder /build/target/release/headscale /usr/local/bin/headscale
++COPY vendor/http/LICENSE* /usr/share/licenses/headscale-rs/http/
+ COPY vendor/h2/LICENSE* /usr/share/licenses/headscale-rs/h2/
+ COPY vendor/hyper/LICENSE* /usr/share/licenses/headscale-rs/hyper/
+ COPY vendor/hyper-rustls/LICENSE* /usr/share/licenses/headscale-rs/hyper-rustls/

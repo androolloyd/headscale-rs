@@ -1,1 +1,1 @@
-Error: parsing IPv4 prefix from config: missing prefix length
+Error: parsing IPv4 prefix from config: netip.ParsePrefix("not-a-cidr"): no '/'

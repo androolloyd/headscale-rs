@@ -1,0 +1,13 @@
+HuJSON byte parsing and standardization compatibility
+
+src/go_hujson.rs adapts parse.go, standard.go, pack.go and types.go from
+github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
+(commit ecc657c15afd), selected by headscale-go v0.29.5.
+
+Source headers: Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
+The original module license, including its 2019 copyright notice and all
+conditions, is reproduced without alteration in LICENSE-HUJSON.
+
+The native policy metadata packer retains original extra spans and nil-versus-
+non-nil trailing-comma markers in a flat arena, then iteratively emits the
+stripMetadataMembers/Standardize/Pack result without a recursive AST.

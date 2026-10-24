@@ -10,6 +10,7 @@ on:
       - "headscale-api-acl/**"
       - "headscale-cli/**"
       - "headscale-db/**"
+      - "vendor/**"
       - "tools/real-client/**"
       - "tools/parity/headscale-go/**"
       - "Cargo.toml"
@@ -22,6 +23,7 @@ on:
       - "headscale-api-acl/**"
       - "headscale-cli/**"
       - "headscale-db/**"
+      - "vendor/**"
       - "tools/real-client/**"
       - "tools/parity/headscale-go/**"
       - "Cargo.toml"
@@ -79,11 +81,11 @@ jobs:
         authkey,authkey-nonreusable,authkey-expired,authkey-relogin-same-user,authkey-relogin-expired,authkey-relogin-different-user,authkey-relogin-deleted,authkey-relogin-route-preserve,
         taildrop-capmap,ssh-accept-env,ping-lifecycle,postgres-authkey,postgres-authkey-nonreusable,postgres-authkey-expired,postgres-authkey-relogin-same-user,postgres-authkey-relogin-expired,
         postgres-authkey-relogin-different-user,postgres-authkey-relogin-deleted,postgres-authkey-relogin-route-preserve,postgres-taildrop-capmap,postgres-randomize-client-port,postgres-derp-private,postgres-derp-native,postgres-derp-native-websocket,postgres-derp-native-reload,postgres-derp-native-restart,
-        postgres-online-lastseen,postgres-ping-lifecycle,postgres-policy-churn,postgres-web-register-policy-churn,postgres-web-register-policy-churn-restart,postgres-web-register-policy-config-map-churn-restart,postgres-node-rename,postgres-policy-rename-restart,postgres-user-node-lifecycle-restart,postgres-magicdns,postgres-magicdns-custom-domain,postgres-extra-records,postgres-dns-disabled,
+        postgres-online-lastseen,postgres-ping-lifecycle,postgres-full-map-ping-churn,postgres-ephemeral-reconnect,postgres-policy-churn,postgres-rejected-policy-filter,postgres-policy-peer-removal-restart,postgres-self-filter-user-rename,postgres-nextdns-nodeattrs-policy-reload,postgres-web-register-policy-churn,postgres-web-register-policy-churn-restart,postgres-web-register-policy-config-map-churn-restart,postgres-node-rename,postgres-invalid-fqdn-peer-restart,postgres-node-key-expiry-clear,postgres-policy-rename-restart,postgres-user-node-lifecycle-restart,postgres-magicdns,postgres-magicdns-custom-domain,postgres-extra-records,postgres-dns-disabled,
         postgres-dns-edge,postgres-dns-hot-reload,postgres-magicdns-ipv6-only,postgres-prefix-family-dual-stack,postgres-prefix-family-v4-to-dual-backfill,postgres-prefix-family-v4-to-dual-backfill-route-restart,postgres-prefix-family-v4-to-dual-backfill-magicdns-restart,postgres-prefix-family-v4-to-dual-backfill-ssh-policy-restart,postgres-prefix-family-dual-stack-to-ipv4-only-backfill,postgres-prefix-family-dual-stack-to-ipv6-only-backfill,postgres-prefix-family-ipv4-only,
         postgres-prefix-family-ipv6-only,postgres-web-register,postgres-web-register-custom-domain,postgres-web-register-tags,postgres-web-register-unowned-tag,postgres-route-advertise,postgres-route-approve,postgres-route-primary,postgres-route-primary-restart,
         postgres-route-primary-failover,postgres-route-primary-sticky,postgres-route-primary-withdraw,postgres-route-exit-node,postgres-web-register-route-approve,postgres-web-register-route-approve-restart,postgres-oidc,postgres-oidc-policy-churn,postgres-oidc-policy-churn-restart,postgres-oidc-restart,
-        postgres-oidc-route-approve-restart,postgres-ssh,postgres-ssh-oidc-check,postgres-ssh-cli-check,postgres-ssh-oidc-check-period-cache,postgres-ssh-oidc-check-period-local-user,postgres-ssh-oidc-policy-restart,postgres-ssh-oidc-check-wrong-user,
+        postgres-oidc-route-approve-restart,postgres-ssh,postgres-ssh-oidc-check,postgres-ssh-cli-check,postgres-ssh-oidc-check-period-cache,postgres-ssh-oidc-check-period-local-user,postgres-ssh-oidc-policy-restart,postgres-ssh-oidc-revocation,postgres-ssh-oidc-check-wrong-user,
         postgres-ssh-oidc-check-deny,postgres-ssh-oidc-check-cancel,postgres-ssh-accept-env,postgres-ssh-localpart,postgres-ssh-profile-variants,postgres-ssh-profile-subdomain-deny,postgres-web-register-restart,postgres-restart-persistence,postgres-tagged-preauth,
         postgres-tag-update,postgres-tag-update-invalid,postgres-tag-reauth-clear,postgres-acl-allow,postgres-acl-empty,postgres-acl-autogroup-self,postgres-route-via,postgres-route-via-same-tag,
         postgres-route-via-health,postgres-route-via-health-restart,postgres-route-via-reload,postgres-route-via-multiprefix,postgres-route-via-multiprefix-reload,postgres-route-via-restart,postgres-route-via-same-tag-restart,postgres-route-via-reload-restart,postgres-route-via-health-reload-restart,
@@ -129,10 +131,62 @@ jobs:
           sudo apt-get install -y openssl postgresql-client protobuf-compiler ruby sqlite3
       - name: Check DNS live resolver harness metadata
         run: tools/real-client/dns-live-resolver-harness-check.sh
-      - name: Run Postgres serve topology smoke
+      - name: Record initial qualification source identity
         run: >-
-          cargo test -p headscale-cli --features postgres-sqlx --test cli_process
-          serve_postgres_runtime_local_grpc_admin_surface_smoke -- --nocapture
+          python3 tools/real-client/evidence_manifest.py
+          --output target/real-client/evidence-before.json
+          --binary rust=target/debug/headscale
+          --binary rust-harness=tools/real-client/headscale-rs-harness/target/debug/headscale-rs-real-client-harness
+          --binary go=${{ runner.temp }}/headscale
+          --features headscale-cli/default,postgres-sqlx
+          --backends sqlite,postgres
+          --allow-missing-binary
+      - name: Run Postgres serve mutation and restart process suite
+        run: |
+          set -euo pipefail
+          : "${HEADSCALE_DB_POSTGRES_TEST_URL:?Postgres process suite requires its live database URL}"
+          process_log="${RUNNER_TEMP}/postgres-process-mutations.log"
+          cargo test -p headscale-cli --features postgres-sqlx --test cli_process \
+            serve_postgres_runtime_ -- --nocapture --test-threads=1 \
+            2>&1 | tee "${process_log}"
+          # Local runs may skip when no test database is configured or the
+          # role cannot create an isolated database. CI must exercise each case.
+          if grep -Fq 'skipping Postgres runtime smoke' "${process_log}"; then
+            echo '::error::A Postgres process case skipped; all cases require a live writable database.'
+            exit 1
+          fi
+      - name: Compare Noise OIDC register responses with pinned Go
+        run: |
+          set -euo pipefail
+          export HEADSCALE_GO_BIN="${RUNNER_TEMP}/headscale"
+          python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_DATABASE=postgres python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_WEBSOCKET=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_DATABASE=postgres NOISE_OIDC_WEBSOCKET=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_TLS=1 NOISE_OIDC_WEBSOCKET=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_DATABASE=postgres NOISE_OIDC_TLS=1 NOISE_OIDC_WEBSOCKET=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_DELETE_STREAM=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+          NOISE_OIDC_DATABASE=postgres NOISE_OIDC_DELETE_STREAM=1 python3 tools/real-client/noise-oidc-register-response-smoke.py
+      - name: Compare tagged auth-key reauthentication with pinned Go
+        run: |
+          set -euo pipefail
+          export HEADSCALE_GO_BIN="${RUNNER_TEMP}/headscale"
+          python3 tools/real-client/noise-tagged-retag-smoke.py
+          NOISE_TAGGED_DATABASE=postgres python3 tools/real-client/noise-tagged-retag-smoke.py
+      - name: Compare admin CLI output and requests with pinned Go
+        # Successful output and request construction use deterministic gRPC
+        # responses so timestamps and random secrets need no output masking.
+        # The preceding paired process steps build both CLI executables.
+        run: |
+          set -euo pipefail
+          export HEADSCALE_GO_BIN="${RUNNER_TEMP}/headscale"
+          python3 tools/real-client/cli-admin-output-diff.py
+      - name: Compare policy and OIDC startup with pinned Go
+        run: |
+          set -euo pipefail
+          export HEADSCALE_GO_BIN="${RUNNER_TEMP}/headscale"
+          python3 tools/real-client/startup-policy-oidc-smoke.py
+          python3 tools/real-client/oidc-startup-deadline-smoke.py
       - name: Check Docker availability
         run: |
           set -euo pipefail
@@ -142,6 +196,18 @@ jobs:
         run: docker pull "${TAILSCALE_IMAGE}"
       - name: Run paired real-client parity matrix
         run: tools/real-client/smoke-matrix.sh
+      - name: Record final qualification source and binary identity
+        if: always()
+        run: >-
+          python3 tools/real-client/evidence_manifest.py
+          --output target/real-client/evidence-after.json
+          --binary rust=target/debug/headscale
+          --binary rust-harness=tools/real-client/headscale-rs-harness/target/debug/headscale-rs-real-client-harness
+          --binary go=${{ runner.temp }}/headscale
+          --features headscale-cli/default,postgres-sqlx
+          --backends sqlite,postgres
+          --reports target/real-client
+          --compare-source target/real-client/evidence-before.json
       - name: Upload real-client logs
         if: always()
         uses: actions/upload-artifact@v7

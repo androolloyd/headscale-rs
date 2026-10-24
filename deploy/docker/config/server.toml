@@ -2,8 +2,20 @@
 
 [server]
 listen = "0.0.0.0:8080"
+server_url = "http://headscale-server:8080"
 db_path = "/var/lib/headscale/db.sqlite"
 mesh_cidr = "100.64.0.0/10"
+unix_socket = "/var/lib/headscale/headscale.sock"
+
+[noise]
+private_key_path = "/var/lib/headscale/noise_private.key"
+
+[database]
+type = "sqlite"
+
+[dns]
+magic_dns = false
+override_local_dns = false
 
 # Add DERP servers as needed
 # [[server.derp_servers]]

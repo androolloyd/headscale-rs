@@ -24,11 +24,14 @@ database_backend="${REAL_CLIENT_DATABASE_BACKEND:-sqlite}"
 login_mode="${REAL_CLIENT_LOGIN_MODE:-authkey}"
 preauth_reusable="${REAL_CLIENT_PREAUTH_REUSABLE:-true}"
 preauth_expired="${REAL_CLIENT_PREAUTH_EXPIRED:-false}"
+preauth_ephemeral="${REAL_CLIENT_PREAUTH_EPHEMERAL:-false}"
+ephemeral_reconnect_churn="${REAL_CLIENT_EPHEMERAL_RECONNECT_CHURN:-0}"
 expected_authkey_failure_indexes="${REAL_CLIENT_EXPECT_AUTHKEY_FAILURE_INDEXES:-}"
 expected_machine_count="${REAL_CLIENT_EXPECT_MACHINE_COUNT:-}"
 advertise_routes="${REAL_CLIENT_ADVERTISE_ROUTES:-}"
 advertise_exit_node="${REAL_CLIENT_ADVERTISE_EXIT_NODE:-false}"
 approve_routes="${REAL_CLIENT_APPROVE_ROUTES:-}"
+assert_self_approved_route="${REAL_CLIENT_ASSERT_SELF_APPROVED_ROUTE:-}"
 expected_available_routes="${REAL_CLIENT_EXPECT_AVAILABLE_ROUTES:-${advertise_routes}}"
 expected_approved_routes="${REAL_CLIENT_EXPECT_APPROVED_ROUTES:-${approve_routes}}"
 preauth_tags="${REAL_CLIENT_PREAUTH_TAGS:-}"
@@ -42,9 +45,17 @@ authkey_relogin_same_user="${REAL_CLIENT_AUTHKEY_RELOGIN_SAME_USER:-false}"
 authkey_relogin_expired="${REAL_CLIENT_AUTHKEY_RELOGIN_EXPIRED:-false}"
 authkey_relogin_different_user="${REAL_CLIENT_AUTHKEY_RELOGIN_DIFFERENT_USER:-false}"
 authkey_relogin_deleted="${REAL_CLIENT_AUTHKEY_RELOGIN_DELETED:-false}"
+expect_relogin_observer_rekey="${REAL_CLIENT_EXPECT_RELOGIN_OBSERVER_REKEY:-false}"
 expected_tags_exact="${REAL_CLIENT_EXPECT_TAGS_EXACT:-}"
 policy_json="${REAL_CLIENT_POLICY_JSON:-}"
 policy_reload_json="${REAL_CLIENT_RELOAD_POLICY_JSON:-}"
+rejected_policy_json="${REAL_CLIENT_REJECT_POLICY_JSON:-}"
+self_filter_rename_user="${REAL_CLIENT_SELF_FILTER_RENAME_USER:-}"
+audit_recover_policy_json="${REAL_CLIENT_AUDIT_RECOVER_POLICY_JSON:-}"
+logtail_enabled="${REAL_CLIENT_LOGTAIL_ENABLED:-false}"
+expected_audit_log_state="${REAL_CLIENT_EXPECT_AUDIT_LOG_STATE:-}"
+policy_unrelated_reload_json="${REAL_CLIENT_RELOAD_POLICY_UNRELATED_JSON:-}"
+expect_policy_peer_removal="${REAL_CLIENT_EXPECT_POLICY_PEER_REMOVAL:-false}"
 prefix_v4="${REAL_CLIENT_PREFIX_V4-100.64.0.0/10}"
 prefix_v6="${REAL_CLIENT_PREFIX_V6:-}"
 expected_tailscale_ip_families="${REAL_CLIENT_EXPECT_TAILSCALE_IP_FAMILIES:-}"
@@ -53,6 +64,8 @@ expected_peer_counts="${REAL_CLIENT_EXPECT_PEER_COUNTS:-}"
 expected_peer_count_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD:-}"
 expected_peer_counts_after_policy_reload="${REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD:-}"
 rename_node_after_login="${REAL_CLIENT_RENAME_NODE_AFTER_LOGIN:-}"
+corrupt_peer_name_after_login="${REAL_CLIENT_CORRUPT_PEER_NAME_AFTER_LOGIN:-false}"
+clear_node_expiry_after_login="${REAL_CLIENT_CLEAR_NODE_EXPIRY_AFTER_LOGIN:-false}"
 user_node_lifecycle_restart="${REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART:-false}"
 rename_user_after_login="${REAL_CLIENT_RENAME_USER_AFTER_LOGIN:-}"
 expire_node_index="${REAL_CLIENT_EXPIRE_NODE_INDEX:-}"
@@ -82,10 +95,13 @@ expected_dns_extra_records="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS:-${REAL_CLIEN
 expected_dns_extra_records_exact="${REAL_CLIENT_EXPECT_DNS_EXTRA_RECORDS_EXACT:-false}"
 expected_dns_routes="${REAL_CLIENT_EXPECT_DNS_ROUTES:-}"
 expected_dns_resolvers="${REAL_CLIENT_EXPECT_DNS_RESOLVERS:-}"
+expected_dns_resolvers_before_policy_reload="${REAL_CLIENT_EXPECT_DNS_RESOLVERS_BEFORE_POLICY_RELOAD:-}"
+assert_mapresponse_dns_policy_reload="${REAL_CLIENT_ASSERT_MAPRESPONSE_DNS_POLICY_RELOAD:-false}"
 expected_dns_fallback_resolvers="${REAL_CLIENT_EXPECT_DNS_FALLBACK_RESOLVERS:-}"
 expected_dns_debug_resolves="${REAL_CLIENT_EXPECT_DNS_DEBUG_RESOLVES:-}"
 expected_peer_magic_dns_resolve="${REAL_CLIENT_EXPECT_PEER_MAGIC_DNS_RESOLVE:-false}"
 expected_debug_ping="${REAL_CLIENT_EXPECT_DEBUG_PING:-false}"
+full_ping_churn_count="${REAL_CLIENT_FULL_PING_CHURN_COUNT:-0}"
 taildrop_enabled="${REAL_CLIENT_TAILDROP_ENABLED:-}"
 expected_file_sharing_cap="${REAL_CLIENT_EXPECT_FILE_SHARING_CAP:-}"
 expected_self_capmap_keys="${REAL_CLIENT_EXPECT_SELF_CAPMAP_KEYS:-}"
@@ -202,9 +218,34 @@ case "${preauth_expired}" in
     exit 2
     ;;
 esac
+case "${preauth_ephemeral}" in
+  1 | true | TRUE | True | yes | YES | Yes | on | ON | On) preauth_ephemeral_flag=1 ;;
+  "" | 0 | false | FALSE | False | no | NO | No | off | OFF | Off) preauth_ephemeral_flag=0 ;;
+  *)
+    echo "REAL_CLIENT_PREAUTH_EPHEMERAL must be true or false, got ${preauth_ephemeral}" >&2
+    exit 2
+    ;;
+esac
+if ! [[ "${ephemeral_reconnect_churn}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_EPHEMERAL_RECONNECT_CHURN must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "${full_ping_churn_count}" =~ ^[0-9]+$ ]]; then
+  echo "REAL_CLIENT_FULL_PING_CHURN_COUNT must be a non-negative integer" >&2
+  exit 2
+fi
 
 if ! [[ "${client_count}" =~ ^[0-9]+$ ]] || ((client_count < 1)); then
   echo "REAL_CLIENT_CLIENT_COUNT must be a positive integer, got ${client_count}" >&2
+  exit 2
+fi
+if ((ephemeral_reconnect_churn > 0)) &&
+  { ((client_count != 2)) || ((preauth_ephemeral_flag == 0)) || [[ "${login_mode}" != authkey ]]; }; then
+  echo "ephemeral reconnect churn requires two clients and an ephemeral auth key" >&2
+  exit 2
+fi
+if ((full_ping_churn_count > 0 && client_count != 1)); then
+  echo "full-map/ping churn requires one client" >&2
   exit 2
 fi
 if [[ -n "${expected_machine_count}" ]] && ! [[ "${expected_machine_count}" =~ ^[0-9]+$ ]]; then
@@ -410,6 +451,10 @@ if [[ -z "${prefix_v4}" && -z "${prefix_v6}" ]]; then
 fi
 if [[ -n "${rename_node_after_login}" && "${client_count}" -lt 2 ]]; then
   echo "REAL_CLIENT_RENAME_NODE_AFTER_LOGIN requires at least two clients so a peer map can observe the rename" >&2
+  exit 2
+fi
+if [[ "${clear_node_expiry_after_login}" == true && "${client_count}" -lt 2 ]]; then
+  echo "REAL_CLIENT_CLEAR_NODE_EXPIRY_AFTER_LOGIN requires two clients" >&2
   exit 2
 fi
 
@@ -899,6 +944,20 @@ if [[ -n "${policy_reload_json}" &&
   echo "REAL_CLIENT_RELOAD_POLICY_JSON requires REAL_CLIENT_EXPECT_PEER_COUNT_AFTER_POLICY_RELOAD or REAL_CLIENT_EXPECT_PEER_COUNTS_AFTER_POLICY_RELOAD" >&2
   exit 2
 fi
+if [[ -n "${expected_audit_log_state}" ]]; then
+  if [[ "${expected_audit_log_state}" != "Stopped" && "${expected_audit_log_state}" != "Running" ]]; then
+    echo "REAL_CLIENT_EXPECT_AUDIT_LOG_STATE must be Stopped or Running" >&2
+    exit 2
+  fi
+  if [[ -z "${policy_reload_json}" ]]; then
+    echo "audit-log state checks require a policy reload" >&2
+    exit 2
+  fi
+fi
+if [[ -n "${audit_recover_policy_json}" && "${expected_audit_log_state}" != Stopped ]]; then
+  echo "REAL_CLIENT_AUDIT_RECOVER_POLICY_JSON requires expected Stopped audit-log state" >&2
+  exit 2
+fi
 if [[ -z "${policy_reload_json}" &&
   -n "${expected_peer_count_after_policy_reload}${expected_peer_counts_after_policy_reload}" ]]; then
   echo "post-reload peer expectations require REAL_CLIENT_RELOAD_POLICY_JSON" >&2
@@ -1072,6 +1131,10 @@ case "${work_root}" in
   *) work_dir="${repo_root}/${work_root}/${run_id}" ;;
 esac
 mkdir -p "${work_dir}"
+if [[ "${assert_mapresponse_dns_policy_reload}" == true ]] || ((full_ping_churn_count > 0)); then
+  export HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH="${work_dir}/mapresponses"
+  mkdir -p "${HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH}"
+fi
 
 http_port=""
 https_port=""
@@ -1081,6 +1144,9 @@ server_pid=""
 config_path="${work_dir}/config.yaml"
 policy_path="${work_dir}/policy.hujson"
 policy_reload_path="${work_dir}/policy-reload.hujson"
+rejected_policy_path="${work_dir}/policy-rejected.hujson"
+audit_recover_policy_path="${work_dir}/policy-audit-recover.hujson"
+policy_unrelated_reload_path="${work_dir}/policy-unrelated-reload.hujson"
 db_path="${work_dir}/db.sqlite"
 socket_path="/tmp/${run_id}.sock"
 control_url=""
@@ -1234,6 +1300,22 @@ drop_postgres_database() {
   fi
   postgres_database_created=0
   echo "::endgroup::"
+}
+
+export_postgres_database_if_requested() {
+  local export_path="${REAL_CLIENT_POSTGRES_EXPORT_PATH:-}"
+  [[ -n "${export_path}" ]] || return 0
+  if [[ "${database_backend}" != "postgres" || "${postgres_database_created}" != 1 ]]; then
+    echo "REAL_CLIENT_POSTGRES_EXPORT_PATH requires a live Postgres smoke database" >&2
+    return 2
+  fi
+  need pg_dump
+  mkdir -p "$(dirname "${export_path}")"
+  PGHOST="${postgres_host}" PGPORT="${postgres_port}" \
+    PGUSER="${postgres_user}" PGPASSWORD="${postgres_pass}" \
+    PGSSLMODE="${postgres_sslmode}" \
+    pg_dump --format=custom --no-owner --file="${export_path}" \
+      "${postgres_database_name}"
 }
 
 stop_server() {
@@ -1441,6 +1523,84 @@ assert_post_reload_peer_visibility_if_requested() {
     "${expected_peer_counts_after_policy_reload}"
 }
 
+assert_policy_peer_removal_phase_if_requested() {
+  [[ "${expect_policy_peer_removal}" == true ]] || return 0
+  local phase="$1" name before_path after_path
+  for name in "${client_names[@]}"; do
+    before_path="${work_dir}/${name}.initial-peer-status.json"
+    after_path="${work_dir}/${name}.${phase}-peer-status.json"
+    ruby -rjson -e '
+      before = JSON.parse(File.read(ARGV.fetch(0)))
+      after = JSON.parse(File.read(ARGV.fetch(1)))
+      before_self = before.fetch("Self")
+      after_self = after.fetch("Self")
+      before_peers = before["Peer"] || {}
+      after_peers = after["Peer"] || {}
+      abort("expected one visible peer before policy removal, got #{before_peers.length}") unless before_peers.length == 1
+      abort("peer remained after policy removal: #{after_peers.inspect}") unless after_peers.empty?
+      abort("observer node ID changed") unless before_self.fetch("ID") == after_self.fetch("ID")
+      abort("observer Tailscale IPs changed") unless before.fetch("TailscaleIPs").sort == after.fetch("TailscaleIPs").sort
+      puts JSON.pretty_generate({observer_id: after_self.fetch("ID"), observer_ips: after.fetch("TailscaleIPs"), removed_peer_id: before_peers.values.first.fetch("ID"), remaining_peers: after_peers.length})
+    ' "${before_path}" "${after_path}" >"${work_dir}/${name}.${phase}-peer-removal-summary.json"
+    cat "${work_dir}/${name}.${phase}-peer-removal-summary.json"
+  done
+}
+
+assert_corrupt_peer_name_after_restart_if_requested() {
+  [[ "${corrupt_peer_name_after_login}" == true ]] || return 0
+  if [[ "${database_backend}" != postgres || ${#successful_client_names[@]} -lt 2 ]]; then
+    echo "REAL_CLIENT_CORRUPT_PEER_NAME_AFTER_LOGIN requires Postgres and two clients" >&2
+    return 2
+  fi
+
+  echo "::group::corrupt stored peer name and restart ${target}"
+  local affected_name="${successful_client_names[0]}"
+  local observer_name="${successful_client_names[1]}"
+  local nodes_path="${work_dir}/nodes-before-corrupt-name.json"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  local affected_id
+  affected_id="$(node_id_for_client_name "${nodes_path}" "${affected_name}")"
+  [[ "${affected_id}" =~ ^[0-9]+$ ]] || return 2
+
+  stop_server
+  PGHOST="${postgres_host}" PGPORT="${postgres_port}" \
+    PGUSER="${postgres_user}" PGPASSWORD="${postgres_pass}" \
+    PGSSLMODE="${postgres_sslmode}" \
+    psql -v ON_ERROR_STOP=1 -d "${postgres_database_name}" \
+      -c "UPDATE nodes SET given_name = '' WHERE id = ${affected_id}" \
+      >"${work_dir}/corrupt-peer-name.stdout"
+  start_server
+  if ! grep -Fq "headscale nodes rename ${affected_id} <name>" \
+    "${work_dir}/${target}.stdout" "${work_dir}/${target}.stderr"; then
+    echo "server did not log an actionable rename hint for the invalid stored peer name" >&2
+    return 1
+  fi
+
+  local status_path="${work_dir}/${observer_name}.after-invalid-name-peer-status.json"
+  if ! wait_for "${observer_name} reconnected after invalid-name restart" \
+    "client_logged_in '${observer_name}' '${status_path}'"; then
+    dump_client_debug "${observer_name}"
+    return 1
+  fi
+  if ! wait_for "${observer_name} drops invalid-name peer" \
+    "tailscale_peer_count_matches '${observer_name}' 0"; then
+    dump_client_debug "${observer_name}"
+    return 1
+  fi
+  docker exec "${observer_name}" tailscale status --json >"${status_path}"
+  ruby -rjson -e '
+    before = JSON.parse(File.read(ARGV.fetch(0)))
+    after = JSON.parse(File.read(ARGV.fetch(1)))
+    abort("observer node ID changed") unless before.fetch("Self").fetch("ID") == after.fetch("Self").fetch("ID")
+    abort("observer Tailscale IPs changed") unless before.fetch("TailscaleIPs").sort == after.fetch("TailscaleIPs").sort
+    abort("invalid-name peer remained") unless (after["Peer"] || {}).empty?
+    puts JSON.pretty_generate({observer_id: after.fetch("Self").fetch("ID"), observer_ips: after.fetch("TailscaleIPs"), removed_peer_id: ARGV.fetch(2)})
+  ' "${work_dir}/${observer_name}.initial-peer-status.json" "${status_path}" "${affected_id}" \
+    >"${work_dir}/invalid-name-peer-removal-summary.json"
+  cat "${work_dir}/invalid-name-peer-removal-summary.json"
+  echo "::endgroup::"
+}
+
 assert_node_renamed_file() {
   local path="$1"
   local old_name="$2"
@@ -1539,6 +1699,64 @@ rename_node_if_requested() {
       }
     cat "${output_path}"
   done
+  echo "::endgroup::"
+}
+
+peer_netmap_has_key_expiry() {
+  local observer_name="$1"
+  local node_id="$2"
+  local expected_expiry="$3"
+  local output_path="$4"
+  docker exec "${observer_name}" tailscale debug netmap >"${output_path}.netmap" 2>"${output_path}.err" &&
+    ruby -rjson -rtime -e '
+      map = JSON.parse(File.read(ARGV.fetch(0)))
+      id = Integer(ARGV.fetch(1))
+      expected = ARGV.fetch(2)
+      peer = Array(map["Peers"]).find { |node| Integer(node.fetch("ID")) == id }
+      abort("missing peer #{id} in observer netmap") unless peer
+      expiry = peer["KeyExpiry"]
+      if expected == "clear"
+        abort("peer #{id} retained key expiry #{expiry.inspect}") unless expiry.nil? || expiry.empty? || Time.parse(expiry).year == 1
+      else
+        abort("peer #{id} has wrong key expiry #{expiry.inspect}, expected #{expected}") unless expiry && Time.parse(expiry).to_i == Time.parse(expected).to_i
+      end
+      puts JSON.pretty_generate({peer_id: id, key_expiry: expiry, expected: expected})
+    ' "${output_path}.netmap" "${node_id}" "${expected_expiry}" >"${output_path}"
+}
+
+clear_node_expiry_if_requested() {
+  [[ "${clear_node_expiry_after_login}" == true ]] || return 0
+  echo "::group::set and clear node key expiry in a live peer netmap"
+  local nodes_path="${work_dir}/nodes-before-key-expiry.json"
+  local target_name="${successful_client_names[0]}"
+  local observer_name="${successful_client_names[1]}"
+  headscale_cmd -o json nodes list >"${nodes_path}"
+  local node_id expiry
+  node_id="$(node_id_for_client_name "${nodes_path}" "${target_name}")"
+  expiry="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) + timedelta(days=7)).replace(microsecond=0).isoformat().replace('+00:00', 'Z'))
+PY
+)"
+  headscale_cmd nodes expire --identifier "${node_id}" --expiry "${expiry}" \
+    >"${work_dir}/node-key-expiry-set.stdout" \
+    2>"${work_dir}/node-key-expiry-set.stderr"
+  wait_for "peer key expiry set" \
+    "peer_netmap_has_key_expiry '${observer_name}' '${node_id}' '${expiry}' '${work_dir}/node-key-expiry-set.json'" || {
+      dump_debug
+      echo "::endgroup::"
+      return 1
+    }
+  headscale_cmd nodes expire --identifier "${node_id}" --disable \
+    >"${work_dir}/node-key-expiry-clear.stdout" \
+    2>"${work_dir}/node-key-expiry-clear.stderr"
+  wait_for "peer key expiry cleared" \
+    "peer_netmap_has_key_expiry '${observer_name}' '${node_id}' clear '${work_dir}/node-key-expiry-clear.json'" || {
+      dump_debug
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/node-key-expiry-set.json" "${work_dir}/node-key-expiry-clear.json"
   echo "::endgroup::"
 }
 
@@ -2023,6 +2241,7 @@ assert_restart_if_requested() {
   done
 
   assert_post_restart_peer_visibility_if_requested
+  assert_policy_peer_removal_phase_if_requested "after-restart"
   assert_renamed_peer_visibility_after_restart_if_requested
   assert_derp_stun_if_requested
   assert_derp_map_if_requested
@@ -2030,6 +2249,10 @@ assert_restart_if_requested() {
   assert_derp_ping_if_requested
   assert_derp_status_properties_if_requested
   assert_native_derp_admissions_if_requested
+  if [[ -n "${assert_self_approved_route}" ]]; then
+    wait_for_node_routes "${expected_available_routes}" "${expected_approved_routes}" "approved routes after restart"
+  fi
+  assert_self_approved_route_phase_if_requested "after-restart"
   echo "::endgroup::"
 }
 
@@ -2351,6 +2574,11 @@ install_or_build_headscale() {
       fi
       "${headscale_bin}" version >"${work_dir}/headscale-go-version.txt"
       cat "${work_dir}/headscale-go-version.txt"
+      if [[ "${headscale_go_version}" == "v0.29.5" ]] &&
+        ! rg -q 'v0\.29\.5' "${work_dir}/headscale-go-version.txt"; then
+        echo "expected pinned headscale-go v0.29.5 binary" >&2
+        return 1
+      fi
       echo "::endgroup::"
       ;;
   esac
@@ -2420,12 +2648,18 @@ EOF
 }
 
 write_policy_file() {
-  [[ -n "${policy_json}${policy_reload_json}" ]] || return 0
+  [[ -n "${policy_json}${policy_reload_json}${rejected_policy_json}" ]] || return 0
   if [[ -n "${policy_json}" ]]; then
     printf '%s\n' "${policy_json}" >"${policy_path}"
   fi
   if [[ -n "${policy_reload_json}" ]]; then
     printf '%s\n' "${policy_reload_json}" >"${policy_reload_path}"
+  fi
+  if [[ -n "${rejected_policy_json}" ]]; then
+    printf '%s\n' "${rejected_policy_json}" >"${rejected_policy_path}"
+  fi
+  if [[ -n "${audit_recover_policy_json}" ]]; then
+    printf '%s\n' "${audit_recover_policy_json}" >"${audit_recover_policy_path}"
   fi
 }
 
@@ -2578,6 +2812,9 @@ cli:
 noise:
   private_key_path: ${work_dir}/noise_private.key
 
+logtail:
+  enabled: ${logtail_enabled}
+
 prefixes:
   allocation: sequential
 EOF
@@ -2597,6 +2834,18 @@ EOF
       append_dns_nameservers_config
       printf '  search_domains: []\n' >>"${config_path}"
       append_dns_extra_records_config
+      if ((use_rust_embedded_derp == 0)) &&
+        { ((user_node_lifecycle_restart_flag)) || [[ "${expect_relogin_observer_rekey}" == true ]] || [[ "${expect_policy_peer_removal}" == true ]] || [[ -n "${rejected_policy_json}${self_filter_rename_user}${assert_self_approved_route}" ]] || [[ -n "${expected_audit_log_state}" ]]; }; then
+        cat >>"${config_path}" <<EOF
+derp:
+  server:
+    enabled: false
+  urls: []
+  paths:
+    - ${work_dir}/derp.yaml
+  auto_update_enabled: false
+EOF
+      fi
       ;;
     headscale-go)
       cat >"${config_path}" <<EOF
@@ -2634,7 +2883,7 @@ EOF
       cat >>"${config_path}" <<EOF
 
 logtail:
-  enabled: false
+  enabled: ${logtail_enabled}
 
 cli:
   timeout: 5s
@@ -2678,6 +2927,13 @@ EOF
       ;;
   esac
   write_database_config >>"${config_path}"
+  if [[ "${database_backend}" == sqlite && -n "${policy_json}${policy_reload_json}" ]]; then
+    cat >>"${config_path}" <<EOF
+
+policy:
+  mode: database
+EOF
+  fi
   if [[ -n "${taildrop_enabled_bool}" ]]; then
     cat >>"${config_path}" <<EOF
 
@@ -2817,6 +3073,273 @@ reload_policy_if_requested() {
   echo "::endgroup::"
 }
 
+capture_self_filter_rename_state() {
+  local phase="$1" client_name="${successful_client_names[1]}"
+  docker exec "${client_name}" tailscale debug netmap \
+    >"${work_dir}/${client_name}.self-filter-${phase}.netmap.json" || return 1
+  docker exec "${client_name}" tailscale status --json \
+    >"${work_dir}/${client_name}.self-filter-${phase}.status.json" || return 1
+}
+
+self_filter_rename_reached_once() {
+  capture_self_filter_rename_state after || return 1
+  python3 - "${work_dir}/${successful_client_names[1]}.self-filter-before.netmap.json" \
+    "${work_dir}/${successful_client_names[1]}.self-filter-after.netmap.json" <<'PY'
+import json
+import sys
+
+before, after = (json.load(open(path)) for path in sys.argv[1:])
+old = before.get('PacketFilterRules') or []
+new = after.get('PacketFilterRules') or []
+own_ip = before['SelfNode']['Addresses'][0].split('/')[0]
+want = [{'SrcIPs': [own_ip], 'DstPorts': [{'IP': own_ip, 'Ports': {'First': 0, 'Last': 65535}}]}]
+if old or new != want:
+    sys.exit(1)
+status = json.load(open(sys.argv[2].replace('.netmap.json', '.status.json')))
+if status.get('BackendState') != 'Running':
+    sys.exit(1)
+PY
+}
+
+rename_self_filter_user_if_requested() {
+  [[ -n "${self_filter_rename_user}" ]] || return 0
+  ((${#successful_client_names[@]} >= 2)) || {
+    echo "REAL_CLIENT_SELF_FILTER_RENAME_USER requires two clients" >&2
+    return 2
+  }
+  local old_name="${self_filter_rename_user%%:*}"
+  local new_name="${self_filter_rename_user#*:}"
+  [[ -n "${old_name}" && -n "${new_name}" && "${old_name}" != "${new_name}" ]] || return 2
+  echo "::group::rename user and refresh autogroup:self filter"
+  capture_self_filter_rename_state before
+  headscale_cmd policy get >"${work_dir}/self-filter-policy-before.hujson"
+  local user_id
+  user_id="$(user_id_for_name "${old_name}")"
+  headscale_cmd users rename --identifier "${user_id}" --new-name "${new_name}" \
+    >"${work_dir}/self-filter-user-rename.stdout"
+  wait_for "autogroup:self filter after user rename" self_filter_rename_reached_once || {
+    echo "per-node packet filter did not gain the renamed group member" >&2
+    return 1
+  }
+  headscale_cmd policy get >"${work_dir}/self-filter-policy-after.hujson"
+  cmp "${work_dir}/self-filter-policy-before.hujson" \
+    "${work_dir}/self-filter-policy-after.hujson"
+  echo "::endgroup::"
+}
+
+assert_self_filter_rename_after_restart_if_requested() {
+  [[ -n "${self_filter_rename_user}" ]] || return 0
+  capture_self_filter_rename_state after-restart
+  python3 - "${work_dir}/${successful_client_names[1]}.self-filter-after.netmap.json" \
+    "${work_dir}/${successful_client_names[1]}.self-filter-after-restart.netmap.json" <<'PY'
+import json
+import sys
+
+before, after = (json.load(open(path)) for path in sys.argv[1:])
+for key in ('PacketFilter', 'PacketFilterRules'):
+    if before.get(key) != after.get(key):
+        raise AssertionError(f'{key} changed after restart following user rename')
+PY
+}
+
+snapshot_rejected_policy_state() {
+  local phase="$1"
+  headscale_cmd policy get >"${work_dir}/rejected-policy-${phase}.hujson"
+  local client_name
+  for client_name in "${successful_client_names[@]}"; do
+    docker exec "${client_name}" tailscale debug netmap \
+      >"${work_dir}/${client_name}.rejected-policy-${phase}.netmap.json"
+    docker exec "${client_name}" tailscale status --json \
+      >"${work_dir}/${client_name}.rejected-policy-${phase}.status.json"
+  done
+}
+
+assert_rejected_policy_state_matches() {
+  local phase="$1" client_name
+  cmp "${work_dir}/rejected-policy-before.hujson" \
+    "${work_dir}/rejected-policy-${phase}.hujson"
+  for client_name in "${successful_client_names[@]}"; do
+    python3 - "${work_dir}/${client_name}.rejected-policy-before.netmap.json" \
+      "${work_dir}/${client_name}.rejected-policy-${phase}.netmap.json" \
+      "${work_dir}/${client_name}.rejected-policy-before.status.json" \
+      "${work_dir}/${client_name}.rejected-policy-${phase}.status.json" <<'PY'
+import json
+import sys
+
+before, after, before_status, after_status = (json.load(open(path)) for path in sys.argv[1:])
+if not before.get('PacketFilterRules') or len(before.get('Peers') or []) != 1:
+    raise AssertionError('expected an active packet filter and one visible peer before rejection')
+if not (before.get('DERPMap') or {}).get('Regions'):
+    raise AssertionError('expected a configured DERP region before rejection')
+for status in (before_status, after_status):
+    if status.get('BackendState') != 'Running':
+        raise AssertionError(f'client is not Running: {status.get("BackendState")}')
+for field in ('PacketFilter', 'PacketFilterRules'):
+    if before.get(field) != after.get(field):
+        raise AssertionError(f'{field} changed after rejected policy')
+before_peers = {peer['ID'] for peer in before.get('Peers') or []}
+after_peers = {peer['ID'] for peer in after.get('Peers') or []}
+if before_peers != after_peers:
+    raise AssertionError(f'peers changed after rejected policy: {before_peers} -> {after_peers}')
+PY
+  done
+}
+
+reject_policy_if_requested() {
+  [[ -n "${rejected_policy_json}" ]] || return 0
+  ((${#successful_client_names[@]} >= 2)) || {
+    echo "REAL_CLIENT_REJECT_POLICY_JSON requires at least two clients" >&2
+    return 2
+  }
+  echo "::group::reject policy and retain packet filters"
+  snapshot_rejected_policy_state before
+  if headscale_cmd --force policy set --file "${rejected_policy_path}" \
+    >"${work_dir}/policy-rejected-set.stdout" \
+    2>"${work_dir}/policy-rejected-set.stderr"; then
+    echo "policy with a failing test was unexpectedly accepted" >&2
+    return 1
+  fi
+  if ! grep -Fq 'test(s) failed:' "${work_dir}/policy-rejected-set.stderr"; then
+    cat "${work_dir}/policy-rejected-set.stderr" >&2
+    echo "policy was rejected for a reason other than its failing test" >&2
+    return 1
+  fi
+  sleep 2
+  snapshot_rejected_policy_state after
+  assert_rejected_policy_state_matches after
+  echo "::endgroup::"
+}
+
+assert_rejected_policy_after_restart_if_requested() {
+  [[ -n "${rejected_policy_json}" ]] || return 0
+  snapshot_rejected_policy_state after-restart
+  assert_rejected_policy_state_matches after-restart
+}
+
+audit_log_state_once() {
+  local audit_client_name="$1"
+  local output_path="$2"
+  docker exec "${audit_client_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
+    docker exec "${audit_client_name}" tailscale debug prefs >"${output_path}.prefs" 2>"${output_path}.prefs.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      prefs = JSON.parse(File.read(ARGV.fetch(1)))
+      expected = ARGV.fetch(2)
+      want_running = expected == "Running"
+      abort("expected audit-log WantRunning #{want_running}, got #{prefs["WantRunning"].inspect}") unless prefs["WantRunning"] == want_running
+      abort("audit-log transition lost the node key") unless status["HaveNodeKey"]
+      if want_running
+        abort("expected Running state, got #{status["BackendState"].inspect}") unless status["BackendState"] == "Running"
+      else
+        health = Array(status["Health"]).join("\n")
+        abort("missing audit-log health warning: #{health.inspect}") unless health.include?("tailnet requires logging to be enabled")
+      end
+    ' "${output_path}" "${output_path}.prefs" "${expected_audit_log_state}"
+}
+
+assert_audit_log_state_if_requested() {
+  [[ -n "${expected_audit_log_state}" ]] || return 0
+  echo "::group::assert audit-log client state"
+  local audit_client_name output_path
+  for audit_client_name in "${successful_client_names[@]}"; do
+    output_path="${work_dir}/${audit_client_name}.audit-log-status.json"
+    wait_for "audit-log CapMap ${audit_client_name}" \
+      "assert_self_capmap_keys '${audit_client_name}' '${work_dir}/${audit_client_name}.audit-log-capmap.json' 'https://tailscale.com/cap/data-plane-audit-logs'" || {
+        dump_client_debug "${audit_client_name}"
+        echo "::endgroup::"
+        return 1
+      }
+    if ! wait_for "audit-log ${expected_audit_log_state} state ${audit_client_name}" \
+      "audit_log_state_once '${audit_client_name}' '${output_path}'"; then
+      dump_client_debug "${audit_client_name}"
+      echo "::endgroup::"
+      return 1
+    fi
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      prefs = JSON.parse(File.read(ARGV.fetch(1)))
+      puts JSON.pretty_generate({backend_state: status["BackendState"],
+        want_running: prefs["WantRunning"], health: status["Health"]})
+    ' "${output_path}" "${output_path}.prefs"
+  done
+  echo "::endgroup::"
+}
+
+recover_audit_log_client_if_requested() {
+  [[ -n "${audit_recover_policy_json}" ]] || return 0
+  echo "::group::recover audit-log client"
+  headscale_cmd --force -o json policy set --file "${audit_recover_policy_path}" \
+    >"${work_dir}/policy-audit-recover-set.json"
+  local audit_client_name status_path
+  for audit_client_name in "${successful_client_names[@]}"; do
+    run_with_timeout "tailscale up after audit-log policy removal ${audit_client_name}" \
+      docker exec "${audit_client_name}" tailscale up \
+        "--timeout=${up_timeout}" \
+        "--login-server=${control_url}" \
+        "--hostname=${audit_client_name}" \
+        --accept-routes=false \
+        "--accept-dns=${accept_dns_arg}" || {
+        dump_client_debug "${audit_client_name}"
+        echo "::endgroup::"
+        return 1
+      }
+    status_path="${work_dir}/${audit_client_name}.audit-log-recovered-status.json"
+    wait_for "recovered audit-log client ${audit_client_name}" \
+      "audit_log_recovered_once '${audit_client_name}' '${status_path}'" || {
+        dump_client_debug "${audit_client_name}"
+        echo "::endgroup::"
+        return 1
+      }
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      prefs = JSON.parse(File.read(ARGV.fetch(1)))
+      puts JSON.pretty_generate({backend_state: status["BackendState"],
+        want_running: prefs["WantRunning"], health: status["Health"]})
+    ' "${status_path}" "${status_path}.prefs"
+  done
+  echo "::endgroup::"
+}
+
+audit_log_recovered_once() {
+  local audit_client_name="$1"
+  local output_path="$2"
+  docker exec "${audit_client_name}" tailscale status --json >"${output_path}" 2>"${output_path}.err" &&
+    docker exec "${audit_client_name}" tailscale debug prefs >"${output_path}.prefs" 2>"${output_path}.prefs.err" &&
+    docker exec "${audit_client_name}" tailscale debug netmap >"${output_path}.netmap" 2>"${output_path}.netmap.err" &&
+    ruby -rjson -e '
+      status = JSON.parse(File.read(ARGV.fetch(0)))
+      prefs = JSON.parse(File.read(ARGV.fetch(1)))
+      netmap = JSON.parse(File.read(ARGV.fetch(2)))
+      initial = JSON.parse(File.read(ARGV.fetch(3)))
+      cap_map = (netmap["SelfNode"] || {})["CapMap"] || {}
+      cap = "https://tailscale.com/cap/data-plane-audit-logs"
+      abort("audit-log capability remains after policy removal") if cap_map.key?(cap)
+      abort("client did not resume running") unless prefs["WantRunning"] == true && status["BackendState"] == "Running"
+      abort("client identity changed during recovery") unless status.dig("Self", "ID") == initial.dig("Self", "ID") && status["TailscaleIPs"] == initial["TailscaleIPs"]
+    ' "${output_path}" "${output_path}.prefs" "${output_path}.netmap" "${work_dir}/${audit_client_name}.status.json"
+}
+
+reload_unrelated_policy_if_requested() {
+  [[ -n "${policy_unrelated_reload_json}" ]] || return 0
+  printf '%s\n' "${policy_unrelated_reload_json}" >"${policy_unrelated_reload_path}"
+  echo "::group::reload unrelated policy"
+  headscale_cmd --force -o json policy set --file "${policy_unrelated_reload_path}" \
+    >"${work_dir}/policy-unrelated-reload-set.json"
+  if [[ "${assert_mapresponse_dns_policy_reload}" == true ]]; then
+    wait_for "unrelated policy MapResponse" \
+      "find '${HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH}' -name '*-policy.json' -print -quit | grep -q ."
+  fi
+  echo "::endgroup::"
+}
+
+assert_mapresponse_dns_policy_reload_if_requested() {
+  [[ "${assert_mapresponse_dns_policy_reload}" == true ]] || return 0
+  python3 tools/real-client/assert-mapresponse-dns-policy-reload.py \
+    "${HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH}" \
+    "${expected_dns_resolvers_before_policy_reload}" \
+    "${expected_dns_resolvers}"
+}
+
 user_id_for_name() {
   local wanted="$1"
   local idx
@@ -2860,6 +3383,9 @@ mint_preauth_key_for_user() {
   )
   if ((preauth_reusable_flag)); then
     preauth_args+=(--reusable)
+  fi
+  if ((preauth_ephemeral_flag)); then
+    preauth_args+=(--ephemeral)
   fi
   if [[ -n "${key_tags}" ]]; then
     preauth_args+=(--tags "${key_tags}")
@@ -3154,6 +3680,15 @@ tailscale_status_ips() {
 
 relogin_with_authkey_if_requested() {
   ((authkey_relogin_requested_flag)) || return 0
+  if [[ "${expect_relogin_observer_rekey}" == true ]]; then
+    if ((client_count != 2)) || ((authkey_relogin_same_user_flag != 1)) ||
+      ((authkey_relogin_expired_flag || authkey_relogin_deleted_flag || authkey_relogin_different_user_flag)); then
+      echo "REAL_CLIENT_EXPECT_RELOGIN_OBSERVER_REKEY requires two same-user relogin clients" >&2
+      return 2
+    fi
+    docker exec "${client_names[0]}" tailscale debug netmap >"${work_dir}/relogin-observer-before.netmap"
+    docker exec "${client_names[1]}" tailscale debug netmap >"${work_dir}/relogin-target-before.netmap"
+  fi
   local rejection_mode=""
   if ((authkey_relogin_different_user_flag)); then
     echo "::group::auth-key logout and different-user relogin"
@@ -3266,6 +3801,35 @@ relogin_with_authkey_if_requested() {
     fi
     cp "${work_dir}/${client_name}.relogin-status.json" "${work_dir}/${client_name}.status.json"
   done
+
+  if [[ "${expect_relogin_observer_rekey}" == true ]]; then
+    local observer_name="${client_names[0]}"
+    local target_name="${client_names[1]}"
+    local observer_after="${work_dir}/relogin-observer-after.netmap"
+    local target_after="${work_dir}/relogin-target-after.netmap"
+    if ! wait_for "observer map receives ${target_name} rekey" \
+      "relogin_observer_rekey_matches '${observer_name}' '${target_name}' '${observer_after}' '${target_after}'"; then
+      dump_client_debug "${observer_name}"
+      return 1
+    fi
+    ruby -rjson -e '
+      observer_before, target_before, observer_after, target_after = ARGV.map { |path| JSON.parse(File.read(path)) }
+      old_target = target_before.fetch("SelfNode")
+      new_target = target_after.fetch("SelfNode")
+      old_observer = observer_before.fetch("SelfNode")
+      new_observer = observer_after.fetch("SelfNode")
+      peer = Array(observer_after.fetch("Peers")).find { |node| node.fetch("ID") == new_target.fetch("ID") }
+      abort("relogin target disappeared from observer map") unless peer
+      abort("relogin changed target node ID") unless old_target.fetch("ID") == new_target.fetch("ID")
+      abort("relogin changed target IPs") unless old_target.fetch("Addresses") == new_target.fetch("Addresses")
+      abort("relogin changed observer node ID or IPs") unless old_observer.fetch("ID") == new_observer.fetch("ID") && old_observer.fetch("Addresses") == new_observer.fetch("Addresses")
+      abort("relogin did not rotate target node key") if old_target.fetch("Key") == new_target.fetch("Key")
+      abort("observer has stale target node key") unless peer.fetch("Key") == new_target.fetch("Key")
+      puts JSON.pretty_generate({observer_id: new_observer.fetch("ID"), target_id: new_target.fetch("ID"), target_addresses: new_target.fetch("Addresses"), target_key_rotated: true, observer_received_new_key: true})
+    ' "${work_dir}/relogin-observer-before.netmap" "${work_dir}/relogin-target-before.netmap" "${observer_after}" "${target_after}" \
+      >"${work_dir}/relogin-observer-rekey-summary.json"
+    cat "${work_dir}/relogin-observer-rekey-summary.json"
+  fi
 
   headscale_cmd -o json nodes list >"${after_nodes_path}"
   if ((authkey_relogin_expired_flag || authkey_relogin_deleted_flag)); then
@@ -3449,6 +4013,19 @@ relogin_with_authkey_if_requested() {
   echo "::endgroup::"
 }
 
+relogin_observer_rekey_matches() {
+  local observer_name="$1" target_name="$2" observer_path="$3" target_path="$4"
+  docker exec "${observer_name}" tailscale debug netmap >"${observer_path}" 2>/dev/null || return 1
+  docker exec "${target_name}" tailscale debug netmap >"${target_path}" 2>/dev/null || return 1
+  ruby -rjson -e '
+    observer = JSON.parse(File.read(ARGV.fetch(0)))
+    target = JSON.parse(File.read(ARGV.fetch(1))).fetch("SelfNode")
+    old_target = JSON.parse(File.read(ARGV.fetch(2))).fetch("SelfNode")
+    peer = Array(observer.fetch("Peers")).find { |node| node.fetch("ID") == target.fetch("ID") }
+    exit(peer && peer.fetch("Key") == target.fetch("Key") && target.fetch("Key") != old_target.fetch("Key") ? 0 : 1)
+  ' "${observer_path}" "${target_path}" "${work_dir}/relogin-target-before.netmap"
+}
+
 assert_client_netmap() {
   local netmap_path="${work_dir}/${client_name}.netmap.json"
   docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" 2>"${netmap_path}.err"
@@ -3513,6 +4090,80 @@ assert_debug_ping_if_requested() {
     return 1
   fi
   ruby -rjson -e 'puts JSON.pretty_generate({debug_ping: "ok", node: ARGV.fetch(0)})' "${client_name}"
+  echo "::endgroup::"
+}
+
+count_full_mapresponse_dumps() {
+  python3 - "${HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH}" <<'PY'
+import json
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+print(sum("DERPMap" in json.loads(path.read_text()) for path in root.glob("*/*.json")))
+PY
+}
+
+assert_full_mapresponse_dump_count() {
+  local wanted="$1"
+  local count
+  count="$(count_full_mapresponse_dumps)"
+  ((count >= wanted))
+}
+
+assert_full_ping_churn_if_requested() {
+  ((full_ping_churn_count > 0)) || return 0
+  echo "::group::full-map and ping process churn"
+  local ping_url="$(debug_ping_url)"
+  local baseline="${work_dir}/full-ping-baseline-status.json"
+  wait_for "logged-in baseline before ping churn" \
+    "client_logged_in '${client_name}' '${baseline}'" || return 1
+  local full_before
+  local iteration user_name user_id ping_pid status_path
+  for ((iteration = 1; iteration <= full_ping_churn_count; iteration++)); do
+    user_name="ping-churn-${iteration}"
+    headscale_cmd -o json users create "${user_name}" \
+      >"${work_dir}/full-ping-user-${iteration}.json"
+    user_id="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("id")' "${work_dir}/full-ping-user-${iteration}.json")"
+    full_before="$(count_full_mapresponse_dumps)"
+
+    curl -fsS --max-time "${timeout_secs}" --get \
+      --data-urlencode "node=${client_name}" "${ping_url}" \
+      >"${work_dir}/full-ping-${iteration}.html" \
+      2>"${work_dir}/full-ping-${iteration}.err" &
+    ping_pid="$!"
+    headscale_cmd --force -o json users destroy --identifier "${user_id}" \
+      >"${work_dir}/full-ping-user-destroy-${iteration}.json"
+    if ! wait "${ping_pid}"; then
+      cat "${work_dir}/full-ping-${iteration}.err" >&2
+      return 1
+    fi
+    if ! grep -Eq 'Ping OK|Pong|responded' "${work_dir}/full-ping-${iteration}.html"; then
+      echo "debug ping ${iteration} did not report a callback" >&2
+      return 1
+    fi
+    wait_for "full map after unrelated user removal ${iteration}" \
+      "assert_full_mapresponse_dump_count '$((full_before + 1))'" || return 1
+    status_path="${work_dir}/full-ping-${iteration}-status.json"
+    wait_for "client stays logged in after ping ${iteration}" \
+      "client_logged_in '${client_name}' '${status_path}'" || return 1
+    python3 - "${baseline}" "${status_path}" <<'PY'
+import json
+import sys
+from pathlib import Path
+before, after = (json.loads(Path(path).read_text()) for path in sys.argv[1:])
+for key in ("ID", "NodeKey"):
+    if before["Self"].get(key) != after["Self"].get(key):
+        raise SystemExit(f"client changed Self.{key} during full-map/ping churn")
+if before.get("TailscaleIPs") != after.get("TailscaleIPs"):
+    raise SystemExit("client changed Tailscale IPs during full-map/ping churn")
+PY
+  done
+  headscale_cmd -o json nodes list >"${work_dir}/full-ping-nodes-after.json"
+  assert_node_count_file "${work_dir}/full-ping-nodes-after.json" 1
+  printf '{"ping_callbacks":%s,"full_map_responses_at_least":%s}\n' \
+    "${full_ping_churn_count}" "${full_ping_churn_count}" \
+    >"${work_dir}/full-ping-churn-assertion.json"
+  cat "${work_dir}/full-ping-churn-assertion.json"
   echo "::endgroup::"
 }
 
@@ -3866,6 +4517,20 @@ assert_dns_resolvers_if_requested() {
   echo "::endgroup::"
 }
 
+assert_dns_resolvers_before_policy_reload_if_requested() {
+  [[ -n "${expected_dns_resolvers_before_policy_reload}" ]] || return 0
+  echo "::group::assert DNS resolvers before policy reload"
+  local client_name="${successful_client_names[0]}"
+  wait_for "DNS resolvers before policy reload" \
+    "assert_dns_resolver_list 'Resolvers' '${expected_dns_resolvers_before_policy_reload}' '${work_dir}/dns-resolvers-before-policy-reload.json'" || {
+      dump_client_debug "${client_name}"
+      echo "::endgroup::"
+      return 1
+    }
+  cat "${work_dir}/dns-resolvers-before-policy-reload.json"
+  echo "::endgroup::"
+}
+
 assert_dns_fallback_resolvers_if_requested() {
   [[ -n "${expected_dns_fallback_resolvers}" ]] || return 0
   echo "::group::assert DNS fallback resolvers"
@@ -4105,6 +4770,12 @@ assert_user_node_lifecycle_state() {
   local users_path="${work_dir}/users-user-node-lifecycle-${safe_label}.json"
   local output_path="${work_dir}/user-node-lifecycle-${safe_label}.json"
   local rename_user_new="${rename_user_after_login#*:}"
+  local expected_node_owner="${rename_user_new}"
+  if [[ "${target}" == "headscale-go" && "${headscale_go_version}" == "v0.29.5" && "${label}" == "after-mutations" ]]; then
+    # v0.29.5 updates users immediately but keeps the node's hydrated User
+    # association until process restart. Pin both sides of that boundary.
+    expected_node_owner="${rename_user_after_login%%:*}"
+  fi
   local expired_client_name="${client_names[$((expire_node_index - 1))]}"
   local deleted_client_name="${client_names[$((delete_node_index - 1))]}"
   local expected_node_count=$((client_count - 1))
@@ -4115,12 +4786,42 @@ assert_user_node_lifecycle_state() {
       "${nodes_path}" \
       "${users_path}" \
       "${client_names[0]}" \
-      "${rename_user_new}" \
+      "${expected_node_owner}" \
       "${expired_client_name}" \
       "${deleted_client_name}" \
       "${destroy_user_after_node_delete}" \
       "${expected_users_after_lifecycle_restart}" \
       "${expected_node_count}" >"${output_path}"
+}
+
+assert_user_node_lifecycle_observer_map() {
+  local label="$1"
+  local observer="${client_names[0]}"
+  local before="${work_dir}/user-node-lifecycle-observer-before.json"
+  local after="${work_dir}/user-node-lifecycle-observer-${label}.json"
+  docker exec "${observer}" tailscale status --json >"${after}" 2>/dev/null || return 1
+  python3 - "${before}" "${after}" "${client_names[$((expire_node_index - 1))]}" \
+    >"${work_dir}/user-node-lifecycle-map-${label}.json" 2>/dev/null <<'PY'
+import json
+import sys
+
+before, after = [json.load(open(path)) for path in sys.argv[1:3]]
+expired_name = sys.argv[3]
+assert after.get('BackendState') == 'Running', after.get('BackendState')
+assert before.get('Self', {}).get('ID') == after.get('Self', {}).get('ID')
+assert before.get('TailscaleIPs') == after.get('TailscaleIPs')
+assert len(before.get('Peer') or {}) == 2, before.get('Peer')
+peers = list((after.get('Peer') or {}).values())
+assert len(peers) == 1 and peers[0].get('HostName') == expired_name, peers
+assert peers[0].get('Online') is False, peers
+print(json.dumps({
+    'observer_id': after['Self']['ID'],
+    'tailscale_ips': after['TailscaleIPs'],
+    'peer_count': 1,
+    'expired_peer': expired_name,
+    'expired_peer_online': False,
+}, sort_keys=True))
+PY
 }
 
 mutate_user_node_lifecycle_if_requested() {
@@ -4149,6 +4850,9 @@ mutate_user_node_lifecycle_if_requested() {
   expired_node_id="$(node_id_for_client_name "${nodes_path}" "${expired_client_name}")"
   deleted_node_id="$(node_id_for_client_name "${nodes_path}" "${deleted_client_name}")"
 
+  docker exec "${client_names[0]}" tailscale status --json \
+    >"${work_dir}/user-node-lifecycle-observer-before.json"
+
   headscale_cmd -o json users rename --identifier "${rename_user_id}" --new-name "${rename_user_new}" \
     >"${work_dir}/user-node-lifecycle-rename-user.json"
   for idx in "${!created_user_names[@]}"; do
@@ -4170,6 +4874,13 @@ mutate_user_node_lifecycle_if_requested() {
     return 1
   }
   cat "${work_dir}/user-node-lifecycle-after-mutations.json"
+  wait_for "observer expired/offline and deleted/removed peers" \
+    "assert_user_node_lifecycle_observer_map 'after-mutations'" || {
+    dump_client_debug "${client_names[0]}"
+    echo "::endgroup::"
+    return 1
+  }
+  cat "${work_dir}/user-node-lifecycle-map-after-mutations.json"
 
   for idx in "${!successful_client_names[@]}"; do
     if ((idx == expire_node_index - 1 || idx == delete_node_index - 1)); then
@@ -4196,6 +4907,13 @@ assert_user_node_lifecycle_after_restart_if_requested() {
     return 1
   }
   cat "${work_dir}/user-node-lifecycle-after-restart.json"
+  wait_for "observer peer state after server restart" \
+    "assert_user_node_lifecycle_observer_map 'after-restart'" || {
+    dump_client_debug "${client_names[0]}"
+    echo "::endgroup::"
+    return 1
+  }
+  cat "${work_dir}/user-node-lifecycle-map-after-restart.json"
   echo "::endgroup::"
 }
 
@@ -4333,10 +5051,51 @@ wait_for_expected_node_count_if_requested() {
   }
 }
 
+capture_self_approved_route_phase() {
+  local phase="$1"
+  local netmap_path="${work_dir}/${client_name}.self-approved-route-${phase}.netmap.json"
+  local status_path="${work_dir}/${client_name}.self-approved-route-${phase}.status.json"
+  docker exec "${client_name}" tailscale debug netmap >"${netmap_path}" || return 1
+  docker exec "${client_name}" tailscale status --json >"${status_path}" || return 1
+  python3 - "${netmap_path}" "${status_path}" "${assert_self_approved_route}" "${phase}" \
+    "${work_dir}/${client_name}.self-approved-route-before.netmap.json" <<'PY'
+import json, sys
+netmap = json.load(open(sys.argv[1]))
+status = json.load(open(sys.argv[2]))
+route, phase = sys.argv[3:5]
+self_node = netmap.get('SelfNode') or {}
+allowed = self_node.get('AllowedIPs') or []
+primary = self_node.get('PrimaryRoutes') or []
+if status.get('BackendState') != 'Running' or not self_node.get('ID'):
+    sys.exit(1)
+if phase == 'before':
+    if route in allowed or route in primary:
+        sys.exit(1)
+else:
+    if route not in allowed or route not in primary:
+        sys.exit(1)
+    baseline = (json.load(open(sys.argv[5])).get('SelfNode') or {})
+    if self_node.get('ID') != baseline.get('ID') or self_node.get('Addresses') != baseline.get('Addresses'):
+        sys.exit(1)
+PY
+}
+
+assert_self_approved_route_phase_if_requested() {
+  local phase="$1"
+  [[ -n "${assert_self_approved_route}" ]] || return 0
+  if ! wait_for "own approved route ${assert_self_approved_route} ${phase}" \
+    "capture_self_approved_route_phase '${phase}'"; then
+    dump_client_debug "${client_name}"
+    return 1
+  fi
+}
+
 approve_routes_if_requested() {
   [[ -n "${advertise_routes}" || -n "${approve_routes}" ]] || return 0
   wait_for_node_routes "${expected_available_routes}" "" "advertised routes"
   [[ -n "${approve_routes}" ]] || return 0
+
+  assert_self_approved_route_phase_if_requested "before"
 
   echo "::group::approve routes"
   local nodes_path="${work_dir}/nodes-before-approve.json"
@@ -4348,6 +5107,7 @@ approve_routes_if_requested() {
   echo "::endgroup::"
 
   wait_for_node_routes "${expected_available_routes}" "${expected_approved_routes}" "approved routes"
+  assert_self_approved_route_phase_if_requested "after"
 }
 
 set_tags_if_requested() {
@@ -4435,6 +5195,36 @@ stop_tailscaled() {
   echo "::endgroup::"
 }
 
+capture_ephemeral_reconnect_state() {
+  local label="$1"
+  local prefix="${work_dir}/ephemeral-reconnect-${label}"
+  headscale_cmd -o json nodes list >"${prefix}-nodes.json" || return 1
+  docker exec "${client_names[0]}" tailscale status --json >"${prefix}-target.json" 2>/dev/null || return 1
+  docker exec "${client_names[1]}" tailscale status --json >"${prefix}-observer.json" 2>/dev/null || return 1
+  python3 tools/real-client/assert-ephemeral-reconnect.py \
+    "${work_dir}/ephemeral-reconnect-baseline" "${prefix}" \
+    "${client_names[0]}" "${client_names[1]}" \
+    >"${prefix}-assertion.json" 2>"${prefix}-assertion.err" || return 1
+}
+
+assert_ephemeral_reconnect_churn_if_requested() {
+  ((ephemeral_reconnect_churn > 0)) || return 0
+  echo "::group::ephemeral reconnect churn"
+  wait_for "initial ephemeral peer map" "capture_ephemeral_reconnect_state baseline" || return 1
+  local iteration
+  for ((iteration = 1; iteration <= ephemeral_reconnect_churn; iteration++)); do
+    docker restart "${client_names[0]}" >/dev/null
+    wait_for "ephemeral reconnect ${iteration}" \
+      "capture_ephemeral_reconnect_state '${iteration}'" || {
+      cat "${work_dir}/ephemeral-reconnect-${iteration}-assertion.err" >&2 || true
+      dump_debug
+      return 1
+    }
+    cat "${work_dir}/ephemeral-reconnect-${iteration}-assertion.json"
+  done
+  echo "::endgroup::"
+}
+
 need ruby
 prepare_postgres_database
 need curl
@@ -4488,10 +5278,37 @@ set_tags_if_requested
 wait_for_node_tags_if_requested
 wait_for_client_netmap
 assert_peer_visibility_if_requested
+assert_full_ping_churn_if_requested
+if ((full_ping_churn_count > 0)); then
+  echo "${target} full-map and ping process churn smoke passed"
+  exit 0
+fi
+assert_ephemeral_reconnect_churn_if_requested
+if ((ephemeral_reconnect_churn > 0)); then
+  echo "${target} ephemeral reconnect churn stock-client smoke passed"
+  exit 0
+fi
+assert_corrupt_peer_name_after_restart_if_requested
+if [[ "${corrupt_peer_name_after_login}" == true ]]; then
+  echo "${target} invalid FQDN peer removal stock-client smoke passed"
+  exit 0
+fi
 snapshot_derp_map_before_policy_reload_if_requested
+assert_dns_resolvers_before_policy_reload_if_requested
+reload_unrelated_policy_if_requested
 reload_policy_if_requested
+reject_policy_if_requested
+rename_self_filter_user_if_requested
+assert_audit_log_state_if_requested
+if [[ -n "${expected_audit_log_state}" ]]; then
+  recover_audit_log_client_if_requested
+  echo "${target} audit-log stock-client policy reload smoke passed"
+  exit 0
+fi
 assert_post_reload_peer_visibility_if_requested
+assert_policy_peer_removal_phase_if_requested "after-policy-reload"
 rename_node_if_requested
+clear_node_expiry_if_requested
 mutate_user_node_lifecycle_if_requested
 assert_derp_map_if_requested
 assert_derp_map_stable_after_policy_reload_if_requested
@@ -4499,6 +5316,16 @@ assert_derp_ping_if_requested
 assert_derp_status_properties_if_requested
 assert_native_derp_admissions_if_requested
 assert_restart_if_requested
+assert_rejected_policy_after_restart_if_requested
+assert_self_filter_rename_after_restart_if_requested
+if [[ -n "${rejected_policy_json}" ]]; then
+  echo "${target} rejected-policy packet-filter and restart smoke passed"
+  exit 0
+fi
+if [[ -n "${self_filter_rename_user}" ]]; then
+  echo "${target} autogroup:self user-rename filter and restart smoke passed"
+  exit 0
+fi
 assert_user_node_lifecycle_after_restart_if_requested
 assert_ssh_matrix_if_requested
 assert_file_sharing_cap_if_requested
@@ -4510,12 +5337,35 @@ assert_no_magic_dns_if_requested
 assert_dns_extra_records_if_requested
 assert_dns_debug_resolves_if_requested
 assert_dns_resolvers_if_requested
+assert_mapresponse_dns_policy_reload_if_requested
 assert_dns_fallback_resolvers_if_requested
 assert_dns_routes_if_requested
 assert_tailscale_ip_family_if_requested
+if [[ "${REAL_CLIENT_IMPORT_SNAPSHOT_AFTER_LOGIN:-false}" == "true" ]]; then
+  export_postgres_database_if_requested
+  echo "${target} stock-client Postgres import snapshot passed"
+  exit 0
+fi
+if [[ "${clear_node_expiry_after_login}" == true ]]; then
+  echo "${target} live peer key-expiry clear smoke passed"
+  exit 0
+fi
 wait_for_node_lifecycle true "connected online node"
 connected_last_seen="$(cat "${work_dir}/last-seen.epoch")"
 stop_tailscaled
 wait_for_node_lifecycle false "offline node after disconnect grace" "${connected_last_seen}"
+if [[ "${REAL_CLIENT_ASSERT_OFFLINE_LASTSEEN_RESTART:-false}" == true ]]; then
+  offline_last_seen="$(cat "${work_dir}/last-seen.epoch")"
+  stop_server
+  start_server
+  wait_for_node_lifecycle false "offline node after disconnect and server restart" "${connected_last_seen}"
+  restarted_last_seen="$(cat "${work_dir}/last-seen.epoch")"
+  ruby -e '
+    before = Float(ARGV.fetch(0))
+    after = Float(ARGV.fetch(1))
+    abort("offline LastSeen changed across restart: #{before} -> #{after}") if (after - before).abs > 0.001
+  ' "${offline_last_seen}" "${restarted_last_seen}"
+fi
+export_postgres_database_if_requested
 
 echo "${target} online/lastSeen real-client smoke passed"

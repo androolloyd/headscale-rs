@@ -1,0 +1,10 @@
+Gorm JSON serializer compatibility reference
+
+Copyright (c) 2013-present Jinzhu <wosmvp@gmail.com>
+
+Native JSON nil-to-SQL-NULL behavior follows JSONSerializer.Value in
+schema/serializer.go from gorm.io/gorm v1.31.1, used by the pinned
+headscale-go v0.29.5 persistence path. The implementation is maintained
+in Rust; no Gorm runtime dependency is introduced.
+The original MIT terms are retained in LICENSE-GORM.
+Source SHA-256: 9dadcf607eccadd1f6cab29f72a95d8ff7c683e20dd412f585a5b5d15797a1a8.

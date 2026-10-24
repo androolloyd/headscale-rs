@@ -1,6 +1,6 @@
 //! DID-based authentication for control-plane node operations.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use axum::http::HeaderMap;
@@ -15,6 +15,7 @@ pub const DID_TIMESTAMP_HEADER: &str = "X-DID-Timestamp";
 pub const DID_NONCE_HEADER: &str = "X-DID-Nonce";
 
 const SIGNATURE_WINDOW_MILLIS: u64 = 5 * 60 * 1000;
+const DEFAULT_NONCE_CAPACITY: usize = 65_536;
 
 /// Node registration request with the DID proof needed by the public HTTP API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,35 +40,78 @@ pub struct SignedTransferRequest {
 }
 
 /// In-memory replay protection for signed control-plane requests.
-#[derive(Default)]
 pub struct NonceStore {
-    nonces: RwLock<HashMap<String, HashMap<String, u64>>>,
+    nonces: RwLock<NonceEntries>,
+    capacity: usize,
+}
+
+#[derive(Default)]
+struct NonceEntries {
+    seen: HashMap<(String, String), u64>,
+    expirations: BTreeMap<u64, Vec<(String, String)>>,
+}
+
+impl Default for NonceStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NonceStore {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(DEFAULT_NONCE_CAPACITY)
     }
 
-    fn check_and_store(&self, did: &str, nonce: &str, timestamp_millis: u64) -> bool {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            nonces: RwLock::new(NonceEntries::default()),
+            capacity,
+        }
+    }
+
+    fn check_and_store(
+        &self,
+        did: &str,
+        nonce: &str,
+        timestamp_millis: u64,
+    ) -> Result<(), ControlAuthError> {
         if !is_valid_nonce(nonce) {
-            return false;
+            return Err(ControlAuthError::InvalidFormat);
         }
 
         let mut nonces = self
             .nonces
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let did_nonces = nonces.entry(did.to_string()).or_default();
-        let oldest_allowed = timestamp_millis.saturating_sub(SIGNATURE_WINDOW_MILLIS);
-        did_nonces.retain(|_, seen_at| *seen_at >= oldest_allowed);
-
-        if did_nonces.contains_key(nonce) {
-            return false;
+        // Expiry is measured against the server clock, never against a
+        // later request's attacker-controlled timestamp. Do not evict a
+        // still-valid nonce to admit another request: that permits replays.
+        let now = now_millis();
+        while nonces
+            .expirations
+            .first_key_value()
+            .is_some_and(|(expiry, _)| *expiry < now)
+        {
+            if let Some((_, keys)) = nonces.expirations.pop_first() {
+                for key in keys {
+                    nonces.seen.remove(&key);
+                }
+            }
         }
-
-        did_nonces.insert(nonce.to_string(), timestamp_millis);
-        true
+        let key = (did.to_owned(), nonce.to_owned());
+        if nonces.seen.contains_key(&key) {
+            return Err(ControlAuthError::NonceReplay);
+        }
+        if nonces.seen.len() >= self.capacity {
+            return Err(ControlAuthError::NonceCapacity);
+        }
+        let expiry = timestamp_millis.saturating_add(SIGNATURE_WINDOW_MILLIS);
+        if expiry < now {
+            return Err(ControlAuthError::TimestampOutOfWindow);
+        }
+        nonces.seen.insert(key.clone(), expiry);
+        nonces.expirations.entry(expiry).or_default().push(key);
+        Ok(())
     }
 }
 
@@ -83,6 +127,8 @@ pub enum ControlAuthError {
     InvalidSignature,
     #[error("signature nonce was already used")]
     NonceReplay,
+    #[error("signature replay cache is at capacity")]
+    NonceCapacity,
     #[error("signed identity does not match requested node")]
     IdentityMismatch,
 }
@@ -235,11 +281,7 @@ fn verify_signature(
         return Err(ControlAuthError::InvalidSignature);
     }
 
-    if !nonces.check_and_store(did.as_str(), nonce, timestamp_millis) {
-        return Err(ControlAuthError::NonceReplay);
-    }
-
-    Ok(())
+    nonces.check_and_store(did.as_str(), nonce, timestamp_millis)
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, ControlAuthError> {

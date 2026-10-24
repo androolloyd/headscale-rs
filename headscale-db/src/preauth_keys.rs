@@ -1,5 +1,5 @@
 //! Pre-auth key persistence — sqlx-backed store mirroring
-//! `juanfont/headscale@v0.28.0:hscontrol/db/preauth_keys.go`.
+//! `juanfont/headscale@v0.29.5:hscontrol/db/preauth_keys.go`.
 //!
 //! ## Surface
 //!
@@ -9,9 +9,9 @@
 //! * [`expire`] — set `expiration` to now, leaving the row in place.
 //! * [`destroy`] — clear assigned nodes, then delete the row outright.
 //! * [`list_by_user`] — admin listing per user (oldest first).
-//! * [`try_use`] — atomic single-use redemption: if `reusable=0` and
-//!   `used_at IS NULL`, flip `used_at` to now in one statement and
-//!   return the row; reject otherwise.
+//! * [`try_use`] — atomic single-use redemption: validate the credential,
+//!   then claim `used = false` for a one-shot key. SQL NULL is not false;
+//!   `used_at` is a projection of the stored Used bit.
 //!
 //! ## Token shape
 //!
@@ -28,20 +28,21 @@
 //! in under a second.
 
 use crate::{DbError, Result};
-use rand_core::RngCore;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Connection, SqliteConnection, SqlitePool};
 #[cfg(feature = "postgres-sqlx")]
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(crate) mod timestamp;
 
 /// Brand prefix on the plaintext bearer token.
 pub const TOKEN_PREFIX: &str = "hskey-auth-";
 pub const TOKEN_PREFIX_LEN: usize = 12;
 pub const TOKEN_SECRET_LEN: usize = 64;
 
-/// Production bcrypt cost. 12 is the industry-standard floor as of
-/// 2024 (NIST SP 800-63B), but this store intentionally matches
-/// headscale-go's `bcrypt.DefaultCost`.
+/// Production bcrypt cost, matching headscale-go's `bcrypt.DefaultCost`.
 pub const BCRYPT_COST_DEFAULT: u32 = 10;
 
 /// Cheap bcrypt cost for unit tests — the crate's minimum (4). Keeps
@@ -51,27 +52,36 @@ pub const BCRYPT_COST_TEST: u32 = 4;
 
 const GO_ZERO_TIME_UNIX_SECONDS: i64 = -62_135_596_800;
 
-const URLSAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const AUTH_KEY_PARSE_ERROR: &str = "failed to parse auth-key";
 const PREAUTH_KEY_COLUMNS: &str = r"
         id,
         key,
         prefix,
-        COALESCE(CAST(hash AS TEXT), '') AS key_hash,
+        hash AS key_hash,
         COALESCE(CAST(user_id AS TEXT), '') AS user_id,
-        reusable,
-        ephemeral,
+        COALESCE(reusable, false) AS reusable,
+        COALESCE(ephemeral, false) AS ephemeral,
         COALESCE(tags, '[]') AS tags,
         CASE
             WHEN expiration IS NULL THEN NULL
             WHEN typeof(expiration) = 'integer' THEN expiration
             ELSE unixepoch(expiration)
         END AS expiration,
+        json_array(
+            CASE WHEN typeof(expiration) = 'integer' AND EXISTS (
+                SELECT 1 FROM main.sqlite_master
+                WHERE type = 'table' AND name = '_sqlx_migrations'
+            ) THEN 'legacy_integer' ELSE typeof(expiration) END,
+            CASE WHEN typeof(expiration) = 'blob' THEN NULL ELSE CAST(expiration AS TEXT) END,
+            (SELECT cid FROM pragma_table_info('pre_auth_keys') WHERE name = 'expiration'),
+            'expiration'
+        ) AS expiration_text,
         CASE
             WHEN created_at IS NULL THEN 0
             WHEN typeof(created_at) = 'integer' THEN created_at
             ELSE unixepoch(created_at)
         END AS created_at,
+        COALESCE(CAST(created_at AS TEXT), '') AS created_at_text,
         CASE
             WHEN used THEN COALESCE(
                 CASE
@@ -89,22 +99,24 @@ const PREAUTH_KEY_COLUMNS: &str = r"
         END AS used_at
 ";
 
-fn preauth_key_select(suffix: &str) -> String {
+pub(crate) fn preauth_key_select(suffix: &str) -> String {
     format!("SELECT {PREAUTH_KEY_COLUMNS} FROM pre_auth_keys {suffix}")
 }
 
 #[cfg(feature = "postgres-sqlx")]
-const POSTGRES_PREAUTH_KEY_COLUMNS: &str = r"
+const POSTGRES_PREAUTH_KEY_COLUMNS: &str = r#"
         id,
         key,
         prefix,
-        COALESCE(convert_from(hash, 'UTF8'), '') AS key_hash,
+        hash AS key_hash,
         COALESCE(user_id::TEXT, '') AS user_id,
-        reusable,
-        ephemeral,
+        COALESCE(reusable, false) AS reusable,
+        COALESCE(ephemeral, false) AS ephemeral,
         COALESCE(tags, '[]') AS tags,
         FLOOR(EXTRACT(EPOCH FROM expiration))::BIGINT AS expiration,
+        to_char(expiration AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expiration_text,
         COALESCE(FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT, 0) AS created_at,
+        COALESCE(to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS created_at_text,
         CASE
             WHEN used THEN COALESCE(
                 FLOOR(EXTRACT(EPOCH FROM expiration))::BIGINT,
@@ -112,10 +124,10 @@ const POSTGRES_PREAUTH_KEY_COLUMNS: &str = r"
             )
             ELSE NULL
         END AS used_at
-";
+"#;
 
 #[cfg(feature = "postgres-sqlx")]
-fn postgres_preauth_key_select(suffix: &str) -> String {
+pub(crate) fn postgres_preauth_key_select(suffix: &str) -> String {
     format!("SELECT {POSTGRES_PREAUTH_KEY_COLUMNS} FROM pre_auth_keys {suffix}")
 }
 
@@ -127,16 +139,21 @@ pub struct PreauthKeyRow {
     pub id: i64,
     pub key: Option<String>,
     pub prefix: Option<String>,
+    #[sqlx(try_from = "crate::stored_hash::HashColumn")]
     pub key_hash: String,
     pub user_id: String,
     pub reusable: bool,
     pub ephemeral: bool,
-    /// JSON-encoded `Vec<String>`. Use [`PreauthKeyRow::tag_list`] to
-    /// decode.
+    /// JSON-encoded Go string slice. SQL reads validate the encoding; use
+    /// [`PreauthKeyRow::try_tag_list`] for fallible credential decisions.
+    #[sqlx(try_from = "crate::stored_json::StringListColumn")]
     pub tags: String,
     /// Unix-seconds. `None` ⇒ never expires.
     pub expiration: Option<i64>,
+    #[sqlx(try_from = "timestamp::ExpirationColumn")]
+    pub expiration_text: Option<String>,
     pub created_at: i64,
+    pub created_at_text: String,
     /// Unix-seconds. `None` ⇒ unused.
     pub used_at: Option<i64>,
 }
@@ -148,23 +165,35 @@ impl PreauthKeyRow {
         } else if let Some(key) = &self.key {
             key.clone()
         } else {
-            format!("{TOKEN_PREFIX}<sealed:{}>", self.id)
+            String::new()
         }
     }
 
-    /// Parse the JSON `tags` column.
+    /// Convenience for validated SQL rows. Manually constructed rows needing
+    /// an authorization decision must use try_tag_list instead.
     pub fn tag_list(&self) -> Vec<String> {
-        serde_json::from_str(&self.tags).unwrap_or_default()
+        self.try_tag_list().unwrap_or_default()
+    }
+
+    /// Decode credential tags without treating malformed data as untagged.
+    pub fn try_tag_list(&self) -> Result<Vec<String>> {
+        crate::stored_json::string_list(&self.tags)
     }
 
     /// True iff the row is past its `expiration` (using the supplied
     /// "now" — callers pass `now_unix()` in production; tests can
     /// inject a fixed clock).
     pub fn is_expired(&self, now_unix: i64) -> bool {
-        match self.expiration {
-            Some(exp) => exp != GO_ZERO_TIME_UNIX_SECONDS && now_unix >= exp,
-            None => false,
-        }
+        parse_database_timestamp(self.expiration, self.expiration_text.as_deref())
+            .map(|expiry| expiry.timestamp())
+            .or(self.expiration)
+            .is_some_and(|expiry| expiry < now_unix)
+    }
+
+    /// Production validation retains the stored fractional-second deadline.
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        parse_database_timestamp(self.expiration, self.expiration_text.as_deref())
+            .is_some_and(|expiry| expiry < now)
     }
 
     /// True iff the row is single-use (i.e. `!reusable`) and has
@@ -179,6 +208,34 @@ impl PreauthKeyRow {
     }
 }
 
+/// Nodes disable expiry at Go's zero time; preauth keys do not.
+pub(crate) fn node_timestamp_is_expired(
+    seconds: Option<i64>,
+    raw: Option<&str>,
+    now: DateTime<Utc>,
+) -> bool {
+    parse_database_timestamp(seconds, raw).is_some_and(|expiry| {
+        (expiry.timestamp() != GO_ZERO_TIME_UNIX_SECONDS || expiry.timestamp_subsec_nanos() != 0)
+            && expiry < now
+    })
+}
+
+pub(crate) fn parse_database_timestamp(
+    seconds: Option<i64>,
+    raw: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    // Other callers still project legacy integer columns as decimal text.
+    // Credential row decoding canonicalizes those integers before this point;
+    // do not reinterpret a node's integer seconds as a compact calendar date.
+    if raw.is_some_and(|raw| raw.parse::<i64>().is_ok())
+        && let Some(seconds) = seconds
+    {
+        return DateTime::from_timestamp(seconds, 0);
+    }
+    raw.and_then(timestamp::parse_text)
+        .or_else(|| seconds.and_then(|seconds| DateTime::from_timestamp(seconds, 0)))
+}
+
 /// Parameters for minting a new pre-auth key.
 #[derive(Debug, Clone)]
 pub struct CreateParams {
@@ -190,14 +247,173 @@ pub struct CreateParams {
     pub expiration: Option<i64>,
 }
 
-/// Result of [`create`]: the bcrypt-hashed row + the plaintext token
+/// Result of [`create`]: the original insert projection + the plaintext token
 /// that the caller must hand back to the device (the row in the DB
 /// never holds plaintext, so this is the *only* time the secret
-/// exists outside the device's pocket).
+/// exists outside the device's pocket). The projection retains pre-insert
+/// timestamp precision, as Go does, even when SQL stores fewer fractional digits.
 #[derive(Debug, Clone)]
 pub struct Created {
     pub plaintext: String,
     pub row: PreauthKeyRow,
+}
+
+/// User loaded within the same transaction as the minted key.
+#[derive(Debug, Clone)]
+pub struct CreatedWithUser {
+    pub created: Created,
+    pub user: Option<crate::users::UserRow>,
+}
+
+/// A database association preload, including a known missing user.
+#[derive(Debug, Clone)]
+pub struct PreauthKeyWithUser {
+    pub key: PreauthKeyRow,
+    pub user: Option<crate::users::UserRow>,
+}
+
+/// Verified credential and original SQL association material for one fresh
+/// registration. It is deliberately neither Debug nor Serialize and must not
+/// be retained in the node cache; Hash/legacy Key are credential material.
+#[derive(Clone)]
+pub struct RegistrationKey {
+    pub key: PreauthKeyRow,
+    pub hash: Option<Vec<u8>>,
+    pub tags_nil: bool,
+    pub user: Option<crate::users::UserWriteSnapshot>,
+}
+
+impl RegistrationKey {
+    pub fn into_loaded(self) -> PreauthKeyWithUser {
+        PreauthKeyWithUser {
+            key: self.key,
+            user: self.user.map(|user| user.row),
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct RegistrationKeyRow {
+    #[sqlx(flatten)]
+    key: PreauthKeyRow,
+    association_hash: Option<Vec<u8>>,
+    association_tags: Option<String>,
+}
+
+fn registration_key_select(suffix: &str) -> String {
+    format!(
+        "SELECT {PREAUTH_KEY_COLUMNS}, CAST(hash AS BLOB) AS association_hash, tags AS association_tags FROM pre_auth_keys {suffix}"
+    )
+}
+
+#[cfg(feature = "postgres-sqlx")]
+fn postgres_registration_key_select(suffix: &str) -> String {
+    format!(
+        "SELECT {POSTGRES_PREAUTH_KEY_COLUMNS}, hash AS association_hash, tags AS association_tags FROM pre_auth_keys {suffix}"
+    )
+}
+
+impl RegistrationKeyRow {
+    fn tags_nil(&self) -> bool {
+        self.association_tags.as_deref().is_none_or(|tags| {
+            let tags = crate::go_json::trim(tags.as_bytes());
+            tags.is_empty() || tags == b"null"
+        })
+    }
+}
+
+pub async fn get_by_token_for_registration(
+    pool: &SqlitePool,
+    candidate: &str,
+) -> Result<RegistrationKey> {
+    let parsed = parse_auth_key(candidate)?;
+    let (predicate, value) = match parsed {
+        ParsedAuthKey::Modern { prefix, .. } => ("prefix = ?", prefix),
+        ParsedAuthKey::Legacy { key } => ("key = ?", key),
+    };
+    let (row, user) = {
+        let mut connection = pool.acquire().await?;
+        let query = registration_key_select(&format!("WHERE {predicate} ORDER BY id ASC LIMIT 1"));
+        let row = sqlx::query_as::<_, RegistrationKeyRow>(&query)
+            .bind(value)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| DbError::NotFound("preauth_key".into()))?;
+        let user = if let Some(id) =
+            association_user_id(&row.key).map_err(|_| DbError::NotFound("preauth_key".into()))?
+        {
+            match crate::users::get_for_registration_on_connection(&mut connection, id).await {
+                Ok(user) => Some(user),
+                Err(DbError::NotFound(_)) => None,
+                Err(_) => return Err(DbError::NotFound("preauth_key".into())),
+            }
+        } else {
+            None
+        };
+        (row, user)
+    };
+    let tags_nil = row.tags_nil();
+    let key = verify_candidate(
+        row.key,
+        candidate,
+        row.association_hash.as_deref().unwrap_or_default(),
+    )
+    .await?;
+    Ok(RegistrationKey {
+        key,
+        hash: row.association_hash,
+        tags_nil,
+        user,
+    })
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_token_for_registration(
+    pool: &PgPool,
+    candidate: &str,
+) -> Result<RegistrationKey> {
+    let parsed = parse_auth_key(candidate)?;
+    let (predicate, value) = match parsed {
+        ParsedAuthKey::Modern { prefix, .. } => ("prefix = $1", prefix),
+        ParsedAuthKey::Legacy { key } => ("key = $1", key),
+    };
+    let (row, user) = {
+        let mut connection = pool.acquire().await?;
+        let query =
+            postgres_registration_key_select(&format!("WHERE {predicate} ORDER BY id ASC LIMIT 1"));
+        let row = sqlx::query_as::<_, RegistrationKeyRow>(&query)
+            .bind(value)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| DbError::NotFound("preauth_key".into()))?;
+        let user = if let Some(id) =
+            association_user_id(&row.key).map_err(|_| DbError::NotFound("preauth_key".into()))?
+        {
+            match crate::users::get_postgres_for_registration_on_connection(&mut connection, id)
+                .await
+            {
+                Ok(user) => Some(user),
+                Err(DbError::NotFound(_)) => None,
+                Err(_) => return Err(DbError::NotFound("preauth_key".into())),
+            }
+        } else {
+            None
+        };
+        (row, user)
+    };
+    let tags_nil = row.tags_nil();
+    let key = verify_candidate(
+        row.key,
+        candidate,
+        row.association_hash.as_deref().unwrap_or_default(),
+    )
+    .await?;
+    Ok(RegistrationKey {
+        key,
+        hash: row.association_hash,
+        tags_nil,
+        user,
+    })
 }
 
 /// Current wall-clock as unix-seconds.
@@ -205,14 +421,6 @@ fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
-}
-
-fn generate_urlsafe(len: usize) -> String {
-    let mut raw = vec![0u8; len];
-    rand_core::OsRng.fill_bytes(&mut raw);
-    raw.into_iter()
-        .map(|b| URLSAFE[(b & 0b0011_1111) as usize] as char)
-        .collect()
 }
 
 fn is_valid_urlsafe_bytes(bytes: &[u8]) -> bool {
@@ -237,15 +445,16 @@ fn normalize_acl_tags(mut tags: Vec<String>) -> Result<Vec<String>> {
 
 /// Generate a fresh `hskey-auth-<12>-<64>` plaintext token.
 pub fn generate_plaintext() -> String {
-    let (plaintext, _, _) = generate_plaintext_parts();
+    let (plaintext, _, _) =
+        generate_plaintext_parts().expect("OS entropy for preauth key generation");
     plaintext
 }
 
-fn generate_plaintext_parts() -> (String, String, String) {
-    let prefix = generate_urlsafe(TOKEN_PREFIX_LEN);
-    let secret = generate_urlsafe(TOKEN_SECRET_LEN);
+fn generate_plaintext_parts() -> Result<(String, String, String)> {
+    let prefix = crate::credential_entropy::urlsafe(TOKEN_PREFIX_LEN)?;
+    let secret = crate::credential_entropy::urlsafe(TOKEN_SECRET_LEN)?;
     let key = format!("{TOKEN_PREFIX}{prefix}-{secret}");
-    (key, prefix, secret)
+    Ok((key, prefix, secret))
 }
 
 /// Mint with the production bcrypt cost.
@@ -267,25 +476,100 @@ pub async fn create_with_cost(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
+    create_with_cost_precise(pool, params, cost, None).await
+}
+
+/// Preserve the fractional timestamp supplied by the upstream gRPC API.
+pub async fn create_with_cost_precise(
+    pool: &SqlitePool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<Created> {
+    create_with_cost_precise_inner(pool, params, cost, expiration_precise, false)
+        .await
+        .map(|result| result.created)
+}
+
+/// Retain the user loaded in the key-creation transaction for API projection.
+pub async fn create_with_cost_precise_with_user(
+    pool: &SqlitePool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<CreatedWithUser> {
+    create_with_cost_precise_inner(pool, params, cost, expiration_precise, false).await
+}
+
+/// Mint for a numeric upstream owner without falling back to a same-named user.
+pub async fn create_with_cost_precise_for_user_id(
+    pool: &SqlitePool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<CreatedWithUser> {
+    create_with_cost_precise_inner(pool, params, cost, expiration_precise, true).await
+}
+
+async fn create_with_cost_precise_inner(
+    pool: &SqlitePool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+    strict_user_id: bool,
+) -> Result<CreatedWithUser> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if strict_user_id && params.user_id.is_empty() && params.tags.is_empty() {
+        return Err(DbError::General(
+            "auth-key must be either tagged or owned by user".into(),
+        ));
+    }
+    let user_snapshot = if strict_user_id && !params.user_id.is_empty() {
+        let id = params
+            .user_id
+            .parse::<i64>()
+            .map_err(|_| DbError::General("user id out of range".into()))?;
+        Some(crate::users::get_for_registration_on_connection(&mut tx, id).await?)
+    } else {
+        resolve_registration_user_on_connection(&mut tx, &params.user_id).await?
+    };
+    let storage_user_id = user_snapshot.as_ref().map(|user| user.row.id);
     let tags = normalize_acl_tags(params.tags)?;
-    let storage_user_id = resolve_storage_user_id(pool, &params.user_id).await?;
     if storage_user_id.is_none() && tags.is_empty() {
         return Err(DbError::General(
             "user_id must be non-empty unless tags are provided".into(),
         ));
     }
-    let (plaintext, prefix, secret) = generate_plaintext_parts();
-    let hash =
-        bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
-    let tags_json = serde_json::to_string(&tags)?;
-    let created_at = now_unix();
+    let created_time = Utc::now();
+    let (plaintext, prefix, secret) = generate_plaintext_parts()?;
+    let hash = crate::credential_hash::hash(secret, cost)
+        .await
+        .map_err(DbError::General)?;
+    let user = match user_snapshot {
+        Some(user) => Some(
+            crate::headscale_nodes::save_captured_user(&mut tx, user)
+                .await
+                .map_err(creating_key_in_database)?
+                .row,
+        ),
+        None => None,
+    };
+    let storage_user_id = user.as_ref().map(|user| user.id);
+    let tags_json = crate::stored_json::text_for_write(&tags)?;
+    let created_at = created_time.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let expiration_time = expiration_precise.or_else(|| {
+        params
+            .expiration
+            .and_then(|value| DateTime::from_timestamp(value, 0))
+    });
+    let expiration = expiration_time.map(|value| value.to_rfc3339_opts(SecondsFormat::Nanos, true));
 
     let id: i64 = sqlx::query_scalar(
         "
         INSERT INTO pre_auth_keys
             (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
         VALUES (
-            NULL,
+            '',
             ?,
             ?,
             ?,
@@ -293,8 +577,8 @@ pub async fn create_with_cost(
             ?,
             false,
             ?,
-            CASE WHEN ? IS NULL THEN NULL ELSE datetime(?, 'unixepoch') END,
-            datetime(?, 'unixepoch')
+            ?,
+            ?
         )
         RETURNING id
         ",
@@ -305,17 +589,33 @@ pub async fn create_with_cost(
     .bind(params.reusable)
     .bind(params.ephemeral)
     .bind(&tags_json)
-    .bind(params.expiration)
-    .bind(params.expiration)
+    .bind(expiration)
     .bind(created_at)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(map_create_err)?;
+    .map_err(creating_key_in_database)?;
 
-    Ok(Created {
+    let created = Created {
         plaintext,
-        row: get_by_id(pool, id).await?,
-    })
+        row: PreauthKeyRow {
+            id,
+            key: Some(String::new()),
+            prefix: Some(prefix),
+            key_hash: hash,
+            user_id: storage_user_id.map(|id| id.to_string()).unwrap_or_default(),
+            reusable: params.reusable,
+            ephemeral: params.ephemeral,
+            tags: tags_json,
+            expiration: expiration_time.map(|stamp| stamp.timestamp()),
+            expiration_text: expiration_time
+                .map(|stamp| stamp.to_rfc3339_opts(SecondsFormat::Nanos, true)),
+            created_at: created_time.timestamp(),
+            created_at_text: created_time.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            used_at: None,
+        },
+    };
+    tx.commit().await?;
+    Ok(CreatedWithUser { created, user })
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -352,25 +652,127 @@ pub async fn create_postgres_with_cost_on_connection(
     params: CreateParams,
     cost: u32,
 ) -> Result<Created> {
+    create_postgres_with_cost_precise_on_connection(conn, params, cost, None, false)
+        .await
+        .map(|result| result.created)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost_precise(
+    pool: &PgPool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<Created> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_with_cost_precise_on_connection(
+        &mut conn,
+        params,
+        cost,
+        expiration_precise,
+        false,
+    )
+    .await
+    .map(|result| result.created)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost_precise_with_user(
+    pool: &PgPool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<CreatedWithUser> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_with_cost_precise_on_connection(
+        &mut conn,
+        params,
+        cost,
+        expiration_precise,
+        false,
+    )
+    .await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn create_postgres_with_cost_precise_for_user_id(
+    pool: &PgPool,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+) -> Result<CreatedWithUser> {
+    let mut conn = pool.acquire().await?;
+    create_postgres_with_cost_precise_on_connection(
+        &mut conn,
+        params,
+        cost,
+        expiration_precise,
+        true,
+    )
+    .await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn create_postgres_with_cost_precise_on_connection(
+    conn: &mut PgConnection,
+    params: CreateParams,
+    cost: u32,
+    expiration_precise: Option<DateTime<Utc>>,
+    strict_user_id: bool,
+) -> Result<CreatedWithUser> {
+    let mut tx = conn.begin().await?;
+    if strict_user_id && params.user_id.is_empty() && params.tags.is_empty() {
+        return Err(DbError::General(
+            "auth-key must be either tagged or owned by user".into(),
+        ));
+    }
+    let user_snapshot = if strict_user_id && !params.user_id.is_empty() {
+        let id = params
+            .user_id
+            .parse::<i64>()
+            .map_err(|_| DbError::General("user id out of range".into()))?;
+        Some(crate::users::get_postgres_for_registration_on_connection(&mut tx, id).await?)
+    } else {
+        resolve_postgres_registration_user_on_connection(&mut tx, &params.user_id).await?
+    };
+    let storage_user_id = user_snapshot.as_ref().map(|user| user.row.id);
     let tags = normalize_acl_tags(params.tags)?;
-    let storage_user_id = resolve_postgres_storage_user_id(conn, &params.user_id).await?;
     if storage_user_id.is_none() && tags.is_empty() {
         return Err(DbError::General(
             "user_id must be non-empty unless tags are provided".into(),
         ));
     }
-    let (plaintext, prefix, secret) = generate_plaintext_parts();
-    let hash =
-        bcrypt::hash(&secret, cost).map_err(|e| DbError::General(format!("bcrypt hash: {e}")))?;
-    let tags_json = serde_json::to_string(&tags)?;
-    let created_at = now_unix();
+    let created_time = Utc::now();
+    let (plaintext, prefix, secret) = generate_plaintext_parts()?;
+    let hash = crate::credential_hash::hash(secret, cost)
+        .await
+        .map_err(DbError::General)?;
+    let user = match user_snapshot {
+        Some(user) => Some(
+            crate::headscale_nodes::save_postgres_captured_user(&mut tx, user)
+                .await
+                .map_err(creating_key_in_database)?
+                .row,
+        ),
+        None => None,
+    };
+    let storage_user_id = user.as_ref().map(|user| user.id);
+    let tags_json = crate::stored_json::text_for_write(&tags)?;
+    let created_at = created_time.to_rfc3339_opts(SecondsFormat::Micros, true);
+    let expiration_time = expiration_precise.or_else(|| {
+        params
+            .expiration
+            .and_then(|value| DateTime::from_timestamp(value, 0))
+    });
+    let expiration =
+        expiration_time.map(|value| value.to_rfc3339_opts(SecondsFormat::Micros, true));
 
     let id: i64 = sqlx::query_scalar(
         "
         INSERT INTO pre_auth_keys
             (key, prefix, hash, user_id, reusable, ephemeral, used, tags, expiration, created_at)
         VALUES (
-            NULL,
+            '',
             $1,
             $2,
             $3,
@@ -378,11 +780,8 @@ pub async fn create_postgres_with_cost_on_connection(
             $5,
             false,
             $6,
-            CASE
-                WHEN $7::BIGINT IS NULL THEN NULL
-                ELSE to_timestamp(($7::BIGINT)::DOUBLE PRECISION)
-            END,
-            to_timestamp(($8::BIGINT)::DOUBLE PRECISION)
+            $7::TIMESTAMPTZ,
+            $8::TIMESTAMPTZ
         )
         RETURNING id
         ",
@@ -393,78 +792,160 @@ pub async fn create_postgres_with_cost_on_connection(
     .bind(params.reusable)
     .bind(params.ephemeral)
     .bind(&tags_json)
-    .bind(params.expiration)
+    .bind(expiration)
     .bind(created_at)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(map_create_err)?;
+    .map_err(creating_key_in_database)?;
 
-    Ok(Created {
+    let created = Created {
         plaintext,
-        row: get_postgres_by_id_on_connection(conn, id).await?,
-    })
+        row: PreauthKeyRow {
+            id,
+            key: Some(String::new()),
+            prefix: Some(prefix),
+            key_hash: hash,
+            user_id: storage_user_id.map(|id| id.to_string()).unwrap_or_default(),
+            reusable: params.reusable,
+            ephemeral: params.ephemeral,
+            tags: tags_json,
+            expiration: expiration_time.map(|stamp| stamp.timestamp()),
+            expiration_text: expiration_time
+                .map(|stamp| stamp.to_rfc3339_opts(SecondsFormat::Nanos, true)),
+            created_at: created_time.timestamp(),
+            created_at_text: created_time.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            used_at: None,
+        },
+    };
+    tx.commit().await?;
+    Ok(CreatedWithUser { created, user })
 }
 
-async fn resolve_storage_user_id(pool: &SqlitePool, user_id: &str) -> Result<Option<i64>> {
-    let user_id = user_id.trim();
-    if user_id.is_empty() {
+async fn resolve_storage_user_id(pool: &SqlitePool, selector: &str) -> Result<Option<i64>> {
+    let mut conn = pool.acquire().await?;
+    Ok(resolve_storage_user_on_connection(&mut conn, selector)
+        .await?
+        .map(|user| user.id))
+}
+
+async fn resolve_storage_user_on_connection(
+    conn: &mut SqliteConnection,
+    selector: &str,
+) -> Result<Option<crate::users::UserRow>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
         return Ok(None);
     }
-
-    if let Ok(id) = user_id.parse::<i64>() {
-        match crate::users::get_by_id(pool, id).await {
-            Ok(user) => return Ok(Some(user.id)),
+    if let Ok(id) = selector.parse::<i64>() {
+        match crate::users::get_by_id_on_connection(conn, id).await {
+            Ok(user) => return Ok(Some(user)),
             Err(DbError::NotFound(_)) => {}
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
     }
-
-    match crate::users::get_by_name(pool, user_id).await {
-        Ok(user) => Ok(Some(user.id)),
+    match crate::users::get_by_name_on_connection(conn, selector).await {
+        Ok(user) => Ok(Some(user)),
         Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
-            "preauth key user {user_id:?} does not exist"
+            "preauth key user {selector:?} does not exist"
         ))),
-        Err(e) => Err(e),
+        Err(error) => Err(error),
     }
 }
 
 #[cfg(feature = "postgres-sqlx")]
 async fn resolve_postgres_storage_user_id(
     conn: &mut PgConnection,
-    user_id: &str,
+    selector: &str,
 ) -> Result<Option<i64>> {
-    let user_id = user_id.trim();
-    if user_id.is_empty() {
+    Ok(resolve_postgres_storage_user_on_connection(conn, selector)
+        .await?
+        .map(|user| user.id))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn resolve_postgres_storage_user_on_connection(
+    conn: &mut PgConnection,
+    selector: &str,
+) -> Result<Option<crate::users::UserRow>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
         return Ok(None);
     }
-
-    if let Ok(id) = user_id.parse::<i64>() {
+    if let Ok(id) = selector.parse::<i64>() {
         match crate::users::get_postgres_by_id_on_connection(conn, id).await {
-            Ok(user) => return Ok(Some(user.id)),
+            Ok(user) => return Ok(Some(user)),
             Err(DbError::NotFound(_)) => {}
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
     }
-
-    match crate::users::get_postgres_by_name_on_connection(conn, user_id).await {
-        Ok(user) => Ok(Some(user.id)),
+    match crate::users::get_postgres_by_name_on_connection(conn, selector).await {
+        Ok(user) => Ok(Some(user)),
         Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
-            "preauth key user {user_id:?} does not exist"
+            "preauth key user {selector:?} does not exist"
         ))),
-        Err(e) => Err(e),
+        Err(error) => Err(error),
     }
 }
 
-fn map_create_err(e: sqlx::Error) -> DbError {
-    match &e {
-        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-            DbError::Constraint("preauth key user_id references missing user".into())
+async fn resolve_registration_user_on_connection(
+    connection: &mut SqliteConnection,
+    selector: &str,
+) -> Result<Option<crate::users::UserWriteSnapshot>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(id) = selector.parse::<i64>() {
+        match crate::users::get_for_registration_on_connection(connection, id).await {
+            Ok(user) => return Ok(Some(user)),
+            Err(DbError::NotFound(_)) => {}
+            Err(error) => return Err(error),
         }
-        _ => DbError::from(e),
+    }
+    match crate::users::get_by_name_for_registration_on_connection(connection, selector).await {
+        Ok(user) => Ok(Some(user)),
+        Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
+            "preauth key user {selector:?} does not exist"
+        ))),
+        Err(error) => Err(error),
     }
 }
 
-/// Look up a row by id (used by tests + the admin "show" path).
+#[cfg(feature = "postgres-sqlx")]
+async fn resolve_postgres_registration_user_on_connection(
+    connection: &mut PgConnection,
+    selector: &str,
+) -> Result<Option<crate::users::UserWriteSnapshot>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(id) = selector.parse::<i64>() {
+        match crate::users::get_postgres_for_registration_on_connection(connection, id).await {
+            Ok(user) => return Ok(Some(user)),
+            Err(DbError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match crate::users::get_postgres_by_name_for_registration_on_connection(connection, selector)
+        .await
+    {
+        Ok(user) => Ok(Some(user)),
+        Err(DbError::NotFound(_)) => Err(DbError::Constraint(format!(
+            "preauth key user {selector:?} does not exist"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn creating_key_in_database(error: impl Into<DbError>) -> DbError {
+    let error = error.into();
+    DbError::General(format!(
+        "creating key in database: {}",
+        error.headscale_go_message()
+    ))
+}
+
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PreauthKeyRow> {
     let query = preauth_key_select("WHERE id = ?");
     sqlx::query_as::<_, PreauthKeyRow>(&query)
@@ -477,16 +958,19 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<PreauthKeyRow> {
         })
 }
 
-/// Return only the auth-key ephemeral bit needed when hydrating nodes.
+/// Return the auth-key ephemeral bit after validating its stored tag list.
 pub async fn is_ephemeral_by_id(pool: &SqlitePool, id: i64) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>("SELECT ephemeral FROM pre_auth_keys WHERE id = ?")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
-            e => DbError::from(e),
-        })
+    sqlx::query_as::<_, (bool, crate::stored_json::StringListColumn)>(
+        "SELECT COALESCE(ephemeral, false), COALESCE(tags, '[]') FROM pre_auth_keys WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map(|(ephemeral, _)| ephemeral)
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+        e => DbError::from(e),
+    })
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -522,14 +1006,17 @@ pub async fn is_postgres_ephemeral_by_id_on_connection(
     conn: &mut PgConnection,
     id: i64,
 ) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>("SELECT ephemeral FROM pre_auth_keys WHERE id = $1")
-        .bind(id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
-            e => DbError::from(e),
-        })
+    sqlx::query_as::<_, (bool, crate::stored_json::StringListColumn)>(
+        "SELECT COALESCE(ephemeral, false), COALESCE(tags, '[]') FROM pre_auth_keys WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await
+    .map(|(ephemeral, _)| ephemeral)
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => DbError::NotFound(format!("preauth_key id={id}")),
+        e => DbError::from(e),
+    })
 }
 
 enum ParsedAuthKey<'a> {
@@ -541,7 +1028,7 @@ fn parse_auth_key(candidate: &str) -> Result<ParsedAuthKey<'_>> {
     if candidate.is_empty() {
         return Err(DbError::General(AUTH_KEY_PARSE_ERROR.into()));
     }
-    if let Some(rest) = candidate.strip_prefix(TOKEN_PREFIX) {
+    if let Some((_, rest)) = candidate.split_once(TOKEN_PREFIX) {
         let expected = TOKEN_PREFIX_LEN + 1 + TOKEN_SECRET_LEN;
         if rest.len() < expected {
             return Err(DbError::General(format!(
@@ -586,25 +1073,87 @@ fn parse_auth_key(candidate: &str) -> Result<ParsedAuthKey<'_>> {
 /// the public prefix; legacy rows are looked up by their plaintext
 /// `key` column. Returns `NotFound` if no row matches.
 pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthKeyRow> {
-    match parse_auth_key(candidate)? {
-        ParsedAuthKey::Modern { prefix, secret } => {
-            let query = preauth_key_select("WHERE prefix = ?");
-            let row = sqlx::query_as::<_, PreauthKeyRow>(&query)
-                .bind(prefix)
-                .fetch_one(pool)
-                .await
-                .map_err(|_| DbError::NotFound("preauth_key".into()))?;
+    get_by_token_with_user(pool, candidate)
+        .await
+        .map(|loaded| loaded.key)
+}
 
-            bcrypt::verify(secret, &row.key_hash)
-                .map_err(|e| DbError::General(format!("invalid auth key: {e}")))?
-                .then_some(row)
-                .ok_or_else(|| DbError::General("invalid auth key: hash mismatch".to_string()))
+/// Go preloads User before bcrypt without starting a new read transaction.
+pub async fn get_by_token_with_user(
+    pool: &SqlitePool,
+    candidate: &str,
+) -> Result<PreauthKeyWithUser> {
+    get_by_token_for_registration(pool, candidate)
+        .await
+        .map(RegistrationKey::into_loaded)
+}
+
+pub async fn get_by_token_on_connection(
+    conn: &mut SqliteConnection,
+    candidate: &str,
+) -> Result<PreauthKeyRow> {
+    let key = find_by_token_on_connection(conn, candidate).await?;
+    let _user = lookup_user_on_connection(conn, &key.key).await?;
+    verify_candidate(
+        key.key,
+        candidate,
+        key.association_hash.as_deref().unwrap_or_default(),
+    )
+    .await
+}
+
+async fn lookup_user_on_connection(
+    conn: &mut SqliteConnection,
+    key: &PreauthKeyRow,
+) -> Result<Option<crate::users::UserRow>> {
+    let id = association_user_id(key).map_err(|_| DbError::NotFound("preauth_key".into()))?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    match crate::users::get_by_id_on_connection(conn, id).await {
+        Ok(user) => Ok(Some(user)),
+        Err(DbError::NotFound(_)) => Ok(None),
+        Err(_) => Err(DbError::NotFound("preauth_key".into())),
+    }
+}
+
+async fn verify_candidate(
+    row: PreauthKeyRow,
+    candidate: &str,
+    hash: &[u8],
+) -> Result<PreauthKeyRow> {
+    if let ParsedAuthKey::Modern { secret, .. } = parse_auth_key(candidate)? {
+        let valid = crate::credential_hash::verify_bytes(secret, hash)
+            .await
+            .map_err(|e| DbError::General(format!("invalid auth key: {e}")))?;
+        if !valid {
+            return Err(DbError::General("invalid auth key: crypto/bcrypt: hashedPassword is not the hash of the given password".to_string()));
+        }
+    }
+    Ok(row)
+}
+
+// Only expose verified lookups publicly. Pool callers release the SQL
+// connection before waiting for CPU capacity; connection/transaction callers
+// keep their explicitly supplied connection.
+async fn find_by_token_on_connection(
+    conn: &mut SqliteConnection,
+    candidate: &str,
+) -> Result<RegistrationKeyRow> {
+    match parse_auth_key(candidate)? {
+        ParsedAuthKey::Modern { prefix, .. } => {
+            let query = registration_key_select("WHERE prefix = ? ORDER BY id ASC LIMIT 1");
+            sqlx::query_as::<_, RegistrationKeyRow>(&query)
+                .bind(prefix)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| DbError::NotFound("preauth_key".into()))
         }
         ParsedAuthKey::Legacy { key } => {
-            let query = preauth_key_select("WHERE key = ?");
-            sqlx::query_as::<_, PreauthKeyRow>(&query)
+            let query = registration_key_select("WHERE key = ? ORDER BY id ASC LIMIT 1");
+            sqlx::query_as::<_, RegistrationKeyRow>(&query)
                 .bind(key)
-                .fetch_one(pool)
+                .fetch_one(&mut *conn)
                 .await
                 .map_err(|_| DbError::NotFound("preauth_key".into()))
         }
@@ -613,8 +1162,19 @@ pub async fn get_by_token(pool: &SqlitePool, candidate: &str) -> Result<PreauthK
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn get_postgres_by_token(pool: &PgPool, candidate: &str) -> Result<PreauthKeyRow> {
-    let mut conn = pool.acquire().await?;
-    get_postgres_by_token_on_connection(&mut conn, candidate).await
+    get_postgres_by_token_with_user(pool, candidate)
+        .await
+        .map(|loaded| loaded.key)
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn get_postgres_by_token_with_user(
+    pool: &PgPool,
+    candidate: &str,
+) -> Result<PreauthKeyWithUser> {
+    get_postgres_by_token_for_registration(pool, candidate)
+        .await
+        .map(RegistrationKey::into_loaded)
 }
 
 #[cfg(feature = "postgres-sqlx")]
@@ -622,23 +1182,50 @@ pub async fn get_postgres_by_token_on_connection(
     conn: &mut PgConnection,
     candidate: &str,
 ) -> Result<PreauthKeyRow> {
+    let key = find_postgres_by_token_on_connection(conn, candidate).await?;
+    let _user = lookup_postgres_user_on_connection(conn, &key.key).await?;
+    verify_candidate(
+        key.key,
+        candidate,
+        key.association_hash.as_deref().unwrap_or_default(),
+    )
+    .await
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn lookup_postgres_user_on_connection(
+    conn: &mut PgConnection,
+    key: &PreauthKeyRow,
+) -> Result<Option<crate::users::UserRow>> {
+    let id = association_user_id(key).map_err(|_| DbError::NotFound("preauth_key".into()))?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    match crate::users::get_postgres_by_id_on_connection(conn, id).await {
+        Ok(user) => Ok(Some(user)),
+        Err(DbError::NotFound(_)) => Ok(None),
+        Err(_) => Err(DbError::NotFound("preauth_key".into())),
+    }
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn find_postgres_by_token_on_connection(
+    conn: &mut PgConnection,
+    candidate: &str,
+) -> Result<RegistrationKeyRow> {
     match parse_auth_key(candidate)? {
-        ParsedAuthKey::Modern { prefix, secret } => {
-            let query = postgres_preauth_key_select("WHERE prefix = $1");
-            let row = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        ParsedAuthKey::Modern { prefix, .. } => {
+            let query =
+                postgres_registration_key_select("WHERE prefix = $1 ORDER BY id ASC LIMIT 1");
+            sqlx::query_as::<_, RegistrationKeyRow>(&query)
                 .bind(prefix)
                 .fetch_one(&mut *conn)
                 .await
-                .map_err(|_| DbError::NotFound("preauth_key".into()))?;
-
-            bcrypt::verify(secret, &row.key_hash)
-                .map_err(|e| DbError::General(format!("invalid auth key: {e}")))?
-                .then_some(row)
-                .ok_or_else(|| DbError::General("invalid auth key: hash mismatch".to_string()))
+                .map_err(|_| DbError::NotFound("preauth_key".into()))
         }
         ParsedAuthKey::Legacy { key } => {
-            let query = postgres_preauth_key_select("WHERE key = $1");
-            sqlx::query_as::<_, PreauthKeyRow>(&query)
+            let query = postgres_registration_key_select("WHERE key = $1 ORDER BY id ASC LIMIT 1");
+            sqlx::query_as::<_, RegistrationKeyRow>(&query)
                 .bind(key)
                 .fetch_one(&mut *conn)
                 .await
@@ -647,20 +1234,22 @@ pub async fn get_postgres_by_token_on_connection(
     }
 }
 
-/// Expire a key by id — sets `expiration = now_unix()`. The row stays
+/// Expire a key by id with the current fractional timestamp. The row stays
 /// in place so the admin list can still surface it as "expired".
 /// Missing IDs are no-op success, matching headscale-go's unchecked
 /// `RowsAffected` behavior.
 pub async fn expire(pool: &SqlitePool, id: i64) -> Result<()> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         "
-        UPDATE pre_auth_keys SET expiration = datetime(?, 'unixepoch') WHERE id = ?
+        UPDATE pre_auth_keys SET expiration = ? WHERE id = ?
         ",
     )
-    .bind(now_unix())
+    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -672,17 +1261,19 @@ pub async fn expire_postgres(pool: &PgPool, id: i64) -> Result<()> {
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
+    let mut tx = conn.begin().await?;
     sqlx::query(
         "
         UPDATE pre_auth_keys
-        SET expiration = to_timestamp(($1::BIGINT)::DOUBLE PRECISION)
+        SET expiration = $1::TIMESTAMPTZ
         WHERE id = $2
         ",
     )
-    .bind(now_unix())
+    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true))
     .bind(id)
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -695,57 +1286,64 @@ pub async fn expire_postgres_on_connection(conn: &mut PgConnection, id: i64) -> 
 /// `RowsAffected` behavior.
 pub async fn destroy(pool: &SqlitePool, id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    destroy_on_connection(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
 
-    sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = ?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
+/// Go's DestroyPreAuthKey owns a transaction/savepoint inside its caller's
+/// write transaction. Node.DeletedAt is a plain timestamp, so all references
+/// participate; Gorm's Update also advances the node's UpdatedAt.
+pub async fn destroy_on_connection(conn: &mut SqliteConnection, id: i64) -> Result<()> {
+    let mut tx = conn.begin().await?;
+    sqlx::query("UPDATE nodes SET auth_key_id = NULL, updated_at = ? WHERE auth_key_id = ?")
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
         .bind(id)
         .execute(&mut *tx)
         .await
-        .map_err(map_destroy_err)?;
+        .map_err(clear_auth_key_error)?;
+    sqlx::query("DELETE FROM pre_auth_keys WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn destroy_postgres(pool: &PgPool, id: i64) -> Result<()> {
-    let mut conn = pool.acquire().await?;
-    destroy_postgres_on_connection(&mut conn, id).await
+    let mut tx = pool.begin().await?;
+    destroy_postgres_on_connection(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(feature = "postgres-sqlx")]
 pub async fn destroy_postgres_on_connection(conn: &mut PgConnection, id: i64) -> Result<()> {
     let mut tx = conn.begin().await?;
 
-    let has_nodes: bool = sqlx::query_scalar("SELECT to_regclass('nodes') IS NOT NULL")
-        .fetch_one(&mut *tx)
-        .await?;
-    if has_nodes {
-        sqlx::query("UPDATE nodes SET auth_key_id = NULL WHERE auth_key_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query(
+        "UPDATE nodes SET auth_key_id = NULL, updated_at = $1::TIMESTAMPTZ WHERE auth_key_id = $2",
+    )
+    .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true))
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(clear_auth_key_error)?;
 
     sqlx::query("DELETE FROM pre_auth_keys WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
-        .await
-        .map_err(map_destroy_err)?;
+        .await?;
     tx.commit().await?;
     Ok(())
 }
 
-fn map_destroy_err(e: sqlx::Error) -> DbError {
-    match &e {
-        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-            DbError::Constraint("preauth key is still assigned to a node".into())
-        }
-        _ => DbError::from(e),
-    }
+fn clear_auth_key_error(error: sqlx::Error) -> DbError {
+    DbError::General(format!(
+        "clearing auth_key_id on nodes: {}",
+        DbError::from(error).headscale_go_message()
+    ))
 }
 
 /// List all keys belonging to `user_id`, oldest first.
@@ -815,6 +1413,71 @@ pub async fn list_all_postgres_on_connection(
     Ok(rows)
 }
 
+fn association_user_id(key: &PreauthKeyRow) -> Result<Option<i64>> {
+    if key.user_id.is_empty() {
+        return Ok(None);
+    }
+    let id = key
+        .user_id
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| i64::try_from(id).ok())
+        .ok_or_else(|| DbError::General("invalid stored preauth key user identity".into()))?;
+    Ok(Some(id))
+}
+
+pub(crate) fn association_user_ids(keys: &[PreauthKeyRow]) -> Result<Vec<i64>> {
+    let mut ids = BTreeSet::new();
+    for key in keys {
+        if let Some(id) = association_user_id(key)? {
+            ids.insert(id);
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn attach_users(
+    keys: Vec<PreauthKeyRow>,
+    users: Vec<crate::users::UserRow>,
+) -> Result<Vec<PreauthKeyWithUser>> {
+    let users = users
+        .into_iter()
+        .map(|user| (user.id, user))
+        .collect::<BTreeMap<_, _>>();
+    keys.into_iter()
+        .map(|key| {
+            let user = association_user_id(&key)?.and_then(|id| users.get(&id).cloned());
+            Ok(PreauthKeyWithUser { key, user })
+        })
+        .collect()
+}
+
+/// Read keys and their loaded users in Go's SQLite read transaction.
+pub async fn list_all_with_users(pool: &SqlitePool) -> Result<Vec<PreauthKeyWithUser>> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let query = preauth_key_select("ORDER BY id ASC");
+    let keys = sqlx::query_as::<_, PreauthKeyRow>(&query)
+        .fetch_all(&mut *tx)
+        .await?;
+    let ids = association_user_ids(&keys)?;
+    let users = crate::users::list_by_ids_on_connection(&mut tx, &ids).await?;
+    let result = attach_users(keys, users);
+    let _ = tx.rollback().await;
+    result
+}
+
+#[cfg(feature = "postgres-sqlx")]
+pub async fn list_all_postgres_with_users(pool: &PgPool) -> Result<Vec<PreauthKeyWithUser>> {
+    let mut conn = pool.acquire().await?;
+    let mut tx = conn.begin().await?;
+    let keys = list_all_postgres_on_connection(&mut tx).await?;
+    let ids = association_user_ids(&keys)?;
+    let users = crate::users::list_postgres_by_ids_on_connection(&mut tx, &ids).await?;
+    let result = attach_users(keys, users);
+    let _ = tx.rollback().await;
+    result
+}
+
 /// Errors returned by [`try_use`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
 pub enum UseError {
@@ -860,7 +1523,7 @@ pub async fn try_use(
         .map_err(|_| UseError::NotFound)?;
 
     let now = now_unix();
-    if fresh.is_expired(now) {
+    if fresh.is_expired_at(Utc::now()) {
         return Err(UseError::Expired);
     }
     if !fresh.reusable && fresh.used_at.is_some() {
@@ -922,7 +1585,7 @@ pub async fn try_use_postgres_on_connection(
         .map_err(|_| UseError::NotFound)?;
 
     let now = now_unix();
-    if fresh.is_expired(now) {
+    if fresh.is_expired_at(Utc::now()) {
         return Err(UseError::Expired);
     }
     if !fresh.reusable && fresh.used_at.is_some() {
@@ -1012,6 +1675,10 @@ mod tests {
         assert!(c.row.used_at.is_none());
         let again = get_by_id(db.pool(), c.row.id).await.unwrap();
         assert_eq!(again.key_hash, c.row.key_hash);
+        assert_eq!(again.created_at_text, c.row.created_at_text);
+        let created_at_precise = chrono::DateTime::parse_from_rfc3339(&again.created_at_text)
+            .expect("RFC3339 creation time survives database read");
+        assert_ne!(created_at_precise.timestamp_subsec_nanos(), 0);
 
         let (legacy_key, prefix, stored_hash, used, created_at): (
             Option<String>,
@@ -1030,7 +1697,7 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap();
-        assert!(legacy_key.is_none());
+        assert_eq!(legacy_key.as_deref(), Some(""));
         assert_eq!(prefix, c.row.prefix);
         assert_eq!(stored_hash, c.row.key_hash);
         assert!(!used);
@@ -1278,17 +1945,17 @@ mod tests {
         assert_eq!(e, UseError::Expired);
     }
 
-    /// gRPC create without an expiration mirrors headscale-go's zero
-    /// timestamp in storage, but that zero timestamp still means no expiry.
+    /// A non-nil Go zero timestamp is expired for auth keys. NULL is
+    /// the separate no-expiration case.
     #[tokio::test]
-    async fn try_use_accepts_go_zero_expiration() {
+    async fn try_use_rejects_go_zero_expiration() {
         let db = fresh_db().await;
         let mut p = alice();
         p.expiration = Some(GO_ZERO_TIME_UNIX_SECONDS);
         let c = create_for_test(db.pool(), p).await.unwrap();
 
-        let redeemed = try_use(db.pool(), &c.plaintext).await.unwrap();
-        assert_eq!(redeemed.expiration, Some(GO_ZERO_TIME_UNIX_SECONDS));
+        let error = try_use(db.pool(), &c.plaintext).await.unwrap_err();
+        assert_eq!(error, UseError::Expired);
     }
 
     /// Future expiration ⇒ try_use accepts.
@@ -1371,9 +2038,14 @@ mod tests {
         let node = headscale_nodes::create(
             db.pool(),
             headscale_nodes::CreateParams {
-                machine_key: "mkey:assigned".into(),
-                node_key: "nodekey:assigned".into(),
-                disco_key: "discokey:assigned".into(),
+                machine_key:
+                    "mkey:b3bfa157213313fb215dd3d0e13e51ef6a50e8f3513e3237583842dbbcea3357".into(),
+                node_key:
+                    "nodekey:dd920d91b135023815d22848f03a86a686367b12f2354ed362a8571fd846372a"
+                        .into(),
+                disco_key:
+                    "discokey:575333e3d7c7df9b3eef854e28b87e375e1d8e64fb8ac1e0b3baaaff3699a6c5"
+                        .into(),
                 endpoints: Vec::new(),
                 host_info: json!({"Hostname": "assigned-node"}),
                 ipv4: Some("100.64.0.10".into()),
@@ -1385,7 +2057,9 @@ mod tests {
                 tags: vec!["tag:good".into()],
                 auth_key_id: Some(created.row.id),
                 expiry: None,
+                expiry_precise: None,
                 last_seen: None,
+                last_seen_precise: None,
                 approved_routes: Vec::new(),
             },
         )

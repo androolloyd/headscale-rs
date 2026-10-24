@@ -1,0 +1,23 @@
+Go bcrypt input compatibility and existing Rust backend
+
+Copyright 2011 The Go Authors. All rights reserved.
+Copyright (c) 2020 Vincent Prouillet
+
+src/go_bcrypt.rs adapts golang.org/x/crypto v0.53.0 bcrypt/bcrypt.go and
+bcrypt/base64.go, plus Go 1.26.9 encoding/base64/base64.go decodeQuantum.
+It uses the existing bcrypt 0.16.0 and blowfish 0.9.1 backend primitives,
+including the Rust bcrypt key-schedule/encryption reference for shorter Go
+salts. Constant-time comparison uses the existing subtle 2.6.1 implementation.
+Original BSD/MIT terms are retained in LICENSE-GO-CRYPTO, LICENSE-GO-STDLIB and
+LICENSE-BCRYPT. No dependency version update was made.
+
+SHA-256:
+- hscontrol/db/api_key.go: e1a3c76dfbc8a120a844882b489a244ecc6dc11a724178f4376b17c79098f0e1
+- golang.org/x/crypto v0.53.0 bcrypt/bcrypt.go: 828a8f888c646bce098a2a9461043436c87b9f5c9ca54f6a881371efa58d57d4
+- golang.org/x/crypto v0.53.0 bcrypt/base64.go: 403d60d80b8b42741d429fc5fb0bcfe961f1ca50a5adcf90b9c5b1e52bebeded
+- golang.org/x/crypto v0.53.0 blowfish/cipher.go: c67e62fdf539aa94cd50c1055bdc1d4c6dc93f4b2d654addfd97ccd1d12f6e48
+- Go 1.26.9 encoding/base64/base64.go: e6437c7716ecd1ae91c9d10037362cab186e5873a6365b713e2d8c57d8fc32fc
+- bcrypt 0.16.0 src/bcrypt.rs: 60c4ca87e6ef11043e9b5c05b0e64ffdec9a47652d68e55db0bc8652a582cdfb
+- bcrypt 0.16.0 src/lib.rs: f7887fbbdd0a4709319985c6b298c5c3fcfd2b8b7ff7773919d3839109650718
+- blowfish 0.9.1 src/lib.rs: de83eb4f78298ff277f7e7aa686322fce905bdfe1be46dbbbf19a323beeed361
+- subtle 2.6.1 src/lib.rs: ced6ebd3622af527cbbbb09feb57a2894751ff07e7ca8f97f22bad89401e5c8d

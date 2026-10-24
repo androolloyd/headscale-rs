@@ -1,0 +1,12 @@
+The native JWS/header/JWK compatibility portions of src/oidc.rs and
+src/oidc/{json,jwk}.rs adapt behavior from github.com/go-jose/go-jose/v4
+v4.1.4 jws.go, shared.go and jwk.go.
+
+Copyright 2014 Square Inc.
+
+Licensed under the Apache License, Version 2.0. The original license is
+retained in LICENSE-GO-JOSE. The module contains no root NOTICE file.
+The JSON fork's legacy Unicode, exact-field and duplicate-name rules derive
+from json/decode.go (Copyright 2010 The Go Authors. All rights reserved.);
+its BSD redistribution terms are retained in LICENSE-GO-JOSE-JSON.
+Source hashes and implementation limits are recorded in UPSTREAM.md.

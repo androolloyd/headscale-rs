@@ -1,3 +1,3 @@
 {
-	"error": "bad request (400): setting policy: policy document failed schema validation: unknown field \"unknown\""
+	"error": "setting ACL policy: rpc error: code = Unknown desc = setting policy: parsing policy: unknown field: \"unknown\""
 }

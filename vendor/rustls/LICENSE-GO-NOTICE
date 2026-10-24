@@ -1,0 +1,27 @@
+The optional native raw ClientHello/SNI parser, exact-name retry and session binding follow selected Go crypto/tls source.
+References: Go 1.26.9 src/crypto/tls/handshake_messages.go, handshake_server.go, handshake_server_tls13.go and ticket.go.
+Copyright 2009 The Go Authors. All rights reserved.
+Original rustls licenses are preserved; adapted Go BSD terms are in LICENSE-GO.
+See UPSTREAM.md for source pins and scope.
+
+The explicit native deferred certificate state machine additionally follows
+crypto/tls/handshake_server.go, handshake_server_tls13.go, auth.go and
+key_agreement.go for GetCertificate/resumption/HRR/ALPN/signature phases.
+Copyright 2009, 2018 The Go Authors. All rights reserved.
+Original Go terms remain in LICENSE-GO; this does not claim full Go TLS parity.
+
+Native server application-reader record-boundary EOF
+Copyright 2009 The Go Authors. All rights reserved.
+The per-connection native server Reader EOF rule additionally follows selected
+Go1.26.9 crypto/tls/conn.go readRecordOrCCS: missing close_notify is accepted only
+between records. Original rustls licenses and Go BSD terms remain intact.
+UPSTREAM.md records source pins, selection and unqualified runtime boundaries.
+
+Native client and nested TLS record-boundary EOF
+Copyright 2009 The Go Authors. All rights reserved.
+The explicitly selected client Reader, transport EOF normalization and handshake
+EOF observer follow selected Go1.26.9 crypto/tls/conn.go readRecordOrCCS and
+readHandshakeBytes. Complete retained records are distinguished from partial
+wire records. Default Rustls policy is retained; UPSTREAM.md records the remaining
+error identity, broader handshake alert and runtime qualification boundaries.
+Original Rustls licenses and Go BSD terms in LICENSE-GO remain intact.

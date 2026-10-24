@@ -323,10 +323,20 @@ async fn extra_records_file_watcher_keeps_last_records_while_file_is_missing() {
 
 #[test]
 fn parse_extra_records_validates_required_fields() {
-    // Missing `value` is rejected.
-    assert!(parse_extra_records(br#"[{"name":"x"}]"#).is_err());
-    // Missing `name` is rejected.
-    assert!(parse_extra_records(br#"[{"value":"x"}]"#).is_err());
+    // headscale-go decodes the file with encoding/json into
+    // []tailcfg.DNSRecord: there is no required-field validation, a missing
+    // field keeps its zero value (verified against Go's decoder:
+    // `[{"name":"x"}]` -> {Name:x Type: Value:}, no error).
+    let recs = parse_extra_records(br#"[{"name":"x"}]"#).expect("missing value is accepted");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].name, "x");
+    assert_eq!(recs[0].value, "");
+    let recs = parse_extra_records(br#"[{"value":"x"}]"#).expect("missing name is accepted");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].name, "");
+    assert_eq!(recs[0].value, "x");
+    // Malformed JSON is still rejected.
+    assert!(parse_extra_records(br#"[{"name":"x""#).is_err());
     // Mixed Pascal + lowercase keys still work.
     let recs = parse_extra_records(br#"[{"Name":"a","value":"1.1.1.1"}]"#).expect("parses");
     assert_eq!(recs[0].name, "a");

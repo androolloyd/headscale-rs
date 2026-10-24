@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use super::PolicyDoc;
+use super::{NodeView, PacketFilterNode, PolicyDoc, filter};
 use crate::tailscale_wire::wire::{SshAction, SshPolicy, SshPrincipal, SshRule};
 
 /// Node facets required to compile Tailscale SSH policy for a target node.
@@ -16,6 +16,14 @@ pub struct SshPolicyNode {
     pub tags: Vec<String>,
 }
 
+/// Content plus native slice shape retained for per-connection reflection
+/// equality. The wire projection intentionally keeps its existing field types.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub(crate) struct NativeSshPolicy {
+    pub(crate) policy: SshPolicy,
+    accept_env_nil: Vec<bool>,
+}
+
 const SSH_CHECK_PERIOD_DEFAULT: Duration = Duration::from_secs(12 * 60 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,10 +32,31 @@ struct SshUserRule {
     source_node_ids: BTreeSet<u64>,
 }
 
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum SourceOwner {
+    User(u64),
+    Legacy(String),
+    Tagged,
+}
+
+fn source_owner(node: &SshPolicyNode) -> Option<SourceOwner> {
+    if !node.tags.is_empty() {
+        Some(SourceOwner::Tagged)
+    } else if let Some(id) = node.user_id {
+        Some(SourceOwner::User(id))
+    } else {
+        node.user
+            .as_ref()
+            .filter(|user| !user.is_empty())
+            .cloned()
+            .map(SourceOwner::Legacy)
+    }
+}
+
 /// Compile a headscale policy `ssh` block into the `tailcfg.SSHPolicy`
 /// shape sent in `MapResponse.SSHPolicy`.
 ///
-/// Mirrors headscale-go v0.28.0's policy/v2 compiler for the currently
+/// Mirrors headscale-go v0.29.5's policy/v2 compiler for the currently
 /// supported alias set: users, groups, tags, `autogroup:member`,
 /// `autogroup:tagged`, and `autogroup:self`.
 pub fn compile_ssh_policy(
@@ -48,16 +77,41 @@ pub fn compile_ssh_policy_with_base_url(
         return None;
     }
     let target_node = nodes.iter().find(|node| node.id == target_node_id)?;
-    let mut out = Vec::new();
+    compile_ssh_policy_for_target(doc, nodes, target_node, base_url)
+}
 
-    for rule in &doc.ssh {
+pub(super) fn compile_ssh_policy_for_target(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    target_node: &SshPolicyNode,
+    base_url: &str,
+) -> Option<SshPolicy> {
+    compile_ssh_policy_snapshot(doc, nodes, target_node, base_url, &[])
+        .map(|snapshot| snapshot.policy)
+}
+
+pub(super) fn compile_ssh_policy_snapshot(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    target_node: &SshPolicyNode,
+    base_url: &str,
+    rule_accept_env_nil: &[bool],
+) -> Option<NativeSshPolicy> {
+    if doc.ssh.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut accept_env_nil = Vec::new();
+
+    for (index, rule) in doc.ssh.iter().enumerate() {
+        let start = out.len();
         let source_nodes = resolve_ssh_source_nodes(doc, &rule.src, nodes);
         if source_nodes.is_empty() {
             continue;
         }
 
         let action = ssh_action(base_url, &rule.action);
-        let ssh_user_rules = ssh_user_rules(&rule.users, &source_nodes);
+        let ssh_user_rules = ssh_user_rules(doc, &rule.users, &source_nodes);
         if ssh_user_rules.is_empty() {
             continue;
         }
@@ -86,7 +140,7 @@ pub fn compile_ssh_policy_with_base_url(
         if !other_dsts.is_empty() {
             if other_dsts
                 .iter()
-                .any(|dst| ssh_destination_matches(dst, target_node))
+                .any(|dst| ssh_destination_matches(doc, dst, target_node, nodes))
             {
                 push_ssh_rules_for_nodes(
                     &mut out,
@@ -108,10 +162,19 @@ pub fn compile_ssh_policy_with_base_url(
                 );
             }
         }
+        accept_env_nil.extend(std::iter::repeat_n(
+            rule.accept_env.is_empty() && rule_accept_env_nil.get(index).copied().unwrap_or(false),
+            out.len() - start,
+        ));
     }
 
-    out.sort_by_key(|rule| i32::from(rule.action.hold_and_delegate.is_empty()));
-    Some(SshPolicy { rules: out })
+    let mut paired = out.into_iter().zip(accept_env_nil).collect::<Vec<_>>();
+    paired.sort_by_key(|(rule, _)| i32::from(rule.action.hold_and_delegate.is_empty()));
+    let (rules, accept_env_nil) = paired.into_iter().unzip();
+    Some(NativeSshPolicy {
+        policy: SshPolicy { rules },
+        accept_env_nil,
+    })
 }
 
 pub fn ssh_check_period_for(
@@ -119,8 +182,19 @@ pub fn ssh_check_period_for(
     nodes: &[SshPolicyNode],
     src_node_id: u64,
     dst_node_id: u64,
+    local_user: &str,
 ) -> Option<Duration> {
-    if doc.ssh.is_empty() {
+    ssh_check_period_for_bytes(doc, nodes, src_node_id, dst_node_id, local_user.as_bytes())
+}
+
+pub(super) fn ssh_check_period_for_bytes(
+    doc: &PolicyDoc,
+    nodes: &[SshPolicyNode],
+    src_node_id: u64,
+    dst_node_id: u64,
+    local_user: &[u8],
+) -> Option<Duration> {
+    if doc.ssh.is_empty() || local_user.is_empty() {
         return None;
     }
     let src_node = nodes.iter().find(|node| node.id == src_node_id)?;
@@ -130,8 +204,14 @@ pub fn ssh_check_period_for(
         if rule.action != "check" {
             continue;
         }
-        let source_nodes = resolve_ssh_source_nodes(doc, &rule.src, nodes);
+        let Ok(source_ips) = resolved_ssh_aliases(doc, &rule.src, nodes).checked() else {
+            continue;
+        };
+        let source_nodes = ssh_source_nodes_for_ips(&source_ips, nodes);
         if !source_nodes.iter().any(|node| node.id == src_node.id) {
+            continue;
+        }
+        if !ssh_rule_allows_user(doc, &rule.users, src_node, local_user) {
             continue;
         }
         for dst in &rule.dst {
@@ -142,9 +222,20 @@ pub fn ssh_check_period_for(
                 continue;
             }
 
-            if ssh_destination_matches(dst, dst_node) {
+            if resolved_ssh_aliases(doc, std::slice::from_ref(dst), nodes)
+                .checked()
+                .is_ok_and(|ips| filter::any_ip_matches(&ips, &ssh_node_view(dst_node)))
+            {
                 return Some(check_period_from_rule(rule.check_period.as_deref()));
             }
+        }
+        if users_have_canonical_localpart(&rule.users)
+            && rule.dst.iter().any(|dst| dst != "autogroup:self")
+            && source_nodes.iter().any(|node| node.id == dst_node_id)
+            && ((is_untagged_user_owned(dst_node) && same_ssh_user_owner(src_node, dst_node))
+                || (!is_untagged_user_owned(dst_node) && src_node_id == dst_node_id))
+        {
+            return Some(check_period_from_rule(rule.check_period.as_deref()));
         }
     }
 
@@ -226,34 +317,101 @@ fn push_ssh_rule(
 }
 
 fn source_node_addrs_for_rule(nodes: &[&SshPolicyNode], rule: &SshUserRule) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut by_user: BTreeMap<SourceOwner, Vec<String>> = BTreeMap::new();
+    let mut tagged = Vec::new();
     for node in nodes {
         if !rule.source_node_ids.contains(&node.id) {
             continue;
         }
         if node.tags.is_empty() {
-            for addr in &node.addrs {
-                push_unique_string(&mut out, addr.clone());
+            if let Some(owner) = source_owner(node) {
+                by_user
+                    .entry(owner)
+                    .or_default()
+                    .extend(node.addrs.iter().cloned());
             }
         } else {
             for _ in 0..node.tags.len() {
                 for addr in &node.addrs {
-                    out.push(addr.clone());
+                    // Tagged principals use Addr.String directly, including
+                    // zones and the typed zero Addr's "invalid IP" display.
+                    tagged.push(if addr.is_empty() {
+                        "invalid IP".into()
+                    } else {
+                        headscale_api_acl::go_netip::addr_text(addr).unwrap_or_else(|| addr.clone())
+                    });
                 }
             }
         }
     }
-    out.sort();
+    let mut out = Vec::new();
+    for addresses in by_user.into_values() {
+        // One IPSet per numeric account, followed by the raw tagged list.
+        // IPRangeFrom removes zones; any invalid typed address invalidates
+        // this account's builder instead of silently dropping one address.
+        if let Some(ips) = ipset_principal_addresses(&addresses) {
+            out.extend(ips);
+        }
+    }
+    out.extend(tagged);
     out
 }
 
+fn ipset_principal_addresses(addresses: &[String]) -> Option<Vec<String>> {
+    addresses
+        .iter()
+        .map(|address| {
+            let (address, _) = headscale_api_acl::go_netip::parse_addr(address).ok()?;
+            Some(address)
+        })
+        .collect::<Option<BTreeSet<_>>>()
+        .map(|addresses| {
+            addresses
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect()
+        })
+}
+
 fn unique_node_addrs(node: &SshPolicyNode) -> Vec<String> {
-    let mut out = Vec::new();
-    for addr in &node.addrs {
-        push_unique_string(&mut out, addr.clone());
+    ipset_principal_addresses(&node.addrs).unwrap_or_default()
+}
+
+fn ssh_node_view(node: &SshPolicyNode) -> NodeView<'_> {
+    NodeView {
+        user_id: node.user_id,
+        user: node.user.as_deref(),
+        addr: node.addrs.first().map(String::as_str),
+        addrs: &node.addrs,
+        tags: &node.tags,
     }
-    out.sort();
-    out
+}
+
+fn resolve_ssh_aliases(
+    doc: &PolicyDoc,
+    aliases: &[String],
+    nodes: &[SshPolicyNode],
+) -> Vec<String> {
+    resolved_ssh_aliases(doc, aliases, nodes).partial()
+}
+
+fn resolved_ssh_aliases(
+    doc: &PolicyDoc,
+    aliases: &[String],
+    nodes: &[SshPolicyNode],
+) -> super::resolution::ResolvedAlias {
+    let nodes = nodes
+        .iter()
+        .map(|node| PacketFilterNode {
+            id: node.id,
+            user_id: node.user_id,
+            user: node.user.clone(),
+            addrs: node.addrs.clone(),
+            tags: node.tags.clone(),
+            routes: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    super::resolution::aliases(doc, aliases, &nodes)
 }
 
 fn resolve_ssh_source_nodes<'a>(
@@ -261,105 +419,35 @@ fn resolve_ssh_source_nodes<'a>(
     tokens: &[String],
     nodes: &'a [SshPolicyNode],
 ) -> Vec<&'a SshPolicyNode> {
-    let mut out = Vec::new();
-    let mut seen_nodes = BTreeSet::new();
-    for token in tokens {
-        let mut seen_groups = BTreeSet::new();
-        resolve_ssh_source_node(
-            doc,
-            token,
-            nodes,
-            &mut seen_groups,
-            &mut seen_nodes,
-            &mut out,
-        );
-    }
-    out.sort_by_key(|node| node.id);
-    out
+    // Sources resolve to an IP set before grouping nodes by their numeric
+    // owner. A second node sharing a matching IP is included, as in Go.
+    let ips = resolve_ssh_aliases(doc, tokens, nodes);
+    ssh_source_nodes_for_ips(&ips, nodes)
 }
 
-fn resolve_ssh_source_node<'a>(
+fn ssh_source_nodes_for_ips<'a>(
+    ips: &[String],
+    nodes: &'a [SshPolicyNode],
+) -> Vec<&'a SshPolicyNode> {
+    // groupSourcesByUser walks the retained node slice. User principal sets
+    // are sorted separately by owner/address, while tagged principals retain
+    // node order and per-tag duplication from this slice.
+    nodes
+        .iter()
+        .filter(|node| filter::any_ip_matches(ips, &ssh_node_view(node)))
+        .collect()
+}
+
+fn ssh_destination_matches(
     doc: &PolicyDoc,
     token: &str,
-    nodes: &'a [SshPolicyNode],
-    seen_groups: &mut BTreeSet<String>,
-    seen_nodes: &mut BTreeSet<u64>,
-    out: &mut Vec<&'a SshPolicyNode>,
-) {
-    if token.contains('@') {
-        for node in nodes
-            .iter()
-            .filter(|node| is_untagged_user_owned(node))
-            .filter(|node| {
-                node.user
-                    .as_deref()
-                    .is_some_and(|user| user_matches(token, user))
-            })
-        {
-            push_unique_node(out, seen_nodes, node);
-        }
-        return;
-    }
-    if let Some(group) = token.strip_prefix("group:") {
-        let group_ref = format!("group:{group}");
-        if !seen_groups.insert(group_ref.clone()) {
-            return;
-        }
-        let Some(members) = doc.groups.get(token).or_else(|| doc.groups.get(group)) else {
-            seen_groups.remove(&group_ref);
-            return;
-        };
-        for member in members {
-            resolve_ssh_source_node(doc, member, nodes, seen_groups, seen_nodes, out);
-        }
-        seen_groups.remove(&group_ref);
-        return;
-    }
-    if let Some(tag) = token.strip_prefix("tag:") {
-        for node in nodes
-            .iter()
-            .filter(|node| node.tags.iter().any(|node_tag| tag_matches(node_tag, tag)))
-        {
-            push_unique_node(out, seen_nodes, node);
-        }
-        return;
-    }
-    if let Some(kind) = token.strip_prefix("autogroup:") {
-        match kind {
-            "member" => {
-                for node in nodes.iter().filter(|node| is_untagged_user_owned(node)) {
-                    push_unique_node(out, seen_nodes, node);
-                }
-            }
-            "tagged" => {
-                for node in nodes.iter().filter(|node| !node.tags.is_empty()) {
-                    push_unique_node(out, seen_nodes, node);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn ssh_destination_matches(token: &str, node: &SshPolicyNode) -> bool {
-    if token.contains('@') {
-        return is_untagged_user_owned(node)
-            && node
-                .user
-                .as_deref()
-                .is_some_and(|user| user_matches(token, user));
-    }
-    if let Some(tag) = token.strip_prefix("tag:") {
-        return node.tags.iter().any(|node_tag| tag_matches(node_tag, tag));
-    }
-    if let Some(kind) = token.strip_prefix("autogroup:") {
-        return match kind {
-            "member" => is_untagged_user_owned(node),
-            "tagged" => !node.tags.is_empty(),
-            _ => false,
-        };
-    }
-    false
+    node: &SshPolicyNode,
+    nodes: &[SshPolicyNode],
+) -> bool {
+    // The target may be a current quiet NodeStore view, but destination
+    // aliases resolve through the policy manager's retained node list.
+    let ips = resolve_ssh_aliases(doc, &[token.to_owned()], nodes);
+    filter::any_ip_matches(&ips, &ssh_node_view(node))
 }
 
 fn same_user_untagged_nodes<'a>(
@@ -390,11 +478,19 @@ fn same_ssh_user_owner(left: &SshPolicyNode, right: &SshPolicyNode) -> bool {
     }
 }
 
-fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshUserRule> {
-    let all_source_node_ids: BTreeSet<u64> = source_nodes.iter().map(|node| node.id).collect();
+fn ssh_user_rules(
+    doc: &PolicyDoc,
+    users: &[String],
+    source_nodes: &[&SshPolicyNode],
+) -> Vec<SshUserRule> {
+    let all_source_node_ids: BTreeSet<u64> = source_nodes
+        .iter()
+        .filter(|node| source_owner(node).is_some())
+        .map(|node| node.id)
+        .collect();
     let localpart_domains = canonical_localpart_domains(users);
     if !localpart_domains.is_empty() {
-        return ssh_user_rules_with_localparts(users, source_nodes, &localpart_domains);
+        return ssh_user_rules_with_localparts(doc, users, source_nodes, &localpart_domains);
     }
 
     let mut out = BTreeMap::new();
@@ -425,6 +521,7 @@ fn ssh_user_rules(users: &[String], source_nodes: &[&SshPolicyNode]) -> Vec<SshU
 }
 
 fn ssh_user_rules_with_localparts(
+    doc: &PolicyDoc,
     users: &[String],
     source_nodes: &[&SshPolicyNode],
     localpart_domains: &[String],
@@ -448,29 +545,31 @@ fn ssh_user_rules_with_localparts(
         base.insert(user.clone(), user.clone());
     }
 
-    let mut groups: Vec<(Option<String>, BTreeSet<u64>)> = Vec::new();
+    let mut groups: BTreeMap<SourceOwner, (Option<String>, BTreeSet<u64>)> = BTreeMap::new();
     for node in source_nodes {
         let user = if is_untagged_user_owned(node) {
             node.user.clone()
         } else {
             None
         };
-        if let Some((_, ids)) = groups.iter_mut().find(|(candidate, _)| *candidate == user) {
-            ids.insert(node.id);
-        } else {
-            groups.push((user, BTreeSet::from([node.id])));
-        }
+        let Some(owner) = source_owner(node) else {
+            continue;
+        };
+        groups
+            .entry(owner)
+            .or_insert_with(|| (user, BTreeSet::new()))
+            .1
+            .insert(node.id);
     }
 
     let mut rules = Vec::new();
-    for (user, source_node_ids) in groups {
+    for (owner, (user, source_node_ids)) in groups {
         rules.push(SshUserRule {
             ssh_users: base.clone(),
             source_node_ids: source_node_ids.clone(),
         });
-        if let Some(user) = user.as_deref()
-            && let Some(localpart) = localpart_for_user(user, localpart_domains)
-        {
+        let localpart = localpart_for_owner(doc, &owner, user.as_deref(), localpart_domains);
+        if let Some(localpart) = localpart {
             rules.push(SshUserRule {
                 ssh_users: BTreeMap::from([(localpart.clone(), localpart)]),
                 source_node_ids,
@@ -480,10 +579,67 @@ fn ssh_user_rules_with_localparts(
     rules
 }
 
+fn localpart_for_owner(
+    doc: &PolicyDoc,
+    owner: &SourceOwner,
+    legacy_user: Option<&str>,
+    domains: &[String],
+) -> Option<String> {
+    match (owner, &doc.users) {
+        (SourceOwner::User(id), Some(accounts)) => domains
+            .iter()
+            .flat_map(|domain| {
+                accounts
+                    .iter()
+                    .filter(move |account| account.id == *id)
+                    .filter_map(move |account| localpart_for_domain(&account.email, domain))
+            })
+            .last(),
+        (SourceOwner::Tagged, _) | (_, Some(_)) => None,
+        (_, None) => legacy_user.and_then(|user| localpart_for_user(user, domains)),
+    }
+}
+
+/// SSHCheckParams evaluates rule users directly, independently of whether
+/// groupSourcesByUser can emit a principal for this source's association.
+fn ssh_rule_allows_user(
+    doc: &PolicyDoc,
+    users: &[String],
+    source: &SshPolicyNode,
+    local_user: &[u8],
+) -> bool {
+    if local_user.is_empty() {
+        return false;
+    }
+    let is_root = local_user == b"root";
+    if (is_root && users.iter().any(|user| user == "root"))
+        || (!is_root
+            && users.iter().any(|user| {
+                user == "autogroup:nonroot"
+                    || (user.as_bytes() == local_user && canonical_localpart_domain(user).is_none())
+            }))
+    {
+        return true;
+    }
+    if !is_untagged_user_owned(source) {
+        return false;
+    }
+    let Some(owner) = source_owner(source) else {
+        return false;
+    };
+    localpart_for_owner(
+        doc,
+        &owner,
+        source.user.as_deref(),
+        &canonical_localpart_domains(users),
+    )
+    .is_some_and(|localpart| localpart.as_bytes() == local_user)
+}
+
 fn ssh_action(base_url: &str, action: &str) -> SshAction {
     if action == "check" {
         return SshAction {
-            hold_and_delegate: ssh_check_hold_url(base_url, None),
+            hold_and_delegate: ssh_check_hold_url(base_url),
             ..SshAction::default()
         };
     }
@@ -497,20 +653,8 @@ fn ssh_action(base_url: &str, action: &str) -> SshAction {
     }
 }
 
-fn ssh_check_hold_url(base_url: &str, auth_id: Option<&str>) -> String {
-    let mut url = format!(
-        "{}/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER",
-        base_url.trim_end_matches('/')
-    );
-    if let Some(auth_id) = auth_id {
-        url.push_str("&auth_id=");
-        url.push_str(auth_id);
-    }
-    url
-}
-
-pub(crate) fn ssh_check_hold_url_with_auth(base_url: &str, auth_id: &str) -> String {
-    ssh_check_hold_url(base_url, Some(auth_id))
+fn ssh_check_hold_url(base_url: &str) -> String {
+    format!("{base_url}/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER")
 }
 
 fn check_period_from_rule(check_period: Option<&str>) -> Duration {
@@ -524,98 +668,18 @@ fn check_period_from_rule(check_period: Option<&str>) -> Duration {
 }
 
 fn parse_duration_nanos(input: &str) -> Option<i64> {
-    if input.is_empty() {
-        return None;
-    }
     if input == "always" {
-        return Some(0);
+        Some(0)
+    } else {
+        headscale_api_acl::go_duration::parse_nanos(input).ok()
     }
-
-    let bytes = input.as_bytes();
-    let mut pos = 0usize;
-    let mut negative = false;
-    if bytes[pos] == b'+' || bytes[pos] == b'-' {
-        negative = bytes[pos] == b'-';
-        pos += 1;
-        if pos == bytes.len() {
-            return None;
-        }
-    }
-    if &input[pos..] == "0" {
-        return Some(0);
-    }
-
-    let mut total: i128 = 0;
-    while pos < bytes.len() {
-        let start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-            pos += 1;
-        }
-        let has_integer = pos > start;
-        let whole: i128 = if has_integer {
-            input[start..pos].parse().ok()?
-        } else {
-            0
-        };
-
-        let mut fraction = 0i128;
-        let mut scale = 1i128;
-        let mut has_fraction = false;
-        if pos < bytes.len() && bytes[pos] == b'.' {
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                has_fraction = true;
-                if scale < 1_000_000_000_000_000_000 {
-                    fraction = fraction
-                        .checked_mul(10)?
-                        .checked_add(i128::from(bytes[pos] - b'0'))?;
-                    scale = scale.checked_mul(10)?;
-                }
-                pos += 1;
-            }
-        }
-        if !has_integer && !has_fraction {
-            return None;
-        }
-
-        let unit_start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_digit() && bytes[pos] != b'.' {
-            pos += 1;
-        }
-        if unit_start == pos {
-            return None;
-        }
-        let unit = &input[unit_start..pos];
-        let multiplier: i128 = match unit {
-            "ns" => 1,
-            "us" | "µs" | "μs" => 1_000,
-            "ms" => 1_000_000,
-            "s" => 1_000_000_000,
-            "m" => 60 * 1_000_000_000,
-            "h" => 60 * 60 * 1_000_000_000,
-            _ => return None,
-        };
-        let whole_nanos = whole.checked_mul(multiplier)?;
-        let fraction_nanos = fraction.checked_mul(multiplier)?.checked_div(scale)?;
-        total = total
-            .checked_add(whole_nanos)?
-            .checked_add(fraction_nanos)?;
-    }
-    if negative {
-        total = total.checked_neg()?;
-    }
-    i64::try_from(total).ok()
-}
-
-fn user_matches(entry: &str, user: &str) -> bool {
-    entry == user || entry.strip_suffix('@') == Some(user) || user.strip_suffix('@') == Some(entry)
 }
 
 fn canonical_localpart_domains(users: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for user in users {
         if let Some(domain) = canonical_localpart_domain(user) {
-            push_unique_string(&mut out, domain.to_ascii_lowercase());
+            out.push(domain.to_string());
         }
     }
     out
@@ -637,42 +701,21 @@ fn canonical_localpart_domain(user: &str) -> Option<&str> {
     }
 }
 
-fn localpart_for_user(user: &str, domains: &[String]) -> Option<String> {
+fn localpart_for_domain(user: &str, expected: &str) -> Option<String> {
     let (localpart, domain) = user.rsplit_once('@')?;
-    if domains
+    headscale_api_acl::go_unicode::equal_fold(expected, domain).then(|| localpart.to_string())
+}
+
+fn localpart_for_user(user: &str, domains: &[String]) -> Option<String> {
+    domains
         .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(domain))
-    {
-        Some(localpart.to_string())
-    } else {
-        None
-    }
+        .filter_map(|domain| localpart_for_domain(user, domain))
+        .next_back()
 }
 
 fn is_untagged_user_owned(node: &SshPolicyNode) -> bool {
     node.tags.is_empty()
         && (node.user_id.is_some() || node.user.as_deref().is_some_and(|user| !user.is_empty()))
-}
-
-fn tag_matches(node_tag: &str, policy_tag_without_prefix: &str) -> bool {
-    node_tag == policy_tag_without_prefix
-        || node_tag.strip_prefix("tag:") == Some(policy_tag_without_prefix)
-}
-
-fn push_unique_string(out: &mut Vec<String>, value: String) {
-    if !out.contains(&value) {
-        out.push(value);
-    }
-}
-
-fn push_unique_node<'a>(
-    out: &mut Vec<&'a SshPolicyNode>,
-    seen: &mut BTreeSet<u64>,
-    node: &'a SshPolicyNode,
-) {
-    if seen.insert(node.id) {
-        out.push(node);
-    }
 }
 
 #[cfg(test)]
@@ -826,10 +869,10 @@ mod tests {
             vec!["100.64.0.1", "100.64.0.2"]
         );
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2),
+            ssh_check_period_for(&doc, &nodes, 1, 2, "root"),
             Some(Duration::from_secs(60 * 60))
         );
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
     }
 
     #[test]
@@ -874,8 +917,8 @@ mod tests {
 
         assert_eq!(pol.rules.len(), 1);
         assert_eq!(principal_ips_for_rule(&pol.rules[0]), vec!["100.64.0.2"]);
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2), None);
-        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, "root"), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 3, 2, "root"), None);
     }
 
     #[test]
@@ -920,9 +963,11 @@ mod tests {
             "https://headscale.example/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
         );
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2),
+            ssh_check_period_for(&doc, &nodes, 1, 2, "admin"),
             Some(Duration::from_secs(24 * 60 * 60))
         );
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, "root"), None);
+        assert_eq!(ssh_check_period_for(&doc, &nodes, 1, 2, ""), None);
     }
 
     #[test]
@@ -1052,7 +1097,7 @@ mod tests {
         ];
 
         assert_eq!(
-            ssh_check_period_for(&doc, &nodes, 1, 2),
+            ssh_check_period_for(&doc, &nodes, 1, 2, "admin"),
             Some(Duration::from_secs(90 * 60))
         );
     }
@@ -1488,7 +1533,20 @@ mod tests {
             principal_ips_for_rule(&alice_target.rules[1]),
             vec!["100.64.0.1"]
         );
-        assert!(userless_target.rules.is_empty());
+        // headscale-go v0.29.5: autogroup:member is every untagged node
+        // (policy/v2/types.go AutoGroupMember, no user check), so the userless
+        // node is a member *destination* and receives the member->member rule;
+        // autogroup:self only expands for nodes with a valid user. Confirmed
+        // with the differential harness's Go side (pm.SSHPolicy for a node with
+        // no user returns exactly this one rule, principal 100.64.0.1).
+        assert_eq!(userless_target.rules.len(), 1);
+        assert_eq!(
+            principal_ips_for_rule(&userless_target.rules[0]),
+            vec!["100.64.0.1"]
+        );
+        assert_eq!(userless_target.rules[0].ssh_users["deploy"], "deploy");
+        assert_eq!(userless_target.rules[0].ssh_users["root"], "");
+        assert_eq!(userless_target.rules[0].ssh_users.len(), 2);
     }
 
     fn principal_ips(policy: &SshPolicy) -> Vec<&str> {

@@ -3336,25 +3336,106 @@ impl RemovedNode {
     }
 }
 
+/// Completion channel for one queued NodeStore write.
+///
+/// Synchronous callers block on a std channel (see [`blocking_section`]);
+/// async callers await a tokio oneshot, so the waiting task never occupies a
+/// runtime worker while the writer batches. Either way the caller resumes only
+/// after the batch containing its write has been published.
+enum NodeStoreReply<T> {
+    Sync(std_mpsc::Sender<T>),
+    Async(oneshot::Sender<T>),
+}
+
+impl<T> NodeStoreReply<T> {
+    /// Hands the value back when the waiting caller has gone away.
+    fn send(self, value: T) -> Result<(), T> {
+        match self {
+            Self::Sync(tx) => tx.send(value).map_err(|std_mpsc::SendError(value)| value),
+            Self::Async(tx) => tx.send(value),
+        }
+    }
+}
+
+/// Run a blocking wait without starving the async runtime.
+///
+/// On a multi-thread runtime `block_in_place` hands this worker's queue
+/// (including a LIFO-slot task such as sqlx's connection-return task) to
+/// another thread for the duration of the wait. On a current-thread runtime or
+/// outside a runtime there is nothing to hand off to, and `block_in_place`
+/// would panic, so the wait just blocks. Async code paths use the `*_async`
+/// writers instead and never reach this.
+fn blocking_section<R>(wait: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(wait)
+        }
+        _ => wait(),
+    }
+}
+
+/// Keeps `nodestore_queue_depth` accurate when an async writer is cancelled.
+struct QueueDepthGuard<'a>(&'a AtomicUsize);
+
+impl<'a> QueueDepthGuard<'a> {
+    fn enter(depth: &'a AtomicUsize) -> Self {
+        depth.fetch_add(1, Ordering::SeqCst);
+        Self(depth)
+    }
+}
+
+impl Drop for QueueDepthGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+type VolatileAuthRegistrationResult =
+    Arc<Mutex<Option<(MachineRecord, Vec<PendingMapChange>, bool)>>>;
+
+/// A volatile auth registration queued for the NodeStore writer, and what is
+/// needed to finish it once the writer has published its batch.
+struct VolatileAuthRegistrationCommit {
+    operation: &'static str,
+    update: NodeStoreBoolUpdateFn,
+    committed: VolatileAuthRegistrationResult,
+    published_key: String,
+}
+
+type StreamConnectionResult = Arc<Mutex<Option<(MachineRecord, u64, bool, Arc<()>)>>>;
+
+/// What a stream connect needs once the writer has published its batch.
+struct StreamConnectionSession {
+    native_work: Option<native_shutdown::NativeWork>,
+    cancelled: Arc<AtomicBool>,
+    result: StreamConnectionResult,
+}
+
+/// A stream connect queued for the NodeStore writer.
+struct StreamConnectionAcquisition {
+    update: NodeStoreBoolUpdateFn,
+    session: StreamConnectionSession,
+}
+
 enum NodeStoreWriteWork {
     Upsert {
         node_key_hex: String,
         rec: Box<MachineRecord>,
-        result_tx: std_mpsc::Sender<bool>,
+        result_tx: NodeStoreReply<bool>,
     },
     Delete {
         node_key_hex: String,
-        result_tx: std_mpsc::Sender<Option<RemovedNode>>,
+        result_tx: NodeStoreReply<Option<RemovedNode>>,
     },
     UpdateBool {
         operation: &'static str,
         update: NodeStoreBoolUpdateFn,
-        result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
+        result_tx: NodeStoreReply<NodeStoreBoolUpdateOutcome>,
     },
     UpdateMany {
         operation: &'static str,
         update: NodeStoreManyUpdateFn,
-        result_tx: std_mpsc::Sender<NodeStoreManyUpdateOutcome>,
+        result_tx: NodeStoreReply<NodeStoreManyUpdateOutcome>,
     },
     Rekey {
         old_node_key_hex: String,
@@ -3362,34 +3443,37 @@ enum NodeStoreWriteWork {
         rec: Box<MachineRecord>,
         changes: Vec<PendingMapChange>,
         final_presence_node_id: Option<u64>,
-        result_tx: std_mpsc::Sender<()>,
+        result_tx: NodeStoreReply<()>,
     },
+    /// Sent by the handle on drop: wakes the writer so it flushes the open
+    /// batch now instead of at the next tick. Carries no write.
+    Wake,
 }
 
 enum NodeStoreWriteCompletion {
     Bool {
         operation: &'static str,
-        result_tx: std_mpsc::Sender<bool>,
+        result_tx: NodeStoreReply<bool>,
         result: bool,
     },
     Delete {
         operation: &'static str,
-        result_tx: std_mpsc::Sender<Option<RemovedNode>>,
+        result_tx: NodeStoreReply<Option<RemovedNode>>,
         removed: Option<RemovedNode>,
     },
     UpdateBool {
         operation: &'static str,
-        result_tx: std_mpsc::Sender<NodeStoreBoolUpdateOutcome>,
+        result_tx: NodeStoreReply<NodeStoreBoolUpdateOutcome>,
         outcome: NodeStoreBoolUpdateOutcome,
     },
     UpdateMany {
         operation: &'static str,
-        result_tx: std_mpsc::Sender<NodeStoreManyUpdateOutcome>,
+        result_tx: NodeStoreReply<NodeStoreManyUpdateOutcome>,
         outcome: NodeStoreManyUpdateOutcome,
     },
     Unit {
         operation: &'static str,
-        result_tx: std_mpsc::Sender<()>,
+        result_tx: NodeStoreReply<()>,
         changes: Vec<PendingMapChange>,
         final_presence_node_id: Option<u64>,
     },
@@ -3404,11 +3488,20 @@ pub struct NodeStoreWriteBatcherHandle {
     id: u64,
     machines: Weak<MachineRegistry>,
     tx: Option<std_mpsc::Sender<NodeStoreWriteWork>>,
+    stopping: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for NodeStoreWriteBatcherHandle {
     fn drop(&mut self) {
+        // Go's `Stop`: first tell the writer to apply the open batch now and
+        // to answer every later write immediately. Retiring the queue below
+        // needs its write lock, and a caller that is still waiting on its
+        // batch must not be able to hold that up for a whole period.
+        self.stopping.store(true, Ordering::SeqCst);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(NodeStoreWriteWork::Wake);
+        }
         if let Some(machines) = self.machines.upgrade() {
             let mut queue = machines.nodestore_write_queue.write();
             if queue.as_ref().is_some_and(|current| current.id == self.id) {
@@ -3417,7 +3510,11 @@ impl Drop for NodeStoreWriteBatcherHandle {
         }
         self.tx.take();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // The writer exits once the last sender is gone, which needs no
+            // help from this thread's runtime.
+            blocking_section(|| {
+                let _ = worker.join();
+            });
         }
     }
 }
@@ -3425,25 +3522,73 @@ impl Drop for NodeStoreWriteBatcherHandle {
 fn run_nodestore_write_worker(
     machines: &Arc<MachineRegistry>,
     rx: &std_mpsc::Receiver<NodeStoreWriteWork>,
+    stopping: &AtomicBool,
     batch_size: usize,
     batch_timeout: Duration,
 ) {
     let batch_size = batch_size.max(1);
     let batch_timeout = batch_timeout.max(Duration::from_millis(1));
 
-    while let Ok(first) = rx.recv() {
-        let mut batch = Vec::with_capacity(batch_size);
-        batch.push(first);
-        while batch.len() < batch_size {
-            match rx.recv_timeout(batch_timeout) {
-                Ok(work) => batch.push(work),
-                Err(
-                    std_mpsc::RecvTimeoutError::Timeout | std_mpsc::RecvTimeoutError::Disconnected,
-                ) => break,
+    // `NodeStore.processWrite`: a free-running ticker applies whatever has
+    // queued up, and a full batch is applied at once. Both reset the ticker.
+    // Arrivals never extend the window, so a write waits for the next tick
+    // (half a period on average) and every write queued before it shares one
+    // snapshot rebuild. The ticker only matters while a batch is open, so an
+    // idle worker blocks instead of waking every period.
+    // A period too large for `Instant` (a typo'd config) just never ticks.
+    let tick_after = |from: Instant| {
+        from.checked_add(batch_timeout)
+            .unwrap_or_else(|| from + Duration::from_secs(60 * 60 * 24 * 365))
+    };
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut next_tick = tick_after(Instant::now());
+    loop {
+        let received = if batch.is_empty() {
+            match rx.recv() {
+                Ok(work) => {
+                    // Ticks that elapsed while idle were no-ops; resume on the
+                    // period boundary a free-running ticker would be at.
+                    let now = Instant::now();
+                    if now >= next_tick {
+                        let elapsed = now.duration_since(next_tick).as_nanos();
+                        let periods = elapsed / batch_timeout.as_nanos().max(1) + 1;
+                        next_tick = next_tick
+                            .checked_add(Duration::from_nanos(
+                                u64::try_from(periods.saturating_mul(batch_timeout.as_nanos()))
+                                    .unwrap_or(u64::MAX),
+                            ))
+                            .unwrap_or_else(|| tick_after(now));
+                    }
+                    Some(work)
+                }
+                Err(std_mpsc::RecvError) => break,
             }
+        } else {
+            match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+                Ok(work) => Some(work),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        match received {
+            Some(work) if !matches!(work, NodeStoreWriteWork::Wake) => {
+                batch.push(work);
+                if batch.len() < batch_size && !stopping.load(Ordering::SeqCst) {
+                    continue;
+                }
+            }
+            // A wake-up carries no write: it only ends the wait early.
+            Some(_) | None => {}
         }
-        machines.apply_nodestore_write_batch(batch);
+        if batch.is_empty() {
+            continue;
+        }
+        machines.apply_nodestore_write_batch(std::mem::take(&mut batch));
+        batch.reserve(batch_size);
+        next_tick = tick_after(Instant::now());
     }
+    // Go applies the open batch on stop so in-flight writers get their result.
+    machines.apply_nodestore_write_batch(batch);
 }
 
 #[cfg(feature = "admin")]
@@ -3674,7 +3819,7 @@ impl MachineRegistry {
     /// against all earlier writer operations. The bumped name is initially
     /// live-only; a later cached save persists it.
     #[cfg(feature = "admin")]
-    pub(crate) fn put_new_native_registration(
+    pub(crate) async fn put_new_native_registration(
         &self,
         mut record: MachineRecord,
         hostinfo: serde_json::Value,
@@ -3694,59 +3839,61 @@ impl MachineRegistry {
         let hostinfos = self.hostinfo_snapshots.clone();
         let natives = self.native_persistence.clone();
         let pending_hostinfos = self.pending_native_hostinfo.clone();
-        let outcome = self.apply_nodestore_bool_update(
-            "put",
-            Box::new(move |records| {
-                if let Some(existing) = records.get(&record.node_key_hex)
-                    && existing.stable_node_id() != id
-                {
-                    *completed.lock() = Some(Err("node key already exists".into()));
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                let base = if record.hostname.is_empty() {
-                    "node"
-                } else {
-                    &record.hostname
-                };
-                let taken = records
-                    .iter()
-                    .filter(|(key, node)| node.stable_node_id_for_key(key) != id)
-                    .map(|(_, node)| node.hostname.as_str())
-                    .collect::<std::collections::HashSet<_>>();
-                let mut name = base.to_owned();
-                for suffix in 1.. {
-                    if !taken.contains(name.as_str()) {
-                        break;
+        let outcome = self
+            .apply_nodestore_bool_update_async(
+                "put",
+                Box::new(move |records| {
+                    if let Some(existing) = records.get(&record.node_key_hex)
+                        && existing.stable_node_id() != id
+                    {
+                        *completed.lock() = Some(Err("node key already exists".into()));
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
                     }
-                    name = format!("{base}-{suffix}");
-                }
-                drop(taken);
-                record.hostname = name;
-                records.retain(|key, node| node.stable_node_id_for_key(key) != id);
-                records.insert(record.node_key_hex.clone(), record.clone());
-                hostinfos.write().insert(
-                    id,
-                    hostinfo::HostInfoSnapshot {
-                        projection: record.host_info_for_node(),
-                        value: hostinfo,
-                    },
-                );
-                natives.write().insert(id, native);
-                pending_hostinfos.write().remove(&id);
-                pending.write().insert(
-                    id,
-                    NativeRegistrationPublication::Created {
-                        revision,
-                        record: Box::new(record.clone()),
-                    },
-                );
-                *completed.lock() = Some(Ok(record));
-                NodeStoreBoolUpdateOutcome {
-                    final_presence_node_id: Some(id),
-                    ..NodeStoreBoolUpdateOutcome::quiet(true)
-                }
-            }),
-        );
+                    let base = if record.hostname.is_empty() {
+                        "node"
+                    } else {
+                        &record.hostname
+                    };
+                    let taken = records
+                        .iter()
+                        .filter(|(key, node)| node.stable_node_id_for_key(key) != id)
+                        .map(|(_, node)| node.hostname.as_str())
+                        .collect::<std::collections::HashSet<_>>();
+                    let mut name = base.to_owned();
+                    for suffix in 1.. {
+                        if !taken.contains(name.as_str()) {
+                            break;
+                        }
+                        name = format!("{base}-{suffix}");
+                    }
+                    drop(taken);
+                    record.hostname = name;
+                    records.retain(|key, node| node.stable_node_id_for_key(key) != id);
+                    records.insert(record.node_key_hex.clone(), record.clone());
+                    hostinfos.write().insert(
+                        id,
+                        hostinfo::HostInfoSnapshot {
+                            projection: record.host_info_for_node(),
+                            value: hostinfo,
+                        },
+                    );
+                    natives.write().insert(id, native);
+                    pending_hostinfos.write().remove(&id);
+                    pending.write().insert(
+                        id,
+                        NativeRegistrationPublication::Created {
+                            revision,
+                            record: Box::new(record.clone()),
+                        },
+                    );
+                    *completed.lock() = Some(Ok(record));
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
+                }),
+            )
+            .await;
         let result = result.lock().take();
         if !outcome.applied {
             return result.unwrap_or_else(|| Err("node changed during new registration".into()));
@@ -3757,7 +3904,7 @@ impl MachineRegistry {
     /// Existing-node auth mutates NodeStore quietly before its SQL write. The
     /// caller owns the machine/node-key guards and native persistence mutex.
     #[cfg(feature = "admin")]
-    pub(crate) fn begin_native_registration(
+    pub(crate) async fn begin_native_registration(
         &self,
         id: u64,
         prepare: impl FnOnce(
@@ -3781,88 +3928,91 @@ impl MachineRegistry {
         let hostinfos = self.hostinfo_snapshots.clone();
         let natives = self.native_persistence.clone();
         let pending_hostinfos = self.pending_native_hostinfo.clone();
-        let outcome = self.apply_nodestore_bool_update(
-            "update",
-            Box::new(move |records| {
-                let mut matches = records
-                    .iter()
-                    .filter(|(key, record)| record.stable_node_id_for_key(key) == id);
-                let Some((old_key, before)) = matches.next() else {
-                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
-                        "node no longer exists in NodeStore".into(),
-                    )));
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                };
-                if matches.next().is_some() {
-                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
-                        "ambiguous node identity".into(),
-                    )));
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                let before = before.clone();
-                let old_key = old_key.clone();
-                let before_projection = before.host_info_for_node();
-                let previous_value = match hostinfos.read().get(&id).map_or_else(
-                    || serde_json::to_value(&before_projection),
-                    |snapshot| snapshot.value_for(&before_projection),
-                ) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        *result.lock() = Some(Err(MachineAdminError::Storage(error.to_string())));
+        let outcome = self
+            .apply_nodestore_bool_update_async(
+                "update",
+                Box::new(move |records| {
+                    let mut matches = records
+                        .iter()
+                        .filter(|(key, record)| record.stable_node_id_for_key(key) == id);
+                    let Some((old_key, before)) = matches.next() else {
+                        *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                            "node no longer exists in NodeStore".into(),
+                        )));
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    };
+                    if matches.next().is_some() {
+                        *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                            "ambiguous node identity".into(),
+                        )));
                         return NodeStoreBoolUpdateOutcome::unchanged(false);
                     }
-                };
-                let hostinfo_before = hostinfo::HostInfoSnapshot {
-                    projection: before_projection,
-                    value: previous_value,
-                };
-                let mut native_before = natives.read().get(&id).cloned();
-                if let Some(native) = &mut native_before {
-                    native.replace_hostinfo_snapshot(hostinfo_before.clone());
-                }
-                let prepared = match prepare(&before, native_before.as_ref()) {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        *result.lock() = Some(Err(error));
+                    let before = before.clone();
+                    let old_key = old_key.clone();
+                    let before_projection = before.host_info_for_node();
+                    let previous_value = match hostinfos.read().get(&id).map_or_else(
+                        || serde_json::to_value(&before_projection),
+                        |snapshot| snapshot.value_for(&before_projection),
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            *result.lock() =
+                                Some(Err(MachineAdminError::Storage(error.to_string())));
+                            return NodeStoreBoolUpdateOutcome::unchanged(false);
+                        }
+                    };
+                    let hostinfo_before = hostinfo::HostInfoSnapshot {
+                        projection: before_projection,
+                        value: previous_value,
+                    };
+                    let mut native_before = natives.read().get(&id).cloned();
+                    if let Some(native) = &mut native_before {
+                        native.replace_hostinfo_snapshot(hostinfo_before.clone());
+                    }
+                    let prepared = match prepare(&before, native_before.as_ref()) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            *result.lock() = Some(Err(error));
+                            return NodeStoreBoolUpdateOutcome::unchanged(false);
+                        }
+                    };
+                    let mut proposed = prepared.record;
+                    if proposed.machine_key_hex != before.machine_key_hex {
+                        *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                            "ambiguous node identity".into(),
+                        )));
                         return NodeStoreBoolUpdateOutcome::unchanged(false);
                     }
-                };
-                let mut proposed = prepared.record;
-                if proposed.machine_key_hex != before.machine_key_hex {
-                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
-                        "ambiguous node identity".into(),
-                    )));
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                if let Some(other) = records.get(&proposed.node_key_hex)
-                    && other.stable_node_id_for_key(&proposed.node_key_hex) != id
-                {
-                    *result.lock() = Some(Err(MachineAdminError::BadRequest(
-                        "node key already exists".into(),
-                    )));
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                proposed.node_id = Some(id);
-                proposed.hostname.clone_from(&before.hostname);
-                let update = NativeRegistrationUpdate {
-                    hostinfo_before,
-                    hostinfo_after: prepared.native.hostinfo_snapshot(),
-                    native_before,
-                    before,
-                    after: proposed.clone(),
-                };
-                records.remove(&old_key);
-                records.insert(proposed.node_key_hex.clone(), proposed);
-                hostinfos.write().insert(id, update.hostinfo_after.clone());
-                natives.write().insert(id, prepared.native);
-                pending_hostinfos.write().remove(&id);
-                *result.lock() = Some(Ok((update, prepared.registration)));
-                NodeStoreBoolUpdateOutcome {
-                    final_presence_node_id: Some(id),
-                    ..NodeStoreBoolUpdateOutcome::quiet(true)
-                }
-            }),
-        );
+                    if let Some(other) = records.get(&proposed.node_key_hex)
+                        && other.stable_node_id_for_key(&proposed.node_key_hex) != id
+                    {
+                        *result.lock() = Some(Err(MachineAdminError::BadRequest(
+                            "node key already exists".into(),
+                        )));
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    }
+                    proposed.node_id = Some(id);
+                    proposed.hostname.clone_from(&before.hostname);
+                    let update = NativeRegistrationUpdate {
+                        hostinfo_before,
+                        hostinfo_after: prepared.native.hostinfo_snapshot(),
+                        native_before,
+                        before,
+                        after: proposed.clone(),
+                    };
+                    records.remove(&old_key);
+                    records.insert(proposed.node_key_hex.clone(), proposed);
+                    hostinfos.write().insert(id, update.hostinfo_after.clone());
+                    natives.write().insert(id, prepared.native);
+                    pending_hostinfos.write().remove(&id);
+                    *result.lock() = Some(Ok((update, prepared.registration)));
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
+                }),
+            )
+            .await;
         let result = completed.lock().take();
         if !outcome.applied {
             return result.unwrap_or_else(|| {
@@ -3879,7 +4029,7 @@ impl MachineRegistry {
     }
 
     #[cfg(feature = "admin")]
-    pub(crate) fn rollback_native_registration(
+    pub(crate) async fn rollback_native_registration(
         &self,
         update: &NativeRegistrationUpdate,
     ) -> Result<(), String> {
@@ -3888,35 +4038,37 @@ impl MachineRegistry {
         let hostinfos = self.hostinfo_snapshots.clone();
         let natives = self.native_persistence.clone();
         let pending_hostinfos = self.pending_native_hostinfo.clone();
-        let outcome = self.apply_nodestore_bool_update(
-            "put",
-            Box::new(move |records| {
-                let current = records.get(&update.after.node_key_hex);
-                if !current.is_some_and(|record| {
-                    record.stable_node_id() == id
-                        && record.machine_key_hex == update.after.machine_key_hex
-                }) || records
-                    .get(&update.before.node_key_hex)
-                    .is_some_and(|record| record.stable_node_id() != id)
-                {
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                records.remove(&update.after.node_key_hex);
-                records.insert(update.before.node_key_hex.clone(), update.before);
-                hostinfos.write().insert(id, update.hostinfo_before);
-                pending_hostinfos.write().remove(&id);
-                let mut native = natives.write();
-                if let Some(before) = update.native_before {
-                    native.insert(id, before);
-                } else {
-                    native.remove(&id);
-                }
-                NodeStoreBoolUpdateOutcome {
-                    final_presence_node_id: Some(id),
-                    ..NodeStoreBoolUpdateOutcome::quiet(true)
-                }
-            }),
-        );
+        let outcome = self
+            .apply_nodestore_bool_update_async(
+                "put",
+                Box::new(move |records| {
+                    let current = records.get(&update.after.node_key_hex);
+                    if !current.is_some_and(|record| {
+                        record.stable_node_id() == id
+                            && record.machine_key_hex == update.after.machine_key_hex
+                    }) || records
+                        .get(&update.before.node_key_hex)
+                        .is_some_and(|record| record.stable_node_id() != id)
+                    {
+                        return NodeStoreBoolUpdateOutcome::unchanged(false);
+                    }
+                    records.remove(&update.after.node_key_hex);
+                    records.insert(update.before.node_key_hex.clone(), update.before);
+                    hostinfos.write().insert(id, update.hostinfo_before);
+                    pending_hostinfos.write().remove(&id);
+                    let mut native = natives.write();
+                    if let Some(before) = update.native_before {
+                        native.insert(id, before);
+                    } else {
+                        native.remove(&id);
+                    }
+                    NodeStoreBoolUpdateOutcome {
+                        final_presence_node_id: Some(id),
+                        ..NodeStoreBoolUpdateOutcome::quiet(true)
+                    }
+                }),
+            )
+            .await;
         if outcome.applied {
             Ok(())
         } else {
@@ -3947,24 +4099,25 @@ impl MachineRegistry {
     }
 
     #[cfg(feature = "admin")]
-    fn finish_native_registration_publication(
+    async fn finish_native_registration_publication(
         &self,
         proposed: &MachineRecord,
     ) -> Result<bool, String> {
         let id = proposed.stable_node_id();
-        let mut pending = self.pending_native_registrations.write();
-        let Some(update) = pending.get(&id) else {
-            return Ok(false);
+        let update = {
+            let mut pending = self.pending_native_registrations.write();
+            let Some(update) = pending.get(&id) else {
+                return Ok(false);
+            };
+            if update.after().node_key_hex != proposed.node_key_hex {
+                return Ok(false);
+            }
+            pending.remove(&id).expect("pending registration exists")
         };
-        if update.after().node_key_hex != proposed.node_key_hex {
-            return Ok(false);
-        }
-        let update = pending.remove(&id).expect("pending registration exists");
-        drop(pending);
         // CLI/OIDC may hydrate canonical account fields after the native save.
         // Merge that metadata without reapplying SQL/client snapshots.
         let metadata = proposed.clone();
-        self.apply_nodestore_bool_update(
+        self.apply_nodestore_bool_update_async(
             "update",
             Box::new(move |records| {
                 let Some(current) = records.get_mut(&metadata.node_key_hex) else {
@@ -3986,7 +4139,8 @@ impl MachineRegistry {
                 current.user_created_at = metadata.user_created_at;
                 NodeStoreBoolUpdateOutcome::quiet(changed)
             }),
-        );
+        )
+        .await;
         let Some(current) = self
             .get(&update.after().node_key_hex)
             .filter(|record| record.stable_node_id() == id)
@@ -4393,15 +4547,26 @@ impl MachineRegistry {
             .replace(NodeStoreWriteQueue { id, tx: tx.clone() });
 
         let machines = Arc::clone(self);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = stopping.clone();
         let worker = thread::Builder::new()
             .name("headscale-nodestore-write-batcher".to_string())
-            .spawn(move || run_nodestore_write_worker(&machines, &rx, batch_size, batch_timeout))
+            .spawn(move || {
+                run_nodestore_write_worker(
+                    &machines,
+                    &rx,
+                    &worker_stopping,
+                    batch_size,
+                    batch_timeout,
+                );
+            })
             .expect("spawn NodeStore write batcher");
 
         NodeStoreWriteBatcherHandle {
             id,
             machines: Arc::downgrade(self),
             tx: Some(tx),
+            stopping,
             worker: Some(worker),
         }
     }
@@ -4899,6 +5064,35 @@ impl MachineRegistry {
         reason: Option<MapChangeReason>,
         hostinfo: Option<serde_json::Value>,
     ) -> Option<MachineRecord> {
+        let (key, update) = self.map_runtime_update(before, proposed, reason, hostinfo)?;
+        let outcome = self.apply_nodestore_bool_update("update", update);
+        outcome.applied.then(|| self.get(&key)).flatten()
+    }
+
+    /// [`Self::apply_map_runtime_update`] for the `/map` handler. A connecting
+    /// node's update waits for its batch without holding a runtime worker, so a
+    /// reconnect storm cannot park every worker behind the NodeStore writer.
+    pub(crate) async fn apply_map_runtime_update_async(
+        &self,
+        before: &MachineRecord,
+        proposed: MachineRecord,
+        reason: Option<MapChangeReason>,
+        hostinfo: Option<serde_json::Value>,
+    ) -> Option<MachineRecord> {
+        let (key, update) = self.map_runtime_update(before, proposed, reason, hostinfo)?;
+        let outcome = self
+            .apply_nodestore_bool_update_async("update", update)
+            .await;
+        outcome.applied.then(|| self.get(&key)).flatten()
+    }
+
+    fn map_runtime_update(
+        &self,
+        before: &MachineRecord,
+        proposed: MachineRecord,
+        reason: Option<MapChangeReason>,
+        hostinfo: Option<serde_json::Value>,
+    ) -> Option<(String, NodeStoreBoolUpdateFn)> {
         let key = before.node_key_hex.clone();
         if proposed.node_key_hex != key {
             return None;
@@ -4906,8 +5100,7 @@ impl MachineRegistry {
         let before = before.clone();
         let hostinfo_snapshots = self.hostinfo_snapshots.clone();
         let key_for_update = key.clone();
-        let outcome = self.apply_nodestore_bool_update(
-            "update",
+        let update: NodeStoreBoolUpdateFn = {
             Box::new(move |records| {
                 let Some(current) = records.get(&key_for_update) else {
                     return NodeStoreBoolUpdateOutcome::unchanged(false);
@@ -4998,9 +5191,9 @@ impl MachineRegistry {
                     clear_unhealthy_route_state: clear_unhealthy.then_some(node_id),
                     final_presence_node_id: None,
                 }
-            }),
-        );
-        outcome.applied.then(|| self.get(&key)).flatten()
+            })
+        };
+        Some((key, update))
     }
 
     pub(crate) fn upsert_with_reason(
@@ -5025,24 +5218,24 @@ impl MachineRegistry {
 
     #[cfg(test)]
     pub(crate) fn upsert_auth_completion(&self, node_key_hex: String, rec: MachineRecord) {
-        self.try_upsert_auth_completion(node_key_hex, rec)
+        futures::executor::block_on(self.try_upsert_auth_completion(node_key_hex, rec))
             .expect("auth completion policy resolves");
     }
 
-    pub(crate) fn try_upsert_auth_completion(
+    pub(crate) async fn try_upsert_auth_completion(
         &self,
         node_key_hex: String,
         rec: MachineRecord,
     ) -> Result<(), String> {
         #[cfg(feature = "admin")]
-        if self.finish_native_registration_publication(&rec)? {
+        if Box::pin(self.finish_native_registration_publication(&rec)).await? {
             return Ok(());
         }
         let node_id = rec.stable_node_id_for_key(&node_key_hex);
         let existing = self.get(&node_key_hex);
         let node_key_for_presence = node_key_hex.clone();
         let published = rec.clone();
-        self.upsert_record(node_key_hex, rec);
+        self.upsert_record_async(node_key_hex, rec).await;
         if !self.node_key_still_maps_to_node_id(&node_key_for_presence, node_id) {
             return Ok(());
         }
@@ -5077,9 +5270,36 @@ impl MachineRegistry {
     pub(crate) fn commit_volatile_auth_registration_with_hostinfo(
         &self,
         previous_node_key: Option<&str>,
-        mut record: MachineRecord,
+        record: MachineRecord,
         hostinfo: Option<serde_json::Value>,
     ) -> Result<MachineRecord, RegistryMutationError> {
+        let commit = self.volatile_auth_registration_commit(previous_node_key, record, hostinfo);
+        let outcome = self.apply_nodestore_bool_update(commit.operation, commit.update);
+        self.finish_volatile_auth_registration(&outcome, &commit.committed, &commit.published_key)
+    }
+
+    /// [`Self::commit_volatile_auth_registration_with_hostinfo`] for the
+    /// register handler: concurrent registrations all queue their write and
+    /// share a batch instead of each parking a runtime worker.
+    pub(crate) async fn commit_volatile_auth_registration_with_hostinfo_async(
+        &self,
+        previous_node_key: Option<&str>,
+        record: MachineRecord,
+        hostinfo: Option<serde_json::Value>,
+    ) -> Result<MachineRecord, RegistryMutationError> {
+        let commit = self.volatile_auth_registration_commit(previous_node_key, record, hostinfo);
+        let outcome = self
+            .apply_nodestore_bool_update_async(commit.operation, commit.update)
+            .await;
+        self.finish_volatile_auth_registration(&outcome, &commit.committed, &commit.published_key)
+    }
+
+    fn volatile_auth_registration_commit(
+        &self,
+        previous_node_key: Option<&str>,
+        mut record: MachineRecord,
+        hostinfo: Option<serde_json::Value>,
+    ) -> VolatileAuthRegistrationCommit {
         let previous = previous_node_key.map(str::to_owned);
         let new_key = record.node_key_hex.clone();
         let published_key = new_key.clone();
@@ -5093,8 +5313,7 @@ impl MachineRegistry {
         let hostinfo_snapshots = self.hostinfo_snapshots.clone();
         #[cfg(feature = "admin")]
         let install_native = self.native_row_installer();
-        let outcome = self.apply_nodestore_bool_update(
-            operation,
+        let update: NodeStoreBoolUpdateFn = {
             Box::new(move |map| {
                 let existing = previous.as_ref().and_then(|key| map.get(key)).cloned();
                 if previous.is_some() && existing.is_none() {
@@ -5188,8 +5407,22 @@ impl MachineRegistry {
                     final_presence_node_id: Some(node_id),
                     ..NodeStoreBoolUpdateOutcome::quiet(true)
                 }
-            }),
-        );
+            })
+        };
+        VolatileAuthRegistrationCommit {
+            operation,
+            update,
+            committed,
+            published_key,
+        }
+    }
+
+    fn finish_volatile_auth_registration(
+        &self,
+        outcome: &NodeStoreBoolUpdateOutcome,
+        committed: &VolatileAuthRegistrationResult,
+        published_key: &str,
+    ) -> Result<MachineRecord, RegistryMutationError> {
         if !outcome.applied {
             return Err("node key already exists".into());
         }
@@ -5200,8 +5433,8 @@ impl MachineRegistry {
         // Binding changes retire their old stream/timer ownership inside the
         // NodeStore writer, before another registration can acquire it.
         if self.node_key_still_maps_to_node_id(
-            &published_key,
-            record.stable_node_id_for_key(&published_key),
+            published_key,
+            record.stable_node_id_for_key(published_key),
         ) {
             if self
                 .try_refresh_policy_node_inputs()
@@ -5303,7 +5536,11 @@ impl MachineRegistry {
     }
 
     fn upsert_record(&self, node_key_hex: String, rec: MachineRecord) -> bool {
-        if let Some(queue) = self.nodestore_write_queue.read().clone() {
+        // Not `if let ... = self.nodestore_write_queue.read().clone()`: that keeps
+        // the read guard alive through the blocking wait and would hold off a
+        // handle drop that needs the write lock to retire the queue.
+        let queue = self.nodestore_write_queue.read().clone();
+        if let Some(queue) = queue {
             return self.enqueue_nodestore_upsert(&queue, node_key_hex, rec);
         }
         self.apply_nodestore_upsert_direct(node_key_hex, rec)
@@ -5324,9 +5561,9 @@ impl MachineRegistry {
         let result = match queue.tx.send(NodeStoreWriteWork::Upsert {
             node_key_hex,
             rec: Box::new(rec),
-            result_tx,
+            result_tx: NodeStoreReply::Sync(result_tx),
         }) {
-            Ok(()) => result_rx.recv().unwrap_or_else(|_| {
+            Ok(()) => blocking_section(|| result_rx.recv()).unwrap_or_else(|_| {
                 self.apply_nodestore_upsert_direct(fallback_node_key_hex, fallback_rec)
             }),
             Err(std_mpsc::SendError(NodeStoreWriteWork::Upsert {
@@ -5336,7 +5573,8 @@ impl MachineRegistry {
                 NodeStoreWriteWork::Delete { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
                 | NodeStoreWriteWork::UpdateMany { .. }
-                | NodeStoreWriteWork::Rekey { .. },
+                | NodeStoreWriteWork::Rekey { .. }
+                | NodeStoreWriteWork::Wake,
             )) => unreachable!(),
         };
         self.metrics
@@ -5378,10 +5616,9 @@ impl MachineRegistry {
             .fetch_add(1, Ordering::SeqCst);
         let result = match queue.tx.send(NodeStoreWriteWork::Delete {
             node_key_hex,
-            result_tx,
+            result_tx: NodeStoreReply::Sync(result_tx),
         }) {
-            Ok(()) => result_rx
-                .recv()
+            Ok(()) => blocking_section(|| result_rx.recv())
                 .unwrap_or_else(|_| self.apply_nodestore_delete_direct(&fallback_node_key_hex)),
             Err(std_mpsc::SendError(NodeStoreWriteWork::Delete { node_key_hex, .. })) => {
                 self.apply_nodestore_delete_direct(&node_key_hex)
@@ -5390,7 +5627,8 @@ impl MachineRegistry {
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
                 | NodeStoreWriteWork::UpdateMany { .. }
-                | NodeStoreWriteWork::Rekey { .. },
+                | NodeStoreWriteWork::Rekey { .. }
+                | NodeStoreWriteWork::Wake,
             )) => unreachable!(),
         };
         self.metrics
@@ -5430,10 +5668,9 @@ impl MachineRegistry {
         let result = match queue.tx.send(NodeStoreWriteWork::UpdateBool {
             operation,
             update,
-            result_tx,
+            result_tx: NodeStoreReply::Sync(result_tx),
         }) {
-            Ok(()) => result_rx
-                .recv()
+            Ok(()) => blocking_section(|| result_rx.recv())
                 .unwrap_or_else(|_| NodeStoreBoolUpdateOutcome::unchanged(false)),
             Err(std_mpsc::SendError(NodeStoreWriteWork::UpdateBool {
                 operation, update, ..
@@ -5442,7 +5679,8 @@ impl MachineRegistry {
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::Delete { .. }
                 | NodeStoreWriteWork::UpdateMany { .. }
-                | NodeStoreWriteWork::Rekey { .. },
+                | NodeStoreWriteWork::Rekey { .. }
+                | NodeStoreWriteWork::Wake,
             )) => unreachable!(),
         };
         self.metrics
@@ -5510,10 +5748,9 @@ impl MachineRegistry {
         let result = match queue.tx.send(NodeStoreWriteWork::UpdateMany {
             operation,
             update,
-            result_tx,
+            result_tx: NodeStoreReply::Sync(result_tx),
         }) {
-            Ok(()) => result_rx
-                .recv()
+            Ok(()) => blocking_section(|| result_rx.recv())
                 .unwrap_or_else(|_| NodeStoreManyUpdateOutcome::unchanged()),
             Err(std_mpsc::SendError(NodeStoreWriteWork::UpdateMany {
                 operation, update, ..
@@ -5522,7 +5759,8 @@ impl MachineRegistry {
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::Delete { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
-                | NodeStoreWriteWork::Rekey { .. },
+                | NodeStoreWriteWork::Rekey { .. }
+                | NodeStoreWriteWork::Wake,
             )) => unreachable!(),
         };
         self.metrics
@@ -5603,10 +5841,10 @@ impl MachineRegistry {
             rec: Box::new(rec),
             changes,
             final_presence_node_id,
-            result_tx,
+            result_tx: NodeStoreReply::Sync(result_tx),
         }) {
             Ok(()) => {
-                if result_rx.recv().is_err() {
+                if blocking_section(|| result_rx.recv()).is_err() {
                     self.apply_nodestore_rekey_direct(
                         &fallback_old_node_key_hex,
                         fallback_new_node_key_hex,
@@ -5633,12 +5871,143 @@ impl MachineRegistry {
                 NodeStoreWriteWork::Upsert { .. }
                 | NodeStoreWriteWork::Delete { .. }
                 | NodeStoreWriteWork::UpdateBool { .. }
-                | NodeStoreWriteWork::UpdateMany { .. },
+                | NodeStoreWriteWork::UpdateMany { .. }
+                | NodeStoreWriteWork::Wake,
             )) => unreachable!(),
         }
         self.metrics
             .nodestore_queue_depth
             .fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Queue `build(reply)` and wait for its batch without parking a runtime
+    /// worker or keeping the queue's sender alive.
+    ///
+    /// The sender is dropped before the await. A [`NodeStoreWriteBatcherHandle`]
+    /// dropped on the runtime thread joins the writer, which exits only once
+    /// every sender is gone; a task parked here while holding one could never
+    /// be polled to release it. `Err` hands the work back when the queue is
+    /// closed. `Ok(None)` means the writer dropped the reply unanswered.
+    async fn send_nodestore_work_async<T>(
+        &self,
+        queue: NodeStoreWriteQueue,
+        build: impl FnOnce(NodeStoreReply<T>) -> NodeStoreWriteWork,
+    ) -> Result<Option<T>, NodeStoreWriteWork> {
+        let _depth = QueueDepthGuard::enter(&self.metrics.nodestore_queue_depth);
+        let (result_tx, result_rx) = oneshot::channel();
+        queue
+            .tx
+            .send(build(NodeStoreReply::Async(result_tx)))
+            .map_err(|std_mpsc::SendError(work)| work)?;
+        drop(queue);
+        Ok(result_rx.await.ok())
+    }
+
+    async fn upsert_record_async(&self, node_key_hex: String, rec: MachineRecord) -> bool {
+        let queue = self.nodestore_write_queue.read().clone();
+        let Some(queue) = queue else {
+            return self.apply_nodestore_upsert_direct(node_key_hex, rec);
+        };
+        let fallback = (node_key_hex.clone(), rec.clone());
+        match self
+            .send_nodestore_work_async(queue, |result_tx| NodeStoreWriteWork::Upsert {
+                node_key_hex,
+                rec: Box::new(rec),
+                result_tx,
+            })
+            .await
+        {
+            Ok(Some(existed)) => existed,
+            Ok(None) => self.apply_nodestore_upsert_direct(fallback.0, fallback.1),
+            Err(NodeStoreWriteWork::Upsert {
+                node_key_hex, rec, ..
+            }) => self.apply_nodestore_upsert_direct(node_key_hex, *rec),
+            Err(_) => unreachable!("only the submitted work is handed back"),
+        }
+    }
+
+    /// Async form of [`Self::apply_nodestore_bool_update`]: the caller resumes
+    /// when its batch is published, with no runtime worker blocked meanwhile.
+    async fn apply_nodestore_bool_update_async(
+        &self,
+        operation: &'static str,
+        update: NodeStoreBoolUpdateFn,
+    ) -> NodeStoreBoolUpdateOutcome {
+        let queue = self.nodestore_write_queue.read().clone();
+        let outcome = match queue {
+            None => self.apply_nodestore_bool_update_direct(operation, update),
+            Some(queue) => match self
+                .send_nodestore_work_async(queue, |result_tx| NodeStoreWriteWork::UpdateBool {
+                    operation,
+                    update,
+                    result_tx,
+                })
+                .await
+            {
+                Ok(Some(outcome)) => outcome,
+                Ok(None) => NodeStoreBoolUpdateOutcome::unchanged(false),
+                Err(NodeStoreWriteWork::UpdateBool {
+                    operation, update, ..
+                }) => self.apply_nodestore_bool_update_direct(operation, update),
+                Err(_) => unreachable!("only the submitted work is handed back"),
+            },
+        };
+        if let Some(node_id) = outcome.clear_unhealthy_route_state {
+            self.primary_routes.write().clear_unhealthy(node_id);
+        }
+        outcome
+    }
+
+    async fn apply_nodestore_rekey_async(
+        &self,
+        old_node_key_hex: String,
+        new_node_key_hex: String,
+        rec: MachineRecord,
+        changes: Vec<PendingMapChange>,
+        final_presence_node_id: Option<u64>,
+    ) {
+        let queue = self.nodestore_write_queue.read().clone();
+        let Some(queue) = queue else {
+            self.apply_nodestore_rekey_direct(&old_node_key_hex, new_node_key_hex, rec, changes);
+            return;
+        };
+        let fallback = (
+            old_node_key_hex.clone(),
+            new_node_key_hex.clone(),
+            rec.clone(),
+            changes.clone(),
+        );
+        match self
+            .send_nodestore_work_async(queue, |result_tx| NodeStoreWriteWork::Rekey {
+                old_node_key_hex,
+                new_node_key_hex,
+                rec: Box::new(rec),
+                changes,
+                final_presence_node_id,
+                result_tx,
+            })
+            .await
+        {
+            Ok(Some(())) => {}
+            Ok(None) => {
+                self.apply_nodestore_rekey_direct(&fallback.0, fallback.1, fallback.2, fallback.3);
+            }
+            Err(NodeStoreWriteWork::Rekey {
+                old_node_key_hex,
+                new_node_key_hex,
+                rec,
+                changes,
+                ..
+            }) => {
+                self.apply_nodestore_rekey_direct(
+                    &old_node_key_hex,
+                    new_node_key_hex,
+                    *rec,
+                    changes,
+                );
+            }
+            Err(_) => unreachable!("only the submitted work is handed back"),
+        }
     }
 
     fn apply_nodestore_rekey_direct(
@@ -5739,6 +6108,7 @@ impl MachineRegistry {
                             outcome,
                         });
                     }
+                    NodeStoreWriteWork::Wake => {}
                     NodeStoreWriteWork::Rekey {
                         old_node_key_hex,
                         new_node_key_hex,
@@ -5817,7 +6187,7 @@ impl MachineRegistry {
                     result_tx, removed, ..
                 } => {
                     // A vanished caller cannot take responsibility for release.
-                    if let Err(std_mpsc::SendError(Some(removed))) = result_tx.send(removed) {
+                    if let Err(Some(removed)) = result_tx.send(removed) {
                         self.release_removed_node_addresses(removed);
                     }
                 }
@@ -6271,11 +6641,11 @@ impl MachineRegistry {
         connection
     }
 
-    fn track_stream_connection_quiet(
+    async fn track_stream_connection_quiet_async(
         machines: Arc<Self>,
         node_id: u64,
     ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
-        Self::acquire_stream_connection(machines, node_id, STREAM_OFFLINE_GRACE, true)
+        Self::acquire_stream_connection_async(machines, node_id, STREAM_OFFLINE_GRACE, true).await
     }
 
     fn acquire_stream_connection(
@@ -6284,6 +6654,44 @@ impl MachineRegistry {
         offline_grace: Duration,
         native: bool,
     ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
+        let acquisition = Self::stream_connection_acquisition(&machines, node_id, native);
+        let outcome = machines.apply_nodestore_bool_update("update", acquisition.update);
+        Self::finish_stream_connection(
+            machines,
+            node_id,
+            offline_grace,
+            acquisition.session,
+            &outcome,
+        )
+    }
+
+    /// [`Self::acquire_stream_connection`] for the `/map` handler: the connect
+    /// waits for its NodeStore batch without parking a runtime worker, so a
+    /// fleet reconnecting at once cannot stall handshakes or keepalives.
+    async fn acquire_stream_connection_async(
+        machines: Arc<Self>,
+        node_id: u64,
+        offline_grace: Duration,
+        native: bool,
+    ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
+        let acquisition = Self::stream_connection_acquisition(&machines, node_id, native);
+        let outcome = machines
+            .apply_nodestore_bool_update_async("update", acquisition.update)
+            .await;
+        Self::finish_stream_connection(
+            machines,
+            node_id,
+            offline_grace,
+            acquisition.session,
+            &outcome,
+        )
+    }
+
+    fn stream_connection_acquisition(
+        machines: &Arc<Self>,
+        node_id: u64,
+        native: bool,
+    ) -> StreamConnectionAcquisition {
         let native_work = native.then(|| machines.native_shutdown.begin()).flatten();
         let shutdown = machines.native_shutdown.clone();
         let active = machines.active_connections.clone();
@@ -6297,52 +6705,71 @@ impl MachineRegistry {
         let cancel_flag = cancelled.clone();
         let result = Arc::new(Mutex::new(None));
         let captured = result.clone();
-        let outcome = machines.apply_nodestore_bool_update(
-            "update",
-            Box::new(move |records| {
-                if native && shutdown.is_closing() {
-                    cancel_flag.store(true, Ordering::SeqCst);
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                }
-                let Some((_, record)) = records
-                    .iter()
-                    .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
-                else {
-                    return NodeStoreBoolUpdateOutcome::unchanged(false);
-                };
-                // Acquire state and batcher ownership in the same writer
-                // operation as expiry/online selection. A missing node owns
-                // no session, flag, generation or synthetic online entry.
-                let mut epochs = epochs.write();
-                let epoch = epochs
-                    .entry(node_id)
-                    .or_insert_with(|| Arc::new(()))
-                    .clone();
-                let mut active = active.write();
-                *active.entry(node_id).or_default() += 1;
-                *sessions.write().entry(node_id).or_default() += 1;
-                let generation = {
-                    let mut generations = generations.write();
-                    let next = generations
-                        .get(&node_id)
-                        .copied()
-                        .unwrap_or(0)
-                        .wrapping_add(1);
-                    generations.insert(node_id, next);
-                    next
-                };
-                disconnected.write().remove(&node_id);
-                let should_be_online = !record.is_expired_at(Utc::now());
-                online.write().insert(node_id, should_be_online);
-                flags.write().entry(node_id).or_default().push(cancel_flag);
-                *captured.lock() = Some((record.clone(), generation, should_be_online, epoch));
-                NodeStoreBoolUpdateOutcome {
-                    final_presence_node_id: Some(node_id),
-                    clear_unhealthy_route_state: Some(node_id),
-                    ..NodeStoreBoolUpdateOutcome::quiet(true)
-                }
-            }),
-        );
+        let update: NodeStoreBoolUpdateFn = Box::new(move |records| {
+            if native && shutdown.is_closing() {
+                cancel_flag.store(true, Ordering::SeqCst);
+                return NodeStoreBoolUpdateOutcome::unchanged(false);
+            }
+            let Some((_, record)) = records
+                .iter()
+                .find(|(key, record)| record.stable_node_id_for_key(key) == node_id)
+            else {
+                return NodeStoreBoolUpdateOutcome::unchanged(false);
+            };
+            // Acquire state and batcher ownership in the same writer
+            // operation as expiry/online selection. A missing node owns
+            // no session, flag, generation or synthetic online entry.
+            let mut epochs = epochs.write();
+            let epoch = epochs
+                .entry(node_id)
+                .or_insert_with(|| Arc::new(()))
+                .clone();
+            let mut active = active.write();
+            *active.entry(node_id).or_default() += 1;
+            *sessions.write().entry(node_id).or_default() += 1;
+            let generation = {
+                let mut generations = generations.write();
+                let next = generations
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .wrapping_add(1);
+                generations.insert(node_id, next);
+                next
+            };
+            disconnected.write().remove(&node_id);
+            let should_be_online = !record.is_expired_at(Utc::now());
+            online.write().insert(node_id, should_be_online);
+            flags.write().entry(node_id).or_default().push(cancel_flag);
+            *captured.lock() = Some((record.clone(), generation, should_be_online, epoch));
+            NodeStoreBoolUpdateOutcome {
+                final_presence_node_id: Some(node_id),
+                clear_unhealthy_route_state: Some(node_id),
+                ..NodeStoreBoolUpdateOutcome::quiet(true)
+            }
+        });
+        StreamConnectionAcquisition {
+            update,
+            session: StreamConnectionSession {
+                native_work,
+                cancelled,
+                result,
+            },
+        }
+    }
+
+    fn finish_stream_connection(
+        machines: Arc<Self>,
+        node_id: u64,
+        offline_grace: Duration,
+        session: StreamConnectionSession,
+        outcome: &NodeStoreBoolUpdateOutcome,
+    ) -> (StreamConnectionGuard, Option<PendingMapChange>) {
+        let StreamConnectionSession {
+            native_work,
+            cancelled,
+            result,
+        } = session;
         let acquired = result.lock().take();
         let generation = acquired
             .as_ref()
@@ -7088,14 +7515,14 @@ impl MachineRegistry {
         );
     }
 
-    pub(crate) fn try_replace_node_key_auth_completion(
+    pub(crate) async fn try_replace_node_key_auth_completion(
         &self,
         old_node_key_hex: &str,
         new_node_key_hex: String,
         mut rec: MachineRecord,
     ) -> Result<(), String> {
         #[cfg(feature = "admin")]
-        if self.finish_native_registration_publication(&rec)? {
+        if Box::pin(self.finish_native_registration_publication(&rec)).await? {
             return Ok(());
         }
         let existing = self.get(old_node_key_hex);
@@ -7106,13 +7533,15 @@ impl MachineRegistry {
         }
         let new_id = rec.stable_node_id_for_key(&new_node_key_hex);
         let node_key_for_presence = new_node_key_hex.clone();
-        self.replace_node_key_with_changes_and_presence(
-            old_node_key_hex,
+        rec.node_key_hex.clone_from(&new_node_key_hex);
+        self.apply_nodestore_rekey_async(
+            old_node_key_hex.to_string(),
             new_node_key_hex,
             rec,
             Vec::new(),
             Some(new_id),
-        );
+        )
+        .await;
         let Some(current) = self
             .get(&node_key_for_presence)
             .filter(|node| node.stable_node_id() == new_id)
@@ -7795,19 +8224,36 @@ impl MachineRegistry {
     /// `DashMap<String, AtomicI64>` so touches don't clone the main
     /// registry; the API stays the same.
     pub fn touch_last_seen(&self, node_key_hex: &str) -> bool {
-        let now = Utc::now();
-        let node_key_hex = node_key_hex.to_string();
         self.apply_nodestore_bool_update(
             "touch_last_seen",
-            Box::new(move |map| match map.get_mut(&node_key_hex) {
-                Some(rec) => {
-                    rec.last_seen = now;
-                    NodeStoreBoolUpdateOutcome::quiet(true)
-                }
-                None => NodeStoreBoolUpdateOutcome::unchanged(false),
-            }),
+            Self::touch_last_seen_update(node_key_hex),
         )
         .applied
+    }
+
+    /// [`Self::touch_last_seen`] for the `/map` handler: it resumes when the
+    /// stamp's batch is published, without parking the runtime worker that is
+    /// serving the request (every concurrent `/map` would otherwise hold one
+    /// for up to a full batch period).
+    pub async fn touch_last_seen_async(&self, node_key_hex: &str) -> bool {
+        self.apply_nodestore_bool_update_async(
+            "touch_last_seen",
+            Self::touch_last_seen_update(node_key_hex),
+        )
+        .await
+        .applied
+    }
+
+    fn touch_last_seen_update(node_key_hex: &str) -> NodeStoreBoolUpdateFn {
+        let now = Utc::now();
+        let node_key_hex = node_key_hex.to_string();
+        Box::new(move |map| match map.get_mut(&node_key_hex) {
+            Some(rec) => {
+                rec.last_seen = now;
+                NodeStoreBoolUpdateOutcome::quiet(true)
+            }
+            None => NodeStoreBoolUpdateOutcome::unchanged(false),
+        })
     }
 
     /// Replace a machine's `forced_tags` list. Empty-list admin
@@ -10467,6 +10913,190 @@ mod registry_tests {
         assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
         assert!(new_changes[0].content.peers_changed.is_empty());
         assert!(new_changes[0].content.peer_patches.is_empty());
+    }
+
+    /// Go's `processWrite` applies on a free-running ticker. A write that
+    /// arrives mid-window rides the batch already open and does not push the
+    /// tick back, so both writers finish at the first tick.
+    #[tokio::test]
+    async fn nodestore_write_batcher_tick_is_not_extended_by_later_arrivals() {
+        let reg = Arc::new(MachineRegistry::new());
+        let period = Duration::from_millis(600);
+        let handle = reg.configure_nodestore_write_batcher(100, period);
+        let started = Instant::now();
+
+        let first = {
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                reg.upsert_record_async("nk-first".into(), mk_record(1))
+                    .await;
+                started.elapsed()
+            })
+        };
+        tokio::time::sleep(period * 6 / 10).await;
+        let second = {
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                reg.upsert_record_async("nk-second".into(), mk_record(2))
+                    .await;
+                started.elapsed()
+            })
+        };
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+        // An inactivity timeout restarted by the second write would end the
+        // window at 1.6 periods instead.
+        assert!(
+            first < period * 4 / 3,
+            "first write waited {first:?} for a {period:?} tick"
+        );
+        assert!(
+            second < period * 4 / 3,
+            "second write waited {second:?} for a {period:?} tick"
+        );
+        let batches = reg.nodestore_batch_size_metrics();
+        assert_eq!((batches.count, batches.sum), (1, 2.0));
+        assert_eq!(reg.len(), 2);
+        drop(handle);
+    }
+
+    /// While idle the writer does not tick, but a write that arrives later still
+    /// waits for the next period boundary rather than a full period.
+    #[tokio::test]
+    async fn nodestore_write_batcher_idle_period_does_not_delay_the_next_write_by_more_than_one_tick()
+     {
+        let reg = Arc::new(MachineRegistry::new());
+        let period = Duration::from_millis(300);
+        let _handle = reg.configure_nodestore_write_batcher(100, period);
+        tokio::time::sleep(period * 5 / 2).await;
+
+        let started = Instant::now();
+        reg.upsert_record_async("nk-late".into(), mk_record(1))
+            .await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited <= period + Duration::from_millis(200),
+            "write after idling waited {waited:?} for a {period:?} tick"
+        );
+        assert_eq!(reg.len(), 1);
+    }
+
+    /// Dropping the handle on the runtime thread joins the writer. A task parked
+    /// on its reply must not keep the queue open, and the open batch is flushed
+    /// instead of waiting out the (here, hour-long) period.
+    #[test]
+    fn dropping_the_batcher_flushes_async_waiters_on_a_current_thread_runtime() {
+        let (done_tx, done_rx) = std_mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            runtime.block_on(async {
+                let reg = Arc::new(MachineRegistry::new());
+                let handle = reg.configure_nodestore_write_batcher(100, Duration::from_secs(3600));
+                let writer = {
+                    let reg = reg.clone();
+                    tokio::spawn(async move {
+                        reg.upsert_record_async("nk-shutdown".into(), mk_record(1))
+                            .await
+                    })
+                };
+                while reg.nodestore_queue_depth() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                drop(handle);
+                assert!(
+                    !writer.await.expect("writer task"),
+                    "the node did not exist before the flush"
+                );
+                assert_eq!(reg.len(), 1);
+                assert_eq!(reg.nodestore_queue_depth(), 0);
+            });
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("dropping the batcher deadlocked with an async writer parked on it");
+    }
+
+    /// A thread blocked in the sync writer holds a sender, so the writer cannot
+    /// see the queue close. Dropping the handle must still answer it at once,
+    /// not after the (here, hour-long) tick.
+    #[test]
+    fn dropping_the_batcher_answers_blocked_sync_writers_without_waiting_for_the_tick() {
+        let (done_tx, done_rx) = std_mpsc::channel();
+        std::thread::spawn(move || {
+            let reg = Arc::new(MachineRegistry::new());
+            let handle = reg.configure_nodestore_write_batcher(100, Duration::from_secs(3600));
+            let writer = {
+                let reg = reg.clone();
+                std::thread::spawn(move || reg.upsert("nk-blocked".into(), mk_record(1)))
+            };
+            while reg.nodestore_queue_depth() == 0 {
+                std::thread::yield_now();
+            }
+            drop(handle);
+            writer.join().expect("blocked writer");
+            assert_eq!(reg.len(), 1);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("dropping the batcher left a blocked sync writer waiting for the tick");
+    }
+
+    /// Callers that still use the blocking writers from async code (the sync
+    /// registry API) hand their worker over for the wait, so a burst of them
+    /// cannot park every worker of a small runtime behind the writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_nodestore_writes_from_async_tasks_do_not_starve_the_runtime() {
+        let reg = Arc::new(MachineRegistry::new());
+        let period = Duration::from_millis(600);
+        let _handle = reg.configure_nodestore_write_batcher(100, period);
+        for index in 1..=8 {
+            let mut rec = mk_record(index);
+            rec.node_key_hex = format!("nk-{index}");
+            reg.upsert(rec.node_key_hex.clone(), rec);
+        }
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let canary = {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let mut last = Instant::now();
+                while !stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let now = Instant::now();
+                    worst = worst.max(now - last);
+                    last = now;
+                }
+                worst
+            })
+        };
+        let started = Instant::now();
+        let mut touches = tokio::task::JoinSet::new();
+        for index in 1..=8 {
+            let reg = reg.clone();
+            touches.spawn(async move { reg.touch_last_seen(&format!("nk-{index}")) });
+        }
+        while let Some(done) = touches.join_next().await {
+            assert!(done.expect("touch task"));
+        }
+        let elapsed = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        let worst_gap = canary.await.expect("canary task");
+
+        assert!(
+            elapsed < period * 2,
+            "8 blocking writes took {elapsed:?}; they must share one {period:?} batch"
+        );
+        assert!(
+            worst_gap < period / 2,
+            "runtime stalled for {worst_gap:?} behind blocking NodeStore writes"
+        );
     }
 
     #[test]

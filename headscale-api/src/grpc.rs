@@ -988,7 +988,7 @@ pub mod upstream {
                 None => return Err(Status::unknown("node not found in registration cache")),
             };
             let service = Self::clone(self);
-            crate::tailscale_wire::complete_state_mutation(async move {
+            crate::tailscale_wire::complete_state_mutation(Box::pin(async move {
                 // State.HandleNodeFromAuthPath resolves the numeric user after
                 // the pending entry exists, before waiting for its machine lock.
                 let captured_user = service
@@ -1078,6 +1078,7 @@ pub mod upstream {
                                 wire_record.node_key_hex.clone(),
                                 wire_record.clone(),
                             )
+                            .await
                             .map_err(Status::unknown)?;
                     } else {
                         registry
@@ -1085,6 +1086,7 @@ pub mod upstream {
                                 wire_record.node_key_hex.clone(),
                                 wire_record.clone(),
                             )
+                            .await
                             .map_err(Status::unknown)?;
                     }
                 }
@@ -1116,7 +1118,7 @@ pub mod upstream {
                         ))
                     })?;
                 Ok(response)
-            })
+            }))
             .await
             .map_err(|error| Status::internal(format!("finishing node registration: {error}")))?
         }
@@ -5814,6 +5816,198 @@ mod upstream_tests {
         .unwrap();
         assert_eq!(row.approved_route_list(), vec!["10.71.1.0/24"]);
         db.close().await;
+    }
+
+    /// Outcome of [`register_concurrently`].
+    struct ConcurrentRegistrationRun {
+        elapsed: std::time::Duration,
+        slowest: std::time::Duration,
+        batches: u64,
+        wire_registry: Arc<MachineRegistry>,
+    }
+
+    /// Drive `count` simultaneous CLI `RegisterNode` calls through the real
+    /// persistent service with the NodeStore write batcher on, as `headscale
+    /// nodes register` does against a running server. With `reauth`, the nodes
+    /// are registered once first and the timed burst is every one of them
+    /// registering again under a new node key.
+    async fn register_concurrently(
+        count: usize,
+        batch_timeout: std::time::Duration,
+        reauth: bool,
+    ) -> ConcurrentRegistrationRun {
+        let db = headscale_db::Database::in_memory()
+            .await
+            .expect("open in-memory db");
+        db.migrate().await.expect("migrate");
+        let users = Arc::new(PersistentUserAdmin::new(db.pool().clone()));
+        let wire_registry = Arc::new(MachineRegistry::new());
+        let machines = Arc::new(
+            PersistentMachineAdmin::new(db.pool().clone())
+                .with_user_admin(users.clone())
+                .with_wire_registry(wire_registry.clone()),
+        );
+        let registration_cache = Arc::new(RegistrationCache::new());
+        let service = Arc::new(
+            HeadscaleAdminService::with_user_admin(
+                users.clone(),
+                Arc::new(PersistentApiKeyAdmin::new_for_test(db.pool().clone())),
+                Arc::new(
+                    PersistentPreauthAdmin::new_for_test(db.pool().clone())
+                        .with_user_admin(users.clone()),
+                ),
+                PolicyStore::new(),
+                machines,
+            )
+            .with_database_pool(db.pool().clone())
+            .with_policy_pool(db.pool().clone())
+            .with_registration_cache(registration_cache.clone())
+            .with_wire_registry(wire_registry.clone()),
+        );
+        service
+            .create_user(Request::new(CreateUserRequest {
+                name: "alice".into(),
+                display_name: String::new(),
+                email: String::new(),
+                picture_url: String::new(),
+            }))
+            .await
+            .unwrap();
+        let batcher = wire_registry.configure_nodestore_write_batcher(100, batch_timeout);
+
+        // One burst of `count` registrations. `generation` selects fresh
+        // registration ids and node keys; machine keys repeat across
+        // generations so a second burst re-registers the same nodes.
+        let burst = |generation: usize| {
+            let service = service.clone();
+            let registration_cache = registration_cache.clone();
+            async move {
+                for index in 0..count {
+                    let registration = MachineRecord::new_at(
+                        Utc::now(),
+                        format!("{:064x}", 0x1000 + generation * 0x1000 + index),
+                        format!("{:064x}", 0x9000 + index),
+                        String::new(),
+                        format!("burst-{index}"),
+                        Ipv4Addr::new(
+                            100,
+                            64,
+                            u8::try_from(index / 250).unwrap(),
+                            2 + u8::try_from(index % 250).unwrap(),
+                        ),
+                        false,
+                    );
+                    registration_cache
+                        .insert(format!("{:024}", generation * count + index), registration);
+                }
+                let started = std::time::Instant::now();
+                let mut calls = tokio::task::JoinSet::new();
+                for index in 0..count {
+                    let service = service.clone();
+                    calls.spawn(async move {
+                        let call = std::time::Instant::now();
+                        let node = service
+                            .register_node(Request::new(RegisterNodeRequest {
+                                user: "alice".into(),
+                                key: format!("hskey-authreq-{:024}", generation * count + index),
+                            }))
+                            .await
+                            .expect("registration succeeds")
+                            .into_inner()
+                            .node
+                            .expect("registered node");
+                        (node.id, call.elapsed())
+                    });
+                }
+                let mut ids = std::collections::BTreeSet::new();
+                let mut slowest = std::time::Duration::ZERO;
+                while let Some(done) = calls.join_next().await {
+                    let (id, took) = done.expect("registration task");
+                    assert!(ids.insert(id), "node id {id} issued twice");
+                    slowest = slowest.max(took);
+                }
+                assert_eq!(ids.len(), count);
+                (started.elapsed(), slowest, ids)
+            }
+        };
+
+        let mut generation = 0;
+        let mut first_ids = None;
+        if reauth {
+            first_ids = Some(burst(0).await.2);
+            generation = 1;
+        }
+        let batches_before = wire_registry.nodestore_batch_size_metrics().count;
+        let (elapsed, slowest, ids) = burst(generation).await;
+        if let Some(first_ids) = first_ids {
+            assert_eq!(ids, first_ids, "re-registration must keep every node's id");
+        }
+        let batches = wire_registry.nodestore_batch_size_metrics().count - batches_before;
+        drop(batcher);
+        db.close().await;
+        ConcurrentRegistrationRun {
+            elapsed,
+            slowest,
+            batches,
+            wire_registry,
+        }
+    }
+
+    /// `headscale nodes register` against a running server, 100 at once, with the
+    /// production NodeStore batch period. Each registration makes two writer
+    /// round trips, so with one shared batch per period the burst needs about
+    /// two periods however many register. A registration that parks its runtime
+    /// worker (or a pooled database connection stranded behind that worker)
+    /// instead completes only as many as there are workers per period, which
+    /// is the one-registration-per-second ceiling seen with a single SQLite
+    /// connection. Two workers make any blocking visible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_cli_registrations_share_nodestore_batches() {
+        let period = std::time::Duration::from_millis(500);
+        let run = register_concurrently(100, period, false).await;
+
+        assert!(
+            run.elapsed < period * 6,
+            "100 concurrent registrations took {:?} against a {period:?} batch period \
+             (slowest call {:?}); they must share batches, not queue behind each other",
+            run.elapsed,
+            run.slowest,
+        );
+        assert!(
+            run.batches <= 6,
+            "100 registrations should publish a handful of NodeStore batches, got {}",
+            run.batches
+        );
+        assert_eq!(run.wire_registry.len(), 100);
+        let max_batch = run.wire_registry.nodestore_batch_size_metrics();
+        assert!(
+            max_batch.sum >= 190.0,
+            "every registration's two writes must be counted in a batch, got {}",
+            max_batch.sum
+        );
+    }
+
+    /// The same burst, with every node re-registering under a new node key.
+    /// An existing node's live edit used to run under the native save lock, so
+    /// these would have been strictly serial even with a non-blocking writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_cli_reregistrations_share_nodestore_batches() {
+        let period = std::time::Duration::from_millis(500);
+        let run = register_concurrently(100, period, true).await;
+
+        assert!(
+            run.elapsed < period * 6,
+            "100 concurrent re-registrations took {:?} against a {period:?} batch period \
+             (slowest call {:?}); they must share batches, not queue behind the save lock",
+            run.elapsed,
+            run.slowest,
+        );
+        assert!(
+            run.batches <= 6,
+            "100 re-registrations should publish a handful of NodeStore batches, got {}",
+            run.batches
+        );
+        assert_eq!(run.wire_registry.len(), 100);
     }
 
     #[tokio::test]

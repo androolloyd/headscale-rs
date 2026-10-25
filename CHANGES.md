@@ -1,5 +1,25 @@
 # Changes
 
+## 2026-10-25 — Concurrent registration and `/map` no longer queue behind the NodeStore writer
+
+- Registrations were effectively serial (about 1 per second with the 500 ms
+  default batch period; CLI `nodes register` bursts timed out). A handler
+  blocked its runtime worker on the NodeStore write batch, which also stranded
+  sqlx's connection-return task in that worker's local queue, so with a small
+  pool (one connection under the headscale-go pool settings) each registration
+  held the whole database pool for its two writer round trips.
+- NodeStore writes from the registration, auth-completion and `/map` paths now
+  await a tokio oneshot instead of blocking a worker, and the remaining
+  blocking callers hand their worker off with `block_in_place`. A burst shares
+  one batch per period however large it is.
+- The writer batches like `NodeStore.processWrite`: it applies at the next tick
+  of a free-running period or when `node_store_batch_size` is reached, and an
+  arriving write no longer extends the window. Stopping applies the open batch
+  at once.
+- Existing-node re-registration performs its NodeStore edit before taking the
+  native save lock, which now covers only the SQL write (as `persistNode` does
+  in headscale-go).
+
 ## 2026-10-25 — Resource-limit hardening from a public assessment
 
 - Registration cache: per-source quota for unauthenticated pending

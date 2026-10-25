@@ -483,7 +483,7 @@ async fn register_inner_with_hostinfo(
     // Go's accepted auth-key handler keeps running after the HTTP caller
     // disconnects. Own lookup, validation, planning and publication together,
     // including time spent waiting for the registration locks or bcrypt.
-    match super::complete_state_mutation(register_auth_key(
+    match super::complete_state_mutation(Box::pin(register_auth_key(
         state,
         node_key_hex,
         machine_key_hex,
@@ -491,7 +491,7 @@ async fn register_inner_with_hostinfo(
         requested_hostinfo,
         requested_tags,
         now,
-    ))
+    )))
     .await
     {
         Ok(response) => response,
@@ -818,10 +818,12 @@ async fn register_auth_key(
                         registered_key.clone(),
                         saved.record,
                     )
+                    .await
                     .map_err(super::AuthKeyRegistrationError::Storage)?;
             } else {
                 machines
                     .try_upsert_auth_completion(registered_key.clone(), saved.record)
+                    .await
                     .map_err(super::AuthKeyRegistrationError::Storage)?;
             }
             let record = machines.get(&registered_key).ok_or_else(|| {
@@ -854,11 +856,13 @@ async fn register_auth_key(
     }
     match state
         .machines
-        .commit_volatile_auth_registration_with_hostinfo(
+        .commit_volatile_auth_registration_with_hostinfo_async(
             existing_machine.as_ref().map(|(key, _)| key.as_str()),
             rec,
             Some(native_hostinfo),
-        ) {
+        )
+        .await
+    {
         Ok(record) => {
             if let Err(error) =
                 auto_approve_registered_routes(&state.machines, &state.policy, None, &record).await

@@ -2073,7 +2073,7 @@ fn apply_new_association_projection(
     Ok(())
 }
 
-fn finish_new_native_registration(
+async fn finish_new_native_registration(
     registry: Option<&MachineRegistry>,
     row: &headscale_db::headscale_nodes::HeadscaleNodeRow,
     mut record: MachineRecord,
@@ -2149,6 +2149,7 @@ fn finish_new_native_registration(
         .map_err(|error| MachineAdminError::BadRequest(error.to_string()))?;
     let record = registry
         .put_new_native_registration(record, hostinfo, native)
+        .await
         .map_err(MachineAdminError::BadRequest)?;
     Ok(record)
 }
@@ -2331,14 +2332,14 @@ fn prepare_cached_auth_registration(
 }
 
 impl LiveRegistrationSave {
-    fn begin(
+    async fn begin(
         registry: &MachineRegistry,
         prior: &headscale_db::headscale_nodes::HeadscaleNodeRow,
         params: &headscale_db::headscale_nodes::CreateParams,
         wire: Option<&MachineRecord>,
         auth_key: bool,
         associations: NativeNodeAssociations,
-    ) -> Result<Self, MachineAdminError> {
+    ) -> Result<Box<Self>, MachineAdminError> {
         let id = native_row_id(prior)?;
         let params = params.clone();
         let wire = wire.cloned();
@@ -2347,8 +2348,8 @@ impl LiveRegistrationSave {
         } else {
             None
         };
-        let (update, registration) =
-            registry.begin_native_registration(id, move |before, prior_native| {
+        let (update, registration) = registry
+            .begin_native_registration(id, move |before, prior_native| {
                 prepare_cached_auth_registration(
                     id,
                     before,
@@ -2358,22 +2359,26 @@ impl LiveRegistrationSave {
                     auth_key,
                     associations,
                 )
-            })?;
-        Ok(Self {
+            })
+            .await?;
+        // Boxed: this is held across the SQL save, and inline it would more
+        // than double the size of every registration future above it.
+        Ok(Box::new(Self {
             update,
             registration,
             auth_key_to_consume,
-        })
+        }))
     }
 
-    fn rollback(&self, registry: &MachineRegistry) -> Result<(), MachineAdminError> {
+    async fn rollback(&self, registry: &MachineRegistry) -> Result<(), MachineAdminError> {
         registry
             .rollback_native_registration(&self.update)
+            .await
             .map_err(MachineAdminError::BadRequest)?;
         Ok(())
     }
 
-    fn finish(self, registry: &MachineRegistry) -> MachineRecord {
+    fn finish(self: Box<Self>, registry: &MachineRegistry) -> MachineRecord {
         if let Some(key) = &self.auth_key_to_consume {
             key.consume();
         }
@@ -2866,29 +2871,32 @@ impl PersistentMachineAdmin {
         captured_user: Option<&super::users::UserRegistrationSnapshot>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         let subject = record.id.clone();
-        let mut plan = self
-            .prepare_auth_path_registration(
-                record,
-                policy,
-                auth_key_id,
-                user_id_override,
-                validate_requested_tags,
-                wire_record,
-                None,
-                captured_user,
-            )
-            .await?;
+        let mut plan = Box::pin(self.prepare_auth_path_registration(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            None,
+            captured_user,
+        ))
+        .await?;
         apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())?;
         if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
-            let _persist = registry.lock_native_persistence().await;
-            let live = LiveRegistrationSave::begin(
+            // Batch wait first, lock second: the live edit goes through the
+            // NodeStore writer like Go's UpdateNode, so concurrent registrations
+            // share one batch. The save lock covers only the SQL write.
+            let live = Box::pin(LiveRegistrationSave::begin(
                 registry,
                 prior,
                 &plan.params,
                 wire_record,
                 !validate_requested_tags,
                 plan.associations.clone(),
-            )?;
+            ))
+            .await?;
+            let _persist = registry.lock_native_persistence().await;
             if let Err(error) = headscale_db::headscale_nodes::save_cached_registration(
                 &self.pool,
                 live.registration.clone(),
@@ -2896,7 +2904,7 @@ impl PersistentMachineAdmin {
             .await
             {
                 if !validate_requested_tags {
-                    live.rollback(registry)?;
+                    live.rollback(registry).await?;
                 }
                 return Err(db_error_to_machine(error, &subject));
             }
@@ -2964,13 +2972,14 @@ impl PersistentMachineAdmin {
                     .0
             }
         };
-        let record = finish_new_native_registration(
+        let record = Box::pin(finish_new_native_registration(
             self.wire_registry.as_deref(),
             &row,
             record,
             !validate_requested_tags,
             plan.associations.clone(),
-        )?;
+        ))
+        .await?;
         Ok(AuthPathRegistrationResult {
             record: machine_admin_record_from_wire(&record),
             new_node: true,
@@ -3776,29 +3785,32 @@ impl PersistentPostgresMachineAdmin {
         captured_user: Option<&super::users::UserRegistrationSnapshot>,
     ) -> Result<AuthPathRegistrationResult, MachineAdminError> {
         let subject = record.id.clone();
-        let mut plan = self
-            .prepare_auth_path_registration(
-                record,
-                policy,
-                auth_key_id,
-                user_id_override,
-                validate_requested_tags,
-                wire_record,
-                None,
-                captured_user,
-            )
-            .await?;
+        let mut plan = Box::pin(self.prepare_auth_path_registration(
+            record,
+            policy,
+            auth_key_id,
+            user_id_override,
+            validate_requested_tags,
+            wire_record,
+            None,
+            captured_user,
+        ))
+        .await?;
         apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())?;
         if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
-            let _persist = registry.lock_native_persistence().await;
-            let live = LiveRegistrationSave::begin(
+            // Batch wait first, lock second: the live edit goes through the
+            // NodeStore writer like Go's UpdateNode, so concurrent registrations
+            // share one batch. The save lock covers only the SQL write.
+            let live = Box::pin(LiveRegistrationSave::begin(
                 registry,
                 prior,
                 &plan.params,
                 wire_record,
                 !validate_requested_tags,
                 plan.associations.clone(),
-            )?;
+            ))
+            .await?;
+            let _persist = registry.lock_native_persistence().await;
             if let Err(error) = headscale_db::headscale_nodes::save_postgres_cached_registration(
                 &self.pool,
                 live.registration.clone(),
@@ -3806,7 +3818,7 @@ impl PersistentPostgresMachineAdmin {
             .await
             {
                 if !validate_requested_tags {
-                    live.rollback(registry)?;
+                    live.rollback(registry).await?;
                 }
                 return Err(db_error_to_machine(error, &subject));
             }
@@ -3875,13 +3887,14 @@ impl PersistentPostgresMachineAdmin {
                     .0
             }
         };
-        let record = finish_new_native_registration(
+        let record = Box::pin(finish_new_native_registration(
             self.wire_registry.as_deref(),
             &row,
             record,
             !validate_requested_tags,
             plan.associations.clone(),
-        )?;
+        ))
+        .await?;
         Ok(AuthPathRegistrationResult {
             record: machine_admin_record_from_wire(&record),
             new_node: true,
@@ -4574,6 +4587,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
                             wire_record.node_key_hex.clone(),
                             wire_record.clone(),
                         )
+                        .await
                         .map_err(crate::oidc::OidcRegistrationError::Store)?;
                 } else {
                     registry
@@ -4581,6 +4595,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentOidcRegistrationHandler 
                             wire_record.node_key_hex.clone(),
                             wire_record.clone(),
                         )
+                        .await
                         .map_err(crate::oidc::OidcRegistrationError::Store)?;
                 }
             }
@@ -4836,6 +4851,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
                             wire_record.node_key_hex.clone(),
                             wire_record.clone(),
                         )
+                        .await
                         .map_err(crate::oidc::OidcRegistrationError::Store)?;
                 } else {
                     registry
@@ -4843,6 +4859,7 @@ impl crate::oidc::OidcRegistrationHandler for PersistentPostgresOidcRegistration
                             wire_record.node_key_hex.clone(),
                             wire_record.clone(),
                         )
+                        .await
                         .map_err(crate::oidc::OidcRegistrationError::Store)?;
                 }
             }
@@ -5018,8 +5035,8 @@ impl PersistentMachineAdmin {
         let captured = captured_auth_key(credential.as_ref())?;
         let mut record = machine_admin_record_from_wire(&wire_record);
         record.register_method = REGISTER_METHOD_AUTH_KEY;
-        let mut plan = self
-            .prepare_auth_path_registration(
+        let mut plan = Box::pin(
+            self.prepare_auth_path_registration(
                 record,
                 policy,
                 auth_key_id,
@@ -5029,9 +5046,10 @@ impl PersistentMachineAdmin {
                 Some(&wire_record),
                 credential.as_ref(),
                 None,
-            )
-            .await
-            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())
             .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         if capture_from_candidate {
@@ -5049,16 +5067,20 @@ impl PersistentMachineAdmin {
             .as_ref()
             .map(|row| key_without_prefix("nodekey:", &row.node_key));
         if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
-            let _persist = registry.lock_native_persistence().await;
-            let live = LiveRegistrationSave::begin(
+            // Batch wait first, lock second: the live edit goes through the
+            // NodeStore writer like Go's UpdateNode, so concurrent registrations
+            // share one batch. The save lock covers only the SQL write.
+            let live = Box::pin(LiveRegistrationSave::begin(
                 registry,
                 prior,
                 &plan.params,
                 Some(&wire_record),
                 true,
                 plan.associations.clone(),
-            )
+            ))
+            .await
             .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let _persist = registry.lock_native_persistence().await;
             let committed = match captured.as_ref() {
                 Some(key) => {
                     headscale_db::auth_key_registration::commit_cached_sqlite_with_key(
@@ -5081,7 +5103,7 @@ impl PersistentMachineAdmin {
                 }
             };
             if let Err(error) = committed {
-                live.rollback(registry).map_err(|rollback| {
+                live.rollback(registry).await.map_err(|rollback| {
                     AuthKeyRegistrationError::Storage(format!(
                         "{error}; rollback failed: {rollback}"
                     ))
@@ -5176,13 +5198,14 @@ impl PersistentMachineAdmin {
                     .map_err(atomic_registration_error)?
             }
         };
-        let record = finish_new_native_registration(
+        let record = Box::pin(finish_new_native_registration(
             self.wire_registry.as_deref(),
             &row,
             wire_record,
             true,
             plan.associations.clone(),
-        )
+        ))
+        .await
         .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         Ok(PersistedMachineRegistration {
             record,
@@ -5496,8 +5519,8 @@ impl PersistentPostgresMachineAdmin {
         let captured = captured_auth_key(credential.as_ref())?;
         let mut record = machine_admin_record_from_wire(&wire_record);
         record.register_method = REGISTER_METHOD_AUTH_KEY;
-        let mut plan = self
-            .prepare_auth_path_registration(
+        let mut plan = Box::pin(
+            self.prepare_auth_path_registration(
                 record,
                 policy,
                 auth_key_id,
@@ -5507,9 +5530,10 @@ impl PersistentPostgresMachineAdmin {
                 Some(&wire_record),
                 credential.as_ref(),
                 None,
-            )
-            .await
-            .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         apply_registration_hostinfo(&mut plan.params, hostinfo.as_ref())
             .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         if capture_from_candidate {
@@ -5527,16 +5551,20 @@ impl PersistentPostgresMachineAdmin {
             .as_ref()
             .map(|row| key_without_prefix("nodekey:", &row.node_key));
         if let (Some(registry), Some(prior)) = (&self.wire_registry, plan.existing.as_ref()) {
-            let _persist = registry.lock_native_persistence().await;
-            let live = LiveRegistrationSave::begin(
+            // Batch wait first, lock second: the live edit goes through the
+            // NodeStore writer like Go's UpdateNode, so concurrent registrations
+            // share one batch. The save lock covers only the SQL write.
+            let live = Box::pin(LiveRegistrationSave::begin(
                 registry,
                 prior,
                 &plan.params,
                 Some(&wire_record),
                 true,
                 plan.associations.clone(),
-            )
+            ))
+            .await
             .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
+            let _persist = registry.lock_native_persistence().await;
             let committed = match captured.as_ref() {
                 Some(key) => {
                     headscale_db::auth_key_registration::commit_cached_postgres_with_key(
@@ -5559,7 +5587,7 @@ impl PersistentPostgresMachineAdmin {
                 }
             };
             if let Err(error) = committed {
-                live.rollback(registry).map_err(|rollback| {
+                live.rollback(registry).await.map_err(|rollback| {
                     AuthKeyRegistrationError::Storage(format!(
                         "{error}; rollback failed: {rollback}"
                     ))
@@ -5654,13 +5682,14 @@ impl PersistentPostgresMachineAdmin {
             .await
             .map_err(atomic_registration_error)?,
         };
-        let record = finish_new_native_registration(
+        let record = Box::pin(finish_new_native_registration(
             self.wire_registry.as_deref(),
             &row,
             wire_record,
             true,
             plan.associations.clone(),
-        )
+        ))
+        .await
         .map_err(|error| AuthKeyRegistrationError::Storage(error.to_string()))?;
         Ok(PersistedMachineRegistration {
             record,

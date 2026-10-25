@@ -1510,7 +1510,7 @@ async fn map_inner(
     // bookkeeping: only peer-visible state changes should produce map
     // churn. The COW update is O(n) in registry size; the perf concern
     // is documented on `MachineRegistry::touch_last_seen` itself.
-    state.machines.touch_last_seen(&node_key_hex);
+    state.machines.touch_last_seen_async(&node_key_hex).await;
     if let Some(touched) = state.machines.get(&node_key_hex) {
         own.last_seen = touched.last_seen;
     }
@@ -1662,12 +1662,11 @@ async fn map_inner(
     // also wait until Connect so peers see the current online route state.
     let mut deferred_change = None;
     if record_changed {
-        let Some(updated) = state.machines.apply_map_runtime_update(
-            &before_update,
-            own,
-            None,
-            hostinfo_replacement,
-        ) else {
+        let Some(updated) = state
+            .machines
+            .apply_map_runtime_update_async(&before_update, own, None, hostinfo_replacement)
+            .await
+        else {
             if req.stream {
                 return expired_missing_node_stream_response(&state, &node_key_hex, &req);
             }
@@ -1783,12 +1782,17 @@ async fn map_inner(
                         &missing_node_request,
                     ));
                 };
-                let native_connection = (route_mode == MapRouteMode::NativeFlat).then(|| {
-                    super::MachineRegistry::track_stream_connection_quiet(
-                        state.machines.clone(),
-                        record.stable_node_id_for_key(&node_key_hex),
+                let native_connection = if route_mode == MapRouteMode::NativeFlat {
+                    Some(
+                        super::MachineRegistry::track_stream_connection_quiet_async(
+                            state.machines.clone(),
+                            record.stable_node_id_for_key(&node_key_hex),
+                        )
+                        .await,
                     )
-                });
+                } else {
+                    None
+                };
                 if native_connection
                     .as_ref()
                     .is_some_and(|(connection, _)| !connection.acquired)
@@ -3786,6 +3790,116 @@ mod tests {
                 None
             }
         })
+    }
+
+    /// Every `/map` request stamps `last_seen` through the NodeStore writer.
+    /// With the writer batching, each of those waits up to a whole period; a
+    /// reconnect storm larger than the worker count would park every worker
+    /// (the handshake and keepalive handlers with them) if the wait blocked.
+    /// Sixteen nodes mapping at once on two workers must all finish within
+    /// about one period, in one batch, while an unrelated task keeps getting
+    /// scheduled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_map_requests_wait_for_the_nodestore_batch_without_parking_workers() {
+        let (state, _dir) = fixture();
+        let period = Duration::from_millis(600);
+        // Distinct machines: the handler serialises requests per machine key.
+        let nodes = (1..=16u8)
+            .map(|index| {
+                (
+                    format!("{index:02x}").repeat(32),
+                    format!("{:02x}", index + 100).repeat(32),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, (node_key, machine_key)) in nodes.iter().enumerate() {
+            state.machines.upsert(
+                node_key.clone(),
+                MachineRecord::new_at(
+                    chrono::Utc::now(),
+                    node_key.clone(),
+                    machine_key.clone(),
+                    "u".into(),
+                    format!("peer-{index}"),
+                    Ipv4Addr::new(100, 64, 0, 10 + index as u8),
+                    false,
+                ),
+            );
+        }
+        let published_before = state.machines.nodestore_batch_size_metrics().count;
+        let _batcher = state
+            .machines
+            .configure_nodestore_write_batcher(100, period);
+        let app = machine_router(state.clone()).layer(axum::middleware::from_fn(
+            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let machine_key = req
+                    .headers()
+                    .get("x-test-machine-key")
+                    .and_then(|value| value.to_str().ok())
+                    .expect("test machine key header")
+                    .to_string();
+                req.extensions_mut()
+                    .insert(NoisePeerMachineKey(machine_key));
+                next.run(req).await
+            },
+        ));
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let canary = {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                let mut last = std::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let now = std::time::Instant::now();
+                    worst = worst.max(now - last);
+                    last = now;
+                }
+                worst
+            })
+        };
+        let started = std::time::Instant::now();
+        let mut requests = tokio::task::JoinSet::new();
+        for (node_key, machine_key) in nodes {
+            let app = app.clone();
+            requests.spawn(async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/machine/nodekey:{node_key}/map"))
+                        .header("content-type", "application/json")
+                        .header("x-test-machine-key", machine_key)
+                        .body(axum::body::Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "Version": 113 })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            });
+        }
+        while let Some(status) = requests.join_next().await {
+            assert_eq!(status.unwrap(), StatusCode::OK);
+        }
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let worst_gap = canary.await.unwrap();
+
+        assert!(
+            elapsed < period * 2,
+            "16 map requests took {elapsed:?} on two workers with a {period:?} batch period"
+        );
+        assert!(
+            worst_gap < period / 2,
+            "runtime stalled for {worst_gap:?} while map requests waited on the NodeStore writer"
+        );
+        let published = state.machines.nodestore_batch_size_metrics().count - published_before;
+        assert!(
+            published <= 2,
+            "16 map requests published {published} NodeStore batches"
+        );
     }
 
     #[tokio::test]

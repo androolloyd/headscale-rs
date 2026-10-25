@@ -562,13 +562,15 @@ async fn postgres_foundation_applies_v0295_release_repairs_to_older_go_rows() ->
             sqlx::query_as("SELECT id, user_id, tags, expiry IS NOT NULL FROM nodes ORDER BY id")
                 .fetch_all(&mut schema.conn)
                 .await?;
+        // Go's recovery migration only restores user_id from the pre-auth key;
+        // it never rewrites the tags spelling, so a nil-slice 'null' stays.
         assert_eq!(
             nodes,
             vec![
-                (1, Some(10), "[]".into(), false),
+                (1, Some(10), "null".into(), false),
                 (2, None, "[\"tag:server\"]".into(), false),
-                (3, Some(10), "[]".into(), true),
-                (4, None, "[]".into(), false),
+                (3, Some(10), "null".into(), true),
+                (4, None, "null".into(), false),
             ]
         );
 

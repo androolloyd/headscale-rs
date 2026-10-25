@@ -649,6 +649,44 @@ async fn resolve_postgres_auto_given_name(
     Ok(resolve_given_name_from_existing(&base, rows))
 }
 
+/// Go's `NodeStore.PutNode` bumps a colliding GivenName (`base`, `base-1`, ...)
+/// when a new node is stored (`resolveGivenName`). The schema here also carries
+/// a unique `given_name` index that Go's schema lacks, so a new registration
+/// resolves the label against the stored nodes before inserting. `preferred`
+/// is the seeded GivenName; when empty the label derives from `hostname`.
+async fn resolve_new_node_given_name(
+    conn: &mut SqliteConnection,
+    preferred: &str,
+    hostname: &str,
+) -> Result<String> {
+    if preferred.is_empty() {
+        return resolve_auto_given_name(conn, None, hostname).await;
+    }
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT given_name FROM nodes WHERE given_name IS NOT NULL AND given_name != ''",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(resolve_given_name_from_existing(preferred, rows))
+}
+
+#[cfg(feature = "postgres-sqlx")]
+async fn resolve_new_node_postgres_given_name(
+    conn: &mut PgConnection,
+    preferred: &str,
+    hostname: &str,
+) -> Result<String> {
+    if preferred.is_empty() {
+        return resolve_postgres_auto_given_name(conn, None, hostname).await;
+    }
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT given_name FROM nodes WHERE given_name IS NOT NULL AND given_name != ''",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(resolve_given_name_from_existing(preferred, rows))
+}
+
 async fn create_given_name(conn: &mut SqliteConnection, params: &CreateParams) -> Result<String> {
     if params.given_name.is_empty() {
         resolve_auto_given_name(conn, None, &params.hostname).await
@@ -2705,6 +2743,49 @@ mod tests {
         .await
         .unwrap()
         .id
+    }
+
+    fn new_registration(n: u8, hostname: &str, given_name: &str) -> NewNodeRegistration {
+        NewNodeRegistration {
+            machine_key: format!("mkey:{n:064x}"),
+            node_key: format!("nodekey:{n:064x}"),
+            disco_key: format!("discokey:{n:064x}"),
+            endpoints: None,
+            host_info: None,
+            ipv4: Some(format!("100.64.0.{n}")),
+            ipv6: None,
+            hostname: hostname.into(),
+            given_name: given_name.into(),
+            user_id: None,
+            register_method: REGISTER_METHOD_AUTH_KEY.into(),
+            tags: None,
+            auth_key_id: None,
+            expiry: None,
+            last_seen: None,
+            approved_routes: None,
+        }
+    }
+
+    /// Go's NodeStore bumps a colliding GivenName (base, base-1, base-2, ...)
+    /// when it stores a new node; this schema also has a unique given_name
+    /// index, so a new registration must not hit it with a second "laptop"
+    /// (a different user logging in from the same hostname does exactly that).
+    #[tokio::test]
+    async fn new_registration_bumps_colliding_given_name_like_go_nodestore() {
+        let db = fresh_db().await;
+        let mut names = Vec::new();
+        for (n, given_name) in [(1, "laptop"), (2, "laptop"), (3, "laptop"), (4, "")] {
+            let row = create_new_registration(db.pool(), new_registration(n, "Laptop", given_name))
+                .await
+                .unwrap_or_else(|error| panic!("registration {n}: {error}"));
+            names.push(row.given_name);
+        }
+        assert_eq!(names, ["laptop", "laptop-1", "laptop-2", "laptop-3"]);
+        let stored: Vec<String> = sqlx::query_scalar("SELECT given_name FROM nodes ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, names);
     }
 
     async fn auth_key_id(db: &Database, user_id: i64) -> i64 {

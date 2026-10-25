@@ -88,6 +88,7 @@ pub mod acme;
 pub mod basic_handlers;
 pub mod be_transport;
 pub mod controlbase;
+pub mod database_health;
 mod debug_filters;
 mod debug_float;
 mod debug_json;
@@ -128,6 +129,7 @@ pub mod wire;
 mod wire_ids;
 
 pub use basic_handlers::DebugConfigInfo as RuntimeConfigSnapshot;
+pub use database_health::DatabaseHealthCheck;
 pub use knock::{KNOCK_HEADER, KNOCK_PATH_PREFIX, KnockConfig, NGINX_404_BODY};
 pub use noise::ServerNoiseKey;
 pub use web_registration::{CompletedWebRegistration, WebRegistrationError, WebRegistrationUser};
@@ -1310,6 +1312,13 @@ pub enum AuthKeyRegistrationError {
 /// registry.
 #[async_trait]
 pub trait MachineRegistrationStore: Send + Sync {
+    /// Liveness of the database behind this store, which `GET /health`
+    /// reports as headscale-go does (`State.PingDB`). Stores that are not
+    /// backed by a database keep the default and always report healthy.
+    async fn ping_database(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn supports_atomic_auth_key_registration(&self) -> bool {
         false
     }

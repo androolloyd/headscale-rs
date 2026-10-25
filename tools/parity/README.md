@@ -88,6 +88,38 @@ policy and SSH tests against the pinned Go policy manager. Upstream SaaS API
 verdicts and exact rejection text are recorded as context, not asserted as
 equivalent to headscale-go.
 
+## Packet filters: what runs, what is compared
+
+The `filter`, `filter_for_nodes` and `node_filters` outputs of the Rust side are
+produced by production code, not by a harness copy of the compiler.
+`tools/parity/headscale-rs/src/production_filter.rs` builds the inputs the
+server has at startup (a `MachineRegistry` holding the scenario nodes, plus the
+user list), loads the scenario policy through `PolicyStore::from_initial_registry_bytes`
+and reads:
+
+- `filter`: `PolicyStore::filter_rules`, compared with Go's `PolicyManager.Filter()`;
+- `node_filters` (every node of every scenario) and `filter_for_nodes` (the
+  named checks): `tailscale_wire::map::base_packet_filter_for_node` over the
+  node projection of `packet_filter_nodes_for_registry`, i.e. the
+  `PacketFilters["base"]` a `/machine/map` response carries, compared with
+  Go's `FilterForNode`.
+
+`headscale-api/tests/packet_filter_golden.rs` runs the same code against
+`tools/parity/golden/headscale-go-v0.29.5.json` under plain `cargo test`
+(no Go toolchain needed); the differential script keeps that golden honest by
+refusing to pass when the pinned Go module no longer produces it.
+
+Compared exactly: the number and order of the rules, and every field of every
+rule after sorting. Not compared by default: the order *inside* a rule. The Go
+harness sorts `SrcIPs`, `DstPorts` (by IP string, then ports), `IPProto`, the
+caps of a `CapGrant` and the `CapGrant` list before printing, and the Rust side
+applies the same sorts without de-duplicating, so a duplicate entry still shows.
+Run `PARITY_FILTER_ORDER=emitted ./scripts/headscale_go_diff.sh` to switch the
+sorts off on both sides (`CapGrant.Dsts` is always sorted by the Go harness's
+`prefixStrings`). On 2026-10-25 both modes match for all 104 scenarios.
+Scenarios Go rejects (`expect_policy_error`) are compared on the error class
+only and are not compiled into filters.
+
 The default differential run also checks
 `tools/parity/golden/headscale-go-v0.29.5.json`
 after confirming the Rust and Go outputs match. Refresh it with

@@ -5006,6 +5006,105 @@ database:
         let _ = handle.await;
     }
 
+    /// GET `/health` through the production wire state, as headscale-go's
+    /// `HealthHandler` serves it from the control listener.
+    async fn get_health(state: &WireState) -> (StatusCode, Vec<u8>) {
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(headscale_api::tailscale_wire::basic_handlers::handle_health),
+            )
+            .with_state(state.clone());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_health_follows_database_connectivity() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = get_health(&runtime.state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"{\"status\":\"pass\"}\n");
+
+        // A closed pool is how SQLx reports a database that is gone.
+        db.pool().close().await;
+
+        let (status, body) = get_health(&runtime.state).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, b"{\"status\":\"fail\"}\n");
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    #[tokio::test]
+    async fn postgres_persistent_wire_runtime_health_follows_database_connectivity() -> BoxTestResult
+    {
+        let Some(schema) = TempPostgresRuntimeSchema::open("runtime_health").await? else {
+            return Ok(());
+        };
+
+        let result = async {
+            headscale_db::migrate_postgres_foundation(schema.pool()).await?;
+            let dir = tempfile::tempdir()?;
+            let cfg = test_run_server_config(&dir);
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+            let runtime = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &dir.path().join("state"),
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                None,
+                derp_map,
+                dns,
+                &PolicyConfig::database(),
+                runtime_config,
+                None,
+            )
+            .await?;
+
+            let (status, body) = get_health(&runtime.state).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, b"{\"status\":\"pass\"}\n");
+
+            schema.pool().close().await;
+
+            let (status, body) = get_health(&runtime.state).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body, b"{\"status\":\"fail\"}\n");
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        schema.cleanup().await?;
+        result
+    }
+
     async fn tcp_grpc_channel(addr: SocketAddr) -> Channel {
         Endpoint::from_shared(format!("http://{addr}"))
             .unwrap()

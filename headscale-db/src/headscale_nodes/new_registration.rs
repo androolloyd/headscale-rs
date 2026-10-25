@@ -137,7 +137,13 @@ pub async fn create_new_registration_on_connection(
     connection: &mut SqliteConnection,
     node: NewNodeRegistration,
 ) -> Result<HeadscaleNodeRow> {
-    let values = node.encode()?;
+    let mut values = node.encode()?;
+    values.node.given_name = super::resolve_new_node_given_name(
+        connection,
+        &values.node.given_name,
+        &values.node.hostname,
+    )
+    .await?;
     let node = &values.node;
     let now = Utc::now();
     let clock = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -174,7 +180,13 @@ pub async fn create_postgres_new_registration_on_connection(
     connection: &mut PgConnection,
     node: NewNodeRegistration,
 ) -> Result<HeadscaleNodeRow> {
-    let values = node.encode()?;
+    let mut values = node.encode()?;
+    values.node.given_name = super::resolve_new_node_postgres_given_name(
+        connection,
+        &values.node.given_name,
+        &values.node.hostname,
+    )
+    .await?;
     let node = &values.node;
     let now = Utc::now();
     let clock = now.to_rfc3339_opts(SecondsFormat::Micros, true);

@@ -1,5 +1,33 @@
 # Changes
 
+## 2026-10-25 — Evidence gaps: /health, packet-filter parity, Postgres
+
+- `GET /health` now pings the database like headscale-go's `HealthHandler`
+  (`State.PingDB`, one-second bound): 200 `{"status":"pass"}` or 500
+  `{"status":"fail"}`, both with Go's trailing newline. The ping goes through
+  `MachineRegistrationStore::ping_database` (overridden by the SQLite and
+  Postgres persistent stores); a wire surface without a database-backed store
+  still always passes. The gRPC `Health` RPC shares the same one-second bound.
+  Verified against the real v0.29.5 binary with its Postgres database dropped
+  (`tools/parity/health_db_down_diff.sh`).
+- The differential harness no longer carries its own filter compiler: its Rust
+  side builds a `MachineRegistry` + `PolicyStore` and reads the production
+  global and per-node `PacketFilters["base"]` output
+  (`tools/parity/headscale-rs/src/production_filter.rs`). It now compares the
+  filter of every node, not only named ones, and `PARITY_FILTER_ORDER=emitted`
+  disables the intra-rule sorting on both sides. A golden test
+  (`headscale-api/tests/packet_filter_golden.rs`) runs the production compiler
+  against `golden/headscale-go-v0.29.5.json` under plain `cargo test`. No
+  production difference was found: all 104 scenarios match in both modes.
+- Postgres: the production server could not start (SQLSTATE 08P01 `invalid
+  message format` on the first multi-column query). The vendored
+  sqlx-postgres `Bind` encoder wrote the result-format count from the
+  parameter-format slice (an upstream 0.8.6 bug that per-column result formats
+  exposed). Fixed, with a live-database test of the production pool.
+  A new registration whose hostname collides with an existing node's name now
+  gets Go's `-1`, `-2` suffix instead of failing on the unique `given_name`
+  index (hit by a different user logging in from the same host).
+
 ## 2026-10-24 — First build and test of the v0.29.5 parity tree
 
 - Fix the vendored-crate and workspace build breaks that kept the tree from

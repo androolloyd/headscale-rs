@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 headscale-api = { path = "../../../headscale-api", default-features = false }
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }

@@ -45,8 +45,8 @@ use crate::policy::{
     PolicyCheckNode, PolicyCheckNodeSnapshot, PolicyStore, validate_requested_tags_for_auth_path,
 };
 use crate::tailscale_wire::{
-    AuthRequestKind, IpAllocator, MachineRecord, MachineRegistrationStore, MachineRegistry,
-    MachineSnapshot, PersistedMachineRegistration, RegistrationCache,
+    AuthRequestKind, DatabaseHealthCheck, IpAllocator, MachineRecord, MachineRegistrationStore,
+    MachineRegistry, MachineSnapshot, PersistedMachineRegistration, RegistrationCache,
     routes::{auto_approval_changed, auto_approved_routes_with_snapshot},
     wire::{HostInfo, ZERO_DISCO_KEY, is_auto_derived_given_name},
 };
@@ -5193,6 +5193,10 @@ impl PersistentMachineAdmin {
 
 #[async_trait]
 impl MachineRegistrationStore for PersistentMachineAdmin {
+    async fn ping_database(&self) -> Result<(), String> {
+        self.pool.ping().await
+    }
+
     fn runtime_sync_returns_live_snapshot(&self) -> bool {
         self.wire_registry.is_some()
     }
@@ -5672,6 +5676,10 @@ impl PersistentPostgresMachineAdmin {
 #[cfg(feature = "postgres-sqlx")]
 #[async_trait]
 impl MachineRegistrationStore for PersistentPostgresMachineAdmin {
+    async fn ping_database(&self) -> Result<(), String> {
+        self.pool.ping().await
+    }
+
     fn runtime_sync_returns_live_snapshot(&self) -> bool {
         self.wire_registry.is_some()
     }

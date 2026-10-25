@@ -71,6 +71,12 @@ The root Cargo patch changes these files:
   preparation fails or is cancelled, and close IDs remain queued until the
   complete close/ReadyForQuery cycle succeeds. Explicit cache clearing uses
   that same queue. ReadyForQuery accounting rejects underflow.
+- `src/message/bind.rs`: the result-format count is taken from `result_formats`,
+  not `formats`. Upstream 0.8.6 counted the parameter formats, which is only
+  correct while both slices have one element; the native query paths send
+  per-column result formats, so every multi-column described query reached
+  PostgreSQL with trailing bytes and failed with SQLSTATE 08P01 `invalid
+  message format`. Covered by `headscale-db/tests/postgres_go_pool.rs`.
 - `src/message/data_row.rs`, `row_description.rs`, `parameter_description.rs`,
   `notification.rs`, `copy.rs`, `src/row.rs` and `src/value.rs`: inbound counts,
   value lengths and row indices are checked before allocation/indexing, and

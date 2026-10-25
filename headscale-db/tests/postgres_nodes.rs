@@ -153,7 +153,9 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         );
         assert_eq!(updated.user_id, Some(alice.id));
         assert!(updated.tag_list().is_empty());
-        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
+        // Go expands exit routes only in the gRPC SetApprovedRoutes handler;
+        // an auth-path update stores the routes it is given.
+        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0"]);
 
         let expiry = temporary_timestamp() + 3600;
         assert_eq!(

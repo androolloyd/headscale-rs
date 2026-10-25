@@ -4435,7 +4435,12 @@ database:
                     user: user.id,
                     reusable: true,
                     ephemeral: false,
-                    expiration: None,
+                    // headscale-go turns a missing expiration into the zero time,
+                    // i.e. an already-expired key, so ask for a real one.
+                    expiration: Some(prost_types::Timestamp {
+                        seconds: chrono::Utc::now().timestamp() + 3600,
+                        nanos: 0,
+                    }),
                     acl_tags: Vec::new(),
                 }))
                 .await?
@@ -4454,8 +4459,8 @@ database:
                 "pg-router",
             )
             .await;
-            assert!(register.machine_authorized);
-            assert!(register.error.is_empty());
+            assert!(register.machine_authorized, "{register:?}");
+            assert!(register.error.is_empty(), "{register:?}");
 
             let node_row = headscale_db::headscale_nodes::get_postgres_by_node_key(
                 schema.pool(),
@@ -4656,7 +4661,10 @@ database:
                 .machines
                 .get(&second_node_key)
                 .expect("rekeyed OIDC node projected into live registry");
-            assert_eq!(second_wire.hostname, "oidc-router-two");
+            // Go's re-registration updates Hostname but leaves GivenName alone
+            // (only a map-request hostname change re-derives it).
+            assert_eq!(second_wire.hostname, "oidc-router-one");
+            assert_eq!(second_wire.raw_hostname, "oidc-router-two");
             assert_eq!(second_wire.user, "alice@example.com");
             assert_eq!(second_wire.register_method, 3);
             assert_eq!(second_wire.available_routes, vec!["10.82.0.0/24"]);
@@ -4674,6 +4682,7 @@ database:
             .await?;
             assert_eq!(second_row.node_key, format!("nodekey:{second_node_key}"));
             assert_eq!(second_row.hostname, "oidc-router-two");
+            assert_eq!(second_row.given_name, "oidc-router-one");
             assert_eq!(second_row.user_id, Some(i64::try_from(oidc_user.id)?));
             assert_eq!(second_row.ipv4, first_ipv4);
             assert_eq!(
@@ -4683,7 +4692,7 @@ database:
 
             let full = wire_full_map(&runtime.state, &second_node_key, &machine_key).await;
             let self_node = full.node.expect("self node after OIDC Pg rekey");
-            assert_eq!(self_node.name, "oidc-router-two");
+            assert_eq!(self_node.name, "oidc-router-one");
             assert_eq!(
                 self_node.hostinfo.routable_ips,
                 vec!["10.82.0.0/24".to_string()]
@@ -4715,7 +4724,7 @@ database:
                 .machines
                 .get(&second_node_key)
                 .expect("rekeyed OIDC Postgres node hydrated");
-            assert_eq!(hydrated.hostname, "oidc-router-two");
+            assert_eq!(hydrated.hostname, "oidc-router-one");
             assert_eq!(hydrated.user, "alice@example.com");
             assert_eq!(hydrated.register_method, 3);
             assert_eq!(hydrated.available_routes, vec!["10.82.0.0/24"]);
@@ -4724,7 +4733,7 @@ database:
             let restarted_self = restarted_full
                 .node
                 .expect("self node after OIDC Pg hydration");
-            assert_eq!(restarted_self.name, "oidc-router-two");
+            assert_eq!(restarted_self.name, "oidc-router-one");
             assert_eq!(
                 restarted_self.hostinfo.routable_ips,
                 vec!["10.82.0.0/24".to_string()]

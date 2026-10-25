@@ -1,5 +1,25 @@
 # Changes
 
+## 2026-10-25 — Quality gates that gate
+
+- Pin the compiler in `rust-toolchain.toml` (1.96.0) and use it everywhere: all
+  workflows (via `.github/actions/setup-rust`), both Dockerfiles (they built on
+  an unqualified 1.99) and the fuzz jobs (a dated nightly).
+  `scripts/check_toolchain_pin.py` fails on drift. Floating `stable`/`nightly`
+  had turned `main` red from 2026-10-16 (new 1.99 clippy lint; nightly rustfmt).
+- Clear RUSTSEC-2026-0382/0381/0383 (`rustls-webpki` 0.103.16, `webpki-roots` and
+  `webpki-root-certs` 1.0.11; the vendored `sqlx-core` pinned `webpki-roots`
+  exactly to 1.0.9) and RUSTSEC-2026-0386 (`tokio` 1.54.1 in the fuzz lockfile).
+  Resync the fuzz lockfile with its manifests, bump the two tool crates'
+  lockfiles, and audit all four committed lockfiles in the supply-chain job.
+- Vendored crates: `scripts/check_vendor_provenance.py` checks every `vendor/*`
+  crate against its pristine crates.io archive plus the recorded patch set
+  (`vendor/PATCHES.json`); `vendor-tests.yml` runs each crate's own upstream
+  suite against the patch; `headscale-vendor-conformance` asserts the h2, rustls
+  and pgx Go-exactness behaviour. See `docs/ci-quality-gates.md`.
+- `check_headscale_go_refs.py --remote` warns, instead of failing every run,
+  when headscale-go `main` has moved; a nightly `pin-freshness` job fails on it.
+
 ## 2026-10-25 — Resource-limit hardening from a public assessment
 
 - Registration cache: per-source quota for unauthenticated pending

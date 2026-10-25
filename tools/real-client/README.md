@@ -3,6 +3,17 @@
 This directory is for end-to-end parity tests that run stock `tailscaled`
 clients against both headscale-go and headscale-rs.
 
+Running the `postgres-*` rows: set `HEADSCALE_DB_POSTGRES_TEST_URL` (a script
+that finds it unset prints "skipping" and exits 0, which `smoke-matrix.sh`
+reports as a pass) and, on macOS, `HEADSCALE_GO_BIN` to the pinned v0.29.5
+binary: the default Go build fetches an unpinned commit whose module archive
+macOS cannot create, which also breaks the `ssh-oidc-*` mock-OIDC helper for the
+Rust target. The matrix stops at the first failure, so loop over rows to get a
+full picture. Rows built on `authkey-smoke.sh` (the authkey and relogin families) drive the
+wire-only harness below, not the production `headscale` binary; rows built on
+`online-lastseen-common.sh` (including every `postgres-*` row) run the production
+binary.
+
 For the pinned v0.29.5 `configtest` storage check, build the Rust binary and
 run `configtest-storage-v0295-smoke.py` with `HEADSCALE_GO_BIN` pointing to the
 pinned Go executable. It creates fresh files under `target/real-client/`,

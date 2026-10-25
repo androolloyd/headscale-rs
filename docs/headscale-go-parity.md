@@ -1,5 +1,15 @@
 # Headscale-go Parity Ledger
 
+## Evidence gaps closed — 2026-10-25
+
+`/health` now fails with the database as headscale-go's does, the differential
+harness reads the production packet-filter compiler (104 scenarios match, every
+node compared), and the Postgres stock-client rows were run for the first time:
+the production server could not start on Postgres until a vendored-driver
+defect was fixed; 105 of 121 rows now pass and the 16 failures are classified
+(15 fail identically against Go). See "Evidence-gap pass — 2026-10-25" in
+[the remaining-work audit](headscale-v0295-remaining-audit-2026-10-18.md).
+
 ## First build and test of the frozen tree — 2026-10-24
 
 The frozen tree was built, tested and compared against the real headscale-go

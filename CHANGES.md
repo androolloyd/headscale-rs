@@ -40,6 +40,16 @@
   A new registration whose hostname collides with an existing node's name now
   gets Go's `-1`, `-2` suffix instead of failing on the unique `given_name`
   index (hit by a different user logging in from the same host).
+- Other Rust-only failures from the Postgres stock-client rows (Go passes
+  them): `nodes approve-routes --routes ""` sent `[""]` instead of the empty
+  list cobra produces, so clearing approvals failed; the sidecar `derper` was
+  started with `-verify-clients` even when the control `/verify` URL was set,
+  which made it demand a local tailscaled and reject every client.
+- Row scripts: `psql`/`pg_dump` got `PGSSLMODE=false` (libpq rejects it) when
+  the Postgres URL had no `sslmode`; the user-rename row now pins Go's
+  "owner name updates after restart" boundary for headscale-rs too.
+- Stale live-Postgres test expectations (never run before, 11 of them) now
+  follow Go.
 
 ## 2026-10-24 — First build and test of the v0.29.5 parity tree
 

@@ -199,7 +199,10 @@ impl Header {
                 usize::MAX
             )
         })?;
-        if length > buf.len() / (BYTE_WIDTH * 2) {
+        // Only guard the multiplication; `from_bytes` already reports the exact
+        // "expected N bytes after header" mismatch that the upstream test
+        // `cannot_deserialise_path_type_uneven_point_bytes` asserts.
+        if length.checked_mul(BYTE_WIDTH * 2).is_none() {
             return Err("PATH point count exceeds its buffer".to_owned());
         }
 

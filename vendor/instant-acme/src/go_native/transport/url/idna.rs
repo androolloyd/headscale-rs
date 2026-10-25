@@ -61,3 +61,24 @@ fn go_runes(mut bytes: &[u8]) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lookup;
+
+    /// Go 1.26.9 `idna10.0.0.go` `process()` rejects a nonempty ACE label that
+    /// decodes to pure ASCII (`punyError(enc)`) for every profile, so
+    /// `idna.Lookup.ToASCII("bücher.xn--abc-")` fails and net/http keeps the
+    /// original hostname. `minimal_ascii` already applies that rule; the Lookup
+    /// profile must too, or the native client dials a host Go would not.
+    #[test]
+    fn lookup_rejects_ascii_only_ace_label_like_go() {
+        assert_eq!(lookup("b\u{fc}cher.xn--abc-"), None);
+        assert_eq!(lookup("\u{e9}.xn--5wm-"), None);
+        // An ACE label that decodes to non-ASCII text is still accepted.
+        assert_eq!(
+            lookup("xn--bcher-kva.example").as_deref(),
+            Some("xn--bcher-kva.example")
+        );
+    }
+}

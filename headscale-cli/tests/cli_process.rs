@@ -1124,6 +1124,30 @@ fn send_sighup(child: &Child) -> BoxTestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+fn send_sigterm(child: &Child) -> BoxTestResult {
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()?;
+    assert!(status.success(), "kill -TERM exited {status:?}");
+    Ok(())
+}
+
+fn wait_for_exit(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll serve process") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            stop_child(child);
+            panic!("serve did not exit within {limit:?} after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn normalize_users_list_stdout(text: &str) -> String {
     let mut normalized = String::new();
     for line in text.lines() {
@@ -5694,6 +5718,69 @@ fn auth_reject_yaml_missing_auth_id_matches_current_upstream_snapshot() {
             "\n"
         ),
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_sigterm_closes_sqlite_without_leaving_wal_frames() -> BoxTestResult {
+    // headscale-go's HSDatabase.Close (hscontrol/db/db.go) VACUUMs a WAL-mode
+    // SQLite database and closes it on shutdown, so a stopped server leaves no
+    // WAL frames behind and the database file alone carries every committed
+    // row.
+    let dir = tempfile::tempdir()?;
+    let config = write_sqlite_serve_config(
+        dir.path(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+        unused_loopback_addr(),
+    );
+    let mut child = spawn_headscale_serve(&config, dir.path())?;
+
+    let result = async {
+        wait_for_headscale_status(&config, &["health"], 0).await;
+        let create_user = headscale_with_config(&config, &["users", "create", "wal-alice"]);
+        assert!(
+            create_user.status.success(),
+            "stderr: {}",
+            stderr(&create_user)
+        );
+        send_sigterm(&child)?;
+        let status = wait_for_exit(&mut child, Duration::from_secs(30));
+        assert!(status.success(), "serve exited with {status:?}");
+
+        let db_path = dir.path().join("db.sqlite");
+        let wal_path = dir.path().join("db.sqlite-wal");
+        let wal_len = fs::metadata(&wal_path).map_or(0, |meta| meta.len());
+        assert_eq!(
+            wal_len,
+            0,
+            "graceful shutdown left {wal_len} bytes of WAL at {}",
+            wal_path.display()
+        );
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(false),
+            )
+            .await?;
+        let users: Vec<String> = sqlx::query_scalar("SELECT name FROM users ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(users, ["wal-alice"]);
+        let version: String = sqlx::query_scalar("SELECT version FROM database_versions")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(version, "v0.29.5");
+        pool.close().await;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    stop_child(&mut child);
+    result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -248,3 +248,17 @@ pub(super) fn integer(raw: &[u8]) -> Option<i64> {
     }
     std::str::from_utf8(raw).ok()?.parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::scanner;
+
+    /// Go `encoding/json` `quoteChar` returns `'"'` for a double quote (only
+    /// the single quote is backslash-escaped), so the scanner error for
+    /// `{"a" "b"}` reads `invalid character '"' after object key`.
+    #[test]
+    fn scanner_quotes_double_quote_like_go() {
+        let message = scanner::check_valid(b"{\"a\" \"b\"}").unwrap_err();
+        assert_eq!(message, "invalid character '\"' after object key");
+    }
+}

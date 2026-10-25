@@ -216,7 +216,7 @@ impl NativeDerpRuntime {
                 if let Some(parent) = path.parent()
                     && !parent.as_os_str().is_empty()
                 {
-                    fs::create_dir_all(parent)?;
+                    super::noise::ensure_key_dir(parent)?;
                 }
 
                 let key = DerpNodeKeyPair::generate();
@@ -1006,10 +1006,11 @@ where
 }
 
 fn derp_upgrade_required_response() -> Response<Body> {
+    // headscale-go's DERPHandler writes a bare `text/plain` and no newline.
     Response::builder()
         .status(StatusCode::UPGRADE_REQUIRED)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from("DERP requires connection upgrade\n"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from("DERP requires connection upgrade"))
         .unwrap()
 }
 
@@ -1053,8 +1054,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UPGRADE_REQUIRED);
+        // headscale-go `DERPHandler` (hscontrol/derp/server/derp_server.go)
+        // sets a bare `text/plain` and writes the message without a newline.
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain")
+        );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"DERP requires connection upgrade\n");
+        assert_eq!(&body[..], b"DERP requires connection upgrade");
     }
 
     #[tokio::test]
@@ -2840,6 +2849,27 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    /// headscale-go reads the DERP server key through `readOrCreatePrivateKey`
+    /// (hscontrol/app.go), whose `util.EnsureDir` creates a missing key
+    /// directory 0700 and leaves an existing one alone.
+    #[cfg(unix)]
+    #[test]
+    fn native_derp_load_or_generate_key_creates_missing_directories_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let dir = tempfile::tempdir().unwrap();
+        NativeDerpRuntime::load_or_generate_key(dir.path().join("derp/keys/derp.key")).unwrap();
+        assert_eq!(mode(&dir.path().join("derp")), 0o700);
+        assert_eq!(mode(&dir.path().join("derp/keys")), 0o700);
+
+        let existing = dir.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        NativeDerpRuntime::load_or_generate_key(existing.join("derp.key")).unwrap();
+        assert_eq!(mode(&existing), 0o755);
     }
 
     fn test_runtime() -> Arc<NativeDerpRuntime> {

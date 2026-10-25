@@ -141,11 +141,46 @@ pub(crate) fn unsupported_client_error(version: u32) -> String {
     )
 }
 
+/// `capVerToTailscaleVer` from hscontrol/capver/capver_generated.go
+/// (headscale-go v0.29.5): the release that introduced each capability
+/// version, rendered by `unsupportedClientError`.
 fn tailscale_version_for_capability(version: u32) -> Option<&'static str> {
-    match version {
-        113 => Some("v1.80"),
-        _ => None,
-    }
+    Some(match version {
+        32 => "v1.24",
+        41 => "v1.30",
+        46 => "v1.32",
+        51 => "v1.34",
+        56 => "v1.36",
+        58 => "v1.38",
+        61 => "v1.40",
+        62 => "v1.42",
+        63 => "v1.44",
+        65 => "v1.46",
+        68 => "v1.48",
+        74 => "v1.50",
+        79 => "v1.52",
+        82 => "v1.56",
+        85 => "v1.58",
+        87 => "v1.60",
+        88 => "v1.62",
+        90 => "v1.64",
+        95 => "v1.66",
+        97 => "v1.68",
+        102 => "v1.70",
+        104 => "v1.72",
+        106 => "v1.74",
+        109 => "v1.78",
+        113 => "v1.80",
+        115 => "v1.82",
+        116 => "v1.84",
+        123 => "v1.86",
+        125 => "v1.88",
+        130 => "v1.90",
+        131 => "v1.92",
+        133 => "v1.96",
+        138 => "v1.98",
+        _ => return None,
+    })
 }
 
 /// One registered machine's state, kept in the in-memory
@@ -2174,6 +2209,34 @@ pub fn stable_id_from_key(hex_str: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `unsupportedClientError` (hscontrol/noise.go) renders
+    /// `capver.TailscaleVersion(version)`, the release name from the
+    /// `capVerToTailscaleVer` table in hscontrol/capver/capver_generated.go,
+    /// and an empty string for a version the table does not list.
+    #[test]
+    fn unsupported_client_error_uses_go_capver_release_names() {
+        assert_eq!(
+            unsupported_client_error(32),
+            "unsupported client version: v1.24 (32)"
+        );
+        assert_eq!(
+            unsupported_client_error(109),
+            "unsupported client version: v1.78 (109)"
+        );
+        assert_eq!(
+            unsupported_client_error(113),
+            "unsupported client version: v1.80 (113)"
+        );
+        assert_eq!(
+            unsupported_client_error(138),
+            "unsupported client version: v1.98 (138)"
+        );
+        assert_eq!(
+            unsupported_client_error(112),
+            "unsupported client version:  (112)"
+        );
+    }
 
     #[test]
     fn strip_known_prefixes() {

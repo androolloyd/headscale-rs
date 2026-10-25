@@ -99,7 +99,8 @@ fn space(byte: u8) -> bool {
 fn error(byte: u8, context: &str) -> String {
     let character = match byte {
         b'\'' => "'\\''".to_owned(),
-        b'"' => "'\\\"'".to_owned(),
+        // Go's quoteChar backslash-escapes only the single quote.
+        b'"' => "'\"'".to_owned(),
         _ => {
             let quoted = go_strconv::quote(&char::from(byte).to_string());
             format!("'{}'", &quoted[1..quoted.len() - 1])

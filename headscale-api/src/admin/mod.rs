@@ -532,7 +532,9 @@ async fn page_machine_detail(
         &format!(
             "Machine {}",
             if m.name.is_empty() {
-                &m.id[..8]
+                // A malformed persisted row can carry a short node key; never
+                // index past the end of it.
+                m.id.get(..8).unwrap_or(&m.id)
             } else {
                 &m.name
             }

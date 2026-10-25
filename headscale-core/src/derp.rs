@@ -3756,12 +3756,20 @@ mod tests {
         };
 
         let sidecar = DerperSidecar::spawn(&cfg).unwrap();
+        // The fake derper needs a fork/exec and a shell start-up before it
+        // writes its arguments; on a loaded machine that can take well over
+        // the second a short fixed poll allows, so wait on a generous deadline
+        // and stop as soon as the file is complete.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut args = String::new();
-        for _ in 0..20 {
+        loop {
             if let Ok(raw) = std::fs::read_to_string(&args_file)
                 && raw.contains("-verify-client-url-fail-open=false")
             {
                 args = raw;
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

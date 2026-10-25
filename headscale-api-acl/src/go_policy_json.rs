@@ -16,8 +16,13 @@ use crate::go_json::{self, Cursor};
 mod string_syntax;
 
 // jsontext/state.go limits both token decoding and ReadValue to 10,000
-// containers, counting the decoder's enclosing containers as well.
-const MAX_NESTING_DEPTH: usize = 10_000;
+// containers, counting the decoder's enclosing containers as well. The policy
+// value built from the prepared bytes is consumed recursively afterwards
+// (metadata stripping, serde decoding, clone/eq/serialize, drop), and an
+// alternating object/array document overflows a 2 MiB thread stack from about
+// 5,000 containers in release builds (2,500 in debug). Bound policies well
+// below that instead of aborting the process; no real policy comes close.
+const MAX_NESTING_DEPTH: usize = 1_000;
 
 #[derive(Clone, Copy)]
 enum Schema {
@@ -691,7 +696,7 @@ pub(crate) fn prepare_standardized(bytes: &[u8], native_names: bool) -> Result<V
     // pass. A whole-buffer v1 scan here would let a later excessive depth
     // outrank earlier typed unknown-name, string, or custom-method errors.
     if !native_names {
-        go_json::validate(bytes)?;
+        go_json::validate_with_depth(bytes, MAX_NESTING_DEPTH)?;
     }
     let mut cursor = Cursor::new(bytes);
     let mut cursor_base = 0;

@@ -3903,6 +3903,36 @@ mod tests {
         assert_eq!(&body[..], b"{\"Allow\":true}\n");
     }
 
+    /// headscale-go `handleVerifyRequest` (hscontrol/handlers.go) scans
+    /// `state.ListNodes()`, which still holds an expired node, so an expired
+    /// node's key is admitted to DERP exactly like a live one.
+    #[tokio::test]
+    async fn verify_endpoint_allows_expired_node_key_like_headscale_go() {
+        let (state, _dir) = fixture_state();
+        let node_key = "33".repeat(32);
+        let mut rec = record(&node_key, 33, &[], &[]);
+        rec.expiry = Some(Utc::now() - chrono::Duration::hours(1));
+        assert!(rec.is_expired_at(Utc::now()));
+        state.machines.upsert(rec.node_key_hex.clone(), rec);
+
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/verify")
+                    .body(axum::body::Body::from(format!(
+                        "{{\"NodePublic\":\"nodekey:{node_key}\",\"Source\":\"203.0.113.12\"}}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&body[..], b"{\"Allow\":true}\n");
+    }
+
     #[tokio::test]
     async fn verify_endpoint_denies_unknown_node_key() {
         let (state, _dir) = fixture_state();

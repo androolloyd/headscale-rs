@@ -186,6 +186,11 @@ pub(super) fn lookup(input: &str) -> Option<String> {
     for label in mapped.split('.') {
         let value = if let Some(encoded) = label.strip_prefix("xn--") {
             let decoded = punycode::decode(encoded)?;
+            // Go 1.26.9 process(): a nonempty all-ASCII decoded ACE label is
+            // a Punycode error (punyError(enc)) for every profile.
+            if !decoded.is_empty() && decoded.is_ascii() {
+                return None;
+            }
             is_bidi |= decoded.chars().any(bidi::is_rtl);
             if !from_punycode(&decoded) {
                 return None;

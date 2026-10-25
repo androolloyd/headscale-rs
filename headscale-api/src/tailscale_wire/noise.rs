@@ -208,7 +208,7 @@ impl ServerNoiseKey {
         configured_path: Option<&Path>,
     ) -> Result<Self, WireError> {
         let dir = state_dir.as_ref();
-        fs::create_dir_all(dir)?;
+        ensure_key_dir(dir)?;
         let path = Self::effective_key_path(dir, configured_path);
         let use_go_format = configured_path.is_some_and(|configured| configured == path);
 
@@ -257,7 +257,7 @@ impl ServerNoiseKey {
                     kp.private[31] |= 64;
                 }
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
+                    ensure_key_dir(parent)?;
                 }
                 let contents = if use_go_format {
                     format!("privkey:{}\n", hex::encode(&kp.private)).into_bytes()
@@ -288,6 +288,12 @@ impl ServerNoiseKey {
     /// 32-byte X25519 public key. Cheap to copy.
     pub fn public_bytes(&self) -> [u8; 32] {
         self.public
+    }
+
+    /// Permits not held by an in-progress handshake; test-only probe.
+    #[cfg(test)]
+    pub(crate) fn available_handshake_permits(&self) -> usize {
+        self.pending_handshakes.available_permits()
     }
 
     pub(crate) fn handshake_permit(&self) -> Result<OwnedSemaphorePermit, WireError> {
@@ -364,6 +370,20 @@ impl ServerNoiseKey {
             .build_responder()
             .map_err(noise_err)
     }
+}
+
+/// Go's `util.EnsureDir` creates a missing key directory (and any missing
+/// parent) 0700 and skips one that already exists, leaving its mode as found.
+/// `readOrCreatePrivateKey` applies it to the Noise and DERP server keys.
+pub(super) fn ensure_key_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// Tailscale's prologue format: ASCII string
@@ -510,37 +530,55 @@ fn build_early_noise_frame() -> Result<Vec<u8>, WireError> {
 pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) -> Response<Body> {
     let remote_addr = request_log_remote_addr(&req);
     let request_event = super::request_log::defer(&req);
-    // Verify the upgrade header before we commit to the hijack path.
-    let wants_upgrade = req
+    // headscale-go's NoiseUpgradeHandler answers an absent Upgrade header
+    // with 500 "Internal error" (its reverse-proxy hint). Everything after
+    // that is `controlhttpserver.acceptHTTP`, which rejects an unknown next
+    // protocol and a missing or undecodable `X-Tailscale-Handshake` with
+    // `http.Error(..., 400)` *before* hijacking, so a bad request never holds
+    // a connection or a Noise handshake permit.
+    let upgrade = req
         .headers()
         .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case(UPGRADE_PROTOCOL));
-    if !wants_upgrade {
+        .unwrap_or("");
+    if upgrade.is_empty() {
         return Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .body(Body::from("Internal error\n"))
             .unwrap();
     }
+    if !upgrade.eq_ignore_ascii_case(UPGRADE_PROTOCOL) {
+        return http_error(StatusCode::BAD_REQUEST, "unknown next protocol");
+    }
 
     // Current controlhttp clients put the framed IK initiation in this
     // header. The raw TLS listener already handles that form; the ordinary
     // HTTP listener must pass it into the same BE transport driver too.
-    let initial_frame = req
+    let Some(encoded) = req
         .headers()
         .get(super::raw_tls::HANDSHAKE_HEADER_NAME)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            use base64::Engine;
-            match base64::engine::general_purpose::STANDARD.decode(value) {
-                Ok(bytes) => Some(bytes),
-                Err(error) => {
-                    tracing::warn!(target = "tailscale_wire::noise", %error, "invalid X-Tailscale-Handshake header; waiting for pipelined initiation");
-                    None
-                }
+        .filter(|value| !value.is_empty())
+    else {
+        return http_error(
+            StatusCode::BAD_REQUEST,
+            "missing Tailscale handshake header",
+        );
+    };
+    let initial_frame = {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(encoded) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(target = "tailscale_wire::noise", %error, "invalid X-Tailscale-Handshake header");
+                return http_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid tailscale handshake header",
+                );
             }
-        });
+        }
+    };
 
     let on_upgrade = match req.extensions().get::<hyper::upgrade::OnUpgrade>() {
         Some(_) => req
@@ -575,7 +613,7 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
                 if let Err(e) = drive_ts2021_be_with_init_remote_addr(
                     state_for_task,
                     io,
-                    initial_frame,
+                    Some(initial_frame),
                     remote_addr,
                 )
                 .await
@@ -595,6 +633,16 @@ pub async fn handle_ts2021_post(State(state): State<WireState>, req: Request) ->
         .header(header::UPGRADE, HeaderValue::from_static(UPGRADE_PROTOCOL))
         .body(Body::empty())
         .unwrap()
+}
+
+/// Go's `http.Error`: plain text with `nosniff` and a trailing newline.
+fn http_error(status: StatusCode, message: &str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(format!("{message}\n")))
+        .expect("static plain error response is valid")
 }
 
 /// Browser/WASM control clients send the deferred Noise initiation in the
@@ -1607,6 +1655,40 @@ mod tests {
         assert!(!missing.exists());
     }
 
+    /// Go's `util.EnsureDir` (hscontrol/util/file.go) creates a missing key
+    /// directory 0700 and leaves an existing one alone;
+    /// `readOrCreatePrivateKey` (hscontrol/app.go) applies it to the Noise
+    /// key's directory.
+    #[cfg(unix)]
+    #[test]
+    fn key_directories_are_created_0700_like_go_ensure_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let root = tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        ServerNoiseKey::load_or_generate(&state_dir).unwrap();
+        assert_eq!(mode(&state_dir), 0o700);
+
+        let configured_state_dir = root.path().join("configured-state");
+        let configured = root.path().join("go/keys/noise_private.key");
+        ServerNoiseKey::load_or_generate_with_configured_path(
+            &configured_state_dir,
+            Some(&configured),
+        )
+        .unwrap();
+        assert_eq!(mode(&configured_state_dir), 0o700);
+        assert_eq!(mode(&root.path().join("go")), 0o700);
+        assert_eq!(mode(&root.path().join("go/keys")), 0o700);
+
+        // EnsureDir skips an existing directory, whose mode stays as found.
+        let existing = root.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+        ServerNoiseKey::load_or_generate(&existing).unwrap();
+        assert_eq!(mode(&existing), 0o755);
+    }
+
     #[test]
     fn malformed_configured_key_fails_closed() {
         let dir = tempdir().unwrap();
@@ -1729,6 +1811,74 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), b"Internal error\n");
+    }
+
+    /// `controlhttpserver.acceptHTTP` (tailscale control/controlhttp/
+    /// controlhttpserver/controlhttpserver.go:42-64) rejects an unknown
+    /// `Upgrade` value and a missing or undecodable `X-Tailscale-Handshake`
+    /// header with `http.Error(..., 400)` before it hijacks the connection,
+    /// so no Noise handshake state is held for such a request.
+    #[tokio::test]
+    async fn ts2021_header_errors_match_go_accept_http() {
+        let (state, _dir) = fixture_state();
+        let cases: [(&str, Option<&str>, &str); 3] = [
+            (
+                "not-the-control-protocol",
+                Some("AAAA"),
+                "unknown next protocol\n",
+            ),
+            (
+                UPGRADE_PROTOCOL,
+                None,
+                "missing Tailscale handshake header\n",
+            ),
+            (
+                UPGRADE_PROTOCOL,
+                Some("!!!"),
+                "invalid tailscale handshake header\n",
+            ),
+        ];
+        for (upgrade, handshake, expected) in cases {
+            let app = crate::tailscale_wire::router(state.clone());
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/ts2021")
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, upgrade);
+            if let Some(handshake) = handshake {
+                request = request.header(
+                    crate::tailscale_wire::raw_tls::HANDSHAKE_HEADER_NAME,
+                    handshake,
+                );
+            }
+            let resp = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{upgrade:?} {handshake:?}"
+            );
+            assert_eq!(
+                resp.headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/plain; charset=utf-8"),
+                "{upgrade:?} {handshake:?}"
+            );
+            let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+            assert_eq!(
+                body.as_ref(),
+                expected.as_bytes(),
+                "{upgrade:?} {handshake:?}"
+            );
+            assert_eq!(
+                state.server_noise_key.available_handshake_permits(),
+                MAX_PENDING_CONTROL_HANDSHAKES,
+                "a rejected request must not hold a handshake permit"
+            );
+        }
     }
 
     #[tokio::test]

@@ -312,12 +312,24 @@ async fn handle_one(
         "peek complete"
     );
 
-    // 3. Inspect the head of the request.
-    let is_ts2021 = saw_header_end && is_ts2021_upgrade(&buf);
+    // 3. Inspect the head of the request. Hijack only what Go's
+    //    `controlhttpserver.acceptHTTP` hijacks: the control upgrade carrying
+    //    a decodable `X-Tailscale-Handshake` (the whole framed Initiation,
+    //    base64). A missing or undecodable header falls through to hyper,
+    //    where the axum handler answers Go's 400 before any Noise state or
+    //    handshake permit exists.
+    let initial_frame = (saw_header_end && is_ts2021_upgrade(&buf))
+        .then(|| extract_header_value(&buf, HANDSHAKE_HEADER_NAME))
+        .flatten()
+        .filter(|encoded| !encoded.is_empty())
+        .and_then(|encoded| base64_decode(&encoded).ok());
 
-    if is_ts2021 {
+    if let Some(initial_frame) = initial_frame {
         if tracking.as_ref().is_some_and(|tracking| !tracking.admit()) {
             return Ok(());
+        }
+        if !knock_admits(&buf, &wire_state.knock) {
+            return write_knock_404(&mut tls).await;
         }
         let remote_addr = raw_request_log_remote_addr(&buf, peer, &trusted_proxies);
         let _request_event = wire_state
@@ -325,32 +337,10 @@ async fn handle_one(
             .policy_routes_require_persistence()
             .then(|| super::request_log::Event::raw(&buf, remote_addr.clone(), 101));
         let body_after_headers = body_tail(&buf);
-        // Extract the optional `X-Tailscale-Handshake` header — newer
-        // clients (v1.42+) send the entire framed Initiation in this
-        // base64-encoded header value, with an empty request body.
-        // Older clients pipeline the Initiation as the request body
-        // after the 101 response.
-        let handshake_header = extract_header_value(&buf, HANDSHAKE_HEADER_NAME);
-        let initial_frame = match handshake_header {
-            Some(b64) => match base64_decode(&b64) {
-                Ok(bytes) => Some(bytes),
-                Err(e) => {
-                    tracing::warn!(
-                        target = "tailscale_wire::raw_tls",
-                        %peer,
-                        error = %e,
-                        "X-Tailscale-Handshake header present but base64-decode failed; treating as pipelined client"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
         tracing::debug!(
             target = "tailscale_wire::raw_tls",
             %peer,
             post_header_bytes = body_after_headers.len(),
-            fast_start = initial_frame.is_some(),
             "dispatching /ts2021 to drive_ts2021_be (BE-nonce transport)"
         );
         // 4a. Verify the Upgrade header is present *and* matches —
@@ -365,9 +355,14 @@ async fn handle_one(
         // `drive_ts2021_be_with_init` switches to BE-nonce transport
         // ChaCha20Poly1305 records after the snow IK handshake completes.
         // Closes Wall 4 from `docs/tailscale-interop-blocker.md`.
-        drive_ts2021_be_with_init_remote_addr(wire_state, stream, initial_frame, Some(remote_addr))
-            .await
-            .map_err(|e| io::Error::other(format!("ts2021: {e}")))?;
+        drive_ts2021_be_with_init_remote_addr(
+            wire_state,
+            stream,
+            Some(initial_frame),
+            Some(remote_addr),
+        )
+        .await
+        .map_err(|e| io::Error::other(format!("ts2021: {e}")))?;
         return Ok(());
     }
 
@@ -375,6 +370,9 @@ async fn handle_one(
     if saw_header_end && is_derp_fast_start_upgrade(&buf) {
         if tracking.as_ref().is_some_and(|tracking| !tracking.admit()) {
             return Ok(());
+        }
+        if !knock_admits(&buf, &wire_state.knock) {
+            return write_knock_404(&mut tls).await;
         }
         let _request_event = wire_state
             .machines
@@ -476,6 +474,47 @@ fn raw_request_log_remote_addr(
         }
     }
     super::serve::request_log_remote_addr(&headers, peer, trusted)
+}
+
+/// The knock gate is router middleware (`knock::wrap_router`), and the
+/// hijacked upgrade paths above never reach the router. Apply its rule to
+/// the peeked head instead: a `/k/<knock>/…` path must carry a valid
+/// segment, any other path a valid [`knock::KNOCK_HEADER`]. A disabled
+/// config admits everything, exactly like the router's pass-through.
+fn knock_admits(buf: &[u8], cfg: &super::knock::KnockConfig) -> bool {
+    if !cfg.enabled {
+        return true;
+    }
+    let Some(headers_end) = find_header_end(buf) else {
+        return false;
+    };
+    let Some(path) = request_path(&buf[..headers_end]) else {
+        return false;
+    };
+    if let Some(rest) = path.strip_prefix(super::knock::KNOCK_PATH_PREFIX.as_bytes()) {
+        let knock = rest.split(|byte| *byte == b'/').next().unwrap_or_default();
+        return std::str::from_utf8(knock).is_ok_and(|knock| cfg.verify(knock));
+    }
+    extract_header_value(buf, super::knock::KNOCK_HEADER).is_some_and(|knock| cfg.verify(&knock))
+}
+
+/// The same canonical nginx 404 the router answers a failed knock with,
+/// written by hand because this connection never reaches hyper.
+async fn write_knock_404<W: AsyncWrite + Unpin>(w: &mut W) -> io::Result<()> {
+    let body = super::knock::NGINX_404_BODY;
+    let head = format!(
+        "HTTP/1.1 404 Not Found\r\n\
+         Server: nginx/1.18.0\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    );
+    w.write_all(head.as_bytes()).await?;
+    w.write_all(body.as_bytes()).await?;
+    w.flush().await?;
+    w.shutdown().await
 }
 
 /// Write the `101 Switching Protocols` response by hand. We don't go
@@ -597,7 +636,6 @@ fn is_derp_fast_start_upgrade(buf: &[u8]) -> bool {
     upgrade_derp && fast_start
 }
 
-#[cfg(feature = "full")]
 fn request_path(headers: &[u8]) -> Option<&[u8]> {
     let request_line_end = headers
         .windows(2)
@@ -762,6 +800,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     fn fixture_state() -> (WireState, tempfile::TempDir) {
+        fixture_state_with_knock(crate::tailscale_wire::KnockConfig::disabled())
+    }
+
+    fn fixture_state_with_knock(
+        knock: crate::tailscale_wire::KnockConfig,
+    ) -> (WireState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let server = Arc::new(ServerNoiseKey::load_or_generate(dir.path()).unwrap());
         let state = WireState {
@@ -777,7 +821,7 @@ mod tests {
             #[cfg(feature = "full")]
             native_derp: None,
             policy: Arc::new(crate::policy::PolicyStore::new()),
-            knock: crate::tailscale_wire::KnockConfig::disabled(),
+            knock,
             dns: Arc::new(crate::dns::DnsStore::new()),
             public_control_url: None,
             runtime_config: Arc::new(crate::tailscale_wire::RuntimeConfigSnapshot::default()),
@@ -999,6 +1043,225 @@ mod tests {
 
         drop(framed);
         let _ = server_task.await;
+    }
+
+    /// Send one HTTP/1.1 request over a fresh TLS connection and return the
+    /// bytes the server answered with: the head plus a `Content-Length` body
+    /// (or everything up to a close), or just the head of a `101`, which
+    /// hands the socket to the Noise driver that then waits for frames.
+    async fn raw_tls_exchange(
+        addr: SocketAddr,
+        connector: &tokio_rustls::TlsConnector,
+        request: &str,
+    ) -> String {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("test-host").unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.unwrap();
+        tls.write_all(request.as_bytes()).await.unwrap();
+        tls.flush().await.unwrap();
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(10), tls.read(&mut chunk))
+                    .await
+                    .expect("server answers within the timeout");
+            match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&chunk[..n]),
+            }
+            let Some(head_end) = find_header_end(&response) else {
+                continue;
+            };
+            if response.starts_with(b"HTTP/1.1 101") {
+                break;
+            }
+            let body_len = extract_header_value(&response, "content-length")
+                .and_then(|value| value.parse::<usize>().ok());
+            if body_len.is_some_and(|body_len| response.len() >= head_end + body_len) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    /// The knock gate is axum middleware; the hijacked `/ts2021` upgrade
+    /// never reaches the router, so the raw listener must enforce the same
+    /// rule itself. Without it an unauthenticated peer skips the PSK gate by
+    /// speaking the upgrade directly over TLS.
+    #[tokio::test]
+    async fn raw_tls_hijack_enforces_knock_gate() {
+        use crate::tailscale_wire::controlbase::MsgType;
+        use crate::tailscale_wire::knock::{KNOCK_HEADER, KnockConfig, NGINX_404_BODY};
+        use crate::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, load_or_generate};
+        use base64::Engine as _;
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+        let mut psk = [0u8; 32];
+        for (i, byte) in psk.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let knock = KnockConfig::enabled(psk);
+        let (state, dir) = fixture_state_with_knock(knock.clone());
+        let material =
+            load_or_generate(dir.path(), &SanConfig::with_hostname("test-host")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_bound_raw_tls(
+            listener,
+            addr,
+            ReloadableServerConfig::new(Arc::clone(&material.server_config)),
+            Router::new(),
+            state.clone(),
+        ));
+
+        // A well-formed Initiation, as a stock client puts in the header.
+        let server_pub = state.server_noise_key.public_bytes();
+        let mut init = state
+            .server_noise_key
+            .build_initiator_for_version(&server_pub, 113)
+            .unwrap();
+        let mut init_body = vec![0u8; 1024];
+        let n = init.write_message(b"", &mut init_body).unwrap();
+        init_body.truncate(n);
+        let mut init_frame = Vec::new();
+        init_frame.extend_from_slice(&113u16.to_be_bytes());
+        init_frame.push(MsgType::Initiation as u8);
+        init_frame.extend_from_slice(&(init_body.len() as u16).to_be_bytes());
+        init_frame.extend_from_slice(&init_body);
+        let handshake = base64::engine::general_purpose::STANDARD.encode(&init_frame);
+
+        let mut roots = rustls::RootCertStore::empty();
+        let leaf = CertificateDer::pem_slice_iter(material.cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        roots.add(leaf).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ));
+        let request = |path: &str, extra_header: &str| {
+            format!(
+                "POST {path} HTTP/1.1\r\n\
+                 Host: test-host\r\n\
+                 Upgrade: tailscale-control-protocol\r\n\
+                 Connection: Upgrade\r\n\
+                 {HANDSHAKE_HEADER_NAME}: {handshake}\r\n\
+                 {extra_header}\
+                 \r\n"
+            )
+        };
+
+        // Bare path without the header, and a wrong path knock: the same
+        // canonical nginx 404 the router answers, never a 101.
+        let response = raw_tls_exchange(addr, &connector, &request("/ts2021", "")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404 "),
+            "bare /ts2021 without a knock must not be hijacked: {response}"
+        );
+        assert!(response.ends_with(NGINX_404_BODY), "{response}");
+        let response =
+            raw_tls_exchange(addr, &connector, &request("/k/0000000000000000/ts2021", "")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404 "),
+            "wrong path knock must not be hijacked: {response}"
+        );
+        assert!(response.ends_with(NGINX_404_BODY), "{response}");
+
+        // A valid knock in either position still upgrades.
+        let current = knock.current_knock();
+        let response = raw_tls_exchange(
+            addr,
+            &connector,
+            &request("/ts2021", &format!("{KNOCK_HEADER}: {current}\r\n")),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 101 "),
+            "header knock must upgrade: {response}"
+        );
+        let response = raw_tls_exchange(
+            addr,
+            &connector,
+            &request(&format!("/k/{current}/ts2021"), ""),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 101 "),
+            "path knock must upgrade: {response}"
+        );
+
+        server.abort();
+    }
+
+    /// Go's `acceptHTTP` answers a missing or undecodable
+    /// `X-Tailscale-Handshake` header with a 400 before hijacking. The raw
+    /// listener must not write a 101 and park the socket in the Noise driver
+    /// (holding a handshake permit for the 30 s deadline) for such a request.
+    #[tokio::test]
+    async fn raw_tls_ts2021_without_handshake_header_is_answered_before_hijack() {
+        use crate::tailscale_wire::tls::{ReloadableServerConfig, SanConfig, load_or_generate};
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+        let (state, dir) = fixture_state();
+        let material =
+            load_or_generate(dir.path(), &SanConfig::with_hostname("test-host")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_bound_raw_tls(
+            listener,
+            addr,
+            ReloadableServerConfig::new(Arc::clone(&material.server_config)),
+            crate::tailscale_wire::router(state.clone()),
+            state.clone(),
+        ));
+        let mut roots = rustls::RootCertStore::empty();
+        let leaf = CertificateDer::pem_slice_iter(material.cert_pem.as_bytes())
+            .next()
+            .unwrap()
+            .unwrap();
+        roots.add(leaf).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        ));
+        let permits = state.server_noise_key.available_handshake_permits();
+
+        for (handshake_header, expected) in [
+            ("", "missing Tailscale handshake header\n"),
+            (
+                "X-Tailscale-Handshake: !!!\r\n",
+                "invalid tailscale handshake header\n",
+            ),
+        ] {
+            let request = format!(
+                "POST /ts2021 HTTP/1.1\r\n\
+                 Host: test-host\r\n\
+                 Upgrade: tailscale-control-protocol\r\n\
+                 Connection: Upgrade\r\n\
+                 {handshake_header}\
+                 \r\n"
+            );
+            let response = raw_tls_exchange(addr, &connector, &request).await;
+            assert!(
+                response.starts_with("HTTP/1.1 400 "),
+                "{handshake_header:?}: {response}"
+            );
+            assert!(
+                response.ends_with(expected),
+                "{handshake_header:?}: {response}"
+            );
+            assert_eq!(
+                state.server_noise_key.available_handshake_permits(),
+                permits,
+                "{handshake_header:?}: no handshake permit may stay held"
+            );
+        }
+
+        server.abort();
     }
 
     #[tokio::test]

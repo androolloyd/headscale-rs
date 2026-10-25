@@ -59,8 +59,38 @@ pub fn http01_router_with_host_policy(
         )
         .with_state(Http01RouterState {
             store,
-            allowed_host,
+            host_policy: allowed_host.map_or(Http01HostPolicy::Any, |host| {
+                host_whitelist_name(&host)
+                    .map_or(Http01HostPolicy::NoneAllowed, Http01HostPolicy::Host)
+            }),
         })
+}
+
+/// autocert's `HostWhitelist` keeps each configured name as
+/// `idna.Lookup.ToASCII` renders it and omits names that conversion rejects.
+#[cfg(feature = "full")]
+fn host_whitelist_name(host: &str) -> Option<String> {
+    super::tls::host_whitelist_name(host)
+}
+
+// The IDNA conversion is `full`-only, so without it the name is kept as
+// configured and cannot be rejected; the signature stays shared with the
+// `full` build, where it can.
+#[cfg(not(feature = "full"))]
+#[allow(clippy::unnecessary_wraps)]
+fn host_whitelist_name(host: &str) -> Option<String> {
+    Some(host.to_owned())
+}
+
+#[derive(Clone, Debug)]
+enum Http01HostPolicy {
+    /// No host policy: every request `Host` is served.
+    Any,
+    /// autocert `HostWhitelist` form of the configured name.
+    Host(String),
+    /// The configured name failed conversion; autocert's whitelist is then
+    /// empty and no request host is allowed.
+    NoneAllowed,
 }
 
 pub fn http01_listener_router(
@@ -81,7 +111,7 @@ pub fn http01_listener_router(
 #[derive(Clone, Debug)]
 struct Http01RouterState {
     store: AcmeHttp01ChallengeStore,
-    allowed_host: Option<String>,
+    host_policy: Http01HostPolicy,
 }
 
 async fn handle_http01_challenge(
@@ -89,7 +119,7 @@ async fn handle_http01_challenge(
     headers: HeaderMap,
     Path(token): Path<String>,
 ) -> Response {
-    if !host_policy_allows(state.allowed_host.as_deref(), &headers) {
+    if !host_policy_allows(&state.host_policy, &headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -105,9 +135,11 @@ async fn handle_http01_challenge(
         .into_response()
 }
 
-fn host_policy_allows(allowed_host: Option<&str>, headers: &HeaderMap) -> bool {
-    let Some(allowed_host) = allowed_host else {
-        return true;
+fn host_policy_allows(policy: &Http01HostPolicy, headers: &HeaderMap) -> bool {
+    let allowed_host = match policy {
+        Http01HostPolicy::Any => return true,
+        Http01HostPolicy::Host(host) => host,
+        Http01HostPolicy::NoneAllowed => return false,
     };
     headers
         .get(header::HOST)
@@ -203,6 +235,31 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), b"token-123.thumbprint");
+    }
+
+    /// autocert's `HostWhitelist` stores each configured name through
+    /// `idna.Lookup.ToASCII` and `HTTPHandler` compares the request `Host`
+    /// against that form, so a mixed-case `tls_letsencrypt_hostname` still
+    /// serves the validator's lowercase request.
+    #[cfg(feature = "full")]
+    #[tokio::test]
+    async fn http01_router_normalizes_configured_host_like_autocert() {
+        let store = AcmeHttp01ChallengeStore::new();
+        store.insert("token-123", "token-123.thumbprint");
+        let app = http01_router_with_host_policy(store, Some("Control.Example".into()));
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/.well-known/acme-challenge/token-123")
+                    .header(header::HOST, "control.example")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

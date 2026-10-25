@@ -95,13 +95,13 @@ impl BackendMessage for Authentication {
             }
 
             10 => {
+                // pgx AuthenticationSASL.Decode loops `for len(authMechanisms) > 1`,
+                // so the final empty-string terminator (or a 1-byte remainder) is
+                // tolerated. Mirror that so validate_go_body and this decoder agree.
                 let mut remaining = buf.as_ref();
-                loop {
+                while remaining.len() > 1 {
                     let end = memchr(b'\0', remaining)
                         .ok_or_else(|| err_protocol!("unterminated SASL mechanism list"))?;
-                    if end == 0 {
-                        break;
-                    }
                     from_utf8(&remaining[..end]).map_err(Error::protocol)?;
                     remaining = &remaining[end + 1..];
                 }
@@ -242,5 +242,29 @@ impl ProtocolDecode<'_> for AuthenticationSaslFinal {
         Ok(Self {
             verifier: verifier.ok_or_else(|| err_protocol!("missing SCRAM verifier"))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Authentication;
+    use crate::message::{validate_go_body, BackendMessage, BackendMessageFormat};
+    use sqlx_core::bytes::Bytes;
+
+    /// pgx `AuthenticationSASL.Decode` loops `for len(authMechanisms) > 1`, so a
+    /// body whose last mechanism is NUL-terminated but carries no final
+    /// empty-string terminator decodes to `["SCRAM-SHA-256"]`. The native
+    /// `validate_go_body` already mirrors that; this decoder must agree with it.
+    #[test]
+    fn sasl_mechanism_list_without_final_terminator_decodes() {
+        let mut body = 10u32.to_be_bytes().to_vec();
+        body.extend_from_slice(b"SCRAM-SHA-256\0");
+        validate_go_body(&BackendMessageFormat::Authentication, &body).unwrap();
+
+        let decoded = Authentication::decode_body(Bytes::from(body)).unwrap();
+        let Authentication::Sasl(sasl) = decoded else {
+            panic!("expected AuthenticationSASL");
+        };
+        assert_eq!(sasl.mechanisms().collect::<Vec<_>>(), ["SCRAM-SHA-256"]);
     }
 }

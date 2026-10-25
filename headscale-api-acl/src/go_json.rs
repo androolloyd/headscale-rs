@@ -291,8 +291,14 @@ impl<'a> Cursor<'a> {
 }
 
 pub(crate) fn validate(bytes: &[u8]) -> Result<(), String> {
+    validate_with_depth(bytes, MAX_DEPTH)
+}
+
+/// Validate with a caller-supplied container bound where a materialized
+/// value is consumed recursively afterwards.
+pub(crate) fn validate_with_depth(bytes: &[u8], max_depth: usize) -> Result<(), String> {
     let mut cursor = Cursor::new(bytes);
-    cursor.value()?;
+    cursor.value_with_depth(Some(max_depth))?;
     cursor.done()
 }
 

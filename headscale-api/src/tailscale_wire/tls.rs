@@ -914,6 +914,14 @@ fn autocert_cache_path(cache_dir: &Path, hostname: &str) -> PathBuf {
     cache_dir.join(clean)
 }
 
+/// The form autocert's `HostWhitelist` stores a configured name in
+/// (`idna.Lookup.ToASCII`) and compares request hosts against. `None` for a
+/// name the whitelist silently omits, which then admits nothing.
+#[cfg(feature = "full")]
+pub(crate) fn host_whitelist_name(hostname: &str) -> Option<String> {
+    acme_hostname::lookup(hostname)
+}
+
 /// Normalize a configured ACME certificate-cache name with the selected
 /// Lookup profile, then remove one trailing root dot for the cache key.
 /// HostWhitelist comparison retains that dot and uses a separate value.

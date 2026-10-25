@@ -180,6 +180,40 @@ async fn missing_machine_detail_returns_404() {
 }
 
 #[tokio::test]
+async fn machine_detail_short_id_without_name_renders() {
+    // A persisted row can surface with an empty hostname and a node key
+    // shorter than the 8-byte title prefix; the page must not index
+    // past the end of the id.
+    let reg = Arc::new(MachineRegistry::new());
+    reg.upsert(
+        "ab".into(),
+        MachineRecord::new_at(
+            chrono::Utc::now(),
+            "ab".into(),
+            "bb".repeat(32),
+            "alice".into(),
+            String::new(),
+            std::net::Ipv4Addr::new(100, 64, 0, 7),
+            false,
+        ),
+    );
+    let state = AdminState::builder()
+        .bearer_token(admin_token())
+        .users(UserRegistry::new())
+        .machines(Arc::new(WireMachineAdmin::new(reg)))
+        .preauth(Arc::new(InMemoryPreauthAdmin::new()))
+        .derp_regions(1)
+        .build();
+    let resp = router(state)
+        .oneshot(req_get_authed("/admin/machines/ab", &admin_token()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_str(resp).await;
+    assert!(body.contains("Machine ab"));
+}
+
+#[tokio::test]
 async fn users_page_create_form_present() {
     let (app, _) = app();
     let resp = app

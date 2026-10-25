@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,9 @@ const DEFAULT_LETSENCRYPT_CACHE_DIR: &str = "/var/www/.cache";
 const DEFAULT_LETSENCRYPT_LISTEN: &str = ":http";
 const DEFAULT_LETSENCRYPT_CHALLENGE_TYPE: &str = "HTTP-01";
 const NATIVE_DERP_SHUTDOWN_NOTICE_FLUSH_GRACE: Duration = Duration::from_millis(50);
+/// Upper bound on the final database close (Go's `HSDatabase.Close` has none):
+/// a connection that never comes back must not turn shutdown into a hang.
+const DATABASE_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 mod acme_grpc_incoming;
 
@@ -383,7 +386,7 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
             "server.server_url is required so clients receive absolute registration URLs"
         )
     })?;
-    std::fs::create_dir_all(&cfg.state_dir).with_context(|| {
+    create_private_dir_all(&cfg.state_dir).with_context(|| {
         format!(
             "Failed to create state directory: {}",
             cfg.state_dir.display()
@@ -702,7 +705,43 @@ async fn run_tailscale_wire_server(cfg: RunServerConfig) -> Result<()> {
         handle.abort();
     }
     drop(embedded_derp_runtime);
+    // Last, once the NodeStore worker has drained and joined: Go closes state
+    // and database after its batcher and listeners (hscontrol/app.go Serve).
+    close_runtime_database(db).await;
     serve_result
+}
+
+/// `HSDatabase.Close` (hscontrol/db/db.go): VACUUM a WAL-mode SQLite database,
+/// ignoring the result, then close it, so the stopped server leaves no WAL
+/// frames behind and the database file alone carries every committed row.
+async fn close_runtime_database(db: RuntimeDatabase) {
+    let close = async {
+        match db {
+            RuntimeDatabase::Sqlite(db) => {
+                let write_ahead_log = sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+                    .fetch_one(db.pool())
+                    .await
+                    .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"));
+                if write_ahead_log
+                    && let Err(error) = sqlx::query("VACUUM").execute(db.pool()).await
+                {
+                    tracing::debug!(%error, "VACUUM before closing the database failed");
+                }
+                db.close().await;
+            }
+            #[cfg(feature = "postgres-sqlx")]
+            RuntimeDatabase::Postgres(pool) => pool.close().await,
+        }
+    };
+    if tokio::time::timeout(DATABASE_CLOSE_TIMEOUT, close)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout = ?DATABASE_CLOSE_TIMEOUT,
+            "closing the database did not finish in time; continuing shutdown"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2538,11 +2577,21 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
-        std::fs::create_dir_all(parent).with_context(|| {
+        create_private_dir_all(parent).with_context(|| {
             format!("Failed to create database directory: {}", parent.display())
         })?;
     }
     Ok(())
+}
+
+/// headscale-go creates missing state, database and unix socket directories
+/// through util.EnsureDir, i.e. os.MkdirAll(dir, 0o700): every component it
+/// creates is private to the service user rather than the umask default.
+fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
 }
 
 fn parse_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
@@ -3593,6 +3642,54 @@ mod tests {
         let len = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
         assert_eq!(chunk.len(), 4 + len, "framed chunk size mismatch");
         serde_json::from_slice(&chunk[4..]).expect("map response json")
+    }
+
+    #[test]
+    fn state_directory_is_created_with_go_private_mode() {
+        // readOrCreatePrivateKey goes through util.EnsureDir for the directory
+        // holding the Noise key, which is the state directory here.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("var").join("headscale");
+        create_private_dir_all(&state_dir).unwrap();
+        for created in [dir.path().join("var"), state_dir.clone()] {
+            let mode = std::fs::metadata(&created).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} created with mode {mode:o}",
+                created.display()
+            );
+        }
+
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        create_private_dir_all(&state_dir).unwrap();
+        let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750, "existing directory mode must be preserved");
+    }
+
+    #[test]
+    fn ensure_parent_dir_creates_missing_directories_with_go_private_mode() {
+        // headscale-go creates the SQLite database and unix socket directories
+        // through util.EnsureDir: os.MkdirAll(dir, 0o700), never the umask
+        // default. Existing directories are left alone whatever their mode.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("state").join("nested");
+        let path = nested.join("db.sqlite");
+        ensure_parent_dir(&path).unwrap();
+        for created in [dir.path().join("state"), nested.clone()] {
+            let mode = std::fs::metadata(&created).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} created with mode {mode:o}",
+                created.display()
+            );
+        }
+
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o750)).unwrap();
+        ensure_parent_dir(&path).unwrap();
+        let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750, "existing directory mode must be preserved");
     }
 
     fn test_run_server_config(dir: &tempfile::TempDir) -> RunServerConfig {

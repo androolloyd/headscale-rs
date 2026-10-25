@@ -1937,9 +1937,10 @@ impl CliConfig {
         if let Some(derp) = &mut self.derp {
             resolve_path(config_dir, &mut derp.server.private_key_path);
         }
-        if let Some(dns) = &mut self.dns {
-            resolve_optional_path(config_dir, &mut dns.extra_records_path);
-        }
+        // dns.extra_records_path is deliberately absent: headscale-go hands
+        // the configured string to the extra-records manager unchanged
+        // (hscontrol/types/config.go:913, hscontrol/app.go:687), so a relative
+        // value is relative to the working directory, not the config file.
         if let Some(server) = &mut self.server {
             resolve_path(config_dir, &mut server.db_path);
             resolve_path(config_dir, &mut server.state_dir);
@@ -5553,9 +5554,65 @@ dns:
             dir.path().join("keys/derp.key")
         );
         assert_eq!(derp.paths, [PathBuf::from("derp/map.yaml")]);
+        // Unlike the keys above, Go never passes dns.extra_records_path
+        // through util.AbsolutePathFromConfigPath: config.go:913 stores the
+        // raw string and app.go:687 opens it as given, so it stays relative to
+        // the working directory (a pinned v0.29.5 oracle run from another
+        // directory fails with "stat rel-extra.json: no such file or
+        // directory" even though the file is next to the config).
         assert_eq!(
             dns.extra_records_path.as_deref(),
-            Some(dir.path().join("dns/extra-records.json").as_path())
+            Some(Path::new("dns/extra-records.json"))
+        );
+    }
+
+    #[test]
+    fn load_keeps_relative_dns_extra_records_path_as_written() {
+        // headscale-go passes dns.extra_records_path through unchanged
+        // (hscontrol/types/config.go:913 -> hscontrol/app.go:687), so a
+        // relative value is relative to the process working directory, not
+        // the config file. A pinned v0.29.5 oracle started from another
+        // directory with the file beside its config fails with
+        // "stat rel-extra.json: no such file or directory".
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+  extra_records_path: "rel-extra.json"
+database:
+  type: sqlite
+"#,
+        )
+        .unwrap();
+
+        let config = CliConfig::load(&config_path).unwrap();
+        assert_eq!(
+            config.dns.as_ref().unwrap().extra_records_path.as_deref(),
+            Some(Path::new("rel-extra.json"))
+        );
+        // Keys that Go passes through util.AbsolutePathFromConfigPath still
+        // resolve against the config directory.
+        assert_eq!(
+            config.noise.as_ref().unwrap().private_key_path.as_deref(),
+            Some(dir.path().join("noise_private.key").as_path())
+        );
+
+        // The environment override goes through the same resolution pass.
+        let mut config = CliConfig::default();
+        config
+            .apply_dns_env_overrides_from([("HEADSCALE_DNS_EXTRA_RECORDS_PATH", "env/extra.json")])
+            .unwrap();
+        config.resolve_config_relative_paths(Path::new("/etc/headscale"));
+        assert_eq!(
+            config.dns.as_ref().unwrap().extra_records_path.as_deref(),
+            Some(Path::new("env/extra.json"))
         );
     }
 

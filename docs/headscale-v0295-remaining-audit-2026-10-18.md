@@ -736,10 +736,14 @@ Not fixed, recorded as residual risk or as decisions:
   `unicode.IsDigit` rejects (edge case, unconfirmed against the binary).
 - OIDC provider JSON is parsed into trees up to 10,000 deep; the content is
   provider-controlled, so it was left as is.
-- The patched `http` crate widens `HeaderMap` capacity for the whole binary and
-  the gRPC listeners keep h2's 16 MiB header-list default; whether that
-  amplifies memory for an unauthenticated peer is being measured (see
-  `CHANGES.md` for the outcome).
+- The patched `http` crate widens `HeaderMap` capacity for the whole binary
+  (24,576 distinct entries upstream, at least 400,000 here). A reviewer
+  suspected this amplified memory for an unauthenticated peer because h2's own
+  header-list default is 16 MiB; measured against the vendored h2 server, it
+  does not: hyper's default (16 KiB) applies to the tonic gRPC listeners, which
+  refuse a 100,000-header block during decode with ENHANCE_YOUR_CALM, and the
+  1 MiB Noise and shutdown servers answer 431 beyond about 29,000 headers. Whole
+  process memory against a pristine-`http` build was not measured.
 - The h2 `:authority` fallback and the first-SETTINGS guard are compiled in for
   every h2 server once their features are on; the vendored crates do not pass
   `-D warnings` as shipped.

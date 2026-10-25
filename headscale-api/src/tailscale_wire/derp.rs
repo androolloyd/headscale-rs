@@ -33,8 +33,9 @@ use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use headscale_core::derp::{
     native::{NativeDerpRelay, NativeDerpSession},
     protocol::{
-        DerpNodeKeyPair, Frame, FrameDecoder, KEY_LEN, MAX_INFO_LEN, PROTOCOL_VERSION, ServerInfo,
-        encode_frame, encode_server_info_frame, encode_server_key_frame, open_client_info,
+        DerpNodeKeyPair, Frame, FrameDecoder, KEY_LEN, MAX_CLIENT_FRAME_LEN,
+        MAX_HANDSHAKE_FRAME_LEN, PROTOCOL_VERSION, ServerInfo, encode_frame,
+        encode_server_info_frame, encode_server_key_frame, open_client_info,
     },
 };
 use hyper_util::rt::TokioIo;
@@ -50,6 +51,24 @@ const DERP_PUBLIC_KEY_HEADER: &str = "Derp-Public-Key";
 const READ_BUF_LEN: usize = 16 * 1024;
 const DERP_PRIVATE_KEY_PREFIX: &str = "privkey:";
 const WEBSOCKET_UNSUPPORTED_DATA: u16 = 1003;
+/// Largest WebSocket message (and frame) accepted on `/derp`. The WebSocket
+/// layer buffers a whole message before the DERP decoder sees it, and its
+/// defaults (64 MiB per message, 16 MiB per frame) would let any client pin
+/// tens of megabytes per connection; Go's `coder/websocket` `NetConn` instead
+/// streams messages through a bufio reader. Each DERP frame is at most
+/// `MAX_CLIENT_FRAME_LEN` (~64 KiB) after the handshake and
+/// `MAX_HANDSHAKE_FRAME_LEN` (~256 KiB) during it, and Go's DERP client
+/// writes roughly one frame per message, so 1 MiB (Go's `derp.MaxInfoLen`)
+/// leaves room for several coalesced frames per message.
+const MAX_WEBSOCKET_MESSAGE_LEN: usize = 1 << 20;
+/// How long a single write to a client may stall before the connection is
+/// dropped. Go puts a write deadline on every client write
+/// (`DefaultTCPWiteTimeout`, 2 s, which pinned headscale uses as-is, and
+/// `privilegedWriteTimeout`, 30 s, for mesh peers); without one a client that
+/// stops reading pins its task, socket and send queue forever. The longer of
+/// Go's two values is used so a briefly stalled legitimate client is never
+/// cut off sooner than Go would.
+const DERP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_DERP_KEEPALIVE_JITTER: Duration = Duration::from_secs(5);
 const MIN_DERP_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(1);
@@ -563,6 +582,8 @@ async fn handle_derp_websocket_upgrade(
 
     websocket
         .protocols([DERP_UPGRADE_PROTOCOL])
+        .max_message_size(MAX_WEBSOCKET_MESSAGE_LEN)
+        .max_frame_size(MAX_WEBSOCKET_MESSAGE_LEN)
         .on_failed_upgrade(|err| {
             tracing::warn!(target = "tailscale_wire::derp", error = %err, "native DERP websocket upgrade failed");
         })
@@ -585,7 +606,7 @@ where
         .try_acquire_owned()
         .map_err(|_| WireError::Internal("too many pending DERP handshakes".into()))?;
     let deadline = tokio::time::Instant::now() + super::noise::CONTROL_HANDSHAKE_TIMEOUT;
-    let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+    let mut decoder = FrameDecoder::new(MAX_HANDSHAKE_FRAME_LEN);
     let client_public = tokio::time::timeout_at(deadline, async {
         let server_key = encode_server_key_frame(&runtime.server_key)
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
@@ -606,6 +627,7 @@ where
     .await
     .map_err(|_| WireError::Internal("DERP handshake timed out".into()))??;
     drop(pending_handshake);
+    decoder.set_max_payload_len(MAX_CLIENT_FRAME_LEN);
 
     let session = runtime.relay.connect(client_public).await;
     let session_id = session.session_id();
@@ -613,8 +635,7 @@ where
         let server_info =
             encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
                 .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-        writer.write_all(&server_info).await?;
-        writer.flush().await?;
+        write_derp_bytes(&mut writer, &server_info).await?;
         if let Some(frame) = runtime.current_health_frame() {
             write_derp_frame(&mut writer, &frame).await?;
         }
@@ -654,7 +675,7 @@ where
         .try_acquire_owned()
         .map_err(|_| WireError::Internal("too many pending DERP handshakes".into()))?;
     let deadline = tokio::time::Instant::now() + super::noise::CONTROL_HANDSHAKE_TIMEOUT;
-    let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+    let mut decoder = FrameDecoder::new(MAX_HANDSHAKE_FRAME_LEN);
     let client_public = tokio::time::timeout_at(deadline, async {
         let server_key = encode_server_key_frame(&runtime.server_key)
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
@@ -674,6 +695,7 @@ where
     .await
     .map_err(|_| WireError::Internal("DERP handshake timed out".into()))??;
     drop(pending_handshake);
+    decoder.set_max_payload_len(MAX_CLIENT_FRAME_LEN);
 
     let session = runtime.relay.connect(client_public).await;
     let session_id = session.session_id();
@@ -837,9 +859,30 @@ where
 {
     let encoded =
         encode_frame(frame).map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
-    writer.write_all(&encoded).await?;
-    writer.flush().await?;
-    Ok(())
+    write_derp_bytes(writer, &encoded).await
+}
+
+/// Write and flush already-encoded bytes, giving up after
+/// [`DERP_WRITE_TIMEOUT`].
+async fn write_derp_bytes<W>(writer: &mut W, bytes: &[u8]) -> Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
+    with_write_timeout(async {
+        writer.write_all(bytes).await?;
+        writer.flush().await?;
+        Ok(())
+    })
+    .await
+}
+
+async fn with_write_timeout<F>(write: F) -> Result<(), WireError>
+where
+    F: std::future::Future<Output = Result<(), WireError>>,
+{
+    tokio::time::timeout(DERP_WRITE_TIMEOUT, write)
+        .await
+        .map_err(|_| WireError::Internal("DERP write to client timed out".into()))?
 }
 
 async fn read_next_frame<R>(reader: &mut R, decoder: &mut FrameDecoder) -> Result<Frame, WireError>
@@ -922,10 +965,13 @@ where
     W: Sink<Message, Error = WE> + Unpin,
     WE: std::fmt::Display,
 {
-    writer
-        .send(Message::Binary(bytes))
-        .await
-        .map_err(|err| WireError::Internal(format!("DERP websocket: {err}")))
+    with_write_timeout(async {
+        writer
+            .send(Message::Binary(bytes))
+            .await
+            .map_err(|err| WireError::Internal(format!("DERP websocket: {err}")))
+    })
+    .await
 }
 
 async fn send_websocket_derp_frame<W, WE>(writer: &mut W, frame: &Frame) -> Result<(), WireError>
@@ -947,13 +993,16 @@ where
     W: Sink<Message, Error = WE> + Unpin,
     WE: std::fmt::Display,
 {
-    writer
-        .send(Message::Close(Some(CloseFrame {
-            code,
-            reason: Cow::Borrowed(reason),
-        })))
-        .await
-        .map_err(|err| WireError::Internal(format!("DERP websocket: {err}")))
+    with_write_timeout(async {
+        writer
+            .send(Message::Close(Some(CloseFrame {
+                code,
+                reason: Cow::Borrowed(reason),
+            })))
+            .await
+            .map_err(|err| WireError::Internal(format!("DERP websocket: {err}")))
+    })
+    .await
 }
 
 fn derp_upgrade_required_response() -> Response<Body> {
@@ -980,10 +1029,10 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::routing::any;
-    use headscale_core::derp::native::DUPLICATE_CONNECTION_HEALTH;
+    use headscale_core::derp::native::{DUPLICATE_CONNECTION_HEALTH, MAX_SESSIONS_PER_KEY};
     use headscale_core::derp::protocol::{
-        ClientInfo, FrameType, PeerGoneReason, encode_client_info_frame, encode_raw_frame,
-        open_server_info,
+        ClientInfo, FrameType, MAX_INFO_LEN, PeerGoneReason, decode_frame,
+        encode_client_info_frame, encode_header, encode_raw_frame, open_server_info,
     };
     use http_body_util::BodyExt;
     use std::io;
@@ -2791,6 +2840,347 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn test_runtime() -> Arc<NativeDerpRuntime> {
+        Arc::new(NativeDerpRuntime::new(
+            DerpNodeKeyPair::from_private_key([9u8; KEY_LEN]).unwrap(),
+            NativeDerpRelay::new(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn native_derp_same_key_connect_flood_closes_the_oldest_connections() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = test_runtime();
+        let total = MAX_SESSIONS_PER_KEY * 10;
+
+        let mut clients = Vec::new();
+        for _ in 0..total {
+            clients.push(start_websocket_derp_client(runtime.clone(), &client_key).await);
+        }
+
+        assert_eq!(runtime.relay.session_count().await, MAX_SESSIONS_PER_KEY);
+        let evicted: Vec<_> = clients.drain(..total - MAX_SESSIONS_PER_KEY).collect();
+        for client in evicted {
+            let result = tokio::time::timeout(Duration::from_secs(2), client.server)
+                .await
+                .expect("an evicted connection's driver must wind down")
+                .unwrap();
+            assert!(result.is_ok(), "eviction is a clean close: {result:?}");
+        }
+        for client in &clients {
+            assert!(
+                !client.server.is_finished(),
+                "the newest connections stay up"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_rejects_oversized_post_handshake_frame_without_buffering_it() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = test_runtime();
+        let mut client = start_raw_derp_client(runtime.clone(), &client_key).await;
+
+        // Header only: a SendPacket announcing 200 KiB, over any legitimate
+        // client frame. The server must refuse it on sight, not read the body.
+        let header = encode_header(FrameType::SendPacket.code(), 200 << 10);
+        client.writer.write_all(&header).await.unwrap();
+        client.writer.flush().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), client.server)
+            .await
+            .expect("the oversized header must end the connection immediately")
+            .unwrap();
+        let err = result
+            .expect_err("oversized frame is a protocol error")
+            .to_string();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+        assert_eq!(runtime.relay.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_rejects_oversized_handshake_frame_without_buffering_it() {
+        let runtime = test_runtime();
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server_runtime = runtime.clone();
+        let server =
+            tokio::spawn(async move { drive_native_derp(server_runtime, server_io).await });
+        let (mut reader, mut writer) = tokio::io::split(client_io);
+        let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+        read_next_frame(&mut reader, &mut decoder).await.unwrap();
+
+        // An unauthenticated peer announcing a ClientInfo larger than any real
+        // one must not get the server to wait for (and buffer) the body.
+        let header = encode_header(
+            FrameType::ClientInfo.code(),
+            u32::try_from(MAX_HANDSHAKE_FRAME_LEN + 1).unwrap(),
+        );
+        writer.write_all(&header).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("the oversized header must end the handshake immediately")
+            .unwrap();
+        let err = result
+            .expect_err("oversized handshake frame is rejected")
+            .to_string();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+        assert_eq!(runtime.relay.session_count().await, 0);
+    }
+
+    /// A client that stops reading must not pin its connection forever: once a
+    /// write stalls past `DERP_WRITE_TIMEOUT` the driver gives up and removes
+    /// the session. Time is paused, so the 30 s elapse instantly.
+    #[tokio::test(start_paused = true)]
+    async fn drive_native_derp_drops_clients_that_stop_reading() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let runtime = test_runtime();
+        let client = start_raw_derp_client(runtime.clone(), &client_key).await;
+        let RawDerpClient {
+            reader: _stalled_reader,
+            mut writer,
+            server,
+            ..
+        } = client;
+
+        // Ping without ever reading the pongs. Once the (4 KiB) pipe back to
+        // the client is full the server's write blocks.
+        let flood = tokio::spawn(async move {
+            let ping = encode_raw_frame(FrameType::Ping.code(), b"12345678").unwrap();
+            for _ in 0..2000 {
+                if writer.write_all(&ping).await.is_err() {
+                    break;
+                }
+            }
+            writer
+        });
+
+        let result = tokio::time::timeout(DERP_WRITE_TIMEOUT + Duration::from_secs(5), server)
+            .await
+            .expect("a stalled write must time out instead of pinning the connection")
+            .unwrap();
+        let err = result
+            .expect_err("write stall ends the connection")
+            .to_string();
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert_eq!(runtime.relay.session_count().await, 0);
+        flood.abort();
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_websocket_rejects_oversized_frames_on_sight() {
+        let runtime = test_runtime();
+
+        // After login: a SendPacket header over any legitimate client frame.
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let client = start_websocket_derp_client(runtime.clone(), &client_key).await;
+        let header = encode_header(FrameType::SendPacket.code(), 200 << 10);
+        client
+            .tx
+            .send(Ok(Message::Binary(header.to_vec())))
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), client.server)
+            .await
+            .expect("the oversized header must end the connection immediately")
+            .unwrap()
+            .expect_err("oversized frame is a protocol error")
+            .to_string();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+        assert_eq!(runtime.relay.session_count().await, 0);
+
+        // Before login: a ClientInfo header over the handshake limit.
+        let (tx, rx) = mpsc::channel(4);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let server_runtime = runtime.clone();
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            drive_native_derp_websocket_parts(
+                server_runtime,
+                CollectWebsocketSink { sent: server_sent },
+                MpscMessageStream { rx },
+            )
+            .await
+        });
+        let header = encode_header(
+            FrameType::ClientInfo.code(),
+            u32::try_from(MAX_HANDSHAKE_FRAME_LEN + 1).unwrap(),
+        );
+        tx.send(Ok(Message::Binary(header.to_vec()))).await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("the oversized handshake header must end the handshake immediately")
+            .unwrap()
+            .expect_err("oversized handshake frame is rejected")
+            .to_string();
+        assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn drive_native_derp_hangs_up_on_mesh_only_frames_from_regular_clients() {
+        let attacker_key = DerpNodeKeyPair::from_private_key([6u8; KEY_LEN]).unwrap();
+        let victim_key = DerpNodeKeyPair::from_private_key([7u8; KEY_LEN]).unwrap();
+        let runtime = test_runtime();
+        let mut attacker = start_raw_derp_client(runtime.clone(), &attacker_key).await;
+        let victim = start_raw_derp_client(runtime.clone(), &victim_key).await;
+
+        // ClosePeer from a regular client: Go answers "insufficient
+        // permissions" and drops the sender, never the target.
+        let close_peer = encode_frame(&Frame::ClosePeer {
+            peer: victim_key.public_key(),
+        })
+        .unwrap();
+        attacker.writer.write_all(&close_peer).await.unwrap();
+        attacker.writer.flush().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), attacker.server)
+            .await
+            .expect("a regular client's ClosePeer must end its own connection")
+            .unwrap();
+        let err = result.expect_err("mesh-only frame is refused").to_string();
+        assert!(err.contains("mesh permissions"), "unexpected error: {err}");
+        assert_eq!(runtime.relay.session_count().await, 1, "the victim stays");
+        assert!(!victim.server.is_finished());
+    }
+
+    fn masked_ws_binary(payload: &[u8]) -> Vec<u8> {
+        const MASKED: u8 = 0x80;
+        let len = payload.len();
+        let mut frame = vec![0x82];
+        if len < 126 {
+            frame.push(MASKED | u8::try_from(len).unwrap());
+        } else if let Ok(len) = u16::try_from(len) {
+            frame.push(MASKED | 0x7e);
+            frame.extend_from_slice(&len.to_be_bytes());
+        } else {
+            frame.push(MASKED | 0x7f);
+            frame.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+        // A zero masking key leaves the payload bytes unchanged.
+        frame.extend_from_slice(&[0, 0, 0, 0]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// Read one unfragmented server-to-client WebSocket message; a close
+    /// frame or a dropped connection is an error.
+    async fn read_ws_message(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> {
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await?;
+        let mut len = u64::from(head[1] & 0x7f);
+        if len == 126 {
+            let mut ext = [0u8; 2];
+            stream.read_exact(&mut ext).await?;
+            len = u64::from(u16::from_be_bytes(ext));
+        } else if len == 127 {
+            let mut ext = [0u8; 8];
+            stream.read_exact(&mut ext).await?;
+            len = u64::from_be_bytes(ext);
+        }
+        let mut payload = vec![0u8; usize::try_from(len).unwrap()];
+        stream.read_exact(&mut payload).await?;
+        if head[0] & 0x0f == 0x8 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "websocket close frame",
+            ));
+        }
+        Ok(payload)
+    }
+
+    /// Whole WebSocket messages are buffered before the DERP decoder runs, so
+    /// the upgrade must cap them (the library default is 64 MiB). A message
+    /// full of valid keepalives and a ping distinguishes "rejected at the
+    /// message layer" from "decoded": only an accepted message earns a pong.
+    #[tokio::test]
+    async fn native_derp_websocket_upgrade_caps_message_size() {
+        let client_key = DerpNodeKeyPair::from_private_key([8u8; KEY_LEN]).unwrap();
+        let state = test_state_with_native_derp();
+        let server_public = state.native_derp.as_ref().unwrap().public_key();
+        let app = Router::new()
+            .route("/derp", any(handle_derp))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /derp HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                  Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                  Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: derp\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(stream.read_u8().await.unwrap());
+        }
+        assert!(
+            response.starts_with(b"HTTP/1.1 101"),
+            "websocket upgrade: {}",
+            String::from_utf8_lossy(&response)
+        );
+
+        let (frame, _) =
+            decode_frame(&read_ws_message(&mut stream).await.unwrap(), MAX_INFO_LEN).unwrap();
+        assert!(matches!(frame, Frame::ServerKey { key, .. } if key == server_public));
+        let client_info =
+            encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
+        stream
+            .write_all(&masked_ws_binary(&client_info))
+            .await
+            .unwrap();
+        let server_info = read_ws_message(&mut stream).await.unwrap();
+        let (server_info, _) = decode_frame(&server_info, MAX_INFO_LEN).unwrap();
+        open_server_info(&client_key, &server_public, &server_info).unwrap();
+
+        let keepalive = encode_frame(&Frame::KeepAlive).unwrap();
+        let ping = encode_frame(&Frame::Ping(*b"12345678")).unwrap();
+        let message_of = |len: usize| {
+            let mut message = keepalive.repeat(len / keepalive.len());
+            message.extend_from_slice(&ping);
+            message
+        };
+
+        // Control: a large but in-limit message is processed normally.
+        stream
+            .write_all(&masked_ws_binary(&message_of(512 << 10)))
+            .await
+            .unwrap();
+        let (pong, _) =
+            decode_frame(&read_ws_message(&mut stream).await.unwrap(), MAX_INFO_LEN).unwrap();
+        assert_eq!(pong, Frame::Pong(*b"12345678"));
+
+        // Twice the cap: the connection must be torn down, with no pong.
+        let _ = stream
+            .write_all(&masked_ws_binary(&message_of(
+                2 * MAX_WEBSOCKET_MESSAGE_LEN,
+            )))
+            .await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match read_ws_message(&mut stream).await {
+                    Ok(message) => {
+                        if matches!(
+                            decode_frame(&message, MAX_INFO_LEN),
+                            Ok((Frame::Pong(_), _))
+                        ) {
+                            return false;
+                        }
+                    }
+                    Err(_) => return true,
+                }
+            }
+        })
+        .await
+        .expect("the oversized message must end the connection");
+        assert!(outcome, "an oversized websocket message was processed");
+        serve.abort();
     }
 
     struct CollectWebsocketSink {

@@ -20,6 +20,7 @@ use x509_parser::parse_x509_certificate;
 
 use crate::BytesResponse;
 use crate::crypto::{self, KeyPair};
+use crate::limits::bounded_display;
 
 /// Error type for instant-acme
 #[derive(Debug, Error)]
@@ -180,27 +181,34 @@ impl Problem {
 
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("API error")?;
-        if let Some(detail) = &self.detail {
-            write!(f, ": {detail}")?;
-        }
+        // The detail and subproblems are server-controlled: render at most
+        // ERROR_DISPLAY_LIMIT bytes in total, the fields keep everything.
+        bounded_display(f, |out| {
+            out.write_str("API error")?;
+            if let Some(detail) = &self.detail {
+                write!(out, ": {detail}")?;
+            }
 
-        if let Some(r#type) = &self.r#type {
-            write!(f, " ({type})")?;
-        }
+            if let Some(r#type) = &self.r#type {
+                write!(out, " ({type})")?;
+            }
 
-        if !self.subproblems.is_empty() {
-            let count = self.subproblems.len();
-            write!(f, ": {count} subproblems: ")?;
-            for (i, subproblem) in self.subproblems.iter().enumerate() {
-                write!(f, "{subproblem}")?;
-                if i != count - 1 {
-                    f.write_str(", ")?;
+            if !self.subproblems.is_empty() {
+                let count = self.subproblems.len();
+                write!(out, ": {count} subproblems: ")?;
+                for (i, subproblem) in self.subproblems.iter().enumerate() {
+                    if out.is_cut() {
+                        break;
+                    }
+                    write!(out, "{subproblem}")?;
+                    if i != count - 1 {
+                        out.write_str(", ")?;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -1279,5 +1287,42 @@ mod tests {
         let window = info.suggested_window;
         assert_eq!(window.start.day(), 2);
         assert_eq!(window.end.day(), 3);
+    }
+
+    #[test]
+    fn problem_display_is_bounded() {
+        use crate::limits::ERROR_DISPLAY_LIMIT;
+
+        let subproblems = (0..1000)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "urn:ietf:params:acme:error:dns",
+                    "detail": "d".repeat(512),
+                    "identifier": {"type": "dns", "value": format!("host{index}.example.com")},
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::json!({
+            "type": "urn:ietf:params:acme:error:malformed",
+            "detail": "x".repeat(4 * 1024 * 1024),
+            "subproblems": subproblems,
+        });
+        let problem = serde_json::from_value::<Problem>(body).unwrap();
+        let text = problem.to_string();
+        assert!(text.len() <= ERROR_DISPLAY_LIMIT + "... (truncated)".len());
+        assert!(text.ends_with("... (truncated)"));
+        // The data itself is not truncated, only its rendering.
+        assert_eq!(problem.subproblems.len(), 1000);
+
+        let small = Problem {
+            r#type: Some("urn:ietf:params:acme:error:rateLimited".into()),
+            detail: Some("too many certificates already issued".into()),
+            status: Some(429),
+            subproblems: Vec::new(),
+        };
+        assert_eq!(
+            small.to_string(),
+            "API error: too many certificates already issued (urn:ietf:params:acme:error:rateLimited)"
+        );
     }
 }

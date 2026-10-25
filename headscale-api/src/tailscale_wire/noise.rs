@@ -78,6 +78,24 @@ fn request_log_remote_addr(req: &Request) -> Option<RequestLogRemoteAddr> {
         })
 }
 
+/// Hand the connection's resolved peer address to the inner request as the key
+/// pending interactive registrations are accounted against (F-REGCACHE).
+///
+/// `remote_addr` is the address the outer HTTP layer resolved for the
+/// `/ts2021` upgrade: the TCP peer, or the client address a trusted proxy
+/// forwarded, never a header from an untrusted peer. It is fixed for the life
+/// of the connection, so every h2 request on one Noise session carries the same
+/// source. An address that does not parse leaves the extension off, and the
+/// register handler then files the request under the shared `Unknown` source.
+fn attach_registration_source(
+    extensions: &mut http::Extensions,
+    remote_addr: &RequestLogRemoteAddr,
+) {
+    if let Some(source) = super::RegistrationSource::from_remote_addr(&remote_addr.0) {
+        extensions.insert(source);
+    }
+}
+
 /// Machine key learned from the client's TS2021 Noise static key.
 /// Inner h2 requests carry this through axum extensions so `/register`
 /// can persist the real machine identity instead of an empty placeholder.
@@ -1017,6 +1035,7 @@ async fn dispatch_h2_request(
         .insert(NoisePeerMachineKey(machine_key_hex));
     parts.extensions.insert(cancellation.clone());
     if let Some(remote_addr) = remote_addr {
+        attach_registration_source(&mut parts.extensions, &remote_addr);
         parts.extensions.insert(remote_addr);
     }
     let axum_req = http::Request::from_parts(parts, axum_body);
@@ -1836,5 +1855,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Drive `POST /machine/register` through the inner router the way
+    /// `dispatch_h2_request` does: the outer layer resolves the connection's
+    /// peer address, `attach_registration_source` carries it in, the handler
+    /// files the pending entry under it.
+    async fn post_interactive_register(
+        state: &WireState,
+        node_key_hex: &str,
+        remote_addr: &str,
+    ) -> StatusCode {
+        let remote_addr = RequestLogRemoteAddr(remote_addr.to_owned());
+        let app = inner_router(state.clone()).layer(axum::middleware::from_fn(
+            move |mut req: Request, next: axum::middleware::Next| {
+                let remote_addr = remote_addr.clone();
+                async move {
+                    req.extensions_mut()
+                        .insert(NoisePeerMachineKey("00".repeat(32)));
+                    attach_registration_source(req.extensions_mut(), &remote_addr);
+                    next.run(req).await
+                }
+            },
+        ));
+        let body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "pending" },
+        });
+        app.oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/machine/register")
+                .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn noise_requests_are_accounted_to_the_connections_resolved_peer_address() {
+        use crate::tailscale_wire::{
+            REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE, RegistrationSource,
+        };
+
+        let (state, _dir) = fixture_state();
+        let cache = state.registration_cache.clone();
+        let excess = 5;
+
+        for i in 0..(REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE + excess) {
+            // IPv4: every request carries a new port.
+            let status = post_interactive_register(
+                &state,
+                &format!("{:064x}", 0x1000 + i),
+                &format!("203.0.113.7:{}", 2000 + i),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            // IPv6: every request carries a new address inside one /64.
+            let status = post_interactive_register(
+                &state,
+                &format!("{:064x}", 0x2000 + i),
+                &format!("[2001:db8:5:6::{:x}]:443", i + 1),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        // An address the logger could not resolve lands in the shared bucket.
+        assert_eq!(
+            post_interactive_register(&state, &format!("{:064x}", 0x3000), "not an address").await,
+            StatusCode::OK
+        );
+
+        let v4 = RegistrationSource::from_remote_addr("203.0.113.7:1").unwrap();
+        let v6 = RegistrationSource::from_remote_addr("[2001:db8:5:6::99]:1").unwrap();
+        assert_eq!(
+            cache.pending_from_source(v4),
+            REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+        assert_eq!(
+            cache.pending_from_source(v6),
+            REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+        assert_eq!(cache.pending_from_source(RegistrationSource::Unknown), 1);
+        assert_eq!(
+            cache.len(),
+            2 * REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE + 1
+        );
+    }
+
+    #[test]
+    fn registration_source_extension_follows_the_resolved_address() {
+        let mut extensions = http::Extensions::new();
+        attach_registration_source(
+            &mut extensions,
+            &RequestLogRemoteAddr("198.51.100.4:50000".into()),
+        );
+        assert_eq!(
+            extensions.get::<crate::tailscale_wire::RegistrationSource>(),
+            crate::tailscale_wire::RegistrationSource::from_remote_addr("198.51.100.4").as_ref()
+        );
+
+        let mut extensions = http::Extensions::new();
+        attach_registration_source(&mut extensions, &RequestLogRemoteAddr("garbage".into()));
+        assert!(
+            extensions
+                .get::<crate::tailscale_wire::RegistrationSource>()
+                .is_none()
+        );
     }
 }

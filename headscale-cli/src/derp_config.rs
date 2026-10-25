@@ -20,6 +20,18 @@ mod native_yaml;
 
 const DERP_MAP_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Largest `derp.urls` response body accepted, counted after any gzip decoding.
+///
+/// Go's `loadDERPMapFromURL` (hscontrol/derp/derp.go) does an unbounded
+/// `io.ReadAll`, so a hostile or compromised map host could make the control
+/// server allocate until it dies. A real map is tens of KiB (about 100 nodes at
+/// roughly 250 bytes each is 25 KiB; the default Tailscale map pretty-printed
+/// is on the order of 100 KiB), so 10 MiB leaves two orders of magnitude of
+/// headroom while keeping the worst case, a string of the body plus the parsed
+/// raw JSON values, to a few tens of MiB. The 30 second fetch timeout above
+/// still bounds a slow drip.
+const DERP_MAP_MAX_BODY: usize = 10 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct DerpConfig {
@@ -176,7 +188,7 @@ pub(crate) async fn load_native_derp_map(
             }
         };
         ensure_rustls_provider();
-        let bytes = instant_acme::go_http_get(&url, DERP_MAP_FETCH_TIMEOUT)
+        let bytes = instant_acme::go_http_get(&url, DERP_MAP_FETCH_TIMEOUT, DERP_MAP_MAX_BODY)
             .await
             .with_context(|| format!("fetch DERP JSON map {url}"))?;
         // loadDERPMapFromURL decodes the body even for an error HTTP status.
@@ -915,5 +927,214 @@ regions:
             .flatten()
             .map(|node| node.as_ref().expect("node is present").name.clone())
             .collect()
+    }
+
+    /// The `derp.urls` fetch against a misbehaving map host. Every body here is
+    /// far larger than `DERP_MAP_MAX_BODY` once decoded.
+    mod bounded_fetch {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        use super::super::{DERP_MAP_MAX_BODY, DerpConfig, NativeDerpMap, load_native_derp_map};
+
+        /// How much an endless server writes before giving up; a client that
+        /// stops at its bound resets the connection long before this.
+        const ENDLESS: usize = 192 * 1024 * 1024;
+        /// Loopback socket buffers absorb a few MiB after the client closes.
+        const SERVER_WRITE_SLACK: usize = 24 * 1024 * 1024;
+
+        enum Reply {
+            /// Chunked, never-ending `x` bytes.
+            Endless,
+            /// A fixed body sent with an exact Content-Length.
+            Fixed(Vec<u8>),
+            /// A gzip body with `Content-Encoding: gzip`.
+            Gzip(Vec<u8>),
+        }
+
+        async fn read_request(socket: &mut TcpStream) -> bool {
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => return false,
+                    Ok(count) => head.extend_from_slice(&buffer[..count]),
+                }
+            }
+            true
+        }
+
+        /// Returns the URL and the number of body bytes the server wrote.
+        async fn serve(reply: Reply) -> (String, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/derp.json", listener.local_addr().unwrap());
+            let sent = Arc::new(AtomicUsize::new(0));
+            let counter = sent.clone();
+            let reply = Arc::new(reply);
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let counter = counter.clone();
+                    let reply = reply.clone();
+                    tokio::spawn(async move {
+                        if !read_request(&mut socket).await {
+                            return;
+                        }
+                        match &*reply {
+                            Reply::Endless => {
+                                let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+                                if socket.write_all(head.as_bytes()).await.is_err() {
+                                    return;
+                                }
+                                let mut total = 0;
+                                while total < ENDLESS {
+                                    let mut frame = b"4000\r\n".to_vec();
+                                    frame.extend_from_slice(&[b'x'; 0x4000]);
+                                    frame.extend_from_slice(b"\r\n");
+                                    if socket.write_all(&frame).await.is_err() {
+                                        return;
+                                    }
+                                    counter.fetch_add(0x4000, Ordering::Relaxed);
+                                    total += 0x4000;
+                                }
+                            }
+                            Reply::Fixed(body) | Reply::Gzip(body) => {
+                                let encoding = if matches!(&*reply, Reply::Gzip(_)) {
+                                    "Content-Encoding: gzip\r\n"
+                                } else {
+                                    ""
+                                };
+                                let head = format!(
+                                    "HTTP/1.1 200 OK\r\n{encoding}Content-Length: {}\r\n\r\n",
+                                    body.len()
+                                );
+                                let _ = socket.write_all(head.as_bytes()).await;
+                                let _ = socket.write_all(body).await;
+                            }
+                        }
+                        // Stay open: the client's own close must end the exchange.
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    });
+                }
+            });
+            (url, sent)
+        }
+
+        /// A gzip stream inflating to `1 + 258 * matches` bytes of `a` at about
+        /// 160:1 (fixed-Huffman length-258/distance-1 matches), no compressor needed.
+        fn gzip_bomb(matches: usize) -> Vec<u8> {
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut used = 0u32;
+            let mut bit = |value: u32| {
+                if used == 0 {
+                    bytes.push(0);
+                }
+                if value != 0 {
+                    *bytes.last_mut().unwrap() |= 1 << used;
+                }
+                used = (used + 1) % 8;
+            };
+            // BFINAL, then BTYPE=01 (fixed Huffman) low bit first.
+            bit(1);
+            bit(1);
+            bit(0);
+            // Huffman codes are packed most significant bit first.
+            let mut code = |value: u32, length: u32| {
+                for shift in (0..length).rev() {
+                    bit((value >> shift) & 1);
+                }
+            };
+            code(0x30 + u32::from(b'a'), 8);
+            for _ in 0..matches {
+                code(0xc0 + (285 - 280), 8);
+                code(0, 5);
+            }
+            code(0, 7);
+            let size = 1 + 258 * matches;
+            let mut crc = !0u32;
+            for _ in 0..size {
+                crc ^= u32::from(b'a');
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+                }
+            }
+            let mut gzip = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+            gzip.extend_from_slice(&bytes);
+            gzip.extend_from_slice(&(!crc).to_le_bytes());
+            gzip.extend_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+            gzip
+        }
+
+        async fn fetch(url: &str) -> anyhow::Result<NativeDerpMap> {
+            let config = DerpConfig {
+                urls: vec![url.to_string()],
+                ..DerpConfig::default()
+            };
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                load_native_derp_map(&config, "tail.example.org"),
+            )
+            .await
+            .expect("the fetch must end: the oversized body was not abandoned")
+        }
+
+        #[tokio::test]
+        async fn endless_body_is_abandoned_at_the_limit() {
+            let (url, sent) = serve(Reply::Endless).await;
+            let error = format!("{:#}", fetch(&url).await.unwrap_err());
+            assert!(
+                error.contains(&format!(
+                    "response body too large (limit {DERP_MAP_MAX_BODY} bytes)"
+                )),
+                "{error}"
+            );
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let sent = sent.load(Ordering::Relaxed);
+            assert!(
+                sent < DERP_MAP_MAX_BODY + SERVER_WRITE_SLACK,
+                "the server wrote {sent} bytes: the client kept reading past its bound"
+            );
+        }
+
+        #[tokio::test]
+        async fn gzip_bomb_is_bounded_after_decompression() {
+            // ~16.8 MiB inflated from ~105 KB: only a bound on the decoded bytes
+            // (not the compressed size) can reject it.
+            let bomb = gzip_bomb(65_000);
+            assert!(bomb.len() < DERP_MAP_MAX_BODY / 50);
+            let (url, _) = serve(Reply::Gzip(bomb)).await;
+            let error = format!("{:#}", fetch(&url).await.unwrap_err());
+            assert!(error.contains("response body too large"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn large_but_legitimate_map_still_loads() {
+            // 2 MiB of region name: far above any real map, far below the bound.
+            let body = serde_json::to_vec(&serde_json::json!({
+                "Regions": {"950": {
+                    "RegionID": 950,
+                    "RegionCode": "big",
+                    "RegionName": "n".repeat(2 * 1024 * 1024),
+                    "Nodes": [{"Name": "950a", "RegionID": 950, "HostName": "big.example.com"}]
+                }}
+            }))
+            .unwrap();
+            assert!(body.len() < DERP_MAP_MAX_BODY);
+            let (url, _) = serve(Reply::Fixed(body)).await;
+            let map = fetch(&url).await.unwrap();
+            assert!(map.regions.get(&950).is_some_and(Option::is_some));
+        }
+
+        #[tokio::test]
+        async fn error_for_a_large_garbage_body_embeds_no_body_text() {
+            // Within the bound, so it is read in full and fails to parse; the
+            // error must describe the failure, not carry the 4 MiB body.
+            let (url, _) = serve(Reply::Fixed(vec![b'x'; 4 * 1024 * 1024])).await;
+            let error = format!("{:#}", fetch(&url).await.unwrap_err());
+            assert!(error.len() < 1024, "{} bytes: {error:.200}", error.len());
+        }
     }
 }

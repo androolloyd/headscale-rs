@@ -2,14 +2,20 @@
 // Go encoding/json saved assignments and x/crypto/acme.responseError;
 // see LICENSE-GO and LICENSE-GO-NOTICE.
 
+use std::fmt::Write as _;
+
 use http::{HeaderMap, StatusCode};
 
 use super::{NativeIdentifier, legacy_json as json};
-use crate::Error;
+use crate::{Error, limits::bounded_display};
 
 /// Complete native HTTP error metadata, without narrowing status or identifiers
 /// into the SDK's RFC problem representation.
-#[derive(Clone, Debug)]
+///
+/// The fields keep the response in full (up to the client's body bound);
+/// `Display` and `Debug` render only a short prefix of the remote-controlled
+/// text, so formatting an error never copies a whole response body.
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct NativeResponseError {
     /// Original HTTP status, independent of a JSON status assignment.
@@ -80,30 +86,55 @@ impl NativeResponseError {
 
 impl std::fmt::Display for NativeResponseSubproblem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: ", self.problem_type)?;
-        if let Some(identifier) = &self.identifier {
-            write!(formatter, "[{}: {}] ", identifier.kind, identifier.value)?;
-        }
-        formatter.write_str(&self.detail)
+        bounded_display(formatter, |out| {
+            write!(out, "{}: ", self.problem_type)?;
+            if let Some(identifier) = &self.identifier {
+                write!(out, "[{}: {}] ", identifier.kind, identifier.value)?;
+            }
+            out.write_str(&self.detail)
+        })
     }
 }
 
 impl std::fmt::Display for NativeResponseError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Rust formatters require UTF8; detail_bytes preserves any Go raw
-        // string bytes that cannot be emitted through this interface.
-        write!(
-            formatter,
-            "{} {}: {}",
-            self.status, self.problem_type, self.detail
-        )?;
-        if !self.subproblems.is_empty() {
-            formatter.write_str("; subproblems:")?;
-            for problem in &self.subproblems {
-                write!(formatter, "\n\t{problem}")?;
+        // string bytes that cannot be emitted through this interface. The
+        // whole rendering shares one ERROR_DISPLAY_LIMIT budget.
+        bounded_display(formatter, |out| {
+            write!(
+                out,
+                "{} {}: {}",
+                self.status, self.problem_type, self.detail
+            )?;
+            if !self.subproblems.is_empty() {
+                out.write_str("; subproblems:")?;
+                for problem in &self.subproblems {
+                    if out.is_cut() {
+                        break;
+                    }
+                    write!(out, "\n\t{problem}")?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+    }
+}
+
+impl std::fmt::Debug for NativeResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Derived Debug would print `body` as a list of decimal bytes, which
+        // is several times the size of an already large response. Show the
+        // sizes plus the bounded Display text instead.
+        formatter
+            .debug_struct("NativeResponseError")
+            .field("http_status", &self.http_status)
+            .field("status", &self.status)
+            .field("message", &format_args!("{self}"))
+            .field("body_len", &self.body.len())
+            .field("subproblems", &self.subproblems.len())
+            .field("fallback_detail", &self.fallback_detail)
+            .finish_non_exhaustive()
     }
 }
 
@@ -283,4 +314,70 @@ pub(super) fn parse(status: StatusCode, body: &[u8]) -> NativeResponseError {
         };
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::ERROR_DISPLAY_LIMIT;
+
+    const MARKER: &str = "... (truncated)";
+
+    #[test]
+    fn display_and_debug_embed_only_a_bounded_prefix_of_the_body() {
+        // The measured case: a huge non-JSON error body became the error text.
+        let body = vec![b'<'; 5 * 1024 * 1024];
+        let error = parse(StatusCode::BAD_GATEWAY, &body);
+        assert!(error.fallback_detail);
+        let text = error.to_string();
+        assert!(
+            text.len() <= ERROR_DISPLAY_LIMIT + MARKER.len(),
+            "{}",
+            text.len()
+        );
+        assert!(text.ends_with(MARKER));
+        let debug = format!("{error:?}");
+        assert!(debug.len() <= ERROR_DISPLAY_LIMIT + 512, "{}", debug.len());
+        // Structured access still sees the whole response.
+        assert_eq!(error.body.len(), body.len());
+        assert_eq!(error.detail_bytes().len(), body.len());
+    }
+
+    #[test]
+    fn problem_document_display_shares_one_budget_with_its_subproblems() {
+        let subproblems = (0..2000)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "urn:ietf:params:acme:error:dns",
+                    "detail": "d".repeat(256),
+                    "identifier": {"type": "dns", "value": format!("h{index}.example.com")},
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "urn:ietf:params:acme:error:malformed",
+            "detail": "x".repeat(1024 * 1024),
+            "subproblems": subproblems,
+        }))
+        .unwrap();
+        let error = parse(StatusCode::BAD_REQUEST, &body);
+        assert!(!error.fallback_detail);
+        assert_eq!(error.subproblems.len(), 2000);
+        let text = error.to_string();
+        assert!(
+            text.len() <= ERROR_DISPLAY_LIMIT + MARKER.len(),
+            "{}",
+            text.len()
+        );
+        assert!(text.ends_with(MARKER));
+    }
+
+    #[test]
+    fn realistic_error_is_rendered_in_full() {
+        let body = br#"{"type":"urn:ietf:params:acme:error:rateLimited","detail":"too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2026-01-01 00:00:00 UTC: see https://letsencrypt.org/docs/rate-limits/","status":429,"subproblems":[{"type":"urn:ietf:params:acme:error:dns","detail":"DNS problem: NXDOMAIN looking up A for a.example.com","identifier":{"type":"dns","value":"a.example.com"}}]}"#;
+        let text = parse(StatusCode::TOO_MANY_REQUESTS, body).to_string();
+        assert!(!text.ends_with(MARKER), "{text}");
+        assert!(text.contains("see https://letsencrypt.org/docs/rate-limits/"));
+        assert!(text.contains("NXDOMAIN looking up A for a.example.com"));
+    }
 }

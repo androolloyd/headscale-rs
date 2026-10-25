@@ -10,7 +10,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::BytesBody;
+use crate::{
+    BytesBody,
+    limits::{MAX_RESPONSE_BODY, body_too_large},
+};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
@@ -67,13 +70,13 @@ impl NativeBody {
         }
     }
 
-    async fn collect(&mut self, limit: Option<usize>, partial: bool) -> Result<Bytes, BodyError> {
+    /// Read until EOF or `limit` bytes (of decoded output, for a gzip body),
+    /// whichever comes first; there is deliberately no unbounded variant.
+    async fn collect(&mut self, limit: usize, partial: bool) -> Result<Bytes, BodyError> {
         let mut output = Vec::new();
         let mut sizes = read_size::ReadAll::new();
         loop {
-            let maximum = limit.map_or(sizes.maximum(), |limit| {
-                (limit - output.len()).min(sizes.maximum())
-            });
+            let maximum = (limit - output.len()).min(sizes.maximum());
             if maximum == 0 {
                 return Ok(Bytes::from(output));
             }
@@ -140,19 +143,31 @@ impl Body for NativeBody {
 #[async_trait]
 impl BytesBody for NativeBody {
     async fn into_bytes(&mut self) -> Result<Bytes, BodyError> {
-        let result = self.collect(None, false).await;
+        // One byte past the bound proves the body is too large without ever
+        // buffering more; `collect` limits the DECODED output of a gzip body
+        // (its reads are clipped to the remaining allowance), so a small
+        // compressed bomb stops at the same bound as a plain stream.
+        let result = match self.collect(MAX_RESPONSE_BODY + 1, false).await {
+            Ok(body) if body.len() > MAX_RESPONSE_BODY => Err(body_too_large(MAX_RESPONSE_BODY)),
+            result => result,
+        };
         let _ = self.close_native().await;
         result
     }
 
     async fn into_bytes_limited(&mut self, limit: usize) -> Result<Bytes, BodyError> {
-        let result = self.collect(Some(limit), false).await;
+        let result = self.collect(limit, false).await;
         let _ = self.close_native().await;
         result
     }
 
     async fn into_bytes_partial(&mut self) -> Bytes {
-        let result = self.collect(None, true).await.unwrap_or_default();
+        // A diagnostic prefix: whatever arrives up to the bound is kept, the
+        // rest of an oversized error body is never read.
+        let result = self
+            .collect(MAX_RESPONSE_BODY, true)
+            .await
+            .unwrap_or_default();
         let _ = self.close_native().await;
         result
     }
@@ -219,12 +234,22 @@ impl BytesBody for NativeBody {
                         .and_then(|cap| cap.checked_add(512))
                         .ok_or_else(|| body_error("JSON decoder buffer size overflow"))?;
                 }
-                let read = self.read(capacity - output.len()).await;
+                // Never request more than one byte past the bound: a value
+                // that has not completed within MAX_RESPONSE_BODY bytes is
+                // rejected without buffering (or decoding) anything further.
+                let want = (capacity - output.len()).min(MAX_RESPONSE_BODY + 1 - output.len());
+                let read = self.read(want).await;
                 if let Some(length) = scanner.feed(&read.data) {
+                    if output.len() + length > MAX_RESPONSE_BODY {
+                        return Err(body_too_large(MAX_RESPONSE_BODY));
+                    }
                     output.extend_from_slice(&read.data[..length]);
                     return Ok(Bytes::from(output));
                 }
                 output.extend_from_slice(&read.data);
+                if output.len() > MAX_RESPONSE_BODY {
+                    return Err(body_too_large(MAX_RESPONSE_BODY));
+                }
                 // As in Go readValue, syntax and completed values found
                 // in n bytes take priority over the same Read's error.
                 if let Some(error) = read.error {

@@ -1201,6 +1201,7 @@ async fn prepare_sqlite_persistent_wire_runtime(
             .map_err(anyhow::Error::msg)
             .context("initializing policy manager")?,
     );
+    policy.set_ssh_forwarding(policy_config.ssh.forwarding());
     // Rust-only bookkeeping: headscale-go logs nothing here, and its CLI output
     // (configtest/serve) is compared byte for byte, so keep it below info.
     tracing::debug!(
@@ -1305,6 +1306,7 @@ async fn prepare_postgres_persistent_wire_runtime(
             .map_err(anyhow::Error::msg)
             .context("initializing policy manager")?,
     );
+    policy.set_ssh_forwarding(policy_config.ssh.forwarding());
     tracing::info!(
         loaded = policy_loaded,
         mode = policy_config.mode(),
@@ -6600,6 +6602,7 @@ policy:
             &PolicyConfig {
                 mode: "file".to_string(),
                 path: policy_path,
+                ..PolicyConfig::default()
             },
             Arc::new(RuntimeConfigSnapshot::default()),
             None,
@@ -6618,6 +6621,55 @@ policy:
         assert_eq!(runtime.state.policy.raw().as_deref(), Some(raw_policy));
         assert!(runtime.state.policy.tag_exists("tag:file"));
         assert!(runtime.state.policy.node_can_have_tag(&node, "tag:file"));
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_installs_ssh_forwarding_opt_out() {
+        use headscale_api::policy::SshForwarding;
+
+        for (ssh, want) in [
+            (
+                crate::config::PolicySshConfig::default(),
+                SshForwarding::ALLOW_ALL,
+            ),
+            (
+                crate::config::PolicySshConfig {
+                    allow_agent_forwarding: false,
+                    allow_remote_port_forwarding: false,
+                    ..crate::config::PolicySshConfig::default()
+                },
+                SshForwarding {
+                    agent: false,
+                    local_port: true,
+                    remote_port: false,
+                },
+            ),
+        ] {
+            let db = Database::in_memory().await.unwrap();
+            db.migrate().await.unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = build_persistent_wire_runtime_with_dns_and_policy(
+                db.pool(),
+                dir.path(),
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                Some(oidc_runtime()),
+                DerpMap::default(),
+                Arc::new(DnsStore::new()),
+                &PolicyConfig {
+                    ssh,
+                    ..PolicyConfig::database()
+                },
+                Arc::new(RuntimeConfigSnapshot::default()),
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(runtime.state.policy.ssh_forwarding(), want);
+        }
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub use hujson::{PolicyParseError, parse_hujson_policy, parse_hujson_policy_byte
 pub(crate) use opaque::FilterSnapshot;
 pub(crate) use runtime::RouteApprovalSnapshot;
 pub(crate) use ssh::NativeSshPolicy;
-pub use ssh::{SshPolicyNode, compile_ssh_policy, compile_ssh_policy_with_base_url};
+pub use ssh::{SshForwarding, SshPolicyNode, compile_ssh_policy, compile_ssh_policy_with_base_url};
 pub use users::{
     PolicyUser, validate_policy_user_references, validate_policy_user_references_for_source,
 };
@@ -107,6 +107,11 @@ struct Inner {
     /// Native debug reads the configured source afresh, independently of the
     /// last accepted compiled policy. Keep its adapter outside policy state.
     debug_source: RwLock<Option<Arc<DebugPolicyReader>>>,
+    /// Operator opt-out for SSH forwarding permissions. It is server config,
+    /// not policy content, so it survives policy replacement and reload, and
+    /// is applied to compiled SSH policies on read rather than baked into
+    /// the per-node compile cache.
+    ssh_forwarding: SyncMutex<SshForwarding>,
 }
 
 type DebugPolicyRead = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>>;
@@ -123,6 +128,7 @@ impl Default for Inner {
             notify: Notify::new(),
             changes,
             debug_source: RwLock::new(None),
+            ssh_forwarding: SyncMutex::new(SshForwarding::default()),
         }
     }
 }
@@ -1101,6 +1107,20 @@ impl PolicyStore {
         target_node_id: u64,
         base_url: &str,
     ) -> Option<NativeSshPolicy> {
+        let mut snapshot = self.compiled_ssh_policy_for(nodes, target_node_id, base_url)?;
+        // Applied here, after the per-node compile cache, so every reader of a
+        // compiled SSH policy (map responses, debug) sees the same narrowing
+        // and a policy reload cannot resurrect a flag the operator cleared.
+        self.ssh_forwarding().restrict(&mut snapshot.policy);
+        Some(snapshot)
+    }
+
+    fn compiled_ssh_policy_for(
+        &self,
+        nodes: &[SshPolicyNode],
+        target_node_id: u64,
+        base_url: &str,
+    ) -> Option<NativeSshPolicy> {
         let state = self.inner.state.read();
         if let Some(compiled) = &state.compiled {
             let receiver = nodes.iter().find(|node| node.id == target_node_id)?;
@@ -1120,6 +1140,19 @@ impl PolicyStore {
             }
             None => None,
         }
+    }
+
+    /// Install the operator's SSH forwarding opt-out (server config
+    /// `policy.ssh.*`). Call once at startup; later policy replacement and
+    /// reload leave it in place.
+    pub fn set_ssh_forwarding(&self, forwarding: SshForwarding) {
+        *self.inner.ssh_forwarding.lock() = forwarding;
+    }
+
+    /// The forwarding permissions SSH actions may carry. Defaults to every
+    /// permission, matching headscale-go.
+    pub fn ssh_forwarding(&self) -> SshForwarding {
+        *self.inner.ssh_forwarding.lock()
     }
 
     pub fn ssh_check_period_for(

@@ -501,8 +501,35 @@ impl instant_acme::NativeHttpObserver for NativeAcmeObserver {
     }
 
     fn response_error(&self, url: &str, status: u16, body: &[u8]) {
-        tracing::error!(status_code = status, url, body = %String::from_utf8_lossy(body), "acme request returned error");
+        tracing::error!(status_code = status, url, body = %bounded_log_body(body), "acme request returned error");
     }
+}
+
+/// Most bytes of a failing ACME response body written to one log line.
+///
+/// Go's acmeLogger logs the whole body. A CA's problem document is a few
+/// hundred bytes (a rate-limit or DNS failure detail is 150-400 bytes, a
+/// three-identifier failure about 1 KiB), so 1 KiB keeps real errors whole,
+/// while a hostile or broken server cannot turn one error into a log line of
+/// the megabytes the client is still willing to receive.
+const ACME_LOG_BODY_PREFIX: usize = 1024;
+
+/// Lossy text of at most `ACME_LOG_BODY_PREFIX` leading bytes of `body`, cut on
+/// a char boundary, noting the full size when it was cut.
+fn bounded_log_body(body: &[u8]) -> String {
+    if body.len() <= ACME_LOG_BODY_PREFIX {
+        return String::from_utf8_lossy(body).into_owned();
+    }
+    let mut end = ACME_LOG_BODY_PREFIX;
+    // Step back over UTF-8 continuation bytes so a character is not split.
+    while end > 0 && body[end] & 0xc0 == 0x80 {
+        end -= 1;
+    }
+    format!(
+        "{}... ({} bytes total)",
+        String::from_utf8_lossy(&body[..end]),
+        body.len()
+    )
 }
 
 #[cfg(test)]
@@ -1717,5 +1744,186 @@ pub(crate) mod test_support {
         let material =
             tls::load_from_autocert_cache_with_tls_alpn(&cache_dir, LOCAL_ACME_HOSTNAME).unwrap();
         assert!(material.acme_tls_alpn_resolver.is_some());
+    }
+
+    /// The native ACME client against a CA that streams a body without end,
+    /// and the log/error text built from what it received.
+    mod bounded_reads {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        use super::*;
+
+        /// instant-acme's per-response bound (`MAX_RESPONSE_BODY`).
+        const CLIENT_BODY_BOUND: usize = 8 * 1024 * 1024;
+        /// How much the endless CA writes before giving up.
+        const ENDLESS: usize = 192 * 1024 * 1024;
+        /// Loopback socket buffers absorb a few MiB after the client closes.
+        const SERVER_WRITE_SLACK: usize = 24 * 1024 * 1024;
+
+        /// Serves every request with `status` and a chunked body that starts with
+        /// `prefix` and never ends. Returns the URL and the body bytes written.
+        async fn endless_ca(status: u16, prefix: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/directory", listener.local_addr().unwrap());
+            let sent = Arc::new(AtomicUsize::new(0));
+            let counter = sent.clone();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let counter = counter.clone();
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        let mut buffer = [0u8; 2048];
+                        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                            match socket.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(count) => head.extend_from_slice(&buffer[..count]),
+                            }
+                        }
+                        let reply = format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        );
+                        if socket.write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let mut total = 0;
+                        while total < ENDLESS {
+                            let mut body = vec![b'x'; 0x4000];
+                            if total == 0 {
+                                body[..prefix.len()].copy_from_slice(prefix);
+                            }
+                            let mut frame = b"4000\r\n".to_vec();
+                            frame.extend_from_slice(&body);
+                            frame.extend_from_slice(b"\r\n");
+                            if socket.write_all(&frame).await.is_err() {
+                                return;
+                            }
+                            counter.fetch_add(body.len(), Ordering::Relaxed);
+                            total += body.len();
+                        }
+                        // Stay open: the client's own close must end the exchange.
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    });
+                }
+            });
+            (url, sent)
+        }
+
+        async fn register(directory_url: String) -> String {
+            install_test_crypto_provider();
+            let key = instant_acme::NativeAccountKey::generate().unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(60),
+                account_builder(&AcmeHttp01IssuerConfig {
+                    directory_url: directory_url.clone(),
+                    email: None,
+                    hostname: LOCAL_ACME_HOSTNAME.into(),
+                    cache_dir: PathBuf::new(),
+                    ca_root_path: None,
+                })
+                .unwrap()
+                .go_request_observer(Arc::new(NativeAcmeObserver))
+                .go_register(key, directory_url, None),
+            )
+            .await
+            .expect("registration must end: the oversized body was not abandoned");
+            match outcome {
+                Ok(_) => panic!("an endless directory must not register"),
+                Err(error) => format!("{error:#}"),
+            }
+        }
+
+        async fn settled(sent: &AtomicUsize) -> usize {
+            // A client that kept draining after its error would keep growing this.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sent.load(Ordering::Relaxed)
+        }
+
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+            type Writer = Self;
+
+            fn make_writer(&'a self) -> Self {
+                self.clone()
+            }
+        }
+
+        fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+            let logs = LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_ansi(false)
+                .finish();
+            (logs, tracing::subscriber::set_default(subscriber))
+        }
+
+        #[tokio::test]
+        async fn endless_error_body_is_bounded_and_neither_error_nor_log_carries_it() {
+            // The measured case: an error status whose body never ends.
+            let (url, sent) = endless_ca(403, b"").await;
+            let (logs, _guard) = capture_logs();
+            let error = register(url).await;
+            assert!(error.len() < 4096, "error text is {} bytes", error.len());
+            assert!(error.contains("(truncated)"), "{error:.200}");
+            let sent = settled(&sent).await;
+            assert!(
+                sent < CLIENT_BODY_BOUND + SERVER_WRITE_SLACK,
+                "the CA was drained for {sent} bytes"
+            );
+            let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            let lines: Vec<_> = logs
+                .lines()
+                .filter(|line| line.contains("acme request returned error"))
+                .collect();
+            assert!(!lines.is_empty(), "the observer saw the failing response");
+            for line in lines {
+                assert!(line.len() < 4096, "log line is {} bytes", line.len());
+                assert!(line.contains("bytes total)"), "{line:.200}");
+            }
+        }
+
+        #[tokio::test]
+        async fn endless_directory_is_abandoned_at_the_bound() {
+            // A 200 whose JSON string never closes is one unbounded "value".
+            let (url, sent) = endless_ca(200, b"\"").await;
+            let error = register(url).await;
+            assert!(error.contains("response body too large"), "{error:.200}");
+            let sent = settled(&sent).await;
+            assert!(
+                sent < CLIENT_BODY_BOUND + SERVER_WRITE_SLACK,
+                "the CA was drained for {sent} bytes"
+            );
+        }
+
+        #[test]
+        fn bounded_log_body_cuts_on_a_char_boundary() {
+            assert_eq!(bounded_log_body(b"short"), "short");
+            let exact = vec![b'a'; ACME_LOG_BODY_PREFIX];
+            assert_eq!(bounded_log_body(&exact).len(), ACME_LOG_BODY_PREFIX);
+
+            let mut text = "a".repeat(ACME_LOG_BODY_PREFIX - 1);
+            text.push('\u{e9}');
+            text.push_str(&"b".repeat(100));
+            let bounded = bounded_log_body(text.as_bytes());
+            assert!(!bounded.contains('\u{fffd}'), "{bounded:.40}");
+            assert!(bounded.ends_with(&format!("... ({} bytes total)", text.len())));
+            assert!(bounded_log_body(&[0xff; 4096]).len() < 2 * ACME_LOG_BODY_PREFIX * 3);
+        }
     }
 }

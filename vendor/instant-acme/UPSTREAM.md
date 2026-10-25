@@ -39,6 +39,22 @@ remain unqualified. These helpers do not claim complete Go ACME equivalence.
 Independent source reviews and direct rustfmt only; no build/test/feature,
 CA/client/process/package/container execution or release gate closure.
 
+## Bounded remote reads
+
+Go's x/crypto/acme reads directory, order/authorization and error bodies
+without a bound (`io.ReadAll`, `json.NewDecoder`); only the certificate chain
+has one. This copy bounds every response read from the remote server
+(`src/limits.rs`): `MAX_RESPONSE_BODY` (8 MiB) for the SDK whole-body reads and
+the native first-JSON-value, error-prefix and whole-body reads, applied to the
+DECODED bytes of a gzip body and enforced while streaming; the certificate
+download keeps Go's exact bound. `go_http_get` takes the bound from its caller
+(headscale uses 10 MiB for `derp.urls`). `Display` of `NativeResponseError` and
+`Problem` renders at most `ERROR_DISPLAY_LIMIT` (2 KiB) of server text; the
+fields keep the whole (bounded) response. Exceeding a bound is an error
+(`http: response body too large (limit N bytes)`) except for error-status
+bodies, which keep their first `MAX_RESPONSE_BODY` bytes. These are deliberate
+differences from Go, added for the tailworm.com F-READ finding.
+
 ## Selected Go source SHA-256
 
 Golang.org/x/crypto v0.53.0:

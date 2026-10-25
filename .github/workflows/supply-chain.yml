@@ -51,3 +51,20 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - run: cargo +stable install --locked cargo-deny
       - run: cargo deny check advisories licenses sources
+
+  # Path patches (`[patch.crates-io]` -> vendor/*) bypass `cargo deny`'s
+  # `[sources]` check and carry no lockfile checksum, so diff each vendored crate
+  # against its pristine crates.io archive and the reviewed vendor/PATCHES.json.
+  # To accept an intended vendor change run
+  #   scripts/check_vendor_provenance.py --update
+  # locally, review `git diff vendor/PATCHES.json` and commit it.
+  vendor-provenance:
+    name: vendor provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Provenance script unit tests
+        run: python3 -m unittest discover -v -s scripts/tests -p 'test_check_vendor_provenance.py'
+      - name: Vendored crates equal crates.io source plus the recorded patches
+        run: python3 scripts/check_vendor_provenance.py -v

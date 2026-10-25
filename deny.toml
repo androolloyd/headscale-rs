@@ -37,6 +37,11 @@ external-default-features = "allow"
 allow-workspace = true
 
 [sources]
+# `[sources]` only sees registry/git packages. The path patches under vendor/
+# (see `[patch.crates-io]` in the root Cargo.toml) bypass it entirely; the
+# `vendor-provenance` job in .github/workflows/supply-chain.yml covers them via
+# scripts/check_vendor_provenance.py, which diffs every vendored crate against
+# its pristine crates.io archive and the reviewed vendor/PATCHES.json manifest.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

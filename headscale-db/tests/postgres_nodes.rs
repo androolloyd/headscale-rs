@@ -118,15 +118,15 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         .await?;
         assert_eq!(tagged.tag_list(), vec!["tag:dev", "tag:prod"]);
         assert!(tagged.user_id.is_none());
-        assert!(
+        assert_eq!(
             headscale_nodes::list_postgres_by_user_on_connection(&mut schema.conn, alice.id)
-                .await?
-                .is_empty()
+                .await?,
+            [] as [headscale_db::headscale_nodes::HeadscaleNodeRow; 0]
         );
         let untagged =
             headscale_nodes::set_postgres_tags_on_connection(&mut schema.conn, node.id, Vec::new())
                 .await?;
-        assert!(untagged.tag_list().is_empty());
+        assert_eq!(untagged.tag_list(), [] as [String; 0]);
         assert_eq!(untagged.tags, "[]");
         assert!(untagged.user_id.is_none());
 
@@ -152,7 +152,7 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
             "mkey:d6301922bddad7771082a5371804c99eabc897ad8dc48dc0f9032018ee2fda5c"
         );
         assert_eq!(updated.user_id, Some(alice.id));
-        assert!(updated.tag_list().is_empty());
+        assert_eq!(updated.tag_list(), [] as [String; 0]);
         assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
 
         let expiry = temporary_timestamp() + 3600;
@@ -214,10 +214,9 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         assert!(logged_out.expiry.is_some());
 
         headscale_nodes::destroy_postgres_on_connection(&mut schema.conn, node.id).await?;
-        assert!(
-            headscale_nodes::list_postgres_on_connection(&mut schema.conn)
-                .await?
-                .is_empty()
+        assert_eq!(
+            headscale_nodes::list_postgres_on_connection(&mut schema.conn).await?,
+            [] as [headscale_db::headscale_nodes::HeadscaleNodeRow; 0]
         );
 
         Ok::<(), DbError>(())
@@ -446,10 +445,9 @@ async fn postgres_node_list_helpers_match_sqlite_contract() -> TestResult {
             vec![first.id, second.id, ephemeral.id]
         );
 
-        assert!(
-            headscale_nodes::list_postgres_by_ids_on_connection(&mut schema.conn, &[999])
-                .await?
-                .is_empty()
+        assert_eq!(
+            headscale_nodes::list_postgres_by_ids_on_connection(&mut schema.conn, &[999]).await?,
+            [] as [headscale_db::headscale_nodes::HeadscaleNodeRow; 0]
         );
         let partial = headscale_nodes::list_postgres_by_ids_on_connection(
             &mut schema.conn,

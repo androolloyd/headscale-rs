@@ -2313,7 +2313,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let raw = to_bytes(resp.into_body(), 4096).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
-        assert!(!rr.error.is_empty());
+        assert_ne!(rr.error, "");
         assert!(!rr.machine_authorized);
     }
 
@@ -2361,7 +2361,7 @@ mod tests {
         assert_eq!(rec.os, "linux");
         assert_eq!(rec.os_version, "6.6");
         // Allocated IP is in CGNAT.
-        assert!(rec.ipv4.expect("IPv4 allocated").octets()[0] == 100);
+        assert_eq!(rec.ipv4.expect("IPv4 allocated").octets()[0], 100);
     }
 
     #[tokio::test]
@@ -2722,7 +2722,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let rec = state.machines.get(&node_key_hex).unwrap();
-        assert!(rec.forced_tags.is_empty());
+        assert_eq!(rec.forced_tags, [] as [String; 0]);
         assert_eq!(rec.expiry, Some(requested_expiry));
     }
 
@@ -2784,7 +2784,7 @@ mod tests {
         assert!(!rr.node_key_expired);
 
         let rec = state.machines.get(&node_key_hex).unwrap();
-        assert!(rec.forced_tags.is_empty());
+        assert_eq!(rec.forced_tags, [] as [String; 0]);
         let expiry = rec.expiry.expect("Go zero time falls back to node.expiry");
         assert!(expiry > chrono::Utc::now() + chrono::Duration::seconds(7100));
     }
@@ -3226,7 +3226,7 @@ mod tests {
         assert_eq!(state.machines.len(), 1);
         assert!(state.machines.get(&first_node_key).is_none());
         let tagged = state.machines.get(&tagged_node_key).unwrap();
-        assert!(tagged.user.is_empty());
+        assert_eq!(tagged.user, "");
         assert_eq!(tagged.forced_tags, vec!["tag:server"]);
         assert_eq!(tagged.ipv4, first.ipv4);
         assert!(!redeemer.contains(tagged_authkey));
@@ -3801,7 +3801,7 @@ mod tests {
         assert!(rr.machine_authorized);
         assert!(!rr.node_key_expired);
         assert_eq!(rr.login.login_name, "alice");
-        assert!(rr.auth_url.is_empty());
+        assert_eq!(rr.auth_url, "");
         assert_eq!(state.machines.len(), 1);
         assert!(state.registration_cache.is_empty());
     }
@@ -3855,7 +3855,7 @@ mod tests {
         let raw = to_bytes(oauth2_resp.into_body(), 8192).await.unwrap();
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(!rr.machine_authorized);
-        assert!(rr.login.login_name.is_empty());
+        assert_eq!(rr.login.login_name, "");
         assert!(rr.auth_url.starts_with("/register/hskey-authreq-"));
         assert_eq!(state.machines.len(), 1);
         assert_eq!(state.registration_cache.len(), 1);
@@ -3996,7 +3996,7 @@ mod tests {
         let rr: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(rr.node_key_expired);
         assert!(!rr.machine_authorized);
-        assert!(rr.auth_url.is_empty());
+        assert_eq!(rr.auth_url, "");
         assert!(state.machines.get(&node_key_hex).is_some());
     }
 
@@ -4325,7 +4325,7 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let refreshed: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert!(!refreshed.machine_authorized);
-        assert!(refreshed.error.is_empty());
+        assert_eq!(refreshed.error, "");
         let refreshed_auth_id = refreshed
             .auth_url
             .strip_prefix("https://headscale.example/register/")
@@ -4396,7 +4396,7 @@ mod tests {
         let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
         let timed_out: RegisterResponse = serde_json::from_slice(&raw).unwrap();
         assert_eq!(timed_out.error, "registration timed out");
-        assert!(timed_out.auth_url.is_empty());
+        assert_eq!(timed_out.auth_url, "");
         assert!(
             state.registration_cache.get(registration_id).is_some(),
             "cancelled follow-up must not consume the pending auth session"
@@ -4787,7 +4787,7 @@ mod tests {
                 register_interactive_from(&state, format!("{i:02x}").repeat(32), Some(busy), None)
                     .await;
             assert!(!response.machine_authorized);
-            assert!(response.error.is_empty());
+            assert_eq!(response.error, "");
             urls.push(response.auth_url);
             ids.push(id);
         }

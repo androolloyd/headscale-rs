@@ -206,7 +206,7 @@ fn rule_missing_action_is_schema_error() {
     assert_eq!(rules[0].dst_ports[0].ip, "*");
     assert_eq!(rules[0].dst_ports[0].ports.first, 0);
     assert_eq!(rules[0].dst_ports[0].ports.last, 65535);
-    assert!(rules[0].ip_proto.is_empty());
+    assert_eq!(rules[0].ip_proto, [] as [i32; 0]);
 }
 
 #[test]
@@ -274,7 +274,10 @@ fn rule_with_empty_dst_is_dropped() {
         }],
         ..Default::default()
     };
-    assert!(acl_to_filter_rules(&doc).is_empty());
+    assert_eq!(
+        acl_to_filter_rules(&doc),
+        [] as [headscale_api::tailscale_wire::wire::FilterRule; 0]
+    );
 }
 
 #[test]
@@ -292,7 +295,10 @@ fn invalid_port_pattern_drops_rule() {
     };
     // The single port pattern is unparseable, so port_ranges is empty
     // and the rule is dropped (default-deny on garbage).
-    assert!(acl_to_filter_rules(&doc).is_empty());
+    assert_eq!(
+        acl_to_filter_rules(&doc),
+        [] as [headscale_api::tailscale_wire::wire::FilterRule; 0]
+    );
 }
 
 #[test]
@@ -370,7 +376,10 @@ fn store_default_is_unloaded() {
     assert!(!s.is_loaded());
     assert!(s.doc().is_none());
     assert!(s.raw().is_none());
-    assert!(s.filter_rules().is_empty());
+    assert_eq!(
+        s.filter_rules(),
+        [] as [headscale_api::tailscale_wire::wire::FilterRule; 0]
+    );
 }
 
 #[test]

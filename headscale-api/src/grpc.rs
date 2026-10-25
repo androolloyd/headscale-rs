@@ -3555,7 +3555,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.users.is_empty());
+        assert_eq!(listed.users.len(), 0);
     }
 
     #[tokio::test]
@@ -3855,7 +3855,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.users.is_empty());
+        assert_eq!(listed.users.len(), 0);
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -4514,7 +4514,7 @@ mod upstream_tests {
             .expect("registered node");
         assert_eq!(registered.node_key, debug_node.node_key);
         assert_eq!(registered.register_method, RegisterMethod::Cli as i32);
-        assert!(registered.available_routes.is_empty());
+        assert_eq!(registered.available_routes, [] as [String; 0]);
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -4567,7 +4567,7 @@ mod upstream_tests {
             .node
             .expect("debug node");
         assert_eq!(debug_node.available_routes, vec!["0.0.0.0/0"]);
-        assert!(debug_node.approved_routes.is_empty());
+        assert_eq!(debug_node.approved_routes, [] as [String; 0]);
 
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
@@ -4580,8 +4580,8 @@ mod upstream_tests {
             .node
             .expect("registered node");
         assert_eq!(registered.node_key, debug_node.node_key);
-        assert!(registered.available_routes.is_empty());
-        assert!(registered.approved_routes.is_empty());
+        assert_eq!(registered.available_routes, [] as [String; 0]);
+        assert_eq!(registered.approved_routes, [] as [String; 0]);
     }
 
     #[tokio::test]
@@ -4614,7 +4614,7 @@ mod upstream_tests {
             .into_inner()
             .node
             .expect("debug node");
-        assert!(debug_node.ip_addresses.is_empty());
+        assert_eq!(debug_node.ip_addresses, [] as [String; 0]);
 
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
@@ -4663,7 +4663,7 @@ mod upstream_tests {
             .into_inner()
             .node
             .expect("debug node");
-        assert!(debug_node.ip_addresses.is_empty());
+        assert_eq!(debug_node.ip_addresses, [] as [String; 0]);
 
         let registered = service
             .register_node(Request::new(RegisterNodeRequest {
@@ -4722,7 +4722,7 @@ mod upstream_tests {
         // Go: routes live only on the DebugCreateNode echo; the registered node
         // advertises none (cached RegistrationData has no Hostinfo).
         assert_eq!(debug_node.available_routes, vec!["10.42.0.0/24"]);
-        assert!(registered.available_routes.is_empty());
+        assert_eq!(registered.available_routes, [] as [String; 0]);
 
         let err = service
             .auth_register(Request::new(AuthRegisterRequest {
@@ -5040,7 +5040,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.nodes.is_empty());
+        assert_eq!(listed.nodes.len(), 0);
     }
 
     #[tokio::test]
@@ -5261,7 +5261,7 @@ mod upstream_tests {
         assert!(followup_response.machine_authorized);
         assert_eq!(followup_response.user.display_name, "Tagged Devices");
         assert_eq!(followup_response.login.login_name, "tagged-devices");
-        assert!(followup_response.auth_url.is_empty());
+        assert_eq!(followup_response.auth_url, "");
     }
 
     #[tokio::test]
@@ -5311,7 +5311,7 @@ mod upstream_tests {
         // created by auth register advertises no routes (verified against the
         // real v0.29.5 server).
         assert_eq!(pending.available_routes, vec!["10.0.0.0/24"]);
-        assert!(registered.available_routes.is_empty());
+        assert_eq!(registered.available_routes, [] as [String; 0]);
 
         let got = service
             .get_node(Request::new(GetNodeRequest { node_id: 1 }))
@@ -5588,7 +5588,7 @@ mod upstream_tests {
         let live = wire_registry.get(&second_node_key).unwrap();
         assert_eq!(live.machine_key_hex, machine_key_hex);
         assert_eq!(live.ipv4, Some(Ipv4Addr::new(100, 64, 0, 50)));
-        assert!(live.forced_tags.is_empty());
+        assert_eq!(live.forced_tags, [] as [String; 0]);
         assert_eq!(live.available_routes, vec!["10.60.0.0/24"]);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
             .fetch_one(db.pool())
@@ -5688,7 +5688,7 @@ mod upstream_tests {
         // State.AutoApproveRoutes ran; the approval is visible afterwards
         // (verified in-process against v0.29.5: response approved=[], a
         // following GetNode approved=[10.70.1.0/24]).
-        assert!(registered.approved_routes.is_empty());
+        assert_eq!(registered.approved_routes, [] as [String; 0]);
         let got = service
             .get_node(Request::new(GetNodeRequest {
                 node_id: registered.id,
@@ -5791,7 +5791,7 @@ mod upstream_tests {
             .into_inner()
             .node
             .expect("registered node");
-        assert!(registered.approved_routes.is_empty());
+        assert_eq!(registered.approved_routes, [] as [String; 0]);
 
         let got = service
             .get_node(Request::new(GetNodeRequest {
@@ -6078,7 +6078,7 @@ mod upstream_tests {
             .node
             .expect("updated node");
         assert_eq!(updated.approved_routes, vec!["0.0.0.0/0", "::/0"]);
-        assert!(updated.subnet_routes.is_empty());
+        assert_eq!(updated.subnet_routes, [] as [String; 0]);
 
         let raw_routes: String =
             sqlx::query_scalar("SELECT approved_routes FROM nodes WHERE id = ?")
@@ -6234,7 +6234,7 @@ mod upstream_tests {
             .node
             .expect("preapproved node");
         assert_eq!(preapproved.approved_routes, vec!["10.1.0.0/24"]);
-        assert!(preapproved.subnet_routes.is_empty());
+        assert_eq!(preapproved.subnet_routes, [] as [String; 0]);
 
         let renamed = service
             .rename_node(Request::new(RenameNodeRequest {
@@ -6303,7 +6303,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.nodes.is_empty());
+        assert_eq!(listed.nodes.len(), 0);
     }
 
     #[tokio::test]
@@ -6729,7 +6729,7 @@ mod upstream_tests {
             .node
             .expect("updated node");
         assert_eq!(updated.approved_routes, vec!["0.0.0.0/0", "::/0"]);
-        assert!(updated.subnet_routes.is_empty());
+        assert_eq!(updated.subnet_routes, [] as [String; 0]);
 
         let listed = service
             .list_nodes(Request::new(ListNodesRequest {
@@ -6775,7 +6775,7 @@ mod upstream_tests {
             .expect("listed expired node");
         assert!(!listed_node.online);
         assert_eq!(listed_node.approved_routes, vec!["10.9.0.0/24"]);
-        assert!(listed_node.subnet_routes.is_empty());
+        assert_eq!(listed_node.subnet_routes, [] as [String; 0]);
     }
 
     #[tokio::test]
@@ -6793,7 +6793,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(ok.changes.is_empty());
+        assert_eq!(ok.changes, [] as [String; 0]);
     }
 
     #[tokio::test]
@@ -6968,7 +6968,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.api_keys.is_empty());
+        assert_eq!(listed.api_keys.len(), 0);
     }
 
     #[tokio::test]
@@ -7226,7 +7226,7 @@ mod upstream_tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(listed.pre_auth_keys.is_empty());
+        assert_eq!(listed.pre_auth_keys.len(), 0);
     }
 
     #[tokio::test]

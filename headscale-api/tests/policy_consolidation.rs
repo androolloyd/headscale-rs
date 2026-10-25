@@ -96,7 +96,7 @@ fn filter_rules_allow_all_matches_pre_consolidation_shape() {
     assert_eq!(store_rules[0].dst_ports[0].ip, "*");
     assert_eq!(store_rules[0].dst_ports[0].ports.first, 0);
     assert_eq!(store_rules[0].dst_ports[0].ports.last, 65535);
-    assert!(store_rules[0].ip_proto.is_empty());
+    assert_eq!(store_rules[0].ip_proto, [] as [i32; 0]);
 }
 
 #[test]
@@ -519,7 +519,7 @@ fn node_attrs_and_route_grants_match_secondary_address() {
         vec!["nextdns:dual-stack-router".to_string()]
     );
     assert!(doc.can_access_route(&router, &[], &route_owner, "10.44.8.0/24"));
-    assert!(doc.node_attrs_for(&primary_only).is_empty());
+    assert_eq!(doc.node_attrs_for(&primary_only), [] as [String; 0]);
     assert!(!doc.can_access_route(&primary_only, &[], &route_owner, "10.44.8.0/24"));
 }
 

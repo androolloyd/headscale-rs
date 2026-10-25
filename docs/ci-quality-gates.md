@@ -35,14 +35,17 @@ uses a floating `stable`/`nightly` or `dtolnay/rust-toolchain`.
 `cargo test --workspace --all-targets`, `scripts/test_vendored_crates.sh` and
 `python3 scripts/check_toolchain_pin.py` on the new release.
 
-> **Known debt before the pin can move to 1.99 or later.** On 1.99.0 clippy still
-> reports ~200 `assert_is_empty` / `assert_is_not_empty` hits (almost all in
-> test code: `headscale-api` lib tests 171, `headscale-db`, `headscale-api-acl`,
-> `headscale-cli`; `cargo clippy --fix` applies them), one `assert_eq` form, and
-> `unused_async_trait_impl` at `headscale-db/src/lib.rs:384` and
-> `headscale-api/src/admin/preauth.rs:240` (those need a hand edit). They were
-> deliberately not rewritten here: the diff is mechanical noise and the pin makes
-> them non-blocking.
+The tree is also clippy-clean (`-D warnings`, workspace, the three `headscale-api`
+feature variants and the excluded crates) on Rust 1.99.0, the release CI's floating
+`stable` had reached when `main` went red. Moving the pin to 1.99.0 therefore only
+needs the steps above; it has not been done because `CHANGES.md` records 1.96.0 as
+the qualified release. The 1.99 pass rewrote test assertions that clippy flags
+(`assert!(x.is_empty())` is now `assert_eq!(x, [] as [T; 0])`, `assert_eq!(x, "")`
+or `assert_eq!(x.len(), 0)` where the element type cannot be named from the test),
+replaced `chunks_exact(N)` with `as_chunks::<N>()` in the DERP YAML and RNG-table
+parsers, and made two functions that never awaited non-async
+(`InMemoryPreauthAdmin::mint_inner`, and the `go-pool-compat`-off stub of
+`Database::new_with_go_sqlite_options`, which returns a ready future).
 
 ## Gates
 

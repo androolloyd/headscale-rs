@@ -768,7 +768,7 @@ mod tests {
         destroy_by_prefix(db.pool(), &row.display_prefix())
             .await
             .unwrap();
-        assert!(list(db.pool()).await.unwrap().is_empty());
+        assert_eq!(list(db.pool()).await.unwrap().len(), 0);
     }
 
     #[tokio::test]

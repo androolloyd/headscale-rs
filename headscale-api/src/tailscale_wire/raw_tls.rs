@@ -1026,7 +1026,7 @@ mod tests {
             panic!("expected server-key frame");
         };
         assert_eq!(key, server_public);
-        assert!(extra.is_empty());
+        assert_eq!(extra, [] as [u8; 0]);
 
         let server_info = read_derp_frame(&mut client_reader, &mut decoder).await;
         assert_eq!(

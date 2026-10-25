@@ -143,7 +143,7 @@ fn valid_reference_url(value: &str) -> bool {
     if value.bytes().any(|byte| byte.is_ascii_control()) {
         return false;
     }
-    let (head, fragment) = value.split_once('#').map_or((value, ""), |parts| parts);
+    let (head, fragment) = value.split_once('#').unwrap_or((value, ""));
     let path = head.split_once('?').map_or(head, |(path, _)| path);
     for part in [path, fragment] {
         let part = part.as_bytes();

@@ -397,7 +397,7 @@ fn parses_upstream_ssh_fixture() {
 fn store_node_attrs_for_returns_empty_when_unloaded() {
     let s = PolicyStore::new();
     let n = NodeView::new("100.64.0.1");
-    assert!(s.node_attrs_for(&n).is_empty());
+    assert_eq!(s.node_attrs_for(&n), [] as [String; 0]);
 }
 
 #[test]
@@ -471,15 +471,18 @@ fn expand_principal_drops_non_flattenable_autogroups() {
     // SrcIPs).
     let raw = load("upstream_acl_a01.hujson");
     let doc = parse_hujson_policy(&raw).unwrap();
-    assert!(doc.expand_principal("autogroup:self").is_empty());
-    assert!(doc.expand_principal("autogroup:tagged").is_empty());
-    assert!(doc.expand_principal("autogroup:nonroot").is_empty());
+    assert_eq!(doc.expand_principal("autogroup:self"), [] as [String; 0]);
+    assert_eq!(doc.expand_principal("autogroup:tagged"), [] as [String; 0]);
+    assert_eq!(doc.expand_principal("autogroup:nonroot"), [] as [String; 0]);
 }
 
 #[test]
 fn expand_principal_handles_unknown_host() {
     let doc = hosts_doc();
-    assert!(doc.expand_principal("host:does-not-exist").is_empty());
+    assert_eq!(
+        doc.expand_principal("host:does-not-exist"),
+        [] as [String; 0]
+    );
 }
 
 // ---------------------------------------------------------------------------

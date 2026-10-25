@@ -9414,14 +9414,14 @@ mod tests {
         // Go createAndSaveNewNode saves the node without ApprovedRoutes; the
         // registration caller approves them afterwards via
         // State.AutoApproveRoutes (empty policy here), so none are persisted.
-        assert!(result.record.approved_routes.is_empty());
+        assert_eq!(result.record.approved_routes, [] as [String; 0]);
         let raw = headscale_db::headscale_nodes::get_by_node_key(
             db.pool(),
             &format!("nodekey:{}", record.node_key_hex),
         )
         .await
         .unwrap();
-        assert!(raw.approved_route_list().is_empty());
+        assert_eq!(raw.approved_route_list(), [] as [String; 0]);
         assert_eq!(
             raw.register_method,
             headscale_db::headscale_nodes::REGISTER_METHOD_AUTH_KEY
@@ -9530,7 +9530,7 @@ mod tests {
         // Go createAndSaveNewNode persists no ApprovedRoutes for a new node
         // (State.AutoApproveRoutes runs afterwards in the caller). Approve
         // explicitly so the reopen/hydration assertions below still cover them.
-        assert!(created.approved_routes.is_empty());
+        assert_eq!(created.approved_routes, [] as [String; 0]);
         admin
             .set_approved_routes(&created.id, vec!["10.40.0.0/24".into()])
             .await
@@ -10427,17 +10427,14 @@ mod tests {
 
         let stored = admin.get(&pending.node_key_hex).await.unwrap();
         assert_eq!(stored.routes, vec!["10.83.1.0/24"]);
-        assert!(stored.approved_routes.is_empty());
+        assert_eq!(stored.approved_routes, [] as [String; 0]);
         let row = headscale_db::headscale_nodes::get_by_id(db.pool(), stored.node_id as i64)
             .await
             .unwrap();
-        assert!(row.approved_route_list().is_empty());
-        assert!(
-            registry
-                .get(&pending.node_key_hex)
-                .unwrap()
-                .approved_routes
-                .is_empty()
+        assert_eq!(row.approved_route_list(), [] as [String; 0]);
+        assert_eq!(
+            registry.get(&pending.node_key_hex).unwrap().approved_routes,
+            [] as [String; 0]
         );
         // Only the registration's own change (HandleNodeFromAuthPath); an
         // unchanged approval adds no SetApprovedRoutes PolicyChange.
@@ -10558,7 +10555,7 @@ mod tests {
         // Go createAndSaveNewNode persists no ApprovedRoutes for a new node
         // (State.AutoApproveRoutes runs afterwards in the caller). Approve
         // explicitly so the reopen/hydration assertions below still cover them.
-        assert!(stored.approved_routes.is_empty());
+        assert_eq!(stored.approved_routes, [] as [String; 0]);
         admin
             .set_approved_routes(&node_key, vec!["10.50.0.0/24".into()])
             .await

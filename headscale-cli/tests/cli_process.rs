@@ -7363,7 +7363,7 @@ async fn serve_postgres_runtime_gateway_auth_register_survives_restart_smoke() -
             .as_str()
             .expect("registered node id")
             .to_string();
-        assert!(!node_id.is_empty());
+        assert_ne!(node_id, "");
         assert_eq!(
             gateway_register["node"]["name"].as_str(),
             Some("pg-web-register-node")
@@ -7804,7 +7804,7 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
             .as_str()
             .expect("registered node id")
             .to_string();
-        assert!(!node_id.is_empty());
+        assert_ne!(node_id, "");
         assert_eq!(registered["node"]["user"]["name"].as_str(), Some("alice"));
         assert_eq!(
             registered["node"]["name"].as_str(),

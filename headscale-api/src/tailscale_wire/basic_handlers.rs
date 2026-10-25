@@ -3703,12 +3703,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let parsed: VersionInfo = serde_json::from_slice(&body).unwrap();
-        assert!(!parsed.version.is_empty());
-        assert!(!parsed.commit.is_empty());
-        assert!(!parsed.build_time.is_empty());
+        assert_ne!(parsed.version, "");
+        assert_ne!(parsed.commit, "");
+        assert_ne!(parsed.build_time, "");
         assert!(parsed.go.version.starts_with("rustc "));
-        assert!(!parsed.go.os.is_empty());
-        assert!(!parsed.go.arch.is_empty());
+        assert_ne!(parsed.go.os, "");
+        assert_ne!(parsed.go.arch, "");
     }
 
     #[tokio::test]
@@ -6611,7 +6611,7 @@ mod tests {
             server_policy["rules"][0]["action"]["holdAndDelegate"],
             "/machine/ssh/action/$SRC_NODE_ID/to/$DST_NODE_ID?local_user=$LOCAL_USER"
         );
-        assert!(admin_policy["rules"].as_array().unwrap().is_empty());
+        assert_eq!(admin_policy["rules"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]

@@ -79,8 +79,8 @@ fn build_dns_config_keeps_extra_records_operator_supplied_only() {
 fn dns_default_matches_headscale_go_and_requires_base_domain_for_magic_dns() {
     let spec = DnsConfigSpec::default();
     assert!(spec.magic_dns);
-    assert!(spec.base_domain.is_empty());
-    assert!(spec.cert_domains.is_empty());
+    assert_eq!(spec.base_domain, "");
+    assert_eq!(spec.cert_domains, [] as [String; 0]);
     assert!(matches!(
         try_build_dns_config(&spec, &[], &[]),
         Err(DnsConfigError::MissingBaseDomainForMagicDns)
@@ -90,7 +90,7 @@ fn dns_default_matches_headscale_go_and_requires_base_domain_for_magic_dns() {
 #[test]
 fn cert_domains_are_explicit_config_only() {
     let default_cfg = build_dns_config(&magic_spec(), &[], &[]);
-    assert!(default_cfg.cert_domains.is_empty());
+    assert_eq!(default_cfg.cert_domains, [] as [String; 0]);
 
     let spec = DnsConfigSpec {
         cert_domains: vec![
@@ -410,7 +410,7 @@ fn collision_handling_is_stable_under_node_id_reorder() {
     a_names.sort();
     b_names.sort();
     assert_eq!(a_names, b_names);
-    assert!(a_names.is_empty());
+    assert_eq!(a_names, [] as [String; 0]);
 }
 
 #[test]

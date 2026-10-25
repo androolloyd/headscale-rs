@@ -468,7 +468,7 @@ async fn tagsauthkeyconverttouserviacliregister() {
         .expect("tags-only auth-key registration")
         .record;
     assert_eq!(created.node_id, 1);
-    assert!(created.user.is_empty());
+    assert_eq!(created.user, "");
     assert_tags(&created.tags, &["tag:valid-owned"]);
 
     let converted = admin
@@ -481,7 +481,7 @@ async fn tagsauthkeyconverttouserviacliregister() {
         .record;
     assert_eq!(converted.node_id, created.node_id);
     assert_eq!(converted.user, TAG_USER);
-    assert!(converted.tags.is_empty());
+    assert_eq!(converted.tags, [] as [String; 0]);
     assert_eq!(converted.machine_key_hex, key(0xd1));
 }
 
@@ -688,7 +688,7 @@ async fn tagsauthkeywithoutuserinheritstags() {
     );
     register_ok(&state, 0x23, 0x9b, "hskey-auth-tags-only", &[]).await;
     let record = registry.get(&key(0x23)).expect("registered node");
-    assert!(record.user.is_empty());
+    assert_eq!(record.user, "");
     assert_tags(&record.forced_tags, &["tag:valid-owned"]);
 }
 
@@ -743,7 +743,7 @@ async fn tagsuserloginaddtagviaclireauth() {
         &["tag:valid-owned", "tag:second"],
     )
     .await;
-    assert!(!updated.tags.is_empty());
+    assert_ne!(updated.tags, [] as [String; 0]);
     assert_tags(&updated.tags, &["tag:valid-owned", "tag:second"]);
     assert_eq!(registry.len(), 1);
 }
@@ -801,7 +801,7 @@ async fn tagsuserloginreauthwithemptytagsremovesalltags() {
     assert_tags(&first.tags, &["tag:valid-owned", "tag:second"]);
 
     let updated = complete_user_registration(&admin, 0x2b, 0xa1, TAG_USER, &[]).await;
-    assert!(updated.tags.is_empty());
+    assert_eq!(updated.tags, [] as [String; 0]);
     assert_eq!(updated.user, TAG_USER);
     assert_eq!(registry.len(), 1);
 }

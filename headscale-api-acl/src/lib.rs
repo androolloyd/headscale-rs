@@ -4631,7 +4631,7 @@ mod tests {
             ..Default::default()
         });
         let n = NodeView::new("100.64.0.1");
-        assert!(doc.attrs_for(&n).is_empty());
+        assert_eq!(doc.attrs_for(&n), [] as [String; 0]);
     }
 
     #[test]
@@ -4648,7 +4648,7 @@ mod tests {
         let alice = NodeView::new("100.64.0.1").with_user("alice");
         let bob = NodeView::new("100.64.0.2").with_user("bob");
         assert_eq!(doc.attrs_for(&alice), vec!["funnel"]);
-        assert!(doc.attrs_for(&bob).is_empty());
+        assert_eq!(doc.attrs_for(&bob), [] as [String; 0]);
     }
 
     #[test]
@@ -5254,7 +5254,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(doc.ssh[0].accept_env.is_empty());
+        assert_eq!(doc.ssh[0].accept_env, [] as [String; 0]);
         assert_eq!(doc.ssh[0].users, ["🚀"]);
     }
 
@@ -5807,7 +5807,7 @@ mod tests {
             doc.via_routes_for_peer_with_candidates(&client, 10, &router, 1, &routes, &candidates);
 
         assert_eq!(got.include, vec![route.clone()]);
-        assert!(got.exclude.is_empty());
+        assert_eq!(got.exclude, [] as [String; 0]);
         assert_eq!(got.use_primary, vec![route]);
     }
 
@@ -5850,8 +5850,8 @@ mod tests {
             doc.via_routes_for_peer_with_candidates(&client, 10, &router, 1, &routes, &candidates);
 
         assert_eq!(got.include, vec![route]);
-        assert!(got.exclude.is_empty());
-        assert!(got.use_primary.is_empty());
+        assert_eq!(got.exclude, [] as [String; 0]);
+        assert_eq!(got.use_primary, [] as [String; 0]);
     }
 
     #[test]
@@ -5910,11 +5910,11 @@ mod tests {
         );
 
         assert_eq!(primary.include, vec![route.clone()]);
-        assert!(primary.exclude.is_empty());
-        assert!(primary.use_primary.is_empty());
-        assert!(secondary.include.is_empty());
+        assert_eq!(primary.exclude, [] as [String; 0]);
+        assert_eq!(primary.use_primary, [] as [String; 0]);
+        assert_eq!(secondary.include, [] as [String; 0]);
         assert_eq!(secondary.exclude, vec![route]);
-        assert!(secondary.use_primary.is_empty());
+        assert_eq!(secondary.use_primary, [] as [String; 0]);
     }
 
     #[test]
@@ -6095,8 +6095,8 @@ mod tests {
     fn hujson_nil_acl_and_grants_default_deny() {
         for raw in ["{}", r#"{"acls":[]}"#, r#"{"grants":[]}"#] {
             let doc = parse_hujson_policy(raw).unwrap();
-            assert!(doc.rules.is_empty());
-            assert!(doc.grants.is_empty());
+            assert_eq!(doc.rules, [] as [AclRule; 0]);
+            assert_eq!(doc.grants, [] as [GrantRule; 0]);
             assert_eq!(
                 doc.decide("100.64.0.1", "100.64.0.2", PortRef::any()),
                 AclAction::Deny

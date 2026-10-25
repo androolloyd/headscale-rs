@@ -898,7 +898,7 @@ mod tests {
 
         assert_eq!(state.primary_routes(1), Vec::<String>::new());
         assert_eq!(state.primary_routes(2), p(&["10.0.0.0/24"]));
-        assert!(unhealthy(&state).is_empty());
+        assert_eq!(unhealthy(&state), [] as [u64; 0]);
     }
 
     #[test]

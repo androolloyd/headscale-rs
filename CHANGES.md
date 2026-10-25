@@ -17,6 +17,9 @@
   (`vendor/PATCHES.json`); `vendor-tests.yml` runs each crate's own upstream
   suite against the patch; `headscale-vendor-conformance` asserts the h2, rustls
   and pgx Go-exactness behaviour. See `docs/ci-quality-gates.md`.
+- Clear the clippy 1.99.0 findings across the workspace (assertion forms,
+  `as_chunks`, two needlessly async functions) so the tree lints clean on both the
+  pinned 1.96.0 and 1.99.0; the pin itself stays at the qualified 1.96.0.
 - `check_headscale_go_refs.py --remote` warns, instead of failing every run,
   when headscale-go `main` has moved; a nightly `pin-freshness` job fails on it.
 

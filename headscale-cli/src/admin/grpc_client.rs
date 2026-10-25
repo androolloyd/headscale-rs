@@ -904,7 +904,7 @@ impl UpstreamConnectBackoff {
         }
         nanos = nanos.min(120_000_000_000.0);
         let random = (OsRng.next_u64() >> 11) as f64 / ((1_u64 << 53) as f64);
-        Duration::from_nanos((nanos * 0.2f64.mul_add(random * 2.0 - 1.0, 1.0)) as u64)
+        Duration::from_nanos((nanos * 0.2f64.mul_add(random.mul_add(2.0, -1.0), 1.0)) as u64)
     }
 }
 
@@ -1240,12 +1240,9 @@ mod tests {
         assert_eq!(renamed.name, "alice-renamed");
 
         client.delete_user_by_id(listed[0].id).await.unwrap();
-        assert!(
-            client
-                .list_users(UserSelector::default())
-                .await
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            client.list_users(UserSelector::default()).await.unwrap(),
+            [] as [headscale_api::generated::User; 0]
         );
 
         handle.abort();
@@ -1298,7 +1295,10 @@ mod tests {
             .delete_api_key(Some(&expired[0].prefix), None)
             .await
             .unwrap();
-        assert!(client.list_api_keys().await.unwrap().is_empty());
+        assert_eq!(
+            client.list_api_keys().await.unwrap(),
+            [] as [headscale_api::generated::ApiKey; 0]
+        );
 
         handle.abort();
         let _ = handle.await;
@@ -1354,7 +1354,10 @@ mod tests {
 
         client.expire_pre_auth_key(key.id).await.unwrap();
         client.delete_pre_auth_key(key.id).await.unwrap();
-        assert!(client.list_pre_auth_keys().await.unwrap().is_empty());
+        assert_eq!(
+            client.list_pre_auth_keys().await.unwrap(),
+            [] as [headscale_api::generated::PreAuthKey; 0]
+        );
 
         handle.abort();
         let _ = handle.await;
@@ -1426,7 +1429,7 @@ mod tests {
         assert_eq!(registered.user.as_ref().unwrap().name, "alice");
         // headscale-go's `debug create-node` caches the routes only on the
         // pending entry; the node created by `auth register` advertises none.
-        assert!(registered.available_routes.is_empty());
+        assert_eq!(registered.available_routes, [] as [String; 0]);
 
         let auth_registration_id = "bbbbbbbbbbbbbbbbbbbbbbbb";
         client
@@ -1522,7 +1525,10 @@ mod tests {
 
         client.delete_node(registered.id).await.unwrap();
         client.delete_node(auth_registered.id).await.unwrap();
-        assert!(client.list_nodes(None).await.unwrap().is_empty());
+        assert_eq!(
+            client.list_nodes(None).await.unwrap(),
+            [] as [headscale_api::generated::Node; 0]
+        );
         assert!(matches!(
             client.get_node(registered.id).await,
             Err(AdminError::NotFound(_))
@@ -1551,7 +1557,7 @@ mod tests {
         assert!(health.database_connectivity);
         assert!(client.backfill_node_ips(false).await.is_err());
         let backfilled = client.backfill_node_ips(true).await.unwrap();
-        assert!(backfilled.changes.is_empty());
+        assert_eq!(backfilled.changes, [] as [String; 0]);
 
         handle.abort();
         let _ = handle.await;

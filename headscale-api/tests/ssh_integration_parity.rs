@@ -110,7 +110,7 @@ fn ssh_users(policy: &SshPolicy) -> Vec<BTreeMap<String, String>> {
 fn assert_accept(rule: &SshRule) {
     assert!(rule.action.accept);
     assert!(!rule.action.reject);
-    assert!(rule.action.hold_and_delegate.is_empty());
+    assert_eq!(rule.action.hold_and_delegate, "");
     assert!(rule.action.allow_agent_forwarding);
     assert!(rule.action.allow_local_port_forwarding);
     assert!(rule.action.allow_remote_port_forwarding);

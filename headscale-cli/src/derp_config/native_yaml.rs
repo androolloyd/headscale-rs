@@ -66,12 +66,14 @@ impl Document {
             }
             let little = bytes[0] == 0xff;
             let units = bytes[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     if little {
-                        u16::from_le_bytes([pair[0], pair[1]])
+                        u16::from_le_bytes(*pair)
                     } else {
-                        u16::from_be_bytes([pair[0], pair[1]])
+                        u16::from_be_bytes(*pair)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -390,8 +392,8 @@ impl Document {
         };
         let before = errors.len();
         // decode.go visits the first occurrence, then all later matches.
-        for (index, pair) in values.chunks_exact(2).enumerate() {
-            for later in values.chunks_exact(2).skip(index + 1) {
+        for (index, pair) in values.as_chunks::<2>().0.iter().enumerate() {
+            for later in values.as_chunks::<2>().0.iter().skip(index + 1) {
                 if self.duplicate_key(pair[0], later[0]) {
                     errors.push(format!(
                         "line {}: mapping key {} already defined at line {}",
@@ -439,15 +441,15 @@ impl Document {
             let Node::Mapping(values) = &self.nodes[id] else {
                 return Err("yaml: map merge requires map or sequence of maps".into());
             };
-            for (index, pair) in values.chunks_exact(2).enumerate() {
-                for previous in values.chunks_exact(2).take(index) {
+            for (index, pair) in values.as_chunks::<2>().0.iter().enumerate() {
+                for previous in values.as_chunks::<2>().0.iter().take(index) {
                     if self.duplicate_key(previous[0], pair[0]) {
                         return Err("yaml: mapping key already defined".into());
                     }
                 }
             }
             let mut merge = None;
-            for pair in values.chunks_exact(2) {
+            for pair in values.as_chunks::<2>().0 {
                 if self.merge_key(pair[0]) {
                     merge = Some(pair[1]);
                     continue;
@@ -462,7 +464,7 @@ impl Document {
                 }
             }
             if !merged && merge.is_some() {
-                for pair in values.chunks_exact(2) {
+                for pair in values.as_chunks::<2>().0 {
                     seen.insert(self.key(pair[0], None)?);
                 }
             }
@@ -948,7 +950,7 @@ impl AliasBudget {
                             seen
                         } else {
                             let mut seen = HashSet::new();
-                            for pair in values.chunks_exact(2) {
+                            for pair in values.as_chunks::<2>().0 {
                                 if let Some(key) =
                                     budget.key(document, pair[0], walk.depth, None)?
                                 {

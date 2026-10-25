@@ -126,7 +126,7 @@ async fn api_key_create_list_auth_expire_and_delete_flow() {
         .await
         .unwrap();
     let list = body_json(resp).await;
-    assert!(list["api_keys"].as_array().unwrap().is_empty());
+    assert_eq!(list["api_keys"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -170,7 +170,7 @@ async fn api_key_delete_accepts_id_body() {
         .await
         .unwrap();
     let list = body_json(resp).await;
-    assert!(list["api_keys"].as_array().unwrap().is_empty());
+    assert_eq!(list["api_keys"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

@@ -226,7 +226,7 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
     )
     .await;
     assert!(completed.machine_authorized);
-    assert!(completed.auth_url.is_empty());
+    assert_eq!(completed.auth_url, "");
     assert!(!completed.node_key_expired);
     assert_eq!(completed.login.provider, "oidc");
     assert_eq!(completed.login.login_name, "userinfo@example.com");
@@ -257,7 +257,7 @@ async fn oidc_callback_wakes_wire_followup_with_authorized_client_registration()
         policy_delta.peers.is_empty(),
         "policy wake should use an incremental peer delta, not a full peer snapshot"
     );
-    assert!(policy_delta.peers_removed.is_empty());
+    assert_eq!(policy_delta.peers_removed, [] as [u64; 0]);
     let oidc_peer = policy_delta
         .peers_changed
         .iter()

@@ -1120,7 +1120,7 @@ mod tests {
 
         let accept = &pol.rules[1].action;
         assert!(accept.accept);
-        assert!(accept.hold_and_delegate.is_empty());
+        assert_eq!(accept.hold_and_delegate, "");
     }
 
     #[test]

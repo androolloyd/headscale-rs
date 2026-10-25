@@ -5458,7 +5458,7 @@ mod tests {
         assert!(refresh.dns_config.is_some());
         assert!(refresh.peers.is_empty());
         assert!(refresh.peers_changed.is_empty());
-        assert!(refresh.peers_removed.is_empty());
+        assert_eq!(refresh.peers_removed, [] as [u64; 0]);
         assert!(refresh.packet_filters.is_empty());
         assert!(refresh.ssh_policy.is_none());
     }
@@ -5547,8 +5547,8 @@ mod tests {
         assert!(updated.dns_config.is_none());
         assert!(updated.packet_filters.is_empty());
         assert!(updated.ssh_policy.is_none());
-        assert!(updated.user_profiles.is_empty());
-        assert!(updated.domain.is_empty());
+        assert_eq!(updated.user_profiles.len(), 0);
+        assert_eq!(updated.domain, "");
         assert!(updated.control_time.is_some());
         let derp_map = updated.derp_map.unwrap();
         assert_eq!(
@@ -5569,7 +5569,7 @@ mod tests {
         assert_eq!(change.reason_labels(), vec!["DERP map update"]);
         assert_eq!(change.change_type(), "config");
         assert!(change.content.include_derp_map);
-        assert!(change.content.peers_changed.is_empty());
+        assert_eq!(change.content.peers_changed, [] as [u64; 0]);
     }
 
     #[tokio::test]
@@ -6603,7 +6603,7 @@ mod tests {
             updated.peers.is_empty(),
             "policy wake should use incremental peer deltas"
         );
-        assert!(updated.peers_removed.is_empty());
+        assert_eq!(updated.peers_removed, [] as [u64; 0]);
         let router_a = changed_peer(&updated, "router-a").expect("router-a changed");
         assert!(!router_a.allowed_ips.iter().any(|allowed| allowed == route));
         let router_b = changed_peer(&updated, "router-b").expect("router-b changed");
@@ -6687,7 +6687,7 @@ mod tests {
             updated.peers.is_empty(),
             "policy wake should use incremental peer deltas"
         );
-        assert!(updated.peers_removed.is_empty());
+        assert_eq!(updated.peers_removed, [] as [u64; 0]);
         let bob_peer = changed_peer(&updated, "bob-node").expect("Bob peer changed");
         assert_eq!(bob_peer.id, stable_id_from_key(&bob));
         let bob_profile = updated
@@ -6784,7 +6784,7 @@ mod tests {
             vec![stable_id_from_key(&bob)],
             "policy frames resend the remaining visible peers"
         );
-        assert!(updated.peers_removed.is_empty());
+        assert_eq!(updated.peers_removed, [] as [u64; 0]);
         let bob_profile = updated
             .user_profiles
             .iter()
@@ -7220,7 +7220,7 @@ mod tests {
             "second chunk should include the newly-registered peer as a delta"
         );
         assert_eq!(mr.peers_changed[0].addresses[0], "100.64.0.11/32");
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
 
         let metrics_resp = public_app
             .clone()
@@ -7290,7 +7290,7 @@ mod tests {
         assert_eq!(mr.peers_changed.len(), 1);
         assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&a));
         assert_eq!(mr.peers_changed[0].name, "peer-a-reauth");
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(mr.peers_changed_patch.is_empty());
         assert!(mr.dns_config.is_none());
     }
@@ -7331,14 +7331,14 @@ mod tests {
         assert_eq!(self_node.name, "admin-renamed");
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(mr.peers_changed_patch.is_empty());
         assert!(
             mr.dns_config.is_some(),
             "self rename refreshes DNS metadata"
         );
         assert!(mr.derp_map.is_none());
-        assert!(mr.user_profiles.is_empty());
+        assert_eq!(mr.user_profiles.len(), 0);
         assert!(mr.packet_filters.is_empty());
         assert!(mr.ssh_policy.is_none());
     }
@@ -7367,7 +7367,7 @@ mod tests {
         assert_eq!(mr.peers_changed.len(), 1);
         assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&a));
         assert_eq!(mr.peers_changed[0].name, "admin-renamed");
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(mr.peers_changed_patch.is_empty());
         assert!(mr.dns_config.is_none());
     }
@@ -7899,7 +7899,7 @@ mod tests {
             tagged.peers.is_empty(),
             "batch-delivered tag churn should use incremental peer deltas"
         );
-        assert!(tagged.peers_removed.is_empty());
+        assert_eq!(tagged.peers_removed, [] as [u64; 0]);
         let server_peer = changed_peer(&tagged, "server-node").expect("tagged peer delta");
         assert_eq!(server_peer.id, stable_id_from_key(&server));
         assert_eq!(
@@ -8005,7 +8005,7 @@ mod tests {
         let decoded = decode_framed(&chunk);
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed.len(), 1);
         assert_eq!(mr.peers_changed[0].id, stable_id_from_key(&b));
         assert_eq!(mr.peers_changed[0].name, "peer-b");
@@ -8258,8 +8258,8 @@ mod tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_labels(), vec!["peers removed"]);
         assert_eq!(new_changes[0].content.peers_removed, vec![peer_id]);
-        assert!(new_changes[0].content.peers_changed.is_empty());
-        assert!(new_changes[0].content.peer_patches.is_empty());
+        assert_eq!(new_changes[0].content.peers_changed, [] as [u64; 0]);
+        assert_eq!(new_changes[0].content.peer_patches, [] as [u64; 0]);
         let pending = state.machines.pending_map_changes();
         let observer_changes = pending
             .get(&stable_id_from_key(&a))
@@ -8363,7 +8363,7 @@ mod tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_labels(), vec!["peers removed"]);
         assert_eq!(new_changes[0].content.peers_removed, vec![99]);
-        assert!(new_changes[0].content.peers_changed.is_empty());
+        assert_eq!(new_changes[0].content.peers_changed, [] as [u64; 0]);
         assert!(!new_changes[0].content.include_policy);
 
         tokio::task::yield_now().await;
@@ -8460,7 +8460,7 @@ mod tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_labels(), vec!["node added"]);
         assert_eq!(new_changes[0].content.peers_changed, vec![42]);
-        assert!(new_changes[0].content.peers_removed.is_empty());
+        assert_eq!(new_changes[0].content.peers_removed, [] as [u64; 0]);
         assert!(!new_changes[0].content.include_policy);
 
         tokio::task::yield_now().await;
@@ -8479,7 +8479,7 @@ mod tests {
         // Hostname but keeps GivenName, so the peer's DNS name is unchanged.
         assert_eq!(mr.peers_changed[0].name, "old-auth-node");
         assert!(mr.peers_changed_patch.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(
             mr.dns_config.is_none(),
             "auth peer-delta rekey should not become a policy/config chunk"
@@ -8527,8 +8527,8 @@ mod tests {
         assert_eq!(change.reason_labels(), vec!["peers removed"]);
         assert_eq!(change.change_type(), "peers");
         assert_eq!(change.content.peers_removed, vec![stable_id_from_key(&b)]);
-        assert!(change.content.peers_changed.is_empty());
-        assert!(change.content.peer_patches.is_empty());
+        assert_eq!(change.content.peers_changed, [] as [u64; 0]);
+        assert_eq!(change.content.peer_patches, [] as [u64; 0]);
         assert!(
             state
                 .machines
@@ -8773,7 +8773,7 @@ mod tests {
             vec![stable_id_from_key(&bob)]
         );
         assert!(delta.peers_changed_patch.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(
             delta.dns_config.is_none(),
             "policy reload deltas leave unchanged DNSConfig out"
@@ -8907,7 +8907,7 @@ mod tests {
             "batched policy reload should be a peer delta, not a full map"
         );
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
             delta.dns_config.is_none(),
@@ -8967,11 +8967,9 @@ mod tests {
         let first_mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(first_mr.peers.len(), 1);
 
-        assert!(
-            state
-                .machines
-                .gc_ephemeral(Duration::from_secs(60))
-                .is_empty()
+        assert_eq!(
+            state.machines.gc_ephemeral(Duration::from_secs(60)),
+            [] as [String; 0]
         );
         tokio::task::yield_now().await;
 
@@ -9200,7 +9198,7 @@ mod tests {
 
         let mr = next_zstd_map_response(&mut body).await;
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_changed.len(), 1);
         let peer = &mr.peers_changed[0];
@@ -9210,7 +9208,7 @@ mod tests {
         assert!(state.machines.set_expiry(&a, None));
         let cleared = next_zstd_map_response(&mut body).await;
         assert!(cleared.peers.is_empty());
-        assert!(cleared.peers_removed.is_empty());
+        assert_eq!(cleared.peers_removed, [] as [u64; 0]);
         assert!(cleared.peers_changed_patch.is_empty());
         assert_eq!(cleared.peers_changed.len(), 1);
         assert_eq!(cleared.peers_changed[0].id, stable_id_from_key(&a));
@@ -9289,7 +9287,7 @@ mod tests {
 
         let mr = next_zstd_map_response(&mut body).await;
         assert!(mr.peers.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert!(mr.peers_changed_patch.is_empty());
         let changed = mr
             .peers_changed
@@ -9400,7 +9398,7 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed.len(), 1);
         let peer = &mr.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&router_key));
@@ -9502,7 +9500,7 @@ mod tests {
 
         let delta = next_zstd_map_response(&mut alice_body).await;
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
             delta.dns_config.is_none(),
@@ -9624,7 +9622,7 @@ mod tests {
             "worker-batched route auto-approval should be a peer delta, not a full map"
         );
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
             delta.dns_config.is_none(),
@@ -9687,7 +9685,7 @@ mod tests {
             .machines
             .set_approved_routes_many(vec![(router_key.clone(), routes.clone())]);
         assert_eq!(changed, 1);
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
         assert_eq!(
             state
                 .machines
@@ -9740,7 +9738,7 @@ mod tests {
             "batched route approval should be a peer delta, not a full map"
         );
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
             delta.dns_config.is_none(),
@@ -9832,7 +9830,7 @@ mod tests {
             .machines
             .set_approved_routes_many(vec![(router_key.clone(), vec![route.clone()])]);
         assert_eq!(changed, 1);
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
 
         // Go v0.29.5 State.Connect appends a PolicyChange only when
         // NodeNeedsPeerRecompute (subnet router / relay / via target); an
@@ -9872,7 +9870,7 @@ mod tests {
             "ordinary peer lifecycle plus route approval should stay incremental"
         );
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(
             delta.dns_config.is_none(),
             "batched policy changes must not resend unchanged DNS config"
@@ -9973,15 +9971,15 @@ mod tests {
             changed, 0,
             "same-batch delete should clear the stale update-many completion"
         );
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
 
         let changes = state.machines.map_change_history();
         let new_changes = &changes[history_len..];
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_labels(), vec!["peers removed"]);
         assert_eq!(new_changes[0].content.peers_removed, vec![router_id]);
-        assert!(new_changes[0].content.peers_changed.is_empty());
-        assert!(new_changes[0].content.peer_patches.is_empty());
+        assert_eq!(new_changes[0].content.peers_changed, [] as [u64; 0]);
+        assert_eq!(new_changes[0].content.peer_patches, [] as [u64; 0]);
         let pending = state.machines.pending_map_changes();
         let observer_changes = pending
             .get(&stable_id_from_key(&observer))
@@ -10148,7 +10146,7 @@ mod tests {
             "subnet-router online recomputes peers without resending self/config"
         );
         assert!(alice_delta.peers.is_empty());
-        assert!(alice_delta.peers_removed.is_empty());
+        assert_eq!(alice_delta.peers_removed, [] as [u64; 0]);
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
             .peers_changed
@@ -10283,7 +10281,7 @@ mod tests {
             "subnet-router online lifecycle recomputes peers incrementally after persistence"
         );
         assert!(alice_delta.peers.is_empty());
-        assert!(alice_delta.peers_removed.is_empty());
+        assert_eq!(alice_delta.peers_removed, [] as [u64; 0]);
         assert!(alice_delta.peers_changed_patch.is_empty());
         let peer = alice_delta
             .peers_changed
@@ -10335,18 +10333,18 @@ mod tests {
         let mr = next_zstd_map_response(&mut alice_body).await;
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed.len(), 1);
         let peer = &mr.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&router_key));
         assert!(!peer.allowed_ips.iter().any(|ip| ip == route));
-        assert!(peer.hostinfo.routable_ips.is_empty());
+        assert_eq!(peer.hostinfo.routable_ips, [] as [String; 0]);
 
         let stored = state
             .machines
             .get(&router_key)
             .expect("router still registered");
-        assert!(stored.available_routes.is_empty());
+        assert_eq!(stored.available_routes, [] as [String; 0]);
         assert_eq!(stored.approved_routes, vec![route]);
     }
 
@@ -10399,7 +10397,7 @@ mod tests {
 
         let delta = next_zstd_map_response(&mut alice_body).await;
         assert!(delta.peers.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert!(delta.peers_changed_patch.is_empty());
         assert!(
             delta.dns_config.is_none(),
@@ -10529,7 +10527,7 @@ mod tests {
             !old_primary.allowed_ips.iter().any(|ip| ip == route),
             "old unhealthy primary must not regain the route while failover primary is retained"
         );
-        assert!(old_primary.primary_routes.is_empty());
+        assert_eq!(old_primary.primary_routes, [] as [String; 0]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -10552,13 +10550,13 @@ mod tests {
         let delta = next_zstd_map_response(&mut b_body).await;
         assert!(delta.peers.is_empty());
         assert!(delta.peers_changed.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert_eq!(delta.peers_changed_patch.len(), 1);
         let patch = &delta.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
         assert_eq!(patch.online, Some(true));
         assert!(patch.last_seen.is_none());
-        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.endpoints, [] as [String; 0]);
         assert_eq!(patch.derp_region, 0);
 
         let a_first = next_zstd_map_response(&mut a_body).await;
@@ -10630,7 +10628,7 @@ mod tests {
         assert!(b_delta.node.is_none());
         assert!(b_delta.peers.is_empty());
         assert!(b_delta.peers_changed.is_empty());
-        assert!(b_delta.peers_removed.is_empty());
+        assert_eq!(b_delta.peers_removed, [] as [u64; 0]);
         assert_eq!(b_delta.peers_changed_patch.len(), 1);
         assert_eq!(b_delta.peers_changed_patch[0].node_id, a_id);
         assert_eq!(b_delta.peers_changed_patch[0].online, Some(true));
@@ -10699,7 +10697,7 @@ mod tests {
         );
         assert!(online.peers.is_empty());
         assert!(online.peers_changed_patch.is_empty());
-        assert!(online.peers_removed.is_empty());
+        assert_eq!(online.peers_removed, [] as [u64; 0]);
         let online_router = online
             .peers_changed
             .iter()
@@ -10742,7 +10740,7 @@ mod tests {
         );
         assert!(offline.peers.is_empty());
         assert!(offline.peers_changed_patch.is_empty());
-        assert!(offline.peers_removed.is_empty());
+        assert_eq!(offline.peers_removed, [] as [u64; 0]);
         let offline_router = offline
             .peers_changed
             .iter()
@@ -10779,7 +10777,7 @@ mod tests {
         let delta = next_zstd_map_response(&mut b_body).await;
         assert!(delta.peers.is_empty());
         assert!(delta.peers_changed.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert_eq!(delta.peers_changed_patch.len(), 1);
         let patch = &delta.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
@@ -10922,7 +10920,7 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed_patch.len(), 1);
         let patch = &mr.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
@@ -11041,14 +11039,14 @@ mod tests {
         // empty endpoints on the wire (checked against the Go mapper).
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed_patch.len(), 1);
         let patch = &mr.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
         assert_eq!(patch.disco_key.as_deref(), Some(new_disco.as_str()));
         assert_eq!(patch.key.as_deref(), Some(format!("nodekey:{a}").as_str()));
         assert!(patch.key_expiry.is_none());
-        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.endpoints, [] as [String; 0]);
         assert!(patch.online.is_none());
         assert_eq!(patch.derp_region, 0);
     }
@@ -11153,11 +11151,11 @@ mod tests {
         let mr: MapResponse = serde_json::from_slice(&decoded).unwrap();
         assert!(mr.peers.is_empty());
         assert!(mr.peers_changed.is_empty());
-        assert!(mr.peers_removed.is_empty());
+        assert_eq!(mr.peers_removed, [] as [u64; 0]);
         assert_eq!(mr.peers_changed_patch.len(), 1);
         let patch = &mr.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
-        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.endpoints, [] as [String; 0]);
         assert_eq!(patch.derp_region, 7);
         assert!(patch.disco_key.is_none());
         assert!(patch.online.is_none());
@@ -11239,11 +11237,11 @@ mod tests {
         let delta = next_zstd_map_response(&mut body).await;
         assert!(delta.peers.is_empty());
         assert!(delta.peers_changed.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert_eq!(delta.peers_changed_patch.len(), 1);
         let patch = &delta.peers_changed_patch[0];
         assert_eq!(patch.node_id, stable_id_from_key(&a));
-        assert!(patch.endpoints.is_empty());
+        assert_eq!(patch.endpoints, [] as [String; 0]);
         assert_eq!(patch.derp_region, 7);
         assert!(patch.disco_key.is_none());
         assert!(patch.online.is_none());
@@ -11318,7 +11316,7 @@ mod tests {
         let first_delta = next_zstd_map_response(&mut body).await;
         assert!(first_delta.peers.is_empty());
         assert!(first_delta.peers_changed.is_empty());
-        assert!(first_delta.peers_removed.is_empty());
+        assert_eq!(first_delta.peers_removed, [] as [u64; 0]);
         assert_eq!(first_delta.peers_changed_patch.len(), 1);
         assert_eq!(first_delta.peers_changed_patch[0].node_id, peer_a_id);
         assert_eq!(first_delta.peers_changed_patch[0].derp_region, 7);
@@ -11332,7 +11330,7 @@ mod tests {
         let second_delta = next_zstd_map_response(&mut body).await;
         assert!(second_delta.peers.is_empty());
         assert!(second_delta.peers_changed.is_empty());
-        assert!(second_delta.peers_removed.is_empty());
+        assert_eq!(second_delta.peers_removed, [] as [u64; 0]);
         assert_eq!(
             second_delta.peers_changed_patch.len(),
             1,
@@ -11505,7 +11503,7 @@ mod tests {
         assert_eq!(change.reason_labels(), vec!["node updated"]);
         assert_eq!(change.change_type(), "peers");
         assert_eq!(change.content.peers_changed, vec![stable_id_from_key(&a)]);
-        assert!(change.content.peer_patches.is_empty());
+        assert_eq!(change.content.peer_patches, [] as [u64; 0]);
         assert!(!change.content.include_derp_map);
 
         tokio::task::yield_now().await;
@@ -11522,12 +11520,12 @@ mod tests {
         assert!(delta.dns_config.is_none());
         assert!(delta.peers.is_empty());
         assert!(delta.peers_changed_patch.is_empty());
-        assert!(delta.peers_removed.is_empty());
+        assert_eq!(delta.peers_removed, [] as [u64; 0]);
         assert_eq!(delta.peers_changed.len(), 1);
         let peer = &delta.peers_changed[0];
         assert_eq!(peer.id, stable_id_from_key(&a));
         assert_eq!(peer.home_derp, 0);
-        assert!(peer.legacy_derp_string.is_empty());
+        assert_eq!(peer.legacy_derp_string, "");
         assert_eq!(
             peer.hostinfo
                 .net_info
@@ -11976,12 +11974,9 @@ mod tests {
             .unwrap();
         let first = decode_framed(&frame.into_data().unwrap());
         let first_mr: MapResponse = serde_json::from_slice(&first).unwrap();
-        assert!(
-            first_mr
-                .ssh_policy
-                .expect("initial SSH policy")
-                .rules
-                .is_empty()
+        assert_eq!(
+            first_mr.ssh_policy.expect("initial SSH policy").rules.len(),
+            0
         );
 
         let raw_policy = r#"{

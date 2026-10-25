@@ -6620,4 +6620,35 @@ method = "S384"
 
         assert!(err.contains("pkce.method"));
     }
+
+    #[test]
+    fn configtest_rejects_invalid_oidc_pkce_method_when_issuer_configured() {
+        // headscale-go v0.29.5 validates OIDC when `oidc.issuer` is set (there
+        // is no `oidc.enabled` key), and checks the PKCE method first.
+        let source = r#"
+server_url = "https://headscale.example"
+
+[noise]
+private_key_path = "noise_private.key"
+
+[dns]
+magic_dns = false
+override_local_dns = false
+
+[database]
+type = "sqlite"
+
+[oidc]
+issuer = "https://issuer.example.com"
+
+[oidc.pkce]
+method = "S384"
+"#;
+
+        let config = CliConfig::parse(source, ConfigFormat::Toml).unwrap();
+        let err = config.validate_test_fixture().unwrap_err();
+        let err = format!("{err:#}");
+
+        assert!(err.contains("pkce.method"));
+    }
 }

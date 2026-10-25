@@ -25,8 +25,11 @@ python3 scripts/check_headscale_go_refs.py --remote
 These checks verify that the pinned headscale-go version in
 `tools/parity/headscale-go/go.mod` has a matching active golden, that scenario
 file names and `name` fields line up, that pinned/current-head goldens cover
-the checked-in scenario sets exactly, that the real-client current-head SHA
-still matches upstream `main`, and that the pinned release tag exists upstream.
+the checked-in scenario sets exactly, that the pinned release tag exists
+upstream, and that the real-client current-head SHA
+(`tools/real-client/headscale-go-current.sh`) is a full commit hash. A current-head
+SHA that no longer matches upstream `main` is reported as a warning
+(`--fail-on-stale` makes it an error; see `docs/ci-quality-gates.md`).
 
 Scenario files for the pinned differential gate live in
 `tools/parity/scenarios/*.json`. Each scenario carries an upstream-shaped HuJSON

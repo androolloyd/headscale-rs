@@ -4,7 +4,7 @@ reviewed, recorded set of local changes.
 
 Why this exists
 ---------------
-The root Cargo.toml redirects ten registry crates to the local copies under
+The root Cargo.toml redirects eleven registry crates to the local copies under
 vendor/ with `[patch.crates-io]` path entries. `cargo deny`'s `[sources]` check
 (`deny.toml` allows crates.io only) cannot see path patches, and Cargo.lock
 carries no checksum for them, so nothing else notices if a vendored file drifts

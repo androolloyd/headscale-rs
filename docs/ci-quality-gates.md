@@ -84,6 +84,17 @@ layers cover `vendor/`:
    failing. Refresh
    `tools/vendor-tests/locks/*.Cargo.lock` with `--update-locks` whenever a
    vendored manifest changes.
+
+   `libsqlite3-sys` (the SQLite WAL-reset guard backported into the bundled
+   amalgamations, see `vendor/libsqlite3-sys/OCTRA-PATCHES.md`) has an entry like
+   the others: its group runs the crate's own unit test with `--features
+   bundled`, and, because it is patched into every other scratch workspace, the
+   `sqlx-core` group's `integration-sqlite` run exercises sqlx's SQLite suite on
+   top of it. That proves the patched library builds, links and passes those
+   suites; it does **not** prove the race fix, which has no executable
+   regression in this repository (upstream's fault-injection hook is not part of
+   the production backport). The two patched amalgamations are pinned by SHA-256
+   in `vendor/PATCHES.json` and enforced by layer 1.
 3. **Behaviour** (`headscale-vendor-conformance/`). One test per Go-exactness
    feature, each asserting stock and native behaviour on the same input:
    h2 SETTINGS validation, refusal accounting, Content-Length normalisation,

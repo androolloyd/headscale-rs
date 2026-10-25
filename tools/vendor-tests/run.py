@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run each vendored crate's own upstream test suite against its local patch.
 
-`vendor/` holds ten crates (rustls, h2, hyper, ...) that carry Go-exactness
-patches on top of a pinned crates.io release. Nothing else in CI exercises
+`vendor/` holds eleven crates (rustls, h2, hyper, ..., libsqlite3-sys) that carry
+Go-exactness or storage-safety patches on top of a pinned crates.io release. Nothing else in CI exercises
 those crates' *own* tests, so a patch could silently break upstream behaviour.
 This runner closes that gap:
 
@@ -47,6 +47,7 @@ ALL_VENDORED = [
     "hyper-rustls",
     "hyper-util",
     "instant-acme",
+    "libsqlite3-sys",
     "rustls",
     "sqlx-core",
     "sqlx-postgres",
@@ -330,6 +331,23 @@ PLANS: dict[str, Plan] = {
                     "--doc",
                 ],
             ),
+        ],
+    ),
+    # The patch is a C-source backport (SQLite WAL-reset guard) in the bundled
+    # amalgamations, not a Rust API change, and the crate's own tests are one
+    # error-mapping unit test. This run proves that the patched amalgamation
+    # still builds and links with the `bundled` feature the workspace enables
+    # (`sqlx-sqlite/bundled`); the sqlx group below then runs sqlx's SQLite
+    # integration suite on top of it, because every vendored crate that is not
+    # a plan member is patched into the scratch workspace. The WAL-reset race
+    # itself has no executable regression here (the upstream fault-injection
+    # hook is deliberately not in the production backport): the patched
+    # amalgamations are pinned by SHA-256 in vendor/PATCHES.json instead.
+    "libsqlite3-sys": Plan(
+        group="libsqlite3-sys",
+        vendored=["libsqlite3-sys"],
+        runs=[
+            Run("bundled", ["-p", "libsqlite3-sys", "--features", "bundled", "--lib"]),
         ],
     ),
     "aws-lc-rs": Plan(

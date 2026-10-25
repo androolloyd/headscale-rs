@@ -3006,6 +3006,11 @@ pub struct MachineRegistry {
     /// zero-count entries are retained after disconnect to match
     /// headscale-go's `/debug/batcher` rapid-reconnect state.
     active_connections: Arc<RwLock<BTreeMap<u64, usize>>>,
+    /// headscale-go `nodeConn.lastSentPeers`: the peer IDs each node's
+    /// stream last delivered. The batcher keeps it across reconnects so a
+    /// new stream's initial full map can be followed by the removals the
+    /// client never received as a delta (`Batcher.AddNode`, `withRemovals`).
+    delivered_peers: RwLock<BTreeMap<u64, BTreeSet<u64>>>,
     /// State.Connect sessions include handlers waiting through reconnect grace.
     /// Every acquired session is released exactly once; batcher removal alone
     /// does not decrement this count.
@@ -3191,6 +3196,7 @@ impl Default for MachineRegistry {
             gen_tx: Arc::new(gen_tx),
             primary_routes: RwLock::new(PrimaryRouteState::new()),
             active_connections: Arc::new(RwLock::new(BTreeMap::new())),
+            delivered_peers: RwLock::new(BTreeMap::new()),
             state_sessions: Arc::new(RwLock::new(BTreeMap::new())),
             online_states: Arc::new(RwLock::new(BTreeMap::new())),
             connection_generations: Arc::new(RwLock::new(BTreeMap::new())),
@@ -6325,6 +6331,40 @@ impl MachineRegistry {
         self.inner.read().clone()
     }
 
+    /// Inspect the current registry while holding its read lock for the entire
+    /// synchronous callback. Concurrent registry writers cannot revoke or
+    /// replace membership until the callback returns. Unlike `snapshot`, this
+    /// does not release the guard after cloning an Arc.
+    ///
+    /// The callback must be short, nonblocking and nonreentrant: do not call
+    /// registry methods, await, or perform blocking I/O from it. Cross-component
+    /// admission follows the lock order canonical → registry → meter → I/O;
+    /// acquire canonical authority first and never reacquire it in this callback.
+    pub fn with_snapshot<R>(&self, f: impl FnOnce(&HashMap<String, MachineRecord>) -> R) -> R {
+        let current = self.inner.read();
+        f(&current)
+    }
+
+    /// The peer IDs this node's last delivered map chunk left in its view
+    /// (`nodeConn.lastSentPeers`). Empty for a node with no delivered chunk.
+    pub(crate) fn delivered_peers(&self, node_id: u64) -> BTreeSet<u64> {
+        self.delivered_peers
+            .read()
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record the peer view a delivered chunk left the node with
+    /// (`nodeConn.updateSentPeers`). Keepalives and unchanged views skip
+    /// the write lock.
+    pub(crate) fn record_delivered_peers(&self, node_id: u64, peers: BTreeSet<u64>) {
+        if self.delivered_peers.read().get(&node_id) == Some(&peers) {
+            return;
+        }
+        self.delivered_peers.write().insert(node_id, peers);
+    }
+
     /// Capture records and their retained side tables while the NodeStore
     /// writer is excluded. Side tables use COW, so response rebuilds retain
     /// raw Hostinfo and loaded associations without per-record copies.
@@ -7003,6 +7043,7 @@ impl MachineRegistry {
             }
 
             active.remove(&node_id);
+            self.delivered_peers.write().remove(&node_id);
             disconnected_at.remove(&node_id);
             route_health_sessions.remove(&node_id);
             self.pending_map_changes.write().remove(&node_id);
@@ -7452,7 +7493,8 @@ impl MachineRegistry {
             .inner
             .read()
             .iter()
-            .find(|(_, rec)| rec.machine_key_hex == machine_key_hex && rec.user == user)
+            .filter(|(_, rec)| rec.machine_key_hex == machine_key_hex && rec.user == user)
+            .min_by_key(|(key, rec)| rec.stable_node_id_for_key(key))
             .map(|(node_key, rec)| (node_key.clone(), rec.clone()));
         self.record_nodestore_operation("get_by_machine_key", start.elapsed());
         result
@@ -8620,6 +8662,7 @@ impl MachineRegistry {
             self.cancel_stream_connections(*node_id);
             self.stream_cancel_flags.write().remove(node_id);
             self.active_connections.write().remove(node_id);
+            self.delivered_peers.write().remove(node_id);
             self.state_sessions.write().remove(node_id);
             self.online_states.write().remove(node_id);
             self.connection_generations.write().remove(node_id);
@@ -9209,6 +9252,50 @@ mod registry_tests {
         rec.available_routes = vec![route.to_string()];
         rec.approved_routes = vec![route.to_string()];
         rec
+    }
+
+    #[test]
+    fn with_snapshot_holds_membership_until_callback_returns_then_reads_new_state() {
+        use std::sync::mpsc;
+
+        let registry = Arc::new(MachineRegistry::new());
+        let original = mk_record(1);
+        let key = original.node_key_hex.clone();
+        registry.upsert(key.clone(), original);
+        let (start, started) = mpsc::channel();
+        let (blocked, observed_block) = mpsc::channel();
+        let (written, observed_write) = mpsc::channel();
+        let writer_registry = registry.clone();
+        let writer_key = key.clone();
+        let writer = std::thread::spawn(move || {
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            // This is an actual write-lock attempt while the callback runs,
+            // rather than timing an unscheduled thread or relying on a sleep.
+            assert!(writer_registry.inner.try_write().is_none());
+            blocked.send(()).unwrap();
+            writer_registry.update_with(|machines| {
+                machines.get_mut(&writer_key).unwrap().hostname = "updated".into();
+            });
+            written.send(()).unwrap();
+        });
+        let hostname = registry.with_snapshot(|machines| {
+            assert_eq!(machines[&key].hostname, "host-1");
+            start.send(()).unwrap();
+            observed_block.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                observed_write.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(machines[&key].hostname, "host-1");
+            machines[&key].hostname.clone()
+        });
+        assert_eq!(hostname, "host-1");
+        observed_write.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.join().unwrap();
+        assert_eq!(
+            registry.with_snapshot(|machines| machines[&key].hostname.clone()),
+            "updated"
+        );
     }
 
     fn stable_sorted_keys(keys: &[&str]) -> Vec<String> {
@@ -12406,6 +12493,11 @@ mod registry_tests {
             node_id,
             Duration::ZERO,
         );
+        assert_eq!(
+            reg.online_states().get(&node_id),
+            Some(&false),
+            "expired connected node stays offline"
+        );
         drop(guard);
         assert!(reg.delete("nk-a"));
 
@@ -12428,7 +12520,7 @@ mod registry_tests {
                 "node added",
                 "node added",
                 "node offline",
-                "peers removed",
+                "peers removed"
             ]
         );
         let types = changes
@@ -14326,6 +14418,56 @@ mod registry_tests {
         //   legacy all() emu : 1 Vec + 256 String clones + 256 record
         //                      clones (each itself ~5 strings + 1 Vec)
         // i.e. ~1538 heap allocs per call vs 0 on the new path.
+    }
+    // headscale-go v0.29.5 noise.go sshActionFollowUp: FinishAuth buffers one
+    // verdict, then closes the channel, so the SSH follow-up path consumes a
+    // verdict exactly once and a replay sees the session as gone. The
+    // registration wait path (`wait_for_auth`) keeps the verdict.
+    #[tokio::test]
+    async fn release_0295_ssh_verdict_is_consumed_for_accept_and_reject() {
+        for accepted in [false, true] {
+            let cache = RegistrationCache::default();
+            let id = "v".repeat(24);
+            cache.insert_ssh_check(
+                id.clone(),
+                SshCheckBinding {
+                    src_node_id: 1,
+                    dst_node_id: 2,
+                    local_user: "root".into(),
+                },
+            );
+            if accepted {
+                assert!(cache.approve_without_node(&id));
+            } else {
+                assert!(cache.reject(&id, "denied"));
+            }
+            assert_eq!(
+                cache.wait_for_ssh_auth(&id).await,
+                if accepted {
+                    AuthWaitOutcome::Accepted
+                } else {
+                    AuthWaitOutcome::Rejected("denied".into())
+                }
+            );
+            assert_eq!(cache.wait_for_ssh_auth(&id).await, AuthWaitOutcome::Missing);
+        }
+    }
+
+    /// headscale-go v0.29.5 `State.RenameNode` runs
+    /// `types.ValidateGivenName(newName, cfg.BaseDomain)`: a valid 63-char
+    /// label can still overflow `MaxHostnameLength` under a long base
+    /// domain (issue #3346), so the rename is refused rather than stored.
+    #[test]
+    fn release_0295_rename_cannot_create_an_unmappable_fqdn() {
+        let registry = MachineRegistry::new();
+        let record = mk_record(1);
+        let key = record.node_key_hex.clone();
+        registry.upsert(key.clone(), record.clone());
+        registry.configure_given_name_domain(&"x".repeat(250));
+        assert!(!registry.rename(&key, "valid-label".into()));
+        assert_eq!(registry.get(&key).unwrap().hostname, record.hostname);
+        registry.configure_given_name_domain("tail.test");
+        assert!(registry.rename(&key, "valid-label".into()));
     }
 }
 

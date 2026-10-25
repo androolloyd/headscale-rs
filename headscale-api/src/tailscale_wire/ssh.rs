@@ -812,7 +812,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_action_rejects_unknown_auth_id() {
+    async fn ssh_action_redelegates_unknown_auth_id() {
         let (state, _dir) = fixture();
         let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
         let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
@@ -935,6 +935,56 @@ mod tests {
         let action: SshAction = serde_json::from_slice(&body).unwrap();
         assert!(action.accept);
         assert!(!action.reject);
+    }
+
+    // headscale-go v0.29.5 noise.go sshAction resolves SSHCheckParams for the
+    // local user the follow-up names before it waits on the verdict; a user
+    // no check rule lets this source log in as is denied even though the
+    // cached session for the same (src, dst) pair was approved.
+    #[tokio::test]
+    async fn ssh_action_followup_rejects_changed_local_user_not_allowed_by_current_policy() {
+        let (state, _dir) = fixture();
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let raw_auth_id = "abcdefghijklmnopqrstuvwx";
+        state.registration_cache.insert_ssh_check(
+            raw_auth_id.into(),
+            SshCheckBinding {
+                src_node_id: src,
+                dst_node_id: dst,
+                local_user: "root".into(),
+            },
+        );
+        assert!(state.registration_cache.approve_without_node(raw_auth_id));
+
+        let resp = inner_router(state.clone())
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?local_user=deploy&auth_id=hskey-authreq-{raw_auth_id}"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let action: SshAction = serde_json::from_slice(&body).unwrap();
+        assert!(!action.accept);
+        assert!(action.reject);
+        assert!(action.message.contains("no check rule"));
+        assert!(
+            state
+                .registration_cache
+                .last_ssh_auth(
+                    &SshCheckBinding {
+                        src_node_id: src,
+                        dst_node_id: dst,
+                        local_user: "deploy".into(),
+                    },
+                    state.policy.updated_at()
+                )
+                .is_none(),
+            "a denied follow-up must not seed check-period auto approval"
+        );
     }
 
     #[tokio::test]

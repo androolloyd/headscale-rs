@@ -382,7 +382,7 @@ fn run_ssh_policy_test(
     nodes: &[PolicyCheckNode],
     packet_nodes: &[PacketFilterNode],
     ssh_nodes: &[SshPolicyNode],
-    cache: &mut BTreeMap<u64, Option<SshPolicy>>,
+    cache: &mut BTreeMap<u64, SshPolicy>,
 ) -> Vec<String> {
     // The native SSH-test decoder represents an empty source as a nil Alias.
     let src_prefixes = if test.src.is_empty() {
@@ -444,7 +444,7 @@ fn run_ssh_policy_test(
                 let policy = cache.entry(dst.id).or_insert_with(|| {
                     super::ssh::compile_ssh_policy_for_target(doc, ssh_nodes, &ssh_nodes[index], "")
                 });
-                let (accepted, checked) = ssh_reachable_sources(policy.as_ref(), user);
+                let (accepted, checked) = ssh_reachable_sources(Some(&*policy), user);
                 let failure = match kind {
                     0 => {
                         let failed = sources.first_not_in(&accepted).is_some();

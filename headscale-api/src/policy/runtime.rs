@@ -455,7 +455,7 @@ impl CompiledRuntime {
         if let Some(policy) = self.ssh.lock().get(&receiver.id).cloned() {
             return policy;
         }
-        let policy = self.ssh_doc.as_ref().and_then(|doc| {
+        let policy = self.ssh_doc.as_ref().map(|doc| {
             ssh::compile_ssh_policy_snapshot(
                 doc,
                 nodes,

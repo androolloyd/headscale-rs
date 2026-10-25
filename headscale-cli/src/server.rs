@@ -3789,6 +3789,8 @@ mod tests {
 
         let local_grpc = tokio::spawn(async { std::future::pending::<Result<()>>().await });
         let handle = serve::ServeHandle {
+            http_addr: None,
+            https_addr: None,
             http: None,
             https: None,
             metrics: None,
@@ -7014,6 +7016,59 @@ policy:
         let allocator = CidrIpAllocator::from_cidr("100.64.0.0/30").unwrap();
         allocator.seed_existing(Some("100.64.0.1"), None).unwrap();
         allocator.seed_existing(Some("100.64.0.2"), None).unwrap();
+
+        assert!(matches!(
+            allocator.allocate("full"),
+            Err(AllocError::Exhausted)
+        ));
+    }
+
+    /// headscale-go's random strategy only draws the starting point at random
+    /// and then walks forward, wrapping inside the prefix (`IPAllocator.next`,
+    /// hscontrol/db/ip.go). With a single free address every start must find it.
+    #[test]
+    fn cidr_allocator_random_walks_and_wraps_to_the_only_free_address() {
+        for free in 1..=6u8 {
+            for _ in 0..16 {
+                let seeded = (1..=6u8)
+                    .filter(|octet| *octet != free)
+                    .map(|octet| format!("100.64.0.{octet}"))
+                    .collect::<Vec<_>>();
+                let allocator = CidrIpAllocator::from_existing_node_ips(
+                    "100.64.0.0/29",
+                    None,
+                    IpAllocationStrategy::Random,
+                    seeded.iter().map(|ip| ExistingNodeIpAddresses {
+                        ipv4: Some(ip.as_str()),
+                        ipv6: None,
+                    }),
+                )
+                .unwrap();
+
+                assert_eq!(
+                    allocator.allocate("random").unwrap(),
+                    Ipv4Addr::new(100, 64, 0, free)
+                );
+            }
+        }
+    }
+
+    /// A full prefix is `ErrCouldNotAllocateIP`, not an endless redraw.
+    #[test]
+    fn cidr_allocator_random_reports_exhaustion() {
+        let seeded = (1..=6u8)
+            .map(|octet| format!("100.64.0.{octet}"))
+            .collect::<Vec<_>>();
+        let allocator = CidrIpAllocator::from_existing_node_ips(
+            "100.64.0.0/29",
+            None,
+            IpAllocationStrategy::Random,
+            seeded.iter().map(|ip| ExistingNodeIpAddresses {
+                ipv4: Some(ip.as_str()),
+                ipv6: None,
+            }),
+        )
+        .unwrap();
 
         assert!(matches!(
             allocator.allocate("full"),

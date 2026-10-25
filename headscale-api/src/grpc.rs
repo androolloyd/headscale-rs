@@ -247,126 +247,9 @@ pub mod upstream {
     pub use crate::tailscale_wire::database_health::DatabaseHealthCheck;
     use crate::tailscale_wire::database_health::ping_with_timeout;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct PersistedPolicy {
-        pub policy: String,
-        pub updated_at: i64,
-    }
-
-    #[async_trait]
-    pub trait PolicyPersistence: Send + Sync {
-        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String>;
-        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String>;
-
-        // Existing custom backends retain their whole-second contract. Native
-        // pools override these methods without changing PersistedPolicy fields.
-        async fn get_latest_policy_with_timestamp(
-            &self,
-        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
-            self.get_latest_policy().await.map(|policy| {
-                policy.map(|policy| {
-                    let updated_at = unix_to_timestamp(policy.updated_at);
-                    (policy, updated_at)
-                })
-            })
-        }
-
-        async fn set_policy_with_timestamp(
-            &self,
-            policy: &str,
-        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
-            self.set_policy(policy).await.map(|policy| {
-                let updated_at = unix_to_timestamp(policy.updated_at);
-                (policy, updated_at)
-            })
-        }
-    }
-
-    fn policy_with_timestamp(
-        value: headscale_db::policies::TimedPolicyRow,
-    ) -> (PersistedPolicy, prost_types::Timestamp) {
-        let updated_at = value.updated_at_datetime().map_or_else(
-            || unix_to_timestamp(value.row.updated_at),
-            datetime_to_timestamp,
-        );
-        (
-            PersistedPolicy {
-                policy: value.row.data,
-                updated_at: value.row.updated_at,
-            },
-            updated_at,
-        )
-    }
-
-    #[cfg(feature = "admin")]
-    #[async_trait]
-    impl PolicyPersistence for sqlx::SqlitePool {
-        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
-            self.get_latest_policy_with_timestamp()
-                .await
-                .map(|value| value.map(|(policy, _)| policy))
-        }
-
-        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
-            self.set_policy_with_timestamp(policy)
-                .await
-                .map(|(policy, _)| policy)
-        }
-
-        async fn get_latest_policy_with_timestamp(
-            &self,
-        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
-            headscale_db::policies::get_latest_with_timestamp(self)
-                .await
-                .map(|value| value.map(policy_with_timestamp))
-                .map_err(|error| error.to_string())
-        }
-
-        async fn set_policy_with_timestamp(
-            &self,
-            policy: &str,
-        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
-            headscale_db::policies::set_with_timestamp(self, policy)
-                .await
-                .map(policy_with_timestamp)
-                .map_err(|error| error.to_string())
-        }
-    }
-
-    #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
-    #[async_trait]
-    impl PolicyPersistence for sqlx::PgPool {
-        async fn get_latest_policy(&self) -> Result<Option<PersistedPolicy>, String> {
-            self.get_latest_policy_with_timestamp()
-                .await
-                .map(|value| value.map(|(policy, _)| policy))
-        }
-
-        async fn set_policy(&self, policy: &str) -> Result<PersistedPolicy, String> {
-            self.set_policy_with_timestamp(policy)
-                .await
-                .map(|(policy, _)| policy)
-        }
-
-        async fn get_latest_policy_with_timestamp(
-            &self,
-        ) -> Result<Option<(PersistedPolicy, prost_types::Timestamp)>, String> {
-            headscale_db::policies::get_latest_postgres_with_timestamp(self)
-                .await
-                .map(|value| value.map(policy_with_timestamp))
-                .map_err(|error| error.to_string())
-        }
-
-        async fn set_policy_with_timestamp(
-            &self,
-            policy: &str,
-        ) -> Result<(PersistedPolicy, prost_types::Timestamp), String> {
-            headscale_db::policies::set_postgres_with_timestamp(self, policy)
-                .await
-                .map(policy_with_timestamp)
-                .map_err(|error| error.to_string())
-        }
-    }
+    /// The database policy source is shared with the HTTP admin API so both
+    /// embedders publish from the same append-only row history.
+    pub use crate::policy::persistence::{PersistedPolicy, PolicyPersistence};
 
     impl HeadscaleAdminService {
         pub fn new(
@@ -1906,7 +1789,7 @@ pub mod upstream {
                     };
                     Ok(Response::new(GetPolicyResponse {
                         policy: policy.policy,
-                        updated_at: Some(updated_at),
+                        updated_at: Some(datetime_to_timestamp(updated_at)),
                     }))
                 }
                 PolicyMode::File { path } => {
@@ -2024,7 +1907,7 @@ pub mod upstream {
                                     format!("reloading policy: {}", error.message()),
                                 )
                             })?;
-                        (persisted.policy, updated_at)
+                        (persisted.policy, datetime_to_timestamp(updated_at))
                     }
                     PolicyMode::Memory => {
                         crate::admin::machines::apply_policy_auto_approvals(

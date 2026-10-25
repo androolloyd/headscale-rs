@@ -7417,6 +7417,208 @@
   },
   {
     "engine": "headscale",
+    "name": "release-0295-empty-ssh",
+    "filter": [
+      {
+        "SrcIPs": [
+          "*"
+        ],
+        "DstPorts": [
+          {
+            "IP": "*",
+            "Ports": {
+              "First": 0,
+              "Last": 65535
+            }
+          }
+        ]
+      }
+    ],
+    "node_filters": [
+      {
+        "node_id": 1,
+        "rules": [
+          {
+            "SrcIPs": [
+              "*"
+            ],
+            "DstPorts": [
+              {
+                "IP": "*",
+                "Ports": {
+                  "First": 0,
+                  "Last": 65535
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "explicit-revocation",
+        "rules": [
+
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
+    "name": "release-0295-policy-metadata",
+    "filter": [
+
+    ],
+    "node_filters": [
+      {
+        "node_id": 1,
+        "rules": [
+
+        ]
+      },
+      {
+        "node_id": 2,
+        "rules": [
+
+        ]
+      },
+      {
+        "node_id": 3,
+        "rules": [
+
+        ]
+      },
+      {
+        "node_id": 4,
+        "rules": [
+
+        ]
+      },
+      {
+        "node_id": 5,
+        "rules": [
+
+        ]
+      }
+    ],
+    "ssh_policies": [
+      {
+        "name": "alice-laptop",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.1",
+              "100.64.0.2",
+              "fd7a:115c:a1e0::1",
+              "fd7a:115c:a1e0::2"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "root": ""
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "bob-laptop",
+        "rules": [
+
+        ]
+      },
+      {
+        "name": "server",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "root": "",
+              "ssh-it-user": "ssh-it-user"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.3",
+              "fd7a:115c:a1e0::3"
+            ],
+            "ssh_users": {
+              "*": "=",
+              "deploy": "deploy",
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          },
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      },
+      {
+        "name": "db",
+        "rules": [
+          {
+            "principals": [
+              "100.64.0.4",
+              "fd7a:115c:a1e0::4"
+            ],
+            "ssh_users": {
+              "root": "root"
+            },
+            "action": {
+              "accept": true,
+              "reject": false,
+              "session_duration_nanos": 0,
+              "allow_agent_forwarding": true,
+              "allow_local_port_forwarding": true,
+              "allow_remote_port_forwarding": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "headscale",
     "name": "route-autoapprove-edge-matrix",
     "filter": [
       {

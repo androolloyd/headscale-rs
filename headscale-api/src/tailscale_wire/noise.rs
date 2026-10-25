@@ -754,9 +754,14 @@ async fn drive_ts2021_websocket(
             }
         }
     });
-    let result =
-        drive_ts2021_be_with_init_remote_addr(state, noise_io, Some(initial_frame), remote_addr)
-            .await;
+    let result = drive_ts2021_be_with_options(
+        state,
+        noise_io,
+        Some(initial_frame),
+        remote_addr,
+        EarlyNoise::Omit,
+    )
+    .await;
     bridge.abort();
     let _ = bridge.await;
     result
@@ -1378,6 +1383,31 @@ pub(super) async fn drive_ts2021_be_with_init_remote_addr<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    drive_ts2021_be_with_options(state, io, initial_frame, remote_addr, EarlyNoise::Send).await
+}
+
+/// Whether the responder writes the `EarlyNoise` frame before HTTP/2.
+///
+/// tailscale `controlhttpserver.acceptHTTP` passes its `earlyWrite` callback
+/// only to the TCP-upgrade path; `acceptWebsocket` hands the socket straight
+/// to `controlbase.Server`, so a WebSocket control stream starts with the
+/// HTTP/2 preface and a browser client never sees the early payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EarlyNoise {
+    Send,
+    Omit,
+}
+
+pub(super) async fn drive_ts2021_be_with_options<T>(
+    state: WireState,
+    io: T,
+    initial_frame: Option<Vec<u8>>,
+    remote_addr: Option<RequestLogRemoteAddr>,
+    early_noise: EarlyNoise,
+) -> Result<(), WireError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let pending_handshake = state.server_noise_key.handshake_permit()?;
     let deadline = tokio::time::Instant::now() + CONTROL_HANDSHAKE_TIMEOUT;
     let mut framed = Framed::new(io);
@@ -1461,15 +1491,18 @@ where
     // `MarshalText` plumbing (the unmarshaler in the client expects a
     // bare string, not an object — we shipped an object first and
     // the client logged a json-unmarshal error on the EarlyNoise read).
-    let early = build_early_noise_frame()?;
-    use tokio::io::AsyncWriteExt;
-    handshake_io(
-        deadline,
-        "write early-noise",
-        noise_stream.write_all(&early),
-    )
-    .await?;
-    handshake_io(deadline, "flush early-noise", noise_stream.flush()).await?;
+    // WebSocket control streams skip it, as `acceptWebsocket` does.
+    if early_noise == EarlyNoise::Send {
+        let early = build_early_noise_frame()?;
+        use tokio::io::AsyncWriteExt;
+        handshake_io(
+            deadline,
+            "write early-noise",
+            noise_stream.write_all(&early),
+        )
+        .await?;
+        handshake_io(deadline, "flush early-noise", noise_stream.flush()).await?;
+    }
     let h2_conn = handshake_io(
         deadline,
         "h2 handshake",
@@ -1901,6 +1934,79 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// Run the TS2021 IK handshake as an in-process client against the
+    /// BE-nonce responder and return the first plaintext the server writes
+    /// once the transport is up.
+    async fn first_plaintext_after_be_handshake(early_noise: EarlyNoise) -> Vec<u8> {
+        let (state, _dir) = fixture_state();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(drive_ts2021_be_with_options(
+            state.clone(),
+            server_io,
+            None,
+            None,
+            early_noise,
+        ));
+        let version =
+            u16::try_from(crate::tailscale_wire::wire::MIN_SUPPORTED_CAPABILITY_VERSION).unwrap();
+        let server_pub = state.server_noise_key.public_bytes();
+        let mut initiator = state
+            .server_noise_key
+            .build_initiator_for_version(&server_pub, version)
+            .unwrap();
+        let mut framed = Framed::new(client_io);
+        let mut buf = vec![0u8; 1024];
+        let len = initiator.write_message(&[], &mut buf).unwrap();
+        framed.write_initiation(version, &buf[..len]).await.unwrap();
+        let (header, reply) = framed.read_frame().await.unwrap();
+        assert!(matches!(
+            header,
+            FrameHeader::Regular {
+                msg_type: MsgType::Reply,
+                ..
+            }
+        ));
+        initiator.read_message(&reply, &mut buf).unwrap();
+        let (k1_init_egress, k2_resp_egress) = initiator.dangerously_get_raw_split();
+        let mut stream = BeNoiseStream::new(
+            framed.into_inner(),
+            BeTransport::from_split_initiator(k1_init_egress, k2_resp_egress),
+        );
+        let mut first = Vec::new();
+        // The h2 server flushes its SETTINGS frame before reading the client
+        // preface, so the first record arrives without any client write.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while first.len() < 9 {
+                let mut chunk = [0u8; 256];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "responder closed before its first frame");
+                first.extend_from_slice(&chunk[..read]);
+            }
+        })
+        .await
+        .expect("responder's first post-handshake frame");
+        drop(stream);
+        server.abort();
+        first
+    }
+
+    #[tokio::test]
+    async fn be_tcp_upgrade_path_sends_early_noise_before_h2() {
+        let first = first_plaintext_after_be_handshake(EarlyNoise::Send).await;
+        assert!(first.starts_with(&EARLY_NOISE_MAGIC));
+    }
+
+    /// tailscale `controlhttpserver.acceptWebsocket` passes no `earlyWrite`
+    /// to `controlbase.Server`: a WebSocket control stream opens with the
+    /// HTTP/2 server preface (a SETTINGS frame on stream 0).
+    #[tokio::test]
+    async fn websocket_control_stream_omits_early_noise_like_accept_websocket() {
+        let first = first_plaintext_after_be_handshake(EarlyNoise::Omit).await;
+        assert!(!first.starts_with(&EARLY_NOISE_MAGIC));
+        assert_eq!(first[3], 0x04, "h2 SETTINGS frame type");
+        assert_eq!(&first[5..9], &[0, 0, 0, 0], "h2 SETTINGS on stream 0");
     }
 
     #[tokio::test]

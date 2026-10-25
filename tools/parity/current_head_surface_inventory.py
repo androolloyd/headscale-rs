@@ -22,11 +22,11 @@ from typing import Any
 DEFAULT_UPSTREAM_ROOT = Path(
     os.environ.get(
         "HEADSCALE_GO_ROOT",
-        "/Users/androolloyd/go/pkg/mod/github.com/juanfont/headscale@v0.29.0-beta.2",
+        "/Users/androolloyd/go/pkg/mod/github.com/juanfont/headscale@v0.29.5",
     )
 )
-UPSTREAM_VERSION = "v0.29.0-beta.2"
-UPSTREAM_COMMIT = "171fd7a3c54156965753a63639cdcafcd50c8d67"
+UPSTREAM_VERSION = "v0.29.5"
+UPSTREAM_COMMIT = "0f7d1e536bed9f01dd7161f7637af19bb0908335"
 
 GO_METHODS = {
     "Get": "GET",

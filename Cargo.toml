@@ -27,6 +27,7 @@ exclude = [
     "vendor/instant-acme",
     "vendor/sqlx-core",
     "vendor/sqlx-postgres",
+    "vendor/libsqlite3-sys",
     "headscale-core/fuzz",
     # Kept on disk but excluded from workspace-wide cargo commands.
     "headscale-core",
@@ -46,6 +47,9 @@ aws-lc-rs = { path = "vendor/aws-lc-rs" }
 instant-acme = { path = "vendor/instant-acme" }
 sqlx-core = { path = "vendor/sqlx-core" }
 sqlx-postgres = { path = "vendor/sqlx-postgres" }
+# The bundled SQLite 3.46.0 library needs the upstream WAL-reset race guard
+# (see vendor/libsqlite3-sys/OCTRA-PATCHES.md).
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
 
 [workspace.lints.clippy]
 # Mirrors octra/Cargo.toml + octra-foundry/Cargo.toml at the

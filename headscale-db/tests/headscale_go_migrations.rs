@@ -2177,3 +2177,161 @@ async fn migrates_legacy_routes_table_without_synthesizing_opposite_exit_route()
         assert_eq!(migrated.approved_route_list(), vec![prefix]);
     }
 }
+
+#[tokio::test]
+async fn runtime_persist_keeps_admin_expiry_and_deleted_auth_key_while_reregistration_replaces_them()
+ {
+    let (_dir, db) = file_db().await;
+    db.migrate().await.unwrap();
+    let user = user_id(&db).await;
+    let auth = preauth_key_id(&db, user).await;
+    let row = node_with_route(&db, user, auth).await;
+    headscale_nodes::set_expiry(db.pool(), row.id, Some(1_900_000_000))
+        .await
+        .unwrap();
+
+    // Re-registration presents a freshly validated key. Go's reregColumns
+    // add AuthKeyID to nodeUpdateColumns and keep Expiry, so the auth path
+    // replaces both the key reference and the administrator's expiry.
+    let reregistered = headscale_nodes::update_from_auth_path(
+        db.pool(),
+        row.id,
+        headscale_nodes::CreateParams {
+            machine_key: row.machine_key.clone(),
+            node_key: row.node_key.clone(),
+            disco_key: row.disco_key.clone(),
+            endpoints: vec!["127.0.0.1:4242".into()],
+            host_info: row.host_info_value(),
+            ipv4: row.ipv4.clone(),
+            ipv6: row.ipv6.clone(),
+            hostname: row.hostname.clone(),
+            given_name: row.given_name.clone(),
+            user_id: row.user_id,
+            register_method: row.register_method.clone(),
+            tags: row.tag_list(),
+            auth_key_id: Some(auth),
+            expiry: Some(1_950_000_000),
+            last_seen: Some(123_456),
+            approved_routes: row.approved_route_list(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(reregistered.auth_key_id, Some(auth));
+    assert_eq!(reregistered.expiry, Some(1_950_000_000));
+
+    // Go State.persistNode writes nodeUpdateColumns minus Expiry and minus
+    // AuthKeyID. A map-driven save re-read from the NodeStore therefore can
+    // neither restore a destroyed key reference nor overwrite the expiry.
+    preauth_keys::destroy(db.pool(), auth).await.unwrap();
+    headscale_nodes::save_cached_node_snapshot(
+        db.pool(),
+        headscale_nodes::CachedNodeSnapshot {
+            id: row.id,
+            machine_key: row.machine_key.clone(),
+            node_key: row.node_key.clone(),
+            disco_key: row.disco_key.clone(),
+            endpoints: Some(vec!["127.0.0.1:4343".into()]),
+            host_info: Some(row.host_info_value()),
+            ipv4: row.ipv4.clone(),
+            ipv6: row.ipv6.clone(),
+            hostname: row.hostname.clone(),
+            given_name: row.given_name.clone(),
+            user_id: row.user_id,
+            register_method: row.register_method.clone(),
+            tags: Some(row.tag_list()),
+            last_seen: chrono::DateTime::from_timestamp(234_567, 0),
+            approved_routes: Some(row.approved_route_list()),
+        },
+    )
+    .await
+    .unwrap();
+    let persisted = headscale_nodes::get_by_id(db.pool(), row.id).await.unwrap();
+    assert_eq!(persisted.auth_key_id, None);
+    assert_eq!(persisted.expiry, Some(1_950_000_000));
+    assert_eq!(persisted.endpoint_list(), ["127.0.0.1:4343"]);
+    assert_eq!(persisted.last_seen, Some(234_567));
+}
+
+#[tokio::test]
+async fn imports_go_v0295_ledger_without_replaying_tagged_expiry_repair() {
+    let (_dir, db) = file_db().await;
+    seed_fixture(
+        &db,
+        HEADSCALE_GO_V0295_CLEAR_TAGGED_EXPIRY_FIXTURE,
+        "headscale-go v0.29.5 tagged-expiry repair fixture",
+    )
+    .await;
+    // headscale-go v0.29.5 already ran its one-shot repairs on this database.
+    // Afterwards `headscale nodes expire` set a deliberate expiry on tagged
+    // node 2: Go's ExpireNode accepts tagged nodes and no later Go start
+    // revisits a recorded migration, so the import must not replay it either.
+    sqlx::raw_sql(
+        "
+        INSERT INTO migrations VALUES('202605221435-clear-zero-time-node-expiry');
+        INSERT INTO migrations VALUES('202606181200-recover-null-tags-node-user-id');
+        INSERT INTO migrations VALUES('202607241200-clear-tagged-node-expiry');
+        UPDATE nodes SET expiry = NULL WHERE id = 1;
+        ",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed completed Go repairs");
+
+    db.migrate().await.expect("import Go v0.29.5 ledger");
+    let tagged = headscale_nodes::get_by_id(db.pool(), 2).await.unwrap();
+    assert_eq!(tagged.tag_list(), ["tag:foo"]);
+    assert_eq!(
+        tagged.expiry,
+        Some(4_070_908_800),
+        "deliberate tagged expiry survives the import"
+    );
+    // The imported primary keeps Go's ledger, so neither headscale-go nor a
+    // later Rust start sees the repairs as pending.
+    let recorded: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM migrations WHERE id IN (\
+         '202606181200-recover-null-tags-node-user-id', \
+         '202607241200-clear-tagged-node-expiry') ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("read Go repair ledger");
+    assert_eq!(
+        recorded,
+        [
+            "202606181200-recover-null-tags-node-user-id",
+            "202607241200-clear-tagged-node-expiry",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rust_managed_database_keeps_admin_tagged_expiry_across_restart() {
+    let (dir, db) = file_db().await;
+    db.migrate().await.unwrap();
+    let user = user_id(&db).await;
+    let auth = preauth_key_id(&db, user).await;
+    let row = node_with_route(&db, user, auth).await;
+    headscale_nodes::set_tags(db.pool(), row.id, vec!["tag:server".into()])
+        .await
+        .unwrap();
+    headscale_nodes::set_expiry(db.pool(), row.id, Some(1_900_000_000))
+        .await
+        .unwrap();
+    db.pool().close().await;
+
+    // The repairs are recorded once; a restart with the same migration set
+    // must not run them again over an administrator's later expiry.
+    let url = format!(
+        "sqlite://{}",
+        dir.path().join("headscale-go.sqlite").display()
+    );
+    let reopened = Database::new(&url).await.expect("reopen file db");
+    reopened.migrate().await.expect("restart migration");
+    let tagged = headscale_nodes::get_by_id(reopened.pool(), row.id)
+        .await
+        .unwrap();
+    assert_eq!(tagged.tag_list(), ["tag:server"]);
+    assert_eq!(tagged.expiry, Some(1_900_000_000));
+}

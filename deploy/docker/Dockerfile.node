@@ -41,6 +41,7 @@ COPY vendor/hyper-util/LICENSE* /usr/share/licenses/headscale-rs/hyper-util/
 COPY vendor/rustls/LICENSE* /usr/share/licenses/headscale-rs/rustls/
 COPY vendor/aws-lc-rs/LICENSE* vendor/aws-lc-rs/NOTICE* /usr/share/licenses/headscale-rs/aws-lc-rs/
 COPY vendor/instant-acme/LICENSE* /usr/share/licenses/headscale-rs/instant-acme/
+COPY vendor/libsqlite3-sys/LICENSE* /usr/share/licenses/headscale-rs/libsqlite3-sys/
 COPY vendor/sqlx-postgres/LICENSE* /usr/share/licenses/headscale-rs/sqlx-postgres/
 COPY vendor/sqlx-core/LICENSE* /usr/share/licenses/headscale-rs/sqlx-core/
 COPY headscale-cli/LICENSE* headscale-cli/NOTICE* /usr/share/licenses/headscale-rs/headscale-cli/

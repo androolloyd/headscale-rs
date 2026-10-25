@@ -2846,7 +2846,9 @@ impl AclDoc {
             return false;
         };
         if is_default_route(&route) {
-            return destinations.iter().any(|dst| dst == "autogroup:internet");
+            return destinations
+                .iter()
+                .any(|dst| matches!(dst.as_str(), "autogroup:internet" | "*"));
         }
 
         destinations.iter().any(|dst| {
@@ -5852,6 +5854,59 @@ mod tests {
         assert_eq!(got.include, vec![route]);
         assert_eq!(got.exclude, [] as [String; 0]);
         assert_eq!(got.use_primary, [] as [String; 0]);
+    }
+
+    // headscale-go v0.29.5 policy/v2 grantReachesInternet treats the wildcard
+    // destination like autogroup:internet: a regular grant to `*` lets the
+    // viewer use any exit node, lifting the exclusion a via grant placed on an
+    // exit node that lacks the via tag, and defers an included exit route to
+    // global primary election.
+    #[test]
+    fn via_routes_wildcard_regular_grant_reaches_internet_like_autogroup_internet() {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {
+                "tag:client": ["alice@"],
+                "tag:exit": ["router@"]
+              },
+              "grants": [
+                {
+                  "src": ["tag:client"],
+                  "dst": ["*"],
+                  "ip": ["*"]
+                },
+                {
+                  "src": ["tag:client"],
+                  "dst": ["autogroup:internet"],
+                  "ip": ["*"],
+                  "via": ["tag:exit"]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let client_tags = vec!["tag:client".to_string()];
+        let exit_tags = vec!["tag:exit".to_string()];
+        let other_tags = vec!["tag:other".to_string()];
+        let client = NodeView::new("100.64.0.10").with_tags(&client_tags);
+        let routes = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+
+        let untagged_exit = NodeView::new("100.64.0.2").with_tags(&other_tags);
+        let got =
+            doc.via_routes_for_peer_with_candidates(&client, 10, &untagged_exit, 2, &routes, &[]);
+        assert_eq!(got.include, [] as [String; 0]);
+        assert_eq!(
+            got.exclude,
+            [] as [String; 0],
+            "a wildcard regular grant lifts the via exclusion from any exit node"
+        );
+
+        let via_exit = NodeView::new("100.64.0.1").with_tags(&exit_tags);
+        let got = doc.via_routes_for_peer_with_candidates(&client, 10, &via_exit, 1, &routes, &[]);
+        assert_eq!(got.include, routes);
+        assert_eq!(got.exclude, [] as [String; 0]);
+        assert_eq!(got.use_primary, routes);
     }
 
     #[test]

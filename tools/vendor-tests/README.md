@@ -1,8 +1,9 @@
 # Vendored-crate test gate
 
-`vendor/` holds ten crates that carry Go-exactness patches on top of a pinned
-crates.io release: `aws-lc-rs`, `h2`, `http`, `hyper`, `hyper-rustls`,
-`hyper-util`, `instant-acme`, `rustls`, `sqlx-core` and `sqlx-postgres`. Their
+`vendor/` holds eleven crates that carry Go-exactness (or, for `libsqlite3-sys`,
+storage-safety) patches on top of a pinned crates.io release: `aws-lc-rs`, `h2`,
+`http`, `hyper`, `hyper-rustls`, `hyper-util`, `instant-acme`, `libsqlite3-sys`,
+`rustls`, `sqlx-core` and `sqlx-postgres`. Their
 `UPSTREAM.md` files state that no tests were authored for the patches, and the
 workspace's own tests only reach them indirectly. This gate runs **each crate's
 own upstream test suite against the patched source**, so a patch that breaks
@@ -38,6 +39,7 @@ For each crate the runner (`run.py`) builds a scratch workspace under
    | `hyper-rustls` | `tests/` and `examples/` (the tests spawn the example binaries) |
    | `rustls` | `rustls/tests/`, `rustls-test`, `test-ca` plus the `[[test]]` runners |
    | `aws-lc-rs` | `aws-lc-rs/tests/` (auto-discovered) |
+   | `libsqlite3-sys` | nothing: the crate's own unit test ships in the archive; it is run with the `bundled` feature the workspace enables |
    | `sqlx-core`, `sqlx-postgres` | the whole workspace: the patched crates replace `sqlx-core/` and `sqlx-postgres/`, the root `sqlx` crate's `tests/` run on top |
 
    The published manifests omit targets whose files are not in the archive, so
@@ -67,6 +69,20 @@ stale exemption is itself an error. Currently:
 | `http` / `native` | `reserve_over_capacity`, `with_capacity_overflow` | `go-native-header-capacity` raises the `HeaderMap` capacity ceiling from `1<<15` to `1<<22`; upstream asserts the old ceiling with `#[should_panic]` |
 | `hyper` / `native` | `body::incoming::tests::test_size_of` | `go-client-idle` (with `client`) adds per-body idle-tracking state to `hyper::body::Incoming` (248 bytes); upstream's accident detector asserts <= 40 bytes |
 | `h2` / `integration-native` | `recv_invalid_authority`, `recv_next_stream_id_updated_by_malformed_headers` | `go-server-lifecycle` keeps a request whose `:authority` is not a valid URI authority (exposed as `Host`, like Go's `net/http`; see the comment in `vendor/h2/src/server.rs`); both upstream tests send `"not:a/good authority"` and assert the stream is rejected |
+
+## `libsqlite3-sys`: what the gate does and does not prove
+
+The patch is a C-source backport (the SQLite WAL-reset guard, see
+`vendor/libsqlite3-sys/OCTRA-PATCHES.md`) inside the bundled amalgamations; no
+Rust API changed. The `libsqlite3-sys` group runs the crate's own unit test with
+`--features bundled`, so a patched amalgamation that no longer builds or links
+fails CI. Because every vendored crate that is not a plan member is patched into
+the other scratch workspaces, the `sqlx-core` group's `integration-sqlite` run
+(sqlx's SQLite integration suite) also executes against the patched library. The
+WAL-reset race itself has **no executable regression** in this repository (the
+upstream fault-injection hook is intentionally absent from the production
+backport); the two patched amalgamations are pinned by SHA-256 in
+`vendor/PATCHES.json`, which `scripts/check_vendor_provenance.py` enforces.
 
 ## Compiler-drift allowance
 

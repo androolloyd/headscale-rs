@@ -199,7 +199,12 @@ fn test_ssh_no_ssh_configured() {
           "ssh": []
         }"#);
 
-    assert!(compile_ssh_policy(&doc, &base_nodes(), 1).is_none());
+    // headscale-go v0.29.5 compileSSHPolicy never returns nil: a policy without
+    // SSH rules compiles to an explicit empty rule list (`"rules": []`).
+    assert_eq!(
+        compile_ssh_policy(&doc, &base_nodes(), 1),
+        Some(SshPolicy::default())
+    );
 }
 
 #[test]

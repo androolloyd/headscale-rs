@@ -698,6 +698,17 @@ fn self_map_node_from_snapshot(
     auto_update_enabled: bool,
 ) -> Option<MapNode> {
     let own = snapshot.get(self_node_key)?;
+    // headscale-go `tailNode` fails the whole map response when
+    // `GetFQDN(baseDomain)` rejects the node's own name; the client gets
+    // an error instead of a Node it cannot map.
+    if !map_name_is_valid(own, tailnet_domain) {
+        tracing::warn!(
+            node_id = own.stable_node_id(),
+            hostname = %own.hostname,
+            "self node has an invalid FQDN; refusing its map until it is renamed"
+        );
+        return None;
+    }
     let mut own_node = record_to_map_node(own, tailnet_domain);
     own_node.addresses = snapshot.map_address_prefixes(own);
     if !own.is_tagged() && snapshot.native_user_association_id(own).is_some() {
@@ -2189,7 +2200,20 @@ async fn map_inner(
                 compression,
                 public_control_url,
             )| async move {
-                if let Some(initial) = first_opt {
+                if let Some(mut initial) = first_opt {
+                    // headscale-go `Batcher.AddNode`: the initial map is a
+                    // full rebuild, so peers the node's previous stream
+                    // delivered but this view no longer holds follow it as
+                    // the removal delta the client never received.
+                    let node_id = connection_guard.node_id;
+                    let delivered = last_peer_state.keys().copied().collect::<BTreeSet<_>>();
+                    let removed = machines
+                        .delivered_peers(node_id)
+                        .difference(&delivered)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    initial.extend(build_peer_removal_chunk(&removed, compression)?);
+                    machines.record_delivered_peers(node_id, delivered);
                     return Ok(Some((
                         initial,
                         (
@@ -2391,8 +2415,9 @@ async fn map_inner(
                                         &initial_peer_ids,
                                         &mapresponse_debug,
                                         public_control_url.as_deref().unwrap_or(""),
-                                    &last_ssh_policy,
+                                        &last_ssh_policy,
                                         PeerDeltaOptions::registry_change(),
+                                        &BTreeSet::new(),
                                         &BTreeSet::new(),
                                         None,
                                     )
@@ -2448,6 +2473,7 @@ async fn map_inner(
                                     public_control_url.as_deref().unwrap_or(""),
                                     &last_ssh_policy,
                                     PeerDeltaOptions::policy_change(),
+                                    &BTreeSet::new(),
                                     &BTreeSet::new(),
                                     None,
                                 )
@@ -2557,6 +2583,10 @@ async fn map_inner(
                         );
                     }
                 };
+                machines.record_delivered_peers(
+                    connection_guard.node_id,
+                    next_peer_state.keys().copied().collect(),
+                );
                 Ok::<_, std::io::Error>(Some((
                     chunk,
                     (
@@ -2827,8 +2857,30 @@ fn rebuild_map_batch_chunk(
         last_ssh_policy,
         map_batch_peer_delta_options(changes, machines.stable_node_id_for_key(self_node_key)),
         &map_batch_forced_full_peer_ids(changes),
+        &map_batch_forced_online_peer_ids(changes),
         peer_filter_ids.as_ref(),
     )
+}
+
+/// Peers whose lifecycle patch must be sent even when the delivered view
+/// already shows the same online state. headscale-go `State.Connect` emits
+/// `change.NodeOnline` for every acquired session and `buildFromChange`
+/// forwards that `PeerPatches` entry without comparing it to the last sent
+/// node, so a second stream of an already-online peer still patches
+/// `Online: true` to its viewers.
+fn map_batch_forced_online_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
+    changes
+        .iter()
+        .filter(|change| {
+            change.reasons.iter().any(|reason| {
+                matches!(
+                    reason,
+                    MapChangeReason::NodeOnline | MapChangeReason::NodeOffline
+                )
+            })
+        })
+        .flat_map(|change| change.content.peer_patches.iter().copied())
+        .collect()
 }
 
 fn map_batch_forced_full_peer_ids(changes: &[MapChange]) -> BTreeSet<u64> {
@@ -2878,6 +2930,7 @@ fn rebuild_peer_delta_chunk(
     last_ssh_policy: &SshPolicyState,
     options: PeerDeltaOptions,
     force_full_peer_ids: &BTreeSet<u64>,
+    force_online_peer_ids: &BTreeSet<u64>,
     filter_peer_ids: Option<&BTreeSet<u64>>,
 ) -> Option<PeerDeltaChunk> {
     if machines.get(self_node_key).is_none() {
@@ -2989,7 +3042,16 @@ fn rebuild_peer_delta_chunk(
                     && headscale_api_acl::go_tailcfg_json::peer_hostinfo_equal(
                         &previous.hostinfo,
                         &current.hostinfo,
-                    ) => {}
+                    ) =>
+            {
+                if force_online_peer_ids.contains(&peer.id) {
+                    peer_patches.push(PeerChange {
+                        node_id: peer.id,
+                        online: peer.online,
+                        ..PeerChange::default()
+                    });
+                }
+            }
             Some(previous) => {
                 next_peer_state.insert(peer.id, current.clone());
                 // A peer-visible raw change can be hidden by Option<bool> or
@@ -3000,9 +3062,12 @@ fn rebuild_peer_delta_chunk(
                         &previous.hostinfo,
                         &current.hostinfo,
                     )
-                    && let Some(patch) =
+                    && let Some(mut patch) =
                         peer_patch_if_only_patchable_fields_changed(&previous.node, &peer)
                 {
+                    if force_online_peer_ids.contains(&peer.id) {
+                        patch.online = peer.online;
+                    }
                     peer_patches.push(patch);
                 } else {
                     full_peers_changed.push(peer);
@@ -7196,6 +7261,19 @@ mod tests {
         zstd::bulk::decompress(framed_body(bytes), 16 * 1024 * 1024).expect("valid zstd frame")
     }
 
+    /// Go's `withRemovals` leading response carries only `PeersRemoved` on
+    /// the wire: no ControlTime, policy, self node or peers.
+    fn assert_removal_only(message: &MapResponse) {
+        let value = serde_json::to_value(message).unwrap();
+        let encoded = crate::tailscale_wire::map_json::encode(&value, None).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let fields = wire.as_object().unwrap();
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["PeersRemoved"]
+        );
+    }
+
     fn decode_framed_sequence(mut bytes: &[u8]) -> Vec<MapResponse> {
         let mut responses = Vec::new();
         while !bytes.is_empty() {
@@ -8075,6 +8153,15 @@ mod tests {
         assert!(untagged.peers_changed.is_empty());
         assert!(untagged.peers_changed_patch.is_empty());
         assert_eq!(untagged.peers_removed, vec![stable_id_from_key(&server)]);
+        assert_removal_only(&untagged);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
+
         assert!(
             untagged
                 .user_profiles
@@ -8239,6 +8326,14 @@ mod tests {
         assert!(mr.peers_changed.is_empty());
         assert!(mr.peers_changed_patch.is_empty());
         assert_eq!(mr.peers_removed, vec![stable_id_from_key(&b)]);
+        assert_removal_only(&mr);
+        let following = next_zstd_map_response(&mut body).await;
+        assert!(
+            following.peers_removed.is_empty(),
+            "the following content is a distinct protocol message"
+        );
+        assert!(following.peers_changed.is_empty());
+        assert!(following.peers_changed_patch.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -10929,7 +11024,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_second_connection_does_not_emit_duplicate_online_patch() {
+    async fn stream_true_second_connection_emits_native_connect_online_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
@@ -10947,10 +11042,51 @@ mod tests {
         assert_eq!(online_delta.peers_changed_patch[0].online, Some(true));
 
         let _a_body_2 = open_zstd_stream(app, &a).await;
-        assert_no_stream_frame(&mut b_body, Duration::from_secs(1)).await;
+        let reconnect = next_zstd_map_response(&mut b_body).await;
+        assert_eq!(reconnect.peers_changed_patch.len(), 1);
+        assert_eq!(reconnect.peers_changed_patch[0].online, Some(true));
 
         drop(a_body_1);
         assert_no_stream_frame(&mut b_body, Duration::from_secs(9)).await;
+    }
+
+    /// headscale-go `Batcher.AddNode`: `nodeConn.lastSentPeers` survives the
+    /// stream, so a reconnecting node whose view lost a peer while it had no
+    /// stream gets the initial full map followed by `{PeersRemoved}` as a
+    /// delta of its own (`withRemovals`). The client only treats a non-empty
+    /// `Peers` list as authoritative, so without it the stale peer stays.
+    #[tokio::test(start_paused = true)]
+    async fn stream_true_reconnect_follows_initial_map_with_removals_missed_offline() {
+        let (state, _dir) = fixture();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        insert_peer(&state, &a, "peer-a", 10);
+        insert_peer(&state, &b, "peer-b", 11);
+        let b_id = stable_id_from_key(&b);
+
+        let app = router(state.clone());
+        let mut a_body_1 = open_zstd_stream(app.clone(), &a).await;
+        let first = next_zstd_map_response(&mut a_body_1).await;
+        assert_eq!(
+            first.peers.iter().map(|peer| peer.id).collect::<Vec<_>>(),
+            vec![b_id]
+        );
+        drop(a_body_1);
+        tokio::task::yield_now().await;
+
+        assert!(state.machines.delete(&b));
+
+        let mut a_body_2 = open_zstd_stream(app, &a).await;
+        let full = next_zstd_map_response(&mut a_body_2).await;
+        assert!(full.node.is_some(), "reconnect opens with a full map");
+        assert!(full.peers.is_empty());
+        assert!(
+            full.peers_removed.is_empty(),
+            "the full map never carries removals"
+        );
+        let removal = next_zstd_map_response(&mut a_body_2).await;
+        assert_eq!(removal.peers_removed, vec![b_id]);
+        assert_removal_only(&removal);
     }
 
     #[tokio::test(start_paused = true)]
@@ -11086,7 +11222,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stream_true_disco_key_update_uses_full_peer_delta() {
+    async fn stream_true_disco_key_update_uses_key_patch() {
         let (state, _dir) = fixture();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);

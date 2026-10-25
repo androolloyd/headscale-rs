@@ -3180,6 +3180,14 @@ fn apple_html(url: &str) -> String {
 </ul>
 <pre><code>curl {url}/apple/macos-app-store</code></pre>
 <pre><code>curl {url}/apple/macos-standalone</code></pre>
+<h2>tvOS</h2><ol>
+<li>Install the official Tailscale tvOS client from the App Store.</li>
+<li>Open <strong>Tailscale</strong>.</li>
+<li>Select <strong>Install VPN configuration</strong>.</li>
+<li>Select <strong>Allow</strong>, but don't sign in yet.</li>
+<li>Open <strong>Settings</strong>, then <strong>Apps</strong>, then <strong>Tailscale</strong>, and configure the alternate coordination server as <code>{url}</code>.</li>
+<li>Return to the tvOS <strong>Home</strong> screen and open <strong>Tailscale</strong>.</li>
+<li>Scan the QR code and follow the login procedure.</li></ol>
 </body>
 </html>"#
     )

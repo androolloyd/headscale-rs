@@ -3184,6 +3184,32 @@ mod tests {
         assert!(!relogin.is_expired_at(chrono::Utc::now()));
     }
 
+    /// headscale-go v0.29.5 `State` returns `ErrAmbiguousNodeOwnership`
+    /// ("machine key maps to ambiguous node ownership") when a tagged
+    /// pre-auth key meets one machine key owned by several users: nothing
+    /// in a Go map's iteration order may pick the node to convert.
+    #[test]
+    fn release_0295_ambiguous_machine_ownership_cannot_select_hashmap_first() {
+        let (state, _redeemer, _dir) = fixture();
+        for (id, owner) in [(1_u64, "owner-1"), (2, "owner-2")] {
+            let mut record = MachineRecord::new_at(
+                chrono::Utc::now(),
+                format!("{id:02x}").repeat(32),
+                "shared-machine".into(),
+                owner.into(),
+                format!("host-{id}"),
+                std::net::Ipv4Addr::new(100, 64, 0, u8::try_from(id).unwrap()),
+                false,
+            );
+            record.user_id = Some(id);
+            state.machines.upsert(record.node_key_hex.clone(), record);
+        }
+        assert_eq!(
+            existing_machine_for_preauth(&state, "shared-machine", "", None, true),
+            Err("machine key maps to ambiguous node ownership")
+        );
+    }
+
     #[tokio::test]
     async fn authkey_register_same_machine_tagged_key_converts_user_node_in_place() {
         let (state, redeemer, _dir) = fixture();

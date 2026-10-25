@@ -689,6 +689,31 @@
         "version": "0.8.5"
       }
     },
+    "libsqlite3-sys": {
+      "dir": "vendor/libsqlite3-sys",
+      "files": {
+        "OCTRA-PATCHES.md": {
+          "sha256": "7c05d4314bf9c6eb66cdd726f3f51099fa0e3a53c99390f902af1be094a4ece8",
+          "status": "added"
+        },
+        "sqlcipher/sqlite3.c": {
+          "sha256": "fb3e4085fc799a4cff2c9cbe1830882be2a8fdd1bce9ac4711d42697af8eebd6",
+          "status": "modified",
+          "upstream_sha256": "943812115199728aee17b9c0a740b692be9337b5e59693333158bf4755df18fe"
+        },
+        "sqlite3/sqlite3.c": {
+          "sha256": "c67379655ab8a38e0f2ff9c0ea7b982b1a77b8f91b4284f52cc48af6b0206cfe",
+          "status": "modified",
+          "upstream_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149",
+        "name": "libsqlite3-sys",
+        "registry": "crates.io",
+        "version": "0.30.1"
+      }
+    },
     "rustls": {
       "dir": "vendor/rustls",
       "files": {

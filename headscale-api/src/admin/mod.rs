@@ -75,6 +75,8 @@ pub mod users;
 mod views;
 
 #[cfg(test)]
+mod persistence_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -141,9 +143,41 @@ pub struct AdminState {
     /// [`crate::tailscale_wire::WireState::policy`]. Admin PUT mutates
     /// it; the store's `Notify` wakes parked `/map` long-pollers.
     pub policy: crate::policy::PolicyStore,
+    /// Optional database source. Writes commit before the live policy changes.
+    pub policy_persistence: Option<Arc<dyn crate::policy::persistence::PolicyPersistence>>,
+    pub policy_read_only: bool,
 }
 
 impl AdminState {
+    /// Hydrate the live policy before opening a listener. Database/read/parse
+    /// failures propagate so an embedder cannot silently start with allow-all.
+    pub async fn load_policy_from_persistence(&self) -> Result<bool, String> {
+        let Some(storage) = &self.policy_persistence else {
+            return Ok(false);
+        };
+        let storage = Arc::clone(storage);
+        let guard = self.policy.lock_mutation().await;
+        let state = self.clone();
+        crate::tailscale_wire::complete_state_mutation(async move {
+            let _guard = guard;
+            let Some(saved) = storage.get_latest_policy().await? else {
+                return Ok(false);
+            };
+            // Boot validates like Go's policy manager constructor: a stored
+            // policy that no longer resolves fails the load instead of
+            // silently starting with the previous (or an empty) policy.
+            let mut doc = crate::policy::parse_hujson_policy(&saved.policy)
+                .map_err(native_policy_parse_error)?;
+            validate_policy_candidate(&state, &mut doc, &saved.policy, true).await?;
+            state
+                .policy
+                .try_set_at_quiet(doc, saved.policy, saved.updated_at)?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| format!("finishing policy load: {error}"))?
+    }
+
     /// Returns a fresh builder.
     pub fn builder() -> AdminStateBuilder {
         AdminStateBuilder::default()
@@ -159,6 +193,8 @@ pub struct AdminStateBuilder {
     api_keys: Option<Arc<dyn ApiKeyAdmin>>,
     derp_regions: usize,
     policy: Option<crate::policy::PolicyStore>,
+    policy_persistence: Option<Arc<dyn crate::policy::persistence::PolicyPersistence>>,
+    policy_read_only: bool,
 }
 
 impl AdminStateBuilder {
@@ -202,6 +238,20 @@ impl AdminStateBuilder {
         self.policy = Some(p);
         self
     }
+    /// Attach the same database policy source used by gRPC. Call
+    /// `load_policy_from_persistence` before serving requests.
+    pub fn policy_persistence(
+        mut self,
+        persistence: Arc<dyn crate::policy::persistence::PolicyPersistence>,
+    ) -> Self {
+        self.policy_persistence = Some(persistence);
+        self
+    }
+    /// Disable HTTP policy replacement when an external authority owns it.
+    pub fn policy_read_only(mut self, read_only: bool) -> Self {
+        self.policy_read_only = read_only;
+        self
+    }
     pub fn build(self) -> AdminState {
         AdminState {
             auth: AdminAuth::new(self.bearer_token.unwrap_or_default()),
@@ -219,6 +269,8 @@ impl AdminStateBuilder {
                 .unwrap_or_else(|| Arc::new(NoopApiKeyAdmin) as Arc<dyn ApiKeyAdmin>),
             derp_regions: self.derp_regions,
             policy: self.policy.unwrap_or_default(),
+            policy_persistence: self.policy_persistence,
+            policy_read_only: self.policy_read_only,
         }
     }
 }
@@ -1468,6 +1520,13 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
     if let Err(r) = guard_api(&s, req.headers().clone(), req.method().clone()).await {
         return r;
     }
+    if s.policy_read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "policy is managed externally"})),
+        )
+            .into_response();
+    }
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1495,7 +1554,27 @@ async fn api_policy_put(State(s): State<AdminState>, req: Request) -> Response {
                         .into_response();
                 }
                 let n_rules = doc.rules.len();
-                if let Err(error) = s.policy.try_set_quiet(doc, raw) {
+                let installed = match &s.policy_persistence {
+                    // The database row is the embedder's source of truth: the
+                    // append commits before the live policy changes, and a
+                    // failed write leaves the current policy in place without
+                    // a change notification.
+                    Some(storage) => match storage.set_policy(&raw).await {
+                        Ok(saved) => s
+                            .policy
+                            .try_set_at_quiet(doc, saved.policy, saved.updated_at),
+                        Err(error) => {
+                            tracing::warn!(%error, "policy persistence failed");
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"error": "policy persistence unavailable"})),
+                            )
+                                .into_response();
+                        }
+                    },
+                    None => s.policy.try_set_quiet(doc, raw),
+                };
+                if let Err(error) = installed {
                     return (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
                         .into_response();
                 }

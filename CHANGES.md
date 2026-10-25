@@ -1,5 +1,42 @@
 # Changes
 
+## 2026-10-25 — origin/main reconciled into the verified parity branch
+
+- Merged the six `origin/main` commits (2026-10-15 to 2026-10-17: YAML backend,
+  a parallel v0.29.5 compatibility pass, DERP client authorization, mesh-policy
+  persistence, registry handoff) into the branch verified against the real
+  headscale-go v0.29.5 binary. Every hunk was classified; where both sides
+  implemented the same behaviour the verified side was kept unless Go's source
+  or binary showed otherwise.
+- Ported: the vendored SQLite 3.46 WAL-reset backport (`vendor/libsqlite3-sys`,
+  under the vendor provenance and test gates); live native DERP client and peer
+  authorization; embedded mesh policy persistence (the policy persistence trait
+  now lives in `policy::persistence` and returns `chrono` timestamps); peers
+  removed while a node was offline are sent on reconnect; a second stream of an
+  already-online peer gets the forced `Online` patch; WebSocket control streams
+  omit the EarlyNoise payload as Go does; a self node with an invalid FQDN is
+  refused; a default route overlaps a `*` grant like `autogroup:internet`; an
+  empty SSH policy compiles to an explicit empty rule list; an SSH follow-up
+  with a changed local user is refused; two new parity scenarios
+  (`release-0295-empty-ssh`, `release-0295-policy-metadata`).
+- Not taken: main's two repair migrations (they have no Go migration ID, so
+  they would re-run on every Go-imported or already-migrated database and
+  re-clear tagged-node expiry that Go leaves alone); main's `runtime_only`
+  persistence flag and per-method persist mutex (the verified side already
+  persists runtime state with Go's `persistNode` column mask); main's single
+  deletion response split (Go sends one response).
+- Compatibility: a database that an `origin/main` build already migrated
+  records migration `20261015000018` (PostgreSQL `20261015000011`), which this
+  tree does not have, and import stops with a missing-version error. Delete that
+  one row from `_sqlx_migrations` to continue; no repository fixture contains it.
+- Verification on the merged tree (pinned Rust 1.99.0): 2262 workspace tests
+  passed, 0 failed; clippy `-D warnings` and fmt clean in every CI configuration
+  and for the excluded crates; the Go differential matches on all 106
+  scenarios; every vendored crate's own suite passes; stock-client rows
+  authkey, relogin, web-register, OIDC, ping, private DERP, restart persistence,
+  online/last-seen, route advertise and approve, tagged pre-auth and ACL allow
+  pass.
+
 ## 2026-10-25 — Concurrent registration and `/map` no longer queue behind the NodeStore writer
 
 - Registrations were effectively serial (about 1 per second with the 500 ms
@@ -107,6 +144,61 @@
   message and path details).
 - Clear the pedantic/nursery clippy backlog (no blanket allows) and format the
   workspace. Workspace tests: 2114 passed, 0 failed, 1 ignored.
+
+## 2026-10-17 — dynamic native DERP authorization (from the `main` line)
+
+- Add a directional peer-verification hook. Raw and WebSocket sessions reread
+  configured client authorization for each frame and both packet endpoints,
+  including queued delivery; peer policy is checked before forwarding and
+  before writing received packets.
+- Refuse mesh-only and server-only frames from ordinary client connections.
+  A client login does not authorize forwarded-source spoofing or peer teardown.
+- Unconfigured verification retains the library's compatibility defaults.
+  Embedders must supply current membership and peer policy. These checks see
+  endpoint keys and opaque packets, not IP destinations, ports or payment.
+  Revocation applies on the next frame/keepalive; completed IO is not recalled.
+
+## 2026-10-17 — durable embedded mesh control (from the `main` line)
+
+- Share SQLite/PostgreSQL policy persistence between HTTP admin and gRPC;
+  commit HTTP policy writes before publishing them and hydrate policy explicitly
+  before an embedder opens its listeners. Serialize database writes and cache
+  publication, preserve HuJSON and timestamps, and reject HTTP replacement of
+  externally managed policy. This is a library feature for embedders:
+  `headscale-cli` does not wire the HTTP admin persistence.
+- Return bound HTTP/HTTPS addresses to embedding hosts. Raw TLS connections
+  were already tracked by this branch's HTTP shutdown group and are cancelled
+  when it closes, so main's separate connection set is not carried.
+
+## 2026-10-16 — headscale-go v0.29.5 compatibility update (from the `main` line)
+
+- The official v0.29.5 release is this branch's pinned baseline. The `main`
+  line's two extra differential scenarios (`release-0295-empty-ssh`,
+  `release-0295-policy-metadata`) are checked in and match Go, which makes 106
+  scenarios in the Go/Rust differential and its golden (the 104 existing golden
+  entries are unchanged).
+- The release semantics that line implemented (capability checks,
+  authenticated registration and single-use SSH approval, OIDC confirmation and
+  cookies, split map removal frames, peer metadata/key classification,
+  connection lifecycle, durable node IDs/expiry/deleted-key handling in runtime
+  persistence) were reconciled hunk by hunk with the verified implementation;
+  where both lines implemented a behaviour, this branch's code is kept. What
+  landed from that line: an explicit empty SSH policy for a document without
+  `ssh` rules, `"*"` counting as reaching the internet for exit-route election,
+  removal of peers that disappeared while a client was offline right after its
+  initial map, a forced online patch for each new connection, no early-noise
+  write on the WebSocket control stream, and the OIDC/policy `release_0295`
+  regression tests. Its separate append-only repair migration is not carried:
+  this branch already replays Go's two v0.29.5 repairs once, under Go's
+  migration IDs.
+- Vendor the minimal upstream SQLite WAL-reset race backport for the standalone
+  bundled SQLite graph. See `vendor/libsqlite3-sys/OCTRA-PATCHES.md`. The patch
+  is hash-pinned in `vendor/PATCHES.json` and the crate is built and run by the
+  vendored-crate test gate (`docs/ci-quality-gates.md`); the race fix itself has
+  no executable regression in this repository.
+- `docs/qualification/` holds that line's qualification records. They are bound
+  to its tree; see `docs/qualification/README.md`. This update does not claim
+  full 1:1 parity.
 
 ## 2026-10-15 — YAML maintenance and isolated protobuf generation
 

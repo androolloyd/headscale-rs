@@ -729,6 +729,10 @@ tools/real-client/postgres-user-node-lifecycle-restart-headscale-go-smoke.sh
 
 Useful knobs:
 
+- `HEADSCALE_RS_BIN` can point at a separately built Rust `headscale`
+  executable instead of building one (honoured by the rows built on
+  `online-lastseen-common.sh`; the other common scripts still build their own
+  binary).
 - `REAL_CLIENT_USER_NODE_LIFECYCLE_RESTART=true` enables the mutation path.
 - `REAL_CLIENT_RENAME_USER_AFTER_LOGIN` defaults to `alice:alice-renamed`.
 - `REAL_CLIENT_EXPIRE_NODE_INDEX` and `REAL_CLIENT_DELETE_NODE_INDEX` default
@@ -1364,8 +1368,10 @@ tools/real-client/route-via-multiprefix-reload-restart-headscale-go-smoke.sh
 ```
 
 The headscale-go wrapper defaults `HEADSCALE_GO_VERSION` to the audited
-current-head commit, which currently matches the pinned v0.29.0-beta.2
-baseline while keeping upgrade-track route behavior explicit.
+current-head commit (`HEADSCALE_GO_CURRENT_VERSION` in
+`tools/real-client/headscale-go-current.sh`), an upstream `main` commit ahead of
+the pinned v0.29.5 release, so these rows keep upgrade-track route behavior
+explicit. Moving that pin is a parity decision; see `docs/ci-quality-gates.md`.
 
 The route-health scenario enables HA route probes, pauses the current primary
 router container without removing route approval, and asserts that the route

@@ -393,6 +393,8 @@ async fn expired_session_redirects_to_login() {
         api_keys: Arc::new(NoopApiKeyAdmin),
         derp_regions: 0,
         policy: crate::policy::PolicyStore::new(),
+        policy_persistence: None,
+        policy_read_only: false,
     };
     let app = router(state.clone());
     let payload = state.auth.mint_session(1); // expired

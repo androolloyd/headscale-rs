@@ -1,0 +1,243 @@
+{
+  "schema": 1,
+  "date": "2026-10-16",
+  "status": "qualified_release_update_with_open_replacement_parity_backlog",
+  "rust_baseline": "e1d719104fc77edb0001932e28c859f81ec7dc78",
+  "upstream": {
+    "repository": "https://github.com/juanfont/headscale",
+    "tag": "v0.29.5",
+    "commit": "0f7d1e536bed9f01dd7161f7637af19bb0908335",
+    "audited_non_merge_commits_since_beta2": 171,
+    "audited_changed_production_paths": 45
+  },
+  "implementation": {
+    "source_manifest_sha256": "502b3199473f5d8c3dc197c0a1cd295ae62ff5331b6e789af4671e2de5d4c787",
+    "manifest_excludes": [
+      ".git/**",
+      "target/**"
+    ],
+    "manifest_scope": "immutable compile-and-fixture inputs before documentation-only publication checkpoint; exact tested Cargo.lock is force-added to final signed commit",
+    "locked_graph_sha256": "b88d6767a75701b2776801e1cfe478f9d9b0bca122a71fff97f1c39aefa762e2",
+    "audit_sha256": "fc1bffe4770ab3239c6f11a8bbc1225ec3dd95c8873b4d4923d6746a31eff7b6",
+    "native_diff_sha256": "12fb5e499d48b32f0f148339d5732d1f94ab63a914ee2c74dfba46226da01d6f",
+    "consensus_changes": false,
+    "publication_source_manifest_sha256": "e38623c2e3be189be79515f9a1b640677aff90804a30e6facb967f9228cda14d",
+    "public_source_audit_sha256": "96ecdae4892d9d2f55f3175f6fe08dc109dd591449f40cdddac28c53273dd3db",
+    "compiled_test_executables_sha256": "a7a38f6bcba618ef1667b775791da7ffac932729764e6018042ffec5ed8f30cf",
+    "compiled_test_executable_count": 58,
+    "qualification_lock_publication": "Cargo.lock force-added byte-identically to final signed commit"
+  },
+  "toolchains": {
+    "linux_image": "sha256:62d73a659a92699cf1230d84a89521d4266f2eeb7b7e22b41835103871c76cb1",
+    "rust": "1.96.0",
+    "profile": "dev/test (unoptimized, debuginfo)",
+    "msrv_image": "sha256:da5c1f20957217307b213c46d4e7068ea3808a789e7f36d585259b648833f582",
+    "msrv": "1.89.0",
+    "msrv_incremental": false,
+    "rust_server_sha256": "5d48bd51ba736e42c43d243fbd9a8fff29b2e2483fb5ee0b3194ccd7a61c695f",
+    "native_server_sha256": "3e8698e1f8a9cd2c360b8f043ff6a3d5e2d52be894a147215db45ac8e490f4e9"
+  },
+  "gates": {
+    "workspace_all_features_lib_tests": {
+      "targets": 35,
+      "passed": 2061,
+      "failed": 0,
+      "ignored": 1,
+      "status": "pass",
+      "command": "cargo test --offline --locked --workspace --all-features --lib --tests --no-fail-fast",
+      "postgres": "actual temporary PostgreSQL16 enabled, not conditional early-return coverage",
+      "log_sha256": "56893a9dc566fe2d9ecf224e812931991282be530b4d50233f1fc2228eaec595"
+    },
+    "wire_only_lib_tests": {
+      "targets": 23,
+      "passed": 786,
+      "failed": 0,
+      "ignored": 1,
+      "status": "pass",
+      "command": "cargo test --offline --locked -p headscale-api --no-default-features --lib --tests --no-fail-fast",
+      "log_sha256": "e75506410dd990ebd425541caf3a43a6aa720a996dc37893237bcc96ffec5ba7",
+      "individual_log_sha256": "e9bc55eda6b280cf28edbae8d653c0a614841b93401d911b03fa99706bab54c5",
+      "combined_log_lines": [
+        1,
+        942
+      ]
+    },
+    "strict_workspace": {
+      "status": "pass",
+      "command": "cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+      "log_sha256": "0092730abb342f7cf0f6440aea2b383f9c79098a737237783cd99e7f9e44f917"
+    },
+    "strict_wire_and_admin": {
+      "status": "pass",
+      "profiles": [
+        "--no-default-features --tests",
+        "--no-default-features --features admin --tests"
+      ],
+      "log_sha256": "e75506410dd990ebd425541caf3a43a6aa720a996dc37893237bcc96ffec5ba7",
+      "note": "One successful sequential shell invocation ran tests, strict wire lint, then strict admin lint; same combined-log hash is intentional.",
+      "sections": [
+        {
+          "command": "cargo clippy --offline --locked -p headscale-api --no-default-features --tests -- -D warnings",
+          "combined_log_lines": [
+            943,
+            1022
+          ],
+          "individual_log_sha256": "9c14b409f11b2d81ef0b39cd20843df60b9f79238c1b69771ad5d0a16c421be2"
+        },
+        {
+          "command": "cargo clippy --offline --locked -p headscale-api --no-default-features --features admin --tests -- -D warnings",
+          "combined_log_lines": [
+            1023,
+            1086
+          ],
+          "individual_log_sha256": "049894fbb05e99dbf1c4679547fd5755d6c27ae508d765281808e7b5ce053f97"
+        }
+      ]
+    },
+    "actual_msrv": {
+      "status": "pass",
+      "commands": [
+        "cargo check --offline --locked --workspace --all-targets --all-features",
+        "cargo check --offline --locked --workspace --all-targets"
+      ],
+      "log_sha256": "107a5d5c92e9269efc9f8b1ef8b9faf1c8e8d2d5820734919f9dcf1c7e4b6b23"
+    },
+    "policy_wire_differential": {
+      "status": "pass",
+      "executed_scenarios": 100,
+      "full_go_output_sha256": "7886d0a66a493852283b840c18a28a55cfe8b26b0cce8243d7382562a13b7695",
+      "full_rust_output_sha256": "3040df1d0a20cd2949f3b9176dc72f8536506fc22b94ce8d4016b99ee5149126",
+      "normalization": "engine label only",
+      "golden_sha256": "4413fac32c74219b7a2e1e4dff1c7b0b6925f4bcc77fc7407f23752c5956c425"
+    },
+    "native_release_security": {
+      "status": "pass",
+      "top_level_tests": 35,
+      "including_subtests": 60,
+      "log_sha256": "fe7b2f085c10475ef0f413320d5ae5ea253ed9bea50afe8350ccacf42e4988d7"
+    },
+    "legacy_harness_build": {
+      "status": "pass",
+      "command": "cargo build --offline --locked --manifest-path tools/real-client/headscale-rs-harness/Cargo.toml",
+      "log_sha256": "3ba83806cee08cda4cef4260bfaf3ce61d21aa04ffb5e7e32481eb9cb31725c2"
+    },
+    "stock_tailscale": {
+      "client_image": "tailscale/tailscale:v1.94.1",
+      "backend": "temporary PostgreSQL16",
+      "executed_rows": [
+        {
+          "row": "postgres-authkey-relogin-deleted",
+          "rust": "pass",
+          "go": "pass",
+          "rust_elapsed_seconds": 63,
+          "go_elapsed_seconds": 27
+        },
+        {
+          "row": "postgres-user-node-lifecycle-restart",
+          "rust": "pass",
+          "go": "fail_before_restart_on_stale_node_user_projection",
+          "rust_elapsed_seconds": 234,
+          "go_elapsed_seconds": 342
+        },
+        {
+          "row": "postgres-route-approve",
+          "rust": "pass",
+          "go": "pass",
+          "rust_elapsed_seconds": 106,
+          "go_elapsed_seconds": 23
+        }
+      ],
+      "rust_successes": 3,
+      "go_successes": 2,
+      "go_failures": 1,
+      "production_log_sha256": "34ff663e5a7f7354d48582db827689072f11a6efa5eb21fd25c2acbb29722c4e",
+      "route_log_sha256": "ea76c5657accf63f27011e74888f7b00575ead586e53e5ac148518e965a21c89",
+      "matrix_registration_or_static_checks_are_execution_evidence": false
+    },
+    "format": {
+      "status": "pass",
+      "command": "cargo fmt --all -- --check (clean standalone publication worktree)",
+      "log_sha256": "0f37aa4a02a3b8fe22589852ca57f03e7a177aebcf14d7320b6c6d1679aa72e7"
+    },
+    "metadata": {
+      "status": "pass",
+      "checks": [
+        "official release tag/ref pins",
+        "100-scenario golden coverage",
+        "four-item parity backlog",
+        "pending parity stubs",
+        "real-client matrix metadata",
+        "real-client CI enforcement"
+      ],
+      "registered_ci_rows": 168,
+      "registered_ci_rows_are_executed_results": false
+    }
+  },
+  "preserved_failures": [
+    "Initial placement errors in added tests were corrected before they executed.",
+    "Native v0.29.5 exposed real DERP clear, registration classification, lifecycle event and canonical DB-ID projection defects; production paths were fixed and existing strict assertions retained.",
+    "Older beta2 fixtures expected old /key floor, OIDC inline confirmation, policy-companion map frames, public tagged ownership or active routes for disconnected nodes. Updated assertions follow pinned Go source and preserve full framing, durable approvals and persistence checks.",
+    "Initial actual PostgreSQL run uncovered stale runtime expiry/auth-key overwrites and live identity projections; actual PostgreSQL final rerun passed.",
+    "Rust1.89 rejected Duration::from_mins; exact sixty-second test durations were retained using from_secs(60).",
+    "A later Rust1.89 incremental metadata check hit an internal StableCrateId compiler error; unchanged source passed with CARGO_INCREMENTAL=0.",
+    "The Go stock lifecycle row fails because state.UpdateUser updates users SQL/policy but does not refresh NodeStore node.User; upstream state.go explicitly notes this TODO. Rust retains its immediate correct rename projection; the native row is not counted as passing."
+  ],
+  "ignored_scope": {
+    "workspace": {
+      "count": 1,
+      "name": "tailscale_wire::registry_tests::snapshot_vs_legacy_all_microbench",
+      "reason": "existing opt-in wall-clock microbenchmark"
+    },
+    "wire_only": "same existing microbenchmark"
+  },
+  "dependency_delta": {
+    "libsqlite3_sys": "0.30.1 locally vendored minimal SQLite WAL-reset race backport",
+    "original_crate_sha256": "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149",
+    "upstream_fixes": [
+      "053bd3930f827156fd67ea4546a36227cffbb6f8bada3b5d1a7cf5f1867ac624",
+      "decb69015457b4f70cf574aeef87d40f9de60b94965f4a915e8d0cd7559ef2ae"
+    ],
+    "composition_sha256": "fab54fe2b2d4014a904b7ebd78842373ac36a08bc1b2a832e5b744a6d597fa29",
+    "qualification_boundary": "exact previously qualified C source adopted; original forced-race integrity failure and patched durable-reopen pass are composed evidence, not rerun by Headscale Rust tests"
+  },
+  "open_replacement_parity_backlog": [
+    "p0-production-postgres-process-mutations",
+    "p1-policy-v2-compat-fixtures",
+    "p2-cli-output-error-residuals",
+    "p2-dns-live-resolver-behavior"
+  ],
+  "claims": {
+    "complete_one_to_one_replacement": false,
+    "full_upstream_integration_suite": false,
+    "full_875_capture_policy_corpus": false,
+    "public_deployment_or_user_state_changes": false,
+    "physical_sibling_worktree_modified": false
+  },
+  "preserved_failure_artifacts": {
+    "test1.log": "6854d8fbfed99a23f31567379ef64ea9c4f070522322bf7840b04cf2054773a7",
+    "test2.log": "6e8dccdd368155532fe4a356557e2926bf13be2fc8fe0c75906b8ade4b72bbc9",
+    "test3.log": "cefac57e7cb92af4ff26e78713dd6b512d90e372a7390446a0f45060371d9a27",
+    "test4.log": "c72da31b138003d143a24079ced059f1319264898351e1086f9475bbc5bc90b2",
+    "test5-postgres.log": "0c8dca314a3d89fb052eea8583961bfaa92c3987fe31b726692e42fb2341e877",
+    "test6-postgres.log": "62f6d0338c02e8a23e29f99ce7e19bb208ae0bf71910884cc72867faaa373ce2",
+    "test7-postgres.log": "75213ae16131a560db6fc15d715205d011fe90f1784f36f3d23a0b1981c48858",
+    "msrv1.log": "3582e745eeb778e24c5813fd89a1373c3219ef9f37962a0e96cdd2344026ca8c",
+    "msrv-final.log": "8b24dfdc8bcd497423347dc715be6b4a5ee29f2d7cf07e794205d0abf6290837",
+    "clippy1.log": "3f13f7e94304d7dfbf2dcc0f123cf94dfe70e6f10027b83381a9a933ad63dd0f",
+    "clippy2.log": "515090c43cd45c6ff219cc8fc20e3927f5cc9f1b22b935202b519fa41524edbe",
+    "clippy3.log": "1ded98d3ed57334f2243ff4635347a9624758cf51755f9ceb5cccdc0e9bdac9d",
+    "stock-basic.log": "33f689a680ba121166221e3ab4b06ee2af40ee605ce223dc8824ebbbff199d27",
+    "stock-production.log": "34ff663e5a7f7354d48582db827689072f11a6efa5eb21fd25c2acbb29722c4e"
+  },
+  "qualification_compiled_source_drift": {
+    "production_or_test_files": [],
+    "post_qualification_changes": [
+      "CHANGES.md",
+      "README.md",
+      "docs/headscale-go-parity.md",
+      "tools/parity/README.md",
+      "docs/qualification/**"
+    ],
+    "note": "documentation-only publication checkpoint additions; production and test hashes still equal source-freeze-9.json"
+  }
+}

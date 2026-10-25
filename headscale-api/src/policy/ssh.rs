@@ -134,10 +134,15 @@ pub fn compile_ssh_policy_with_base_url(
     base_url: &str,
 ) -> Option<SshPolicy> {
     if doc.ssh.is_empty() {
-        return None;
+        return Some(SshPolicy { rules: Vec::new() });
     }
     let target_node = nodes.iter().find(|node| node.id == target_node_id)?;
-    compile_ssh_policy_for_target(doc, nodes, target_node, base_url)
+    Some(compile_ssh_policy_for_target(
+        doc,
+        nodes,
+        target_node,
+        base_url,
+    ))
 }
 
 pub(super) fn compile_ssh_policy_for_target(
@@ -145,20 +150,22 @@ pub(super) fn compile_ssh_policy_for_target(
     nodes: &[SshPolicyNode],
     target_node: &SshPolicyNode,
     base_url: &str,
-) -> Option<SshPolicy> {
-    compile_ssh_policy_snapshot(doc, nodes, target_node, base_url, &[])
-        .map(|snapshot| snapshot.policy)
+) -> SshPolicy {
+    compile_ssh_policy_snapshot(doc, nodes, target_node, base_url, &[]).policy
 }
 
+/// Never absent: headscale-go v0.29.5 `compileSSHPolicy` returns an empty
+/// rule list for a policy without SSH rules, because clients keep their
+/// previous rules when the map omits the policy.
 pub(super) fn compile_ssh_policy_snapshot(
     doc: &PolicyDoc,
     nodes: &[SshPolicyNode],
     target_node: &SshPolicyNode,
     base_url: &str,
     rule_accept_env_nil: &[bool],
-) -> Option<NativeSshPolicy> {
+) -> NativeSshPolicy {
     if doc.ssh.is_empty() {
-        return None;
+        return NativeSshPolicy::default();
     }
     let mut out = Vec::new();
     let mut accept_env_nil = Vec::new();
@@ -231,10 +238,10 @@ pub(super) fn compile_ssh_policy_snapshot(
     let mut paired = out.into_iter().zip(accept_env_nil).collect::<Vec<_>>();
     paired.sort_by_key(|(rule, _)| i32::from(rule.action.hold_and_delegate.is_empty()));
     let (rules, accept_env_nil) = paired.into_iter().unzip();
-    Some(NativeSshPolicy {
+    NativeSshPolicy {
         policy: SshPolicy { rules },
         accept_env_nil,
-    })
+    }
 }
 
 pub fn ssh_check_period_for(

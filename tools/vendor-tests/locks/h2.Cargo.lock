@@ -976,6 +976,10 @@ name = "instant-acme"
 version = "0.8.5"
 
 [[patch.unused]]
+name = "libsqlite3-sys"
+version = "0.30.1"
+
+[[patch.unused]]
 name = "sqlx-core"
 version = "0.8.6"
 

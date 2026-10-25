@@ -77,6 +77,7 @@ pub const NATIVE_DERP_SHUTDOWN_RECONNECT_IN: Duration = Duration::from_secs(1);
 pub const NATIVE_DERP_SHUTDOWN_TRY_FOR: Duration = Duration::from_secs(5);
 
 type NativeDerpClientVerifier = Arc<dyn Fn(&[u8; KEY_LEN]) -> bool + Send + Sync>;
+type NativeDerpPeerVerifier = Arc<dyn Fn(&[u8; KEY_LEN], &[u8; KEY_LEN]) -> bool + Send + Sync>;
 
 /// Delivery counts for server-originated native DERP lifecycle broadcasts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -122,6 +123,7 @@ impl NativeDerpAdmissionSnapshot {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NativeDerpRuntimeSnapshot {
     pub client_verification_enabled: bool,
+    pub peer_verification_enabled: bool,
     pub admissions: NativeDerpAdmissionSnapshot,
 }
 
@@ -166,6 +168,7 @@ pub struct NativeDerpRuntime {
     server_key: Arc<DerpNodeKeyPair>,
     relay: NativeDerpRelay,
     client_verifier: Option<NativeDerpClientVerifier>,
+    peer_verifier: Option<NativeDerpPeerVerifier>,
     admissions: Arc<NativeDerpAdmissionCounters>,
     keepalive_interval: Duration,
     keepalive_jitter: Duration,
@@ -182,6 +185,10 @@ impl fmt::Debug for NativeDerpRuntime {
             .field(
                 "client_verifier",
                 &self.client_verifier.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "peer_verifier",
+                &self.peer_verifier.as_ref().map(|_| "<configured>"),
             )
             .field("admission_snapshot", &self.admission_snapshot())
             .field("keepalive_interval", &self.keepalive_interval)
@@ -247,6 +254,7 @@ impl NativeDerpRuntime {
             server_key: Arc::new(server_key),
             relay,
             client_verifier: None,
+            peer_verifier: None,
             admissions: Arc::new(NativeDerpAdmissionCounters::default()),
             keepalive_interval: DEFAULT_DERP_KEEPALIVE_INTERVAL,
             keepalive_jitter: DEFAULT_DERP_KEEPALIVE_JITTER,
@@ -264,12 +272,32 @@ impl NativeDerpRuntime {
     ///
     /// The verifier receives the DERP client's public node key bytes after the
     /// encrypted `ClientInfo` frame is opened and before the client is registered
-    /// in the relay.
+    /// in the relay. It is rechecked before every subsequent decoded incoming
+    /// and outgoing frame, and for both endpoints of a carried packet. Return
+    /// false when current local authorization is unavailable. A refusal ends
+    /// the connection; this callback must not block on external I/O.
     pub fn with_client_verifier<F>(mut self, verifier: F) -> Self
     where
         F: Fn(&[u8; KEY_LEN]) -> bool + Send + Sync + 'static,
     {
         self.client_verifier = Some(Arc::new(verifier));
+        self
+    }
+
+    /// Install a directional peer verifier for opaque DERP packet carriage.
+    ///
+    /// Both keys are authenticated relay endpoint identities, not inner IP
+    /// destinations. This check runs before accepting each `SendPacket` and
+    /// again before writing each `RecvPacket`, so queued packets cannot retain
+    /// an earlier authorization. Client membership is rechecked independently
+    /// for both endpoints. The callback must consult current local policy;
+    /// it must not block on network or database I/O.
+    /// A refusal ends the connection currently processing the packet.
+    pub fn with_peer_verifier<F>(mut self, verifier: F) -> Self
+    where
+        F: Fn(&[u8; KEY_LEN], &[u8; KEY_LEN]) -> bool + Send + Sync + 'static,
+    {
+        self.peer_verifier = Some(Arc::new(verifier));
         self
     }
 
@@ -297,12 +325,89 @@ impl NativeDerpRuntime {
         self.client_verifier.is_some()
     }
 
+    /// Whether a peer verifier is configured for native DERP carriage.
+    pub fn peer_verification_enabled(&self) -> bool {
+        self.peer_verifier.is_some()
+    }
+
     /// Return whether a client public key is admitted to the native relay.
     pub fn admit_client(&self, client_public: &[u8; KEY_LEN]) -> bool {
         match &self.client_verifier {
             Some(verifier) => verifier(client_public),
             None => true,
         }
+    }
+
+    /// Return the directional peer policy verdict. Without an explicit
+    /// verifier this preserves the upstream relay's open compatibility mode.
+    pub fn admit_peer(&self, source: &[u8; KEY_LEN], destination: &[u8; KEY_LEN]) -> bool {
+        match &self.peer_verifier {
+            Some(verifier) => verifier(source, destination),
+            None => true,
+        }
+    }
+
+    fn require_client(&self, client_public: &[u8; KEY_LEN]) -> Result<(), WireError> {
+        if !self.admit_client(client_public) {
+            return Err(WireError::Internal(
+                "DERP client was not admitted by verifier".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_peer(
+        &self,
+        source: &[u8; KEY_LEN],
+        destination: &[u8; KEY_LEN],
+    ) -> Result<(), WireError> {
+        if !self.admit_peer(source, destination) {
+            return Err(WireError::Internal(
+                "DERP peer route was not admitted by verifier".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn incoming_frame(&self, client: &[u8; KEY_LEN], frame: &Frame) -> Result<(), WireError> {
+        self.require_client(client)?;
+        match frame {
+            Frame::SendPacket { destination, .. } => {
+                self.require_client(destination)?;
+                self.require_peer(client, destination)
+            }
+            Frame::ForwardPacket { .. } | Frame::ClosePeer { .. } | Frame::WatchConns => {
+                Err(WireError::Internal(
+                    "DERP mesh control is not authorized on a client connection: \
+                     frame requires mesh permissions"
+                        .into(),
+                ))
+            }
+            Frame::ServerKey { .. }
+            | Frame::ClientInfo { .. }
+            | Frame::ServerInfo { .. }
+            | Frame::RecvPacket { .. }
+            | Frame::PeerGone { .. }
+            | Frame::PeerPresent { .. }
+            | Frame::Health(_)
+            | Frame::Restarting { .. } => Err(WireError::Internal(
+                "DERP server frame is not valid on a client connection".into(),
+            )),
+            Frame::KeepAlive
+            | Frame::NotePreferred(_)
+            | Frame::Ping(_)
+            | Frame::Pong(_)
+            | Frame::Unknown { .. } => Ok(()),
+        }
+    }
+
+    fn outgoing_frame(&self, client: &[u8; KEY_LEN], frame: &Frame) -> Result<(), WireError> {
+        self.require_client(client)?;
+        if let Frame::RecvPacket { source, .. } = frame {
+            self.require_client(source)?;
+            self.require_peer(source, client)?;
+        }
+        Ok(())
     }
 
     /// Current native DERP verify-client decision counts by transport.
@@ -314,6 +419,7 @@ impl NativeDerpRuntime {
     pub fn debug_snapshot(&self) -> NativeDerpRuntimeSnapshot {
         NativeDerpRuntimeSnapshot {
             client_verification_enabled: self.client_verification_enabled(),
+            peer_verification_enabled: self.peer_verification_enabled(),
             admissions: self.admission_snapshot(),
         }
     }
@@ -637,11 +743,12 @@ where
                 .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
         write_derp_bytes(&mut writer, &server_info).await?;
         if let Some(frame) = runtime.current_health_frame() {
+            runtime.outgoing_frame(&client_public, &frame)?;
             write_derp_frame(&mut writer, &frame).await?;
         }
 
         let keepalive_delay = runtime.next_keepalive_delay(&client_public);
-        run_relay_loop(session, reader, writer, decoder, keepalive_delay).await
+        run_relay_loop(&runtime, session, reader, writer, decoder, keepalive_delay).await
     }
     .await;
     runtime
@@ -703,13 +810,15 @@ where
         let server_info =
             encode_server_info_frame(&runtime.server_key, &client_public, &ServerInfo::current())
                 .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?;
+        runtime.require_client(&client_public)?;
         send_websocket_binary(&mut writer, server_info).await?;
         if let Some(frame) = runtime.current_health_frame() {
+            runtime.outgoing_frame(&client_public, &frame)?;
             send_websocket_derp_frame(&mut writer, &frame).await?;
         }
 
         let keepalive_delay = runtime.next_keepalive_delay(&client_public);
-        run_websocket_relay_loop(session, reader, writer, decoder, keepalive_delay).await
+        run_websocket_relay_loop(&runtime, session, reader, writer, decoder, keepalive_delay).await
     }
     .await;
     runtime
@@ -720,6 +829,7 @@ where
 }
 
 async fn run_relay_loop<R, W>(
+    runtime: &NativeDerpRuntime,
     mut session: NativeDerpSession,
     mut reader: R,
     mut writer: W,
@@ -744,6 +854,7 @@ where
             .next_frame()
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?
         {
+            runtime.incoming_frame(&session.key(), &frame)?;
             session
                 .handle_frame(frame)
                 .await
@@ -768,9 +879,11 @@ where
                 let Some(frame) = outbound else {
                     return Ok(());
                 };
+                runtime.outgoing_frame(&session.key(), &frame)?;
                 write_derp_frame(&mut writer, &frame).await?;
             }
             RelayLoopEvent::KeepAlive => {
+                runtime.outgoing_frame(&session.key(), &Frame::KeepAlive)?;
                 write_derp_frame(&mut writer, &Frame::KeepAlive).await?;
                 keepalive_sleep
                     .as_mut()
@@ -781,6 +894,7 @@ where
 }
 
 async fn run_websocket_relay_loop<R, W, RE, WE>(
+    runtime: &NativeDerpRuntime,
     mut session: NativeDerpSession,
     mut reader: R,
     mut writer: W,
@@ -806,6 +920,7 @@ where
             .next_frame()
             .map_err(|err| WireError::Internal(format!("DERP protocol: {err}")))?
         {
+            runtime.incoming_frame(&session.key(), &frame)?;
             session
                 .handle_frame(frame)
                 .await
@@ -841,9 +956,11 @@ where
                 let Some(frame) = outbound else {
                     return Ok(());
                 };
+                runtime.outgoing_frame(&session.key(), &frame)?;
                 send_websocket_derp_frame(&mut writer, &frame).await?;
             }
             WebsocketRelayLoopEvent::KeepAlive => {
+                runtime.outgoing_frame(&session.key(), &Frame::KeepAlive)?;
                 send_websocket_derp_frame(&mut writer, &Frame::KeepAlive).await?;
                 keepalive_sleep
                     .as_mut()
@@ -1027,6 +1144,7 @@ fn header_contains_derp_protocol(headers: &axum::http::HeaderMap) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod enforcement;
     use super::*;
     use axum::Router;
     use axum::routing::any;

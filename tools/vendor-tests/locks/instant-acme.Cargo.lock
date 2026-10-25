@@ -1691,6 +1691,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[patch.unused]]
+name = "libsqlite3-sys"
+version = "0.30.1"
+
+[[patch.unused]]
 name = "sqlx-core"
 version = "0.8.6"
 

@@ -1,8 +1,8 @@
 # Runs each vendored crate's own upstream test suite against its local patch.
 #
-# vendor/ carries ten crates (rustls, aws-lc-rs, h2, hyper, hyper-util,
-# hyper-rustls, http, instant-acme, sqlx-core, sqlx-postgres) with Go-exactness
-# patches. None of their upstream tests run anywhere else in CI, so a patch can
+# vendor/ carries eleven crates (rustls, aws-lc-rs, h2, hyper, hyper-util,
+# hyper-rustls, http, instant-acme, libsqlite3-sys, sqlx-core, sqlx-postgres)
+# with Go-exactness (or storage-safety) patches. None of their upstream tests run anywhere else in CI, so a patch can
 # break upstream behaviour unnoticed. scripts/test_vendored_crates.sh builds a
 # scratch workspace per crate (never writing to vendor/), pulls the upstream
 # tests that are not in the crates.io archive from the exact commit recorded in
@@ -66,6 +66,7 @@ jobs:
           - hyper-rustls
           - hyper-util
           - instant-acme
+          - libsqlite3-sys
           - rustls
           - sqlx-core
           - sqlx-postgres

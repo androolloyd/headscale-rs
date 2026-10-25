@@ -30,6 +30,7 @@ pub mod hujson;
 pub(crate) mod lifecycle;
 mod matcher;
 mod opaque;
+pub mod persistence;
 mod resolution;
 mod runtime;
 pub mod ssh;
@@ -1087,10 +1088,11 @@ impl PolicyStore {
     }
 
     /// Compile the loaded policy's `ssh` block for `target_node_id`.
-    /// Returns `None` when no policy is loaded or the policy has no
-    /// SSH rules; returns an empty-policy object when SSH rules exist
-    /// but none match the target. Mirrors headscale-go's
-    /// `PolicyManager.SSHPolicy(node)` semantics.
+    /// Returns `None` when no policy is loaded or the target is unknown;
+    /// returns an empty-policy object when the policy has no SSH rules
+    /// or none match the target. headscale-go v0.29.5's
+    /// `compileSSHPolicy` never returns nil: clients read an omitted
+    /// policy as "keep the previous rules", so revocation must be explicit.
     pub fn ssh_policy_for(
         &self,
         nodes: &[SshPolicyNode],
@@ -1130,13 +1132,13 @@ impl PolicyStore {
         match state.doc.as_ref() {
             Some(doc) => {
                 let receiver = nodes.iter().find(|node| node.id == target_node_id)?;
-                ssh::compile_ssh_policy_snapshot(
+                Some(ssh::compile_ssh_policy_snapshot(
                     doc,
                     nodes,
                     receiver,
                     base_url,
                     &state.ssh_accept_env_nil,
-                )
+                ))
             }
             None => None,
         }
@@ -1593,4 +1595,45 @@ pub fn build_peer_map_for_doc_with_user_ids(
     out.into_iter()
         .map(|(id, peers)| (id, peers.into_iter().collect()))
         .collect()
+}
+
+#[cfg(test)]
+mod release_0295_tests {
+    use super::*;
+
+    // headscale-go v0.29.5 clears every cached SSH check approval on each
+    // policy replacement (state.ClearSSHCheckAuth), including two reloads
+    // that share one wall-clock second or one persisted timestamp, and
+    // policy/v2 compileSSHPolicy never returns a nil policy: a document with
+    // no `ssh` block compiles to an explicit empty rule list.
+    #[test]
+    fn release_0295_revoked_ssh_policy_is_explicit_and_each_reload_invalidates_auth() {
+        let store = PolicyStore::new();
+        let raw = r#"{"ssh": [{"action":"check", "src":["alice@"], "dst":["autogroup:self"], "users":["root"]}]}"#;
+        let doc = parse_hujson_policy(raw).unwrap();
+        store.try_set_at(doc.clone(), raw.into(), 1).unwrap();
+        let first = store.with_ssh_auth_stamp(|stamp| stamp);
+        store.try_set_at(doc, raw.into(), 1).unwrap();
+        let second = store.with_ssh_auth_stamp(|stamp| stamp);
+        assert_eq!(first.updated_at, second.updated_at);
+        assert_ne!(
+            first, second,
+            "reloads with an identical timestamp invalidate cached SSH authorization"
+        );
+
+        store
+            .try_set(parse_hujson_policy("{}").unwrap(), "{}".into())
+            .unwrap();
+        let nodes = [SshPolicyNode {
+            id: 1,
+            user: Some("alice".into()),
+            user_id: Some(1),
+            addrs: vec!["100.64.0.1".into()],
+            tags: Vec::new(),
+        }];
+        assert_eq!(
+            store.ssh_policy_for(&nodes, 1, ""),
+            Some(SshPolicy::default())
+        );
+    }
 }

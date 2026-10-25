@@ -567,11 +567,11 @@
           "status": "added"
         },
         "src/go_native/legacy_json.rs": {
-          "sha256": "b71503dbcf2cc7fbc489745cbe663cd28af0dcce5964325df68b7ec419b0d20c",
+          "sha256": "b81326d8bb4520fab364e9306c5098ca4ef540faaca964bbc1fad36a641794da",
           "status": "added"
         },
         "src/go_native/legacy_json/scanner.rs": {
-          "sha256": "8777b54dbd9d5f3401c54b05fcf35c824a8fa4bf56a67e1ed9b2cee804213a3a",
+          "sha256": "caac46abe2aca1e5e2ef65cac72a912135dbdcc037ab9378f87d9d9d592353f3",
           "status": "added"
         },
         "src/go_native/pem.rs": {
@@ -635,7 +635,7 @@
           "status": "added"
         },
         "src/go_native/transport/url/idna.rs": {
-          "sha256": "4e8eb2c9ea736c9a21a69125564d7a3fb2a53fc2a1fa99e1fedba8f86b31b792",
+          "sha256": "d7a5e5df897cf4dbe9f35aac6285a888849ce3306b8ec4f2fb7af41273a3418e",
           "status": "added"
         },
         "src/go_native/transport/url/idna/bidi.rs": {
@@ -651,7 +651,7 @@
           "status": "added"
         },
         "src/go_native/transport/url/idna/profile.rs": {
-          "sha256": "6c968c039b2ca1a07edd66a4883af4afffacea6e540a5e90219c8228bbbd9cc4",
+          "sha256": "6e8fe96840be0a2bbeb761a89c9a1408476da9b7a00d74a6b1170d6eec6e417d",
           "status": "added"
         },
         "src/go_native/transport/url/idna/punycode.rs": {
@@ -938,7 +938,7 @@
           "status": "added"
         },
         "UPSTREAM.md": {
-          "sha256": "f140990aa2963cc878b9331e951dcb2b326cf4fc06628d6f740eaa6517a4d29b",
+          "sha256": "dba6753a5bfcad4ad301aec9d29705468e8acdea371ecc214e6a15598b7563c5",
           "status": "added"
         },
         "src/any.rs": {
@@ -1006,7 +1006,7 @@
           "upstream_sha256": "1006e3fcf49c1147c09cbf29aa4e50151d241054b268537073dccb788a8173ba"
         },
         "src/message/authentication.rs": {
-          "sha256": "51f7eac7da81c9ad413231ed837a5b1fc8ca76bb0048735dded61056810af8dc",
+          "sha256": "c44f6fea89ccb7c73b8c73145ca0a8b9daa8e21bd14fb9a0a694022355a550f3",
           "status": "modified",
           "upstream_sha256": "d72a8a381d686fcb719f5582db48bd4e5bcb64931baa30f736179fdc2fd3341d"
         },
@@ -1014,6 +1014,11 @@
           "sha256": "9b19e56f455da386b1ff255cfdeb7ab3e0eb462fc1c98bc5dd099317b4c800ee",
           "status": "modified",
           "upstream_sha256": "add437e94e69b7152695094517885c3f4dde48bb53aeb10201c2e67446034d1a"
+        },
+        "src/message/bind.rs": {
+          "sha256": "95670b8a4f490ceab93363ad2f6a5c46753844b8db8fbac2b3a35ea3cbaf2718",
+          "status": "modified",
+          "upstream_sha256": "f48f6c588d710bcf0807f5c7f630ab85ad733026ea43c143a14f316aa091c3ed"
         },
         "src/message/command_complete.rs": {
           "sha256": "433f785fa0376b071d157a730bf73fed86c338ef4fffd7a5d30cd046efa1af31",
@@ -1144,7 +1149,7 @@
           "upstream_sha256": "f450fc0113ff18dbd1868775153a4cd989dfdd6650c12caa555518288cbbafb5"
         },
         "src/types/geometry/path.rs": {
-          "sha256": "c3649531c813e32178e298c8ed8edbf668eff3acb021b326eb89cb20dd7f153d",
+          "sha256": "1d1e2e9e04750a70ea3f0afaf59f5aa858c50292ba4b5e026b47220927a6beee",
           "status": "modified",
           "upstream_sha256": "7cd04dbfbab2891257b2c35161a3b6334fa1852b380a55baf868aa6c2e062a66"
         },

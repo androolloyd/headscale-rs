@@ -1353,8 +1353,8 @@ mod tests {
     #[test]
     fn routes_flag_reads_a_lone_empty_value_as_an_empty_list() {
         // cobra StringSlice: `--routes ""` is [], which clears approvals.
-        assert!(routes_from_flag(vec![String::new()]).is_empty());
-        assert!(routes_from_flag(Vec::new()).is_empty());
+        assert_eq!(routes_from_flag(vec![String::new()]), [] as [String; 0]);
+        assert_eq!(routes_from_flag(Vec::new()), [] as [String; 0]);
         assert_eq!(
             routes_from_flag(vec!["10.0.0.0/24".into()]),
             vec!["10.0.0.0/24".to_string()]

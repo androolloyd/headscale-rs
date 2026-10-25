@@ -54,10 +54,3 @@ See [`docs/HARDENING.md`](./docs/HARDENING.md) for the local audit, coverage,
 fuzzing, and supply-chain commands. Pull requests run a 10k-input fuzz smoke
 pass; a separate scheduled workflow runs longer fuzz campaigns and uploads crash
 artifacts.
-
-## Origin
-
-Extracted from a private last-net swarm experiment (Radicle Heartwood
-fork). The Radicle-coupled business-logic modules (`accounting`,
-`rental`, `rental_service`, `foreman_bridge`) have been removed; this
-repo is now standalone and runs on its own metering primitives.

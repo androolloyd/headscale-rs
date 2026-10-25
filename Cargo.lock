@@ -1642,6 +1642,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "headscale-vendor-conformance"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "h2",
+ "http",
+ "rustls",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

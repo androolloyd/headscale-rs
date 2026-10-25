@@ -14,6 +14,7 @@ members = [
     "headscale-api-acl",
     "headscale-db",
     "headscale-cli",
+    "headscale-vendor-conformance",
 ]
 exclude = [
     "vendor/http",

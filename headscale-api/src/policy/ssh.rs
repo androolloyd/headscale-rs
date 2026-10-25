@@ -26,6 +26,66 @@ pub(crate) struct NativeSshPolicy {
 
 const SSH_CHECK_PERIOD_DEFAULT: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// Operator opt-out for the three forwarding permissions carried by every
+/// `tailcfg.SSHAction` the control server sends.
+///
+/// headscale-go v0.29.5 hard-codes `AllowAgentForwarding`,
+/// `AllowLocalPortForwarding` and `AllowRemotePortForwarding` to true on
+/// accepted rules (`policy/v2/filter.go` `sshAccept`) and on the dynamic
+/// check-mode actions (`noise.go` `sshAction`), so the default here is
+/// all-true to stay byte-compatible. Setting a flag to false makes
+/// headscale-rs emit it as false everywhere; see `policy.ssh` in the server
+/// config and `docs/HARDENING.md`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SshForwarding {
+    pub agent: bool,
+    pub local_port: bool,
+    pub remote_port: bool,
+}
+
+impl Default for SshForwarding {
+    fn default() -> Self {
+        Self::ALLOW_ALL
+    }
+}
+
+impl SshForwarding {
+    /// headscale-go's behaviour: every forwarding permission granted.
+    pub const ALLOW_ALL: Self = Self {
+        agent: true,
+        local_port: true,
+        remote_port: true,
+    };
+
+    /// Base for the dynamic check-mode actions (`/machine/ssh/action`).
+    /// Go starts every one of them, including hold-and-delegate and reject,
+    /// from an action with all three flags set, so the operator setting
+    /// applies to all of them alike.
+    pub(crate) fn base_action(self) -> SshAction {
+        SshAction {
+            allow_agent_forwarding: self.agent,
+            allow_local_port_forwarding: self.local_port,
+            allow_remote_port_forwarding: self.remote_port,
+            ..SshAction::default()
+        }
+    }
+
+    /// Narrow a compiled policy to what the operator allows. This only ever
+    /// clears flags: check-mode rules, whose static action is already
+    /// all-false in Go, are untouched, and with the default every action is
+    /// byte-identical to the compiler output.
+    pub(crate) fn restrict(self, policy: &mut SshPolicy) {
+        if self == Self::ALLOW_ALL {
+            return;
+        }
+        for rule in &mut policy.rules {
+            rule.action.allow_agent_forwarding &= self.agent;
+            rule.action.allow_local_port_forwarding &= self.local_port;
+            rule.action.allow_remote_port_forwarding &= self.remote_port;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SshUserRule {
     ssh_users: BTreeMap<String, String>,
@@ -1547,6 +1607,186 @@ mod tests {
         assert_eq!(userless_target.rules[0].ssh_users["deploy"], "deploy");
         assert_eq!(userless_target.rules[0].ssh_users["root"], "");
         assert_eq!(userless_target.rules[0].ssh_users.len(), 2);
+    }
+
+    fn forwarding_fixture() -> (PolicyDoc, Vec<SshPolicyNode>) {
+        let doc = parse_hujson_policy(
+            r#"{
+              "tagOwners": {"tag:server": ["alice@"]},
+              "ssh": [
+                {
+                  "action": "accept",
+                  "src": ["alice@"],
+                  "dst": ["tag:server"],
+                  "users": ["root"]
+                },
+                {
+                  "action": "check",
+                  "src": ["alice@"],
+                  "dst": ["tag:server"],
+                  "users": ["deploy"]
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let nodes = vec![
+            SshPolicyNode {
+                id: 1,
+                user: Some("alice".into()),
+                user_id: None,
+                addrs: vec!["100.64.0.1".into()],
+                tags: Vec::new(),
+            },
+            SshPolicyNode {
+                id: 2,
+                user: Some("alice".into()),
+                user_id: None,
+                addrs: vec!["100.64.0.2".into()],
+                tags: vec!["tag:server".into()],
+            },
+        ];
+        (doc, nodes)
+    }
+
+    fn forwarding_flags(action: &SshAction) -> [bool; 3] {
+        [
+            action.allow_agent_forwarding,
+            action.allow_local_port_forwarding,
+            action.allow_remote_port_forwarding,
+        ]
+    }
+
+    #[test]
+    fn compiled_ssh_actions_keep_headscale_go_forwarding_flags_by_default() {
+        // policy/v2/filter.go: sshAccept sets all three, sshCheck none.
+        let (doc, nodes) = forwarding_fixture();
+        let store = crate::policy::PolicyStore::new();
+        store.set(doc.clone(), "{}".into());
+        assert_eq!(store.ssh_forwarding(), SshForwarding::ALLOW_ALL);
+
+        let compiled =
+            compile_ssh_policy_with_base_url(&doc, &nodes, 2, "https://h.example").unwrap();
+        let served = store
+            .ssh_policy_for(&nodes, 2, "https://h.example")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&served).unwrap(),
+            serde_json::to_string(&compiled).unwrap(),
+            "default output is exactly the compiler output"
+        );
+        let accept = compiled
+            .rules
+            .iter()
+            .find(|rule| rule.action.accept)
+            .unwrap();
+        let check = compiled
+            .rules
+            .iter()
+            .find(|rule| !rule.action.hold_and_delegate.is_empty())
+            .unwrap();
+        assert_eq!(forwarding_flags(&accept.action), [true, true, true]);
+        assert_eq!(forwarding_flags(&check.action), [false, false, false]);
+    }
+
+    #[test]
+    fn forwarding_opt_out_clears_only_the_chosen_flags_on_served_policy() {
+        let (doc, nodes) = forwarding_fixture();
+        let default =
+            compile_ssh_policy_with_base_url(&doc, &nodes, 2, "https://h.example").unwrap();
+        let cases = [
+            ([false, true, true], "agent"),
+            ([true, false, true], "local port"),
+            ([true, true, false], "remote port"),
+            ([false, false, false], "all"),
+        ];
+        for (allowed, label) in cases {
+            let store = crate::policy::PolicyStore::new();
+            store.set(doc.clone(), "{}".into());
+            store.set_ssh_forwarding(SshForwarding {
+                agent: allowed[0],
+                local_port: allowed[1],
+                remote_port: allowed[2],
+            });
+            let served = store
+                .ssh_policy_for(&nodes, 2, "https://h.example")
+                .unwrap();
+
+            assert_eq!(served.rules.len(), default.rules.len(), "{label}");
+            for (got, want) in served.rules.iter().zip(&default.rules) {
+                let mut expected = want.clone();
+                if expected.action.accept {
+                    expected.action.allow_agent_forwarding = allowed[0];
+                    expected.action.allow_local_port_forwarding = allowed[1];
+                    expected.action.allow_remote_port_forwarding = allowed[2];
+                }
+                assert_eq!(
+                    serde_json::to_string(got).unwrap(),
+                    serde_json::to_string(&expected).unwrap(),
+                    "{label}: everything but the cleared flags is unchanged"
+                );
+            }
+            let accept = served.rules.iter().find(|rule| rule.action.accept).unwrap();
+            assert_eq!(forwarding_flags(&accept.action), allowed, "{label}");
+        }
+    }
+
+    #[test]
+    fn forwarding_opt_out_survives_policy_replacement() {
+        let (doc, nodes) = forwarding_fixture();
+        let store = crate::policy::PolicyStore::new();
+        store.set_ssh_forwarding(SshForwarding {
+            agent: false,
+            local_port: false,
+            remote_port: false,
+        });
+        for round in 0..3 {
+            store.set(doc.clone(), format!("{{\"round\":{round}}}"));
+            let served = store.ssh_policy_for(&nodes, 2, "").unwrap();
+            let accept = served.rules.iter().find(|rule| rule.action.accept).unwrap();
+            assert_eq!(
+                forwarding_flags(&accept.action),
+                [false, false, false],
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn restricting_forwarding_only_narrows_and_never_grants() {
+        for bits in 0..8_u8 {
+            let have = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0];
+            for setting in 0..8_u8 {
+                let allow = SshForwarding {
+                    agent: setting & 1 != 0,
+                    local_port: setting & 2 != 0,
+                    remote_port: setting & 4 != 0,
+                };
+                let mut policy = SshPolicy {
+                    rules: vec![SshRule {
+                        action: SshAction {
+                            accept: true,
+                            allow_agent_forwarding: have[0],
+                            allow_local_port_forwarding: have[1],
+                            allow_remote_port_forwarding: have[2],
+                            ..SshAction::default()
+                        },
+                        ..SshRule::default()
+                    }],
+                };
+                allow.restrict(&mut policy);
+                assert_eq!(
+                    forwarding_flags(&policy.rules[0].action),
+                    [
+                        have[0] && allow.agent,
+                        have[1] && allow.local_port,
+                        have[2] && allow.remote_port,
+                    ],
+                    "have {have:?} under {allow:?}"
+                );
+                assert!(policy.rules[0].action.accept);
+            }
+        }
     }
 
     fn principal_ips(policy: &SshPolicy) -> Vec<&str> {

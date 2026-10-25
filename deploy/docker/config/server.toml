@@ -24,6 +24,15 @@ override_local_dns = false
 # region = "us-west"
 # stun_enabled = true
 
+# SSH forwarding permissions sent to Tailscale clients on SSH rules. All three
+# default to true, matching headscale-go. Set one to false to stop this server
+# authorising that kind of forwarding (see docs/HARDENING.md; this does not
+# patch tailscaled).
+# [policy.ssh]
+# allow_agent_forwarding = false
+# allow_local_port_forwarding = false
+# allow_remote_port_forwarding = false
+
 [logging]
 level = "info"
 format = "pretty"

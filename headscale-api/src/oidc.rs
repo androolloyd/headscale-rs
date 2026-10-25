@@ -53,14 +53,38 @@ const OIDC_COOKIE_NAME_PREFIX_LEN: usize = 6;
 const OIDC_COOKIE_MAX_AGE_SECS: u64 = 60 * 60;
 const DEFAULT_OIDC_AUTH_CACHE_EXPIRY: StdDuration = StdDuration::from_secs(15 * 60);
 const DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES: usize = 1024;
+/// Pending OIDC states one registration id may hold at once. A redirect adds a
+/// state and nothing removes it before the callback, so without a cap a single
+/// pending registration (anyone can create one, see the registration cache's
+/// per-source quota) could repeat the redirect until the global LRU dropped
+/// other users' in-flight sign-ins. 16 leaves room for several browser tabs
+/// and retries; going past it drops that registration's own oldest states.
+const OIDC_MAX_PENDING_STATES_PER_REGISTRATION: usize = 16;
 // headscale-go v0.29.5 NewHeadscale gives provider initialization a
 // 30-second context. Include response-body decoding in the same deadline.
 #[cfg(feature = "full")]
 const OIDC_DISCOVERY_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 #[cfg(feature = "full")]
 const OIDC_PROVIDER_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+/// Most bytes read from any one OIDC provider response (discovery document,
+/// JWKS, token endpoint, userinfo), counted as received after any
+/// decompression and enforced while streaming, never after buffering.
+///
+/// The token endpoint value is Go's own: golang.org/x/oauth2
+/// `internal/token.go` reads `io.LimitReader(r.Body, 1<<20)`. go-oidc v3.18.0
+/// reads the discovery document, JWKS and userinfo with an unbounded
+/// `io.ReadAll` (oidc.go, jwks.go), which a hostile or compromised issuer can
+/// turn into an allocation bomb; this client applies the same 1 MiB to them.
+/// Real responses are far smaller (a discovery document is a few KiB, a JWKS
+/// with dozens of RSA keys tens of KiB), so 1 MiB is generous.
 #[cfg(feature = "full")]
 const OIDC_PROVIDER_BODY_LIMIT: usize = 1024 * 1024;
+/// Most bytes of a remote-controlled value (a response body, a discovery
+/// `issuer`, a Content-Type) that an error string or log line may embed. The
+/// complete value is bounded by `OIDC_PROVIDER_BODY_LIMIT`, but a diagnostic
+/// needs only the start of it: Go's go-oidc and oauth2 error strings carry the
+/// whole body, which for a hostile server is a megabyte per log line.
+const OIDC_ERROR_BODY_PREFIX: usize = 256;
 #[cfg(feature = "full")]
 const MAX_PENDING_OIDC_CALLBACKS: usize = 128;
 #[cfg(feature = "full")]
@@ -402,8 +426,10 @@ impl OidcRegistrationCache {
             expires_at: Instant::now() + self.expiry,
             last_used: self.next_access(),
         };
+        let registration_id = entry.info.registration_id.clone();
         let mut inner = self.inner.write();
         inner.insert(state, entry);
+        prune_registration_states(&mut inner, &registration_id);
         prune_lru(&mut inner, self.max_entries);
     }
 
@@ -579,6 +605,28 @@ fn nonzero_cache_max_entries(max_entries: usize) -> usize {
     }
 }
 
+/// Drops the least recently used states of `registration_id` beyond
+/// [`OIDC_MAX_PENDING_STATES_PER_REGISTRATION`]; other registrations' states
+/// are never touched.
+fn prune_registration_states(
+    inner: &mut BTreeMap<String, OidcRegistrationEntry>,
+    registration_id: &str,
+) {
+    let mut owned = inner
+        .iter()
+        .filter(|(_state, entry)| entry.info.registration_id == registration_id)
+        .map(|(state, entry)| (entry.last_used, state.clone()))
+        .collect::<Vec<_>>();
+    if owned.len() <= OIDC_MAX_PENDING_STATES_PER_REGISTRATION {
+        return;
+    }
+    owned.sort_unstable();
+    let excess = owned.len() - OIDC_MAX_PENDING_STATES_PER_REGISTRATION;
+    for (_last_used, state) in owned.into_iter().take(excess) {
+        inner.remove(&state);
+    }
+}
+
 fn prune_lru<T: LruCacheEntry>(inner: &mut BTreeMap<String, T>, max_entries: usize) {
     while inner.len() > max_entries {
         let Some(evict_key) = inner
@@ -662,7 +710,7 @@ pub enum OidcDiscoveryError {
     #[error(
         "oidc: issuer URL provided to client ({}) did not match the issuer URL returned by provider ({})",
         headscale_api_acl::go_strconv::quote(.expected),
-        headscale_api_acl::go_strconv::quote(.actual)
+        headscale_api_acl::go_strconv::quote(&bounded_remote_text(.actual.as_bytes()))
     )]
     IssuerMismatch { expected: String, actual: String },
 }
@@ -691,6 +739,24 @@ impl OidcProviderMetadata {
 
         Ok(())
     }
+}
+
+/// Lossy text of at most `OIDC_ERROR_BODY_PREFIX` leading bytes of a remote
+/// value, cut on a char boundary, noting the full size when it was cut.
+fn bounded_remote_text(value: &[u8]) -> String {
+    if value.len() <= OIDC_ERROR_BODY_PREFIX {
+        return String::from_utf8_lossy(value).into_owned();
+    }
+    let mut end = OIDC_ERROR_BODY_PREFIX;
+    // Step back over UTF-8 continuation bytes so a character is not split.
+    while end > 0 && value[end] & 0xc0 == 0x80 {
+        end -= 1;
+    }
+    format!(
+        "{}... ({} bytes total)",
+        String::from_utf8_lossy(&value[..end]),
+        value.len()
+    )
 }
 
 pub fn oidc_discovery_url(issuer: &str) -> Result<String, OidcDiscoveryError> {
@@ -738,7 +804,7 @@ pub async fn discover_oidc_metadata_with_client(
     if status != StatusCode::OK {
         return Err(OidcDiscoveryError::HttpStatus {
             status: status.to_string(),
-            body: String::from_utf8_lossy(&body).into_owned(),
+            body: bounded_remote_text(&body),
         });
     }
 
@@ -749,7 +815,7 @@ pub async fn discover_oidc_metadata_with_client(
         } else {
             format!(
                 "expected Content-Type = application/json, got {}: {err}",
-                form::quote_bytes(&content_type)
+                form::quote_bytes(&content_type[..content_type.len().min(OIDC_ERROR_BODY_PREFIX)])
             )
         },
     })?;
@@ -2033,7 +2099,7 @@ fn userinfo_response_status(response: &reqwest::Response) -> String {
     let reason = response
         .extensions()
         .get::<hyper::ext::ReasonPhrase>()
-        .map(|reason| String::from_utf8_lossy(reason.as_bytes()));
+        .map(|reason| bounded_remote_text(reason.as_bytes()));
     format!(
         "{} {}",
         status.as_str(),
@@ -2101,7 +2167,7 @@ async fn fetch_userinfo(
     // Keep the existing explicit resource bound on both success and error
     // bodies; a read/size error therefore takes precedence over HTTP status.
     if !success {
-        log_userinfo_provider_error(format!("{status}: {}", String::from_utf8_lossy(&body)));
+        log_userinfo_provider_error(format!("{status}: {}", bounded_remote_text(&body)));
         return None;
     }
     let body = if media_error.is_none() && content_type == "application/jwt" {
@@ -4163,6 +4229,54 @@ mod tests {
         assert_eq!(cache.get("state-1").unwrap().registration_id, "one");
         assert!(cache.get("state-2").is_none());
         assert_eq!(cache.get("state-3").unwrap().registration_id, "three");
+    }
+
+    #[test]
+    fn one_registration_cannot_flood_other_registrations_out_of_the_state_cache() {
+        // Every redirect for a registration id inserts a fresh state, so one
+        // pending registration, which any unauthenticated client can create,
+        // could repeat the redirect until the LRU dropped everyone else's
+        // in-flight sign-in.
+        let cache = OidcRegistrationCache::new(StdDuration::from_secs(60));
+        cache.insert("victim-state".into(), cache_registration_info("victim"));
+
+        let flood = DEFAULT_OIDC_AUTH_CACHE_MAX_ENTRIES * 4;
+        for n in 0..flood {
+            cache.insert(format!("flood-{n}"), cache_registration_info("attacker"));
+        }
+
+        assert_eq!(
+            cache.get("victim-state").unwrap().registration_id,
+            "victim",
+            "the flooded registration must not push another registration's state out"
+        );
+        let attacker_states = (0..flood)
+            .filter(|n| cache.get(&format!("flood-{n}")).is_some())
+            .count();
+        assert_eq!(attacker_states, OIDC_MAX_PENDING_STATES_PER_REGISTRATION);
+        // The newest states survive: the user's latest redirect still works.
+        assert!(cache.get(&format!("flood-{}", flood - 1)).is_some());
+    }
+
+    #[test]
+    fn state_cap_is_per_registration_and_keeps_two_tab_sign_ins_working() {
+        let cache = OidcRegistrationCache::new(StdDuration::from_secs(60));
+        for n in 0..OIDC_MAX_PENDING_STATES_PER_REGISTRATION {
+            cache.insert(format!("tab-{n}"), cache_registration_info("one"));
+        }
+        for n in 0..OIDC_MAX_PENDING_STATES_PER_REGISTRATION {
+            assert!(
+                cache.get(&format!("tab-{n}")).is_some(),
+                "state {n} within the cap"
+            );
+        }
+        cache.insert("other".into(), cache_registration_info("two"));
+        assert_eq!(cache.len(), OIDC_MAX_PENDING_STATES_PER_REGISTRATION + 1);
+        // One more state for the same registration drops only its oldest.
+        cache.insert("tab-new".into(), cache_registration_info("one"));
+        assert!(cache.get("tab-0").is_none());
+        assert!(cache.get("tab-1").is_some());
+        assert!(cache.get("other").is_some());
     }
 
     #[test]
@@ -6270,4 +6384,340 @@ B7ur2garaZVSBJcYOXPGv+lrKYXrMlg/KZ4nQCvncqxHg9PvlxmpPmzIAthVYhki\n\
 YFK5FWw3FdAIuCrN0K9IXMOWXByuJtgCHOttx4fu24fuyQ2t5N4q5CfQHUyJAgtQ\n\
 Tg59Qj49HbnFm11JVyqd490zKQ==\n\
 -----END PRIVATE KEY-----\n";
+
+    /// Outbound reads from a misbehaving OIDC provider: every response is
+    /// bounded while it streams, and no error or log line carries a whole body.
+    #[cfg(feature = "full")]
+    mod remote_body_limits {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll};
+
+        use axum::body::Body;
+        use axum::routing::{get, post};
+
+        use super::*;
+
+        /// The documented bound, written out so these tests do not follow the
+        /// production constant: golang.org/x/oauth2 reads `io.LimitReader(body, 1<<20)`.
+        const LIMIT: usize = 1 << 20;
+
+        #[test]
+        fn provider_body_limit_is_the_oauth2_limit() {
+            assert_eq!(OIDC_PROVIDER_BODY_LIMIT, LIMIT);
+        }
+
+        /// What an endless provider is willing to send before giving up; a client
+        /// that stops at its bound drops the connection long before this.
+        const ENDLESS: usize = 128 * 1024 * 1024;
+        /// Loopback socket buffers absorb a few MiB after the client closes.
+        const SERVER_WRITE_SLACK: usize = 24 * 1024 * 1024;
+
+        /// A response body of 16 KiB `x` frames that counts what was pulled.
+        struct Endless {
+            pulled: Arc<AtomicUsize>,
+            sent: usize,
+        }
+
+        impl http_body::Body for Endless {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+
+            fn poll_frame(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                if self.sent >= ENDLESS {
+                    return Poll::Ready(None);
+                }
+                self.sent += 16 * 1024;
+                self.pulled.fetch_add(16 * 1024, Ordering::Relaxed);
+                Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
+                    &[b'x'; 16 * 1024],
+                )))))
+            }
+        }
+
+        fn endless(pulled: &Arc<AtomicUsize>) -> Response {
+            let body = Body::new(Endless {
+                pulled: pulled.clone(),
+                sent: 0,
+            });
+            ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+
+        async fn serve(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (base, handle)
+        }
+
+        /// A runtime whose every provider endpoint is `base` plus a path.
+        fn runtime_for(base: &str) -> OidcAuthRuntime {
+            let mut config = auth_config(OidcPkceConfig::default());
+            config.token_endpoint = format!("{base}/token");
+            config.jwks_uri = format!("{base}/jwks");
+            config.userinfo_endpoint = Some(format!("{base}/userinfo"));
+            OidcAuthRuntime::new(config)
+        }
+
+        async fn settled(pulled: &AtomicUsize) -> usize {
+            // A client that kept draining after giving up would keep growing this.
+            tokio::time::sleep(StdDuration::from_millis(300)).await;
+            pulled.load(Ordering::Relaxed)
+        }
+
+        #[tokio::test]
+        async fn discovery_abandons_an_endless_body_at_the_limit() {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let counter = pulled.clone();
+            let (base, handle) = serve(axum::Router::new().route(
+                "/issuer/.well-known/openid-configuration",
+                get(move || {
+                    let counter = counter.clone();
+                    async move { endless(&counter) }
+                }),
+            ))
+            .await;
+
+            let error = discover_oidc_metadata(&format!("{base}/issuer"))
+                .await
+                .unwrap_err();
+            let OidcDiscoveryError::Fetch { message, .. } = &error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(
+                message,
+                "unable to read response body: OIDC provider response exceeds 1 MiB"
+            );
+            let pulled = settled(&pulled).await;
+            assert!(
+                pulled < LIMIT + SERVER_WRITE_SLACK,
+                "the provider was drained for {pulled} bytes"
+            );
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn jwks_abandons_an_endless_body_at_the_limit() {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let counter = pulled.clone();
+            let (base, handle) = serve(axum::Router::new().route(
+                "/jwks",
+                get(move || {
+                    let counter = counter.clone();
+                    async move { endless(&counter) }
+                }),
+            ))
+            .await;
+
+            let result = fetch_oidc_jwks(&runtime_for(&base)).await;
+            assert!(matches!(
+                result,
+                Err(OidcRuntimeError::IdTokenVerificationFailed)
+            ));
+            let pulled = settled(&pulled).await;
+            assert!(
+                pulled < LIMIT + SERVER_WRITE_SLACK,
+                "the provider was drained for {pulled} bytes"
+            );
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn userinfo_abandons_an_endless_body_at_the_limit() {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let counter = pulled.clone();
+            let (base, handle) = serve(axum::Router::new().route(
+                "/userinfo",
+                get(move || {
+                    let counter = counter.clone();
+                    async move { endless(&counter) }
+                }),
+            ))
+            .await;
+
+            let token = OidcTokenResponse {
+                access_token: "access-token".into(),
+                ..OidcTokenResponse::default()
+            };
+            assert!(fetch_userinfo(&runtime_for(&base), &token).await.is_none());
+            let pulled = settled(&pulled).await;
+            assert!(
+                pulled < LIMIT + SERVER_WRITE_SLACK,
+                "the provider was drained for {pulled} bytes"
+            );
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn token_endpoint_reads_at_most_the_oauth2_limit() {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let counter = pulled.clone();
+            let (base, handle) = serve(axum::Router::new().route(
+                "/token",
+                post(move || {
+                    let counter = counter.clone();
+                    async move { endless(&counter) }
+                }),
+            ))
+            .await;
+
+            // oauth2 truncates at 1<<20 (it does not reject), then fails to
+            // decode the prefix; both auth styles are tried, each bounded.
+            let result = exchange_oauth2_token(&runtime_for(&base), b"code", None).await;
+            assert!(matches!(result, Err(OidcRuntimeError::InvalidCode)));
+            let pulled = settled(&pulled).await;
+            assert!(
+                pulled < 2 * LIMIT + SERVER_WRITE_SLACK,
+                "the provider was drained for {pulled} bytes"
+            );
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn discovery_status_error_embeds_only_a_short_prefix() {
+            // Under the read bound, so the whole body is received.
+            let body = "e".repeat(900 * 1024);
+            let (base, handle) = serve(axum::Router::new().route(
+                "/issuer/.well-known/openid-configuration",
+                get(move || {
+                    let body = body.clone();
+                    async move { (StatusCode::INTERNAL_SERVER_ERROR, body) }
+                }),
+            ))
+            .await;
+
+            let error = discover_oidc_metadata(&format!("{base}/issuer"))
+                .await
+                .unwrap_err();
+            let text = error.to_string();
+            assert!(text.len() < 400, "{} bytes", text.len());
+            assert!(
+                text.starts_with("500 Internal Server Error: eeee"),
+                "{text:.80}"
+            );
+            assert!(text.ends_with("... (921600 bytes total)"), "{text}");
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn issuer_mismatch_embeds_only_a_short_prefix_of_the_remote_issuer() {
+            let hostile = format!("https://{}.example", "i".repeat(900 * 1024));
+            let document = serde_json::json!({
+                "issuer": hostile,
+                "authorization_endpoint": "https://a.example/auth",
+                "token_endpoint": "https://a.example/token",
+                "jwks_uri": "https://a.example/jwks",
+            })
+            .to_string();
+            let (base, handle) = serve(axum::Router::new().route(
+                "/issuer/.well-known/openid-configuration",
+                get(move || {
+                    let document = document.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/json")], document) }
+                }),
+            ))
+            .await;
+
+            let error = discover_oidc_metadata(&format!("{base}/issuer"))
+                .await
+                .unwrap_err();
+            let OidcDiscoveryError::IssuerMismatch { actual, .. } = &error else {
+                panic!("unexpected error: {error}");
+            };
+            // The structured field keeps the remote value; only the text is cut.
+            assert_eq!(actual, &hostile);
+            let text = error.to_string();
+            assert!(text.len() < 1024, "{} bytes", text.len());
+            assert!(text.contains("bytes total)"), "{text}");
+            handle.abort();
+        }
+
+        /// Collects the fields of every event logged on the current thread.
+        struct Capture(Arc<RwLock<Vec<String>>>);
+
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                // Only the error-level lines under test, not the HTTP stack's
+                // debug chatter.
+                *metadata.level() == tracing::Level::ERROR
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Fields(String);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn fmt::Debug,
+                    ) {
+                        let _ = write!(self.0, "{}={value:?} ", field.name());
+                    }
+                }
+                let mut fields = Fields(String::new());
+                event.record(&mut fields);
+                self.0.write().push(fields.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        #[tokio::test]
+        async fn userinfo_error_status_logs_only_a_short_prefix_of_the_body() {
+            let body = "u".repeat(900 * 1024);
+            let (base, handle) = serve(axum::Router::new().route(
+                "/userinfo",
+                get(move || {
+                    let body = body.clone();
+                    async move { (StatusCode::BAD_REQUEST, body) }
+                }),
+            ))
+            .await;
+
+            let logged = Arc::new(RwLock::new(Vec::new()));
+            let guard = tracing::subscriber::set_default(Capture(logged.clone()));
+            let token = OidcTokenResponse {
+                access_token: "access-token".into(),
+                ..OidcTokenResponse::default()
+            };
+            assert!(fetch_userinfo(&runtime_for(&base), &token).await.is_none());
+            drop(guard);
+
+            let logged = logged.read();
+            // The pinned callback logs the provider error twice.
+            assert_eq!(logged.len(), 2, "{logged:?}");
+            for line in logged.iter() {
+                assert!(line.len() < 600, "{} bytes: {line:.120}", line.len());
+                assert!(line.contains("400 Bad Request: uuuu"), "{line:.120}");
+                assert!(line.contains("(921600 bytes total)"), "{line:.120}");
+            }
+            handle.abort();
+        }
+
+        #[test]
+        fn bounded_remote_text_cuts_on_a_char_boundary() {
+            assert_eq!(bounded_remote_text(b"short"), "short");
+            let exact = vec![b'a'; OIDC_ERROR_BODY_PREFIX];
+            assert_eq!(bounded_remote_text(&exact).len(), OIDC_ERROR_BODY_PREFIX);
+
+            // A 2-byte char straddling the cut must not be split or replaced.
+            let mut text = "a".repeat(OIDC_ERROR_BODY_PREFIX - 1);
+            text.push('\u{e9}');
+            text.push_str(&"b".repeat(100));
+            let bounded = bounded_remote_text(text.as_bytes());
+            assert!(!bounded.contains('\u{fffd}'), "{bounded}");
+            assert!(bounded.starts_with(&"a".repeat(OIDC_ERROR_BODY_PREFIX - 1)));
+            assert!(bounded.ends_with(&format!("... ({} bytes total)", text.len())));
+
+            // Invalid UTF-8 is replaced, not propagated.
+            assert!(bounded_remote_text(&[0xff; 1000]).contains('\u{fffd}'));
+        }
+    }
 }

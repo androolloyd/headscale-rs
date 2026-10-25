@@ -70,7 +70,9 @@ use super::wire::{
     HostInfo, MapNode, RegisterRequest, RegisterResponse, SimpleLogin, SimpleUser, ZERO_DISCO_KEY,
     is_supported_capability_version, strip_key_prefix, unsupported_client_error,
 };
-use super::{MachineRecord, RegistrationAdmission, RegistrationWaitOutcome, WireState};
+use super::{
+    MachineRecord, RegistrationAdmission, RegistrationSource, RegistrationWaitOutcome, WireState,
+};
 
 const REGISTRATION_ID_RANDOM_BYTES: usize = 18;
 const AUTH_ID_PREFIX: &str = "hskey-authreq-";
@@ -155,6 +157,7 @@ pub async fn handle_register(
     State(state): State<WireState>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
     cancellation: Option<Extension<NoiseRequestCancellation>>,
+    source: Option<Extension<RegistrationSource>>,
     Path(node_key_path): Path<String>,
     raw: Bytes,
 ) -> axum::response::Response {
@@ -194,6 +197,7 @@ pub async fn handle_register(
         body,
         hostinfo,
         cancellation.map(|Extension(cancellation)| cancellation),
+        source.map(|Extension(source)| source),
     ))
     .await
 }
@@ -209,6 +213,7 @@ pub async fn handle_register_flat(
     State(state): State<WireState>,
     machine_key: Option<Extension<NoisePeerMachineKey>>,
     cancellation: Option<Extension<NoiseRequestCancellation>>,
+    source: Option<Extension<RegistrationSource>>,
     raw: Bytes,
 ) -> axum::response::Response {
     let machine_key = match require_noise_machine_key(machine_key) {
@@ -233,6 +238,7 @@ pub async fn handle_register_flat(
         body,
         hostinfo,
         cancellation.map(|Extension(cancellation)| cancellation),
+        source.map(|Extension(source)| source),
     ))
     .await
 }
@@ -252,6 +258,26 @@ async fn register_inner(
     body: RegisterRequest,
     cancellation: Option<NoiseRequestCancellation>,
 ) -> axum::response::Response {
+    register_inner_from(
+        state,
+        node_key_hex,
+        machine_key_hex,
+        body,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn register_inner_from(
+    state: WireState,
+    node_key_hex: String,
+    machine_key_hex: String,
+    body: RegisterRequest,
+    cancellation: Option<NoiseRequestCancellation>,
+    source: Option<RegistrationSource>,
+) -> axum::response::Response {
     let hostinfo = serde_json::to_value(&body.hostinfo).expect("HostInfo JSON primitives");
     Box::pin(register_inner_with_hostinfo(
         state,
@@ -260,6 +286,7 @@ async fn register_inner(
         body,
         hostinfo,
         cancellation,
+        source,
     ))
     .await
 }
@@ -271,6 +298,7 @@ async fn register_inner_with_hostinfo(
     body: RegisterRequest,
     requested_hostinfo: serde_json::Value,
     cancellation: Option<NoiseRequestCancellation>,
+    source: Option<RegistrationSource>,
 ) -> axum::response::Response {
     let has_auth = body.auth.is_some();
     let authkey = body.auth.as_ref().map_or("", |a| a.auth_key.as_str());
@@ -434,6 +462,7 @@ async fn register_inner_with_hostinfo(
                     machine_key_hex,
                     body,
                     requested_hostinfo,
+                    source,
                 )
                 .await;
             }
@@ -446,6 +475,7 @@ async fn register_inner_with_hostinfo(
             machine_key_hex,
             body,
             requested_hostinfo,
+            source,
         )
         .await;
     }
@@ -905,6 +935,7 @@ async fn register_interactive(
     machine_key_hex: String,
     body: RegisterRequest,
     requested_hostinfo: serde_json::Value,
+    source: Option<RegistrationSource>,
 ) -> axum::response::Response {
     let RegisterHostInfoParts {
         host_info,
@@ -960,10 +991,14 @@ async fn register_interactive(
         ssh_host_keys,
         register_method: 0,
     };
-    state.registration_cache.insert_with_hostinfo(
+    // This is the one place an unauthenticated peer can add a pending entry,
+    // so it is always accounted: a request without a resolvable peer address
+    // shares the `Unknown` bucket instead of being exempt.
+    state.registration_cache.insert_from_source(
         registration_id.clone(),
         record,
         Some(requested_hostinfo),
+        Some(source.unwrap_or(RegistrationSource::Unknown)),
     );
 
     register_json_response(&RegisterResponse {
@@ -4606,5 +4641,179 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Register `node_key_hex` interactively (no auth key) as if it arrived
+    /// on a Noise connection from `source`, returning the pending
+    /// registration ID the response hands out.
+    async fn register_interactive_from(
+        state: &WireState,
+        node_key_hex: String,
+        source: Option<&str>,
+        followup: Option<&str>,
+    ) -> (RegisterResponse, String) {
+        let mut body = serde_json::json!({
+            "Version": 113,
+            "NodeKey": format!("nodekey:{node_key_hex}"),
+            "Hostinfo": { "Hostname": "flood" },
+        });
+        if let Some(followup) = followup {
+            body["Followup"] = serde_json::json!(followup);
+        }
+        let body: RegisterRequest = serde_json::from_value(body).unwrap();
+        let resp = register_inner_from(
+            state.clone(),
+            node_key_hex,
+            TEST_MACHINE_KEY_HEX.to_string(),
+            body,
+            None,
+            source.map(|text| RegistrationSource::from_remote_addr(text).unwrap()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let response: RegisterResponse = serde_json::from_slice(&raw).unwrap();
+        let registration_id = response
+            .auth_url
+            .rsplit_once(AUTH_ID_PREFIX)
+            .map(|(_, id)| id.to_owned())
+            .expect("pending registration hands out an auth URL");
+        (response, registration_id)
+    }
+
+    fn flood_state() -> (WireState, tempfile::TempDir) {
+        let (mut state, _redeemer, dir) = fixture();
+        state.public_control_url = Some("https://headscale.example".into());
+        (state, dir)
+    }
+
+    /// F-REGCACHE: the attack as first reproduced (an unauthenticated peer's
+    /// Register flood evicted an admin's pending approval from the default
+    /// 1024-entry cache) must now only cost the flooding source its own
+    /// entries.
+    #[tokio::test]
+    async fn unauthenticated_register_flood_cannot_evict_another_sources_pending_approval() {
+        let (state, _dir) = flood_state();
+        let cache = state.registration_cache.clone();
+        let max_entries = cache.max_entries();
+        assert_eq!(max_entries, 1024);
+
+        let (_, victim) = register_interactive_from(
+            &state,
+            format!("{:064x}", 0),
+            Some("203.0.113.7:4000"),
+            None,
+        )
+        .await;
+        assert!(cache.get_pending_registration(&victim).is_some());
+
+        let flooder = RegistrationSource::from_remote_addr("198.51.100.9:1").unwrap();
+        for i in 1..=max_entries {
+            // A fresh ephemeral port each time: the port is not the source.
+            let (response, _) = register_interactive_from(
+                &state,
+                format!("{i:064x}"),
+                Some(&format!("198.51.100.9:{}", 1024 + i)),
+                None,
+            )
+            .await;
+            assert!(!response.machine_authorized, "the flooder is still served");
+        }
+
+        assert!(
+            cache.get_pending_registration(&victim).is_some(),
+            "the flood must not push the earlier pending entry out"
+        );
+        assert_eq!(
+            cache.pending_from_source(flooder),
+            crate::tailscale_wire::REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+        assert_eq!(
+            cache.len(),
+            1 + crate::tailscale_wire::REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+    }
+
+    /// A request with no resolvable peer address is not an exemption: all of
+    /// them share one bucket.
+    #[tokio::test]
+    async fn register_flood_without_a_peer_address_shares_the_unknown_source() {
+        let (state, _dir) = flood_state();
+        let cache = state.registration_cache.clone();
+        let (_, victim) = register_interactive_from(
+            &state,
+            format!("{:064x}", 0),
+            Some("203.0.113.7:4000"),
+            None,
+        )
+        .await;
+
+        for i in 1..=cache.max_entries() {
+            register_interactive_from(&state, format!("{i:064x}"), None, None).await;
+        }
+
+        assert!(cache.get_pending_registration(&victim).is_some());
+        assert_eq!(
+            cache.pending_from_source(RegistrationSource::Unknown),
+            crate::tailscale_wire::REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+    }
+
+    /// What a source over its quota experiences: every Register still gets the
+    /// normal pending response, only its own oldest entries are dropped, and a
+    /// followup for a dropped entry restarts registration with a fresh auth URL
+    /// exactly like Go's `reqToNewRegisterResponse` for an expired entry.
+    #[tokio::test]
+    async fn source_over_quota_keeps_working_and_only_loses_its_own_oldest_entries() {
+        let (mut state, _dir) = flood_state();
+        state.registration_cache = Arc::new(
+            crate::tailscale_wire::RegistrationCache::with_tuning_and_max_entries(
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                100,
+            )
+            .with_max_pending_per_source(3),
+        );
+        let cache = state.registration_cache.clone();
+        let busy = "198.51.100.9:5000";
+        let busy_source = RegistrationSource::from_remote_addr(busy).unwrap();
+
+        let (_, bystander) =
+            register_interactive_from(&state, "b0".repeat(32), Some("203.0.113.7:1"), None).await;
+        let mut ids = Vec::new();
+        let mut urls = Vec::new();
+        for i in 0..5_u8 {
+            let (response, id) =
+                register_interactive_from(&state, format!("{i:02x}").repeat(32), Some(busy), None)
+                    .await;
+            assert!(!response.machine_authorized);
+            assert!(response.error.is_empty());
+            urls.push(response.auth_url);
+            ids.push(id);
+        }
+
+        assert_eq!(cache.pending_from_source(busy_source), 3);
+        assert!(cache.get_pending_registration(&ids[0]).is_none());
+        assert!(cache.get_pending_registration(&ids[1]).is_none());
+        for id in &ids[2..] {
+            assert!(cache.get_pending_registration(id).is_some());
+        }
+        assert!(cache.get_pending_registration(&bystander).is_some());
+
+        // The dropped entry's client polls its followup: it is told to start
+        // over, and the restart is accounted to the same source again.
+        let (restarted, restarted_id) =
+            register_interactive_from(&state, "00".repeat(32), Some(busy), Some(&urls[0])).await;
+        assert!(!restarted.machine_authorized);
+        assert_ne!(restarted.auth_url, urls[0]);
+        assert_eq!(cache.pending_from_source(busy_source), 3);
+        assert!(cache.get_pending_registration(&restarted_id).is_some());
+        assert!(cache.get_pending_registration(&bystander).is_some());
+
+        // A surviving entry still completes normally.
+        let mut registered = cache.get(&ids[4]).unwrap();
+        registered.user = "alice".into();
+        assert!(cache.complete(&ids[4], registered));
+        assert_eq!(cache.pending_from_source(busy_source), 2);
     }
 }

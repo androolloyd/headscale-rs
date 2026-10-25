@@ -649,6 +649,11 @@ impl Default for TaildropConfig {
 pub(crate) struct PolicyConfig {
     pub mode: String,
     pub path: PathBuf,
+    /// headscale-rs extension (headscale-go has no `policy.ssh` block and
+    /// ignores it). Omitted from the config dump while unset so the dump
+    /// stays comparable with upstream's.
+    #[serde(skip_serializing_if = "policy_ssh_config_is_default")]
+    pub ssh: PolicySshConfig,
 }
 
 impl Default for PolicyConfig {
@@ -656,6 +661,44 @@ impl Default for PolicyConfig {
         Self {
             mode: "file".to_string(),
             path: PathBuf::new(),
+            ssh: PolicySshConfig::default(),
+        }
+    }
+}
+
+/// `policy.ssh`: operator opt-out for the forwarding permissions on SSH
+/// actions. headscale-go grants all three on every accepted SSH rule and
+/// check action with no way to turn them off; the defaults here keep that
+/// behaviour, and setting one to false makes headscale-rs emit the flag as
+/// false everywhere. See `docs/HARDENING.md`.
+///
+/// Unknown keys are rejected: a misspelled `allow_*` key that was silently
+/// ignored would leave forwarding enabled while the operator believes it is
+/// off.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PolicySshConfig {
+    pub allow_agent_forwarding: bool,
+    pub allow_local_port_forwarding: bool,
+    pub allow_remote_port_forwarding: bool,
+}
+
+impl Default for PolicySshConfig {
+    fn default() -> Self {
+        Self {
+            allow_agent_forwarding: true,
+            allow_local_port_forwarding: true,
+            allow_remote_port_forwarding: true,
+        }
+    }
+}
+
+impl PolicySshConfig {
+    pub(crate) const fn forwarding(self) -> headscale_api::policy::SshForwarding {
+        headscale_api::policy::SshForwarding {
+            agent: self.allow_agent_forwarding,
+            local_port: self.allow_local_port_forwarding,
+            remote_port: self.allow_remote_port_forwarding,
         }
     }
 }
@@ -666,6 +709,7 @@ impl PolicyConfig {
         Self {
             mode: "database".to_string(),
             path: PathBuf::new(),
+            ssh: PolicySshConfig::default(),
         }
     }
 
@@ -798,7 +842,7 @@ impl CliConfig {
         config.apply_tuning_env_overrides_from(std::env::vars())?;
         config.apply_logging_env_overrides_from(std::env::vars());
         config.apply_tls_acme_env_overrides_from(std::env::vars());
-        config.apply_policy_env_overrides_from(std::env::vars());
+        config.apply_policy_env_overrides_from(std::env::vars())?;
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars());
         if let Some(parent) = config_dir.as_deref() {
@@ -910,7 +954,7 @@ impl CliConfig {
         config.apply_tuning_env_overrides_from(std::env::vars())?;
         config.apply_logging_env_overrides_from(std::env::vars());
         config.apply_tls_acme_env_overrides_from(std::env::vars());
-        config.apply_policy_env_overrides_from(std::env::vars());
+        config.apply_policy_env_overrides_from(std::env::vars())?;
         config.apply_server_transport_env_overrides_from(std::env::vars())?;
         config.apply_cli_env_overrides_from(std::env::vars());
         config.normalize_upstream_aliases();
@@ -1455,7 +1499,7 @@ impl CliConfig {
         Ok(())
     }
 
-    fn apply_policy_env_overrides_from<I, K, V>(&mut self, vars: I)
+    fn apply_policy_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
@@ -1475,9 +1519,25 @@ impl CliConfig {
                 "HEADSCALE_POLICY_PATH" => {
                     self.policy.path = PathBuf::from(value);
                 }
+                // headscale-rs extension. An unparseable value is an error,
+                // not a skip: ignoring it would leave forwarding enabled
+                // while the operator believes it is off.
+                "HEADSCALE_POLICY_SSH_ALLOW_AGENT_FORWARDING" => {
+                    self.policy.ssh.allow_agent_forwarding =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_POLICY_SSH_ALLOW_LOCAL_PORT_FORWARDING" => {
+                    self.policy.ssh.allow_local_port_forwarding =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
+                "HEADSCALE_POLICY_SSH_ALLOW_REMOTE_PORT_FORWARDING" => {
+                    self.policy.ssh.allow_remote_port_forwarding =
+                        parse_env_bool(value).with_context(|| format!("invalid {key}"))?;
+                }
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn apply_tuning_env_overrides_from<I, K, V>(&mut self, vars: I) -> Result<()>
@@ -3442,6 +3502,10 @@ fn policy_config_is_default(config: &PolicyConfig) -> bool {
     config == &PolicyConfig::default()
 }
 
+fn policy_ssh_config_is_default(config: &PolicySshConfig) -> bool {
+    config == &PolicySshConfig::default()
+}
+
 fn embedded_derp_config_is_default(config: &EmbeddedDerpConfig) -> bool {
     config == &EmbeddedDerpConfig::default()
 }
@@ -4609,19 +4673,185 @@ policy:
             policy: PolicyConfig {
                 mode: "file".to_string(),
                 path: PathBuf::from("configured-policy.hujson"),
+                ssh: PolicySshConfig::default(),
             },
             ..CliConfig::default()
         };
 
-        config.apply_policy_env_overrides_from([
-            ("HEADSCALE_POLICY_MODE", "database"),
-            ("HEADSCALE_POLICY_PATH", "/etc/headscale/policy.hujson"),
-        ]);
+        config
+            .apply_policy_env_overrides_from([
+                ("HEADSCALE_POLICY_MODE", "database"),
+                ("HEADSCALE_POLICY_PATH", "/etc/headscale/policy.hujson"),
+            ])
+            .unwrap();
 
         assert_eq!(config.policy.mode(), "database");
         assert_eq!(
             config.policy.path,
             PathBuf::from("/etc/headscale/policy.hujson")
+        );
+    }
+
+    const POLICY_SSH_BASE_YAML: &str = r#"
+server_url: "https://headscale.example"
+noise:
+  private_key_path: "noise_private.key"
+dns:
+  magic_dns: false
+  override_local_dns: false
+database:
+  type: sqlite
+"#;
+
+    fn forwarding_of(config: &CliConfig) -> [bool; 3] {
+        let forwarding = config.policy.ssh.forwarding();
+        [
+            forwarding.agent,
+            forwarding.local_port,
+            forwarding.remote_port,
+        ]
+    }
+
+    #[test]
+    fn policy_ssh_forwarding_defaults_to_allow_all_and_stays_out_of_the_dump() {
+        let config = CliConfig::parse(POLICY_SSH_BASE_YAML, ConfigFormat::Yaml).unwrap();
+        assert_eq!(forwarding_of(&config), [true, true, true]);
+        assert_eq!(config.policy.ssh, PolicySshConfig::default());
+
+        // A Go-valid `policy:` block with no `ssh` key loads unchanged and
+        // dumps exactly as it did before the setting existed.
+        let with_policy = format!("{POLICY_SSH_BASE_YAML}policy:\n  mode: database\n");
+        let config = CliConfig::parse(&with_policy, ConfigFormat::Yaml).unwrap();
+        assert_eq!(forwarding_of(&config), [true, true, true]);
+        let dump = headscale_cli::yaml::to_string(&config).unwrap();
+        assert!(dump.contains("mode: database"), "{dump}");
+        assert!(!dump.contains("ssh"), "{dump}");
+        assert!(!dump.contains("forwarding"), "{dump}");
+
+        let default_dump = headscale_cli::yaml::to_string(
+            &CliConfig::parse(POLICY_SSH_BASE_YAML, ConfigFormat::Yaml).unwrap(),
+        )
+        .unwrap();
+        assert!(!default_dump.contains("policy"), "{default_dump}");
+    }
+
+    #[test]
+    fn policy_ssh_forwarding_loads_each_flag_from_every_config_format() {
+        for (flag, want) in [
+            ("allow_agent_forwarding", [false, true, true]),
+            ("allow_local_port_forwarding", [true, false, true]),
+            ("allow_remote_port_forwarding", [true, true, false]),
+        ] {
+            let yaml = format!("{POLICY_SSH_BASE_YAML}policy:\n  ssh:\n    {flag}: false\n");
+            let config = CliConfig::parse(&yaml, ConfigFormat::Yaml).unwrap();
+            assert_eq!(forwarding_of(&config), want, "yaml {flag}");
+            // The block stays file-mode like Go's default.
+            assert_eq!(config.policy.mode(), "file");
+
+            let toml = format!(
+                "server_url = \"https://headscale.example\"\n\
+                 [noise]\nprivate_key_path = \"noise_private.key\"\n\
+                 [dns]\nmagic_dns = false\noverride_local_dns = false\n\
+                 [database]\ntype = \"sqlite\"\n\
+                 [policy.ssh]\n{flag} = false\n"
+            );
+            let config = CliConfig::parse(&toml, ConfigFormat::Toml).unwrap();
+            assert_eq!(forwarding_of(&config), want, "toml {flag}");
+
+            let json = format!(
+                r#"{{"server_url":"https://headscale.example","noise":{{"private_key_path":"noise_private.key"}},"dns":{{"magic_dns":false,"override_local_dns":false}},"database":{{"type":"sqlite"}},"policy":{{"ssh":{{"{flag}":false}}}}}}"#
+            );
+            let config = CliConfig::parse(&json, ConfigFormat::Json).unwrap();
+            assert_eq!(forwarding_of(&config), want, "json {flag}");
+        }
+
+        let all_off = format!(
+            "{POLICY_SSH_BASE_YAML}policy:\n  mode: database\n  ssh:\n    \
+             allow_agent_forwarding: false\n    allow_local_port_forwarding: false\n    \
+             allow_remote_port_forwarding: false\n"
+        );
+        let config = CliConfig::parse(&all_off, ConfigFormat::Yaml).unwrap();
+        assert_eq!(forwarding_of(&config), [false, false, false]);
+        assert!(config.policy.is_database_mode());
+
+        // An explicit setting is operator-visible in the config dump.
+        let dump = headscale_cli::yaml::to_string(&config).unwrap();
+        assert!(dump.contains("allow_agent_forwarding: false"), "{dump}");
+    }
+
+    #[test]
+    fn policy_ssh_forwarding_rejects_non_booleans_and_unknown_keys() {
+        // The YAML reader reports a wrong-typed value by line and column
+        // rather than by key name.
+        for body in [
+            "allow_agent_forwarding: maybe",
+            "allow_local_port_forwarding: 0",
+            "allow_remote_port_forwarding: [false]",
+        ] {
+            let yaml = format!("{POLICY_SSH_BASE_YAML}policy:\n  ssh:\n    {body}\n");
+            let err = CliConfig::parse(&yaml, ConfigFormat::Yaml).expect_err(body);
+            let chain = format!("{err:#}");
+            assert!(
+                chain.starts_with("failed to parse YAML config: "),
+                "{body}: {chain}"
+            );
+        }
+
+        // A misspelling must not be silently ignored: that would leave
+        // forwarding on while the operator believes it is off.
+        for key in ["allow_agent_forwading", "allow_forwarding"] {
+            let yaml = format!("{POLICY_SSH_BASE_YAML}policy:\n  ssh:\n    {key}: false\n");
+            let err = CliConfig::parse(&yaml, ConfigFormat::Yaml).expect_err(key);
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains(key),
+                "{key}: error should name the unknown key, got: {chain}"
+            );
+        }
+
+        let toml_with = |value: &str| {
+            format!(
+                "server_url = \"https://headscale.example\"\n\
+                 [noise]\nprivate_key_path = \"noise_private.key\"\n\
+                 [dns]\nmagic_dns = false\noverride_local_dns = false\n\
+                 [database]\ntype = \"sqlite\"\n\
+                 [policy.ssh]\nallow_agent_forwarding = {value}\n"
+            )
+        };
+        // Same document, only the value's type differs: a string is not a bool.
+        assert!(CliConfig::parse(&toml_with("false"), ConfigFormat::Toml).is_ok());
+        assert!(CliConfig::parse(&toml_with("\"false\""), ConfigFormat::Toml).is_err());
+    }
+
+    #[test]
+    fn policy_ssh_forwarding_env_overrides_are_validated() {
+        let mut config = CliConfig::default();
+        config
+            .apply_policy_env_overrides_from([
+                ("HEADSCALE_POLICY_SSH_ALLOW_AGENT_FORWARDING", "false"),
+                ("HEADSCALE_POLICY_SSH_ALLOW_LOCAL_PORT_FORWARDING", "0"),
+                ("HEADSCALE_POLICY_SSH_ALLOW_REMOTE_PORT_FORWARDING", "true"),
+            ])
+            .unwrap();
+        assert_eq!(forwarding_of(&config), [false, false, true]);
+
+        // Empty values are treated as unset, like the other policy variables.
+        let mut config = CliConfig::default();
+        config
+            .apply_policy_env_overrides_from([("HEADSCALE_POLICY_SSH_ALLOW_AGENT_FORWARDING", "")])
+            .unwrap();
+        assert_eq!(forwarding_of(&config), [true, true, true]);
+
+        let mut config = CliConfig::default();
+        let err = config
+            .apply_policy_env_overrides_from([(
+                "HEADSCALE_POLICY_SSH_ALLOW_AGENT_FORWARDING",
+                "disable",
+            )])
+            .expect_err("a typo'd boolean must not leave forwarding enabled");
+        assert!(
+            format!("{err:#}").contains("HEADSCALE_POLICY_SSH_ALLOW_AGENT_FORWARDING"),
+            "{err:#}"
         );
     }
 

@@ -15,7 +15,7 @@ use super::{
     noise::{NoisePeerMachineKey, NoiseRequestCancellation},
     wire::SshAction,
 };
-use crate::policy::SshPolicyNode;
+use crate::policy::{SshForwarding, SshPolicyNode};
 
 const AUTH_ID_PREFIX: &str = "hskey-authreq-";
 const AUTH_ID_RANDOM_BYTES: usize = 24;
@@ -88,19 +88,20 @@ pub(crate) async fn handle_ssh_action(
             .to_owned(),
     };
     let ssh_nodes = ssh_policy_nodes_from_snapshot(&state.machines, &snapshot);
+    let forwarding = state.policy.ssh_forwarding();
     let cached_action = state.policy.with_ssh_check_period_for_bytes(
         &ssh_nodes,
         src_node_id,
         dst_node_id,
         &local_user,
         |period, stamp| match period {
-            None => Some(ssh_action_json(&ssh_no_check_action())),
+            None => Some(ssh_action_json(&ssh_no_check_action(forwarding))),
             Some(period) if query.auth_id_bytes().is_none() && !period.is_zero() => state
                 .registration_cache
                 .last_ssh_auth_with_stamp(&binding, &stamp)
                 .and_then(|last| Instant::now().checked_duration_since(last))
                 .filter(|elapsed| *elapsed < period)
-                .map(|_| ssh_action_json(&ssh_accept_action())),
+                .map(|_| ssh_action_json(&ssh_accept_action(forwarding))),
             _ => None,
         },
     );
@@ -188,7 +189,7 @@ fn ssh_action_hold(state: &WireState, binding: SshCheckBinding, local_user: &[u8
              # Authentication checked with Headscale SSH.\n",
             auth_url(base_url, &auth_id)
         ),
-        ..ssh_forwarding_action()
+        ..state.policy.ssh_forwarding().base_action()
     })
 }
 
@@ -237,6 +238,7 @@ async fn ssh_action_followup(
         AuthWaitOutcome::Accepted => {
             let snapshot = state.machines.snapshot_with_metadata();
             let ssh_nodes = ssh_policy_nodes_from_snapshot(&state.machines, &snapshot);
+            let forwarding = state.policy.ssh_forwarding();
             state.policy.with_ssh_check_period_for_bytes(
                 &ssh_nodes,
                 binding.src_node_id,
@@ -244,47 +246,38 @@ async fn ssh_action_followup(
                 &local_user,
                 |period, stamp| {
                     if period.is_none() {
-                        return ssh_action_json(&ssh_no_check_action());
+                        return ssh_action_json(&ssh_no_check_action(forwarding));
                     }
                     state.registration_cache.record_ssh_auth_with_stamp(
                         &binding,
                         Instant::now(),
                         stamp,
                     );
-                    ssh_action_json(&ssh_accept_action())
+                    ssh_action_json(&ssh_accept_action(forwarding))
                 },
             )
         }
         AuthWaitOutcome::Rejected(_) | AuthWaitOutcome::Expired => ssh_action_json(&SshAction {
             reject: true,
-            ..ssh_forwarding_action()
+            ..state.policy.ssh_forwarding().base_action()
         }),
         AuthWaitOutcome::Missing => ssh_action_hold(&state, binding, &local_user),
     }
 }
 
-fn ssh_no_check_action() -> SshAction {
+fn ssh_no_check_action(forwarding: SshForwarding) -> SshAction {
     SshAction {
         reject: true,
         message: "# Headscale SSH: no check rule in the tailnet policy covers this connection.\n"
             .into(),
-        ..ssh_forwarding_action()
+        ..forwarding.base_action()
     }
 }
 
-fn ssh_accept_action() -> SshAction {
+fn ssh_accept_action(forwarding: SshForwarding) -> SshAction {
     SshAction {
         accept: true,
-        ..ssh_forwarding_action()
-    }
-}
-
-fn ssh_forwarding_action() -> SshAction {
-    SshAction {
-        allow_agent_forwarding: true,
-        allow_local_port_forwarding: true,
-        allow_remote_port_forwarding: true,
-        ..SshAction::default()
+        ..forwarding.base_action()
     }
 }
 
@@ -1042,5 +1035,342 @@ mod tests {
         assert!(action.accept);
         assert!(!action.reject);
         assert!(action.hold_and_delegate.is_empty());
+    }
+
+    /// Replace the random auth id the server mints so two runs of the same
+    /// request can be compared byte for byte.
+    fn normalize_auth_ids(body: &str) -> String {
+        let mut out = String::with_capacity(body.len());
+        let mut rest = body;
+        while let Some(at) = rest.find(AUTH_ID_PREFIX) {
+            let (head, tail) = rest.split_at(at + AUTH_ID_PREFIX.len());
+            out.push_str(head);
+            out.push_str(&"X".repeat(AUTH_ID_RANDOM_BYTES));
+            rest = &tail[AUTH_ID_RANDOM_BYTES.min(tail.len())..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    async fn action_json(state: &WireState, query: &str) -> serde_json::Value {
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let resp = inner_router(state.clone())
+            .oneshot(request(
+                format!("/machine/ssh/action/{src}/to/{dst}?{query}"),
+                DST_MACHINE_KEY,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        serde_json::from_str(&normalize_auth_ids(std::str::from_utf8(&body).unwrap())).unwrap()
+    }
+
+    /// One response of every dynamic check-mode action shape the handler can
+    /// produce, in an order that keeps each of them reachable: hold-and-delegate,
+    /// the no-check-rule reject, a denied follow-up, an approved follow-up and
+    /// the cached auto-approval that the approval seeds.
+    async fn dynamic_actions(state: &WireState) -> Vec<(&'static str, serde_json::Value)> {
+        let src = state.machines.stable_node_id_for_key(SRC_NODE_KEY);
+        let dst = state.machines.stable_node_id_for_key(DST_NODE_KEY);
+        let binding = SshCheckBinding {
+            src_node_id: src,
+            dst_node_id: dst,
+            local_user: "root".into(),
+        };
+        let mut out = vec![
+            ("hold", action_json(state, "local_user=root").await),
+            ("no-check", action_json(state, "local_user=deploy").await),
+        ];
+
+        let denied = "rrrrrrrrrrrrrrrrrrrrrrrr";
+        state
+            .registration_cache
+            .insert_ssh_check(denied.into(), binding.clone());
+        assert!(state.registration_cache.reject(denied, "denied"));
+        out.push((
+            "denied",
+            action_json(
+                state,
+                &format!("local_user=root&auth_id=hskey-authreq-{denied}"),
+            )
+            .await,
+        ));
+
+        let approved = "aaaaaaaaaaaaaaaaaaaaaaaa";
+        state
+            .registration_cache
+            .insert_ssh_check(approved.into(), binding);
+        assert!(state.registration_cache.approve_without_node(approved));
+        out.push((
+            "approved",
+            action_json(
+                state,
+                &format!("local_user=root&auth_id=hskey-authreq-{approved}"),
+            )
+            .await,
+        ));
+        out.push(("cached", action_json(state, "local_user=root").await));
+        out
+    }
+
+    const FORWARDING_KEYS: [&str; 3] = [
+        "allowAgentForwarding",
+        "allowLocalPortForwarding",
+        "allowRemotePortForwarding",
+    ];
+
+    fn forwarding_cases() -> [(&'static str, SshForwarding); 5] {
+        [
+            (
+                "no agent forwarding",
+                SshForwarding {
+                    agent: false,
+                    ..SshForwarding::default()
+                },
+            ),
+            (
+                "no local port forwarding",
+                SshForwarding {
+                    local_port: false,
+                    ..SshForwarding::default()
+                },
+            ),
+            (
+                "no remote port forwarding",
+                SshForwarding {
+                    remote_port: false,
+                    ..SshForwarding::default()
+                },
+            ),
+            (
+                "no forwarding at all",
+                SshForwarding {
+                    agent: false,
+                    local_port: false,
+                    remote_port: false,
+                },
+            ),
+            ("explicit allow all", SshForwarding::ALLOW_ALL),
+        ]
+    }
+
+    /// `want` with every key the operator turned off dropped: `false` is
+    /// omitted from the wire form, so this is exactly what the restricted
+    /// output must equal.
+    fn without_cleared_flags(
+        want: &serde_json::Value,
+        forwarding: SshForwarding,
+    ) -> serde_json::Value {
+        let mut out = want.clone();
+        let object = out.as_object_mut().unwrap();
+        for (key, allowed) in FORWARDING_KEYS.into_iter().zip([
+            forwarding.agent,
+            forwarding.local_port,
+            forwarding.remote_port,
+        ]) {
+            if !allowed {
+                object.remove(key);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn ssh_action_forwarding_defaults_match_headscale_go() {
+        // hscontrol/noise.go sshAction starts every dynamic action, including
+        // hold-and-delegate and both rejects, with all three flags set.
+        let (state, _dir) = fixture();
+        let actions = dynamic_actions(&state).await;
+        assert_eq!(actions.len(), 5);
+        for (name, action) in &actions {
+            for key in FORWARDING_KEYS {
+                assert_eq!(action[key], true, "{name} must carry {key} by default");
+            }
+        }
+        assert_eq!(actions[0].1["accept"], serde_json::Value::Null);
+        assert_eq!(actions[1].1["reject"], true);
+        assert_eq!(actions[2].1["reject"], true);
+        assert_eq!(actions[3].1["accept"], true);
+        assert_eq!(actions[4].1["accept"], true);
+    }
+
+    #[tokio::test]
+    async fn ssh_action_forwarding_opt_out_clears_only_the_chosen_flags() {
+        let (state, _dir) = fixture();
+        let default = dynamic_actions(&state).await;
+
+        for (label, forwarding) in forwarding_cases() {
+            let (state, _dir) = fixture();
+            state.policy.set_ssh_forwarding(forwarding);
+            let restricted = dynamic_actions(&state).await;
+            assert_eq!(restricted.len(), default.len());
+            for ((name, want), (_, got)) in default.iter().zip(&restricted) {
+                assert_eq!(
+                    got,
+                    &without_cleared_flags(want, forwarding),
+                    "{label}: {name} must differ from the default only in the cleared flags"
+                );
+            }
+        }
+    }
+
+    async fn map_ssh_policy(state: &WireState) -> crate::tailscale_wire::wire::SshPolicy {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/machine/nodekey:{DST_NODE_KEY}/map"))
+            .header("content-type", "application/json")
+            .body(Body::from(br#"{"Version":113}"#.to_vec()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(NoisePeerMachineKey(DST_MACHINE_KEY.to_string()));
+        let resp = inner_router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let map: crate::tailscale_wire::wire::MapResponse = serde_json::from_slice(&raw).unwrap();
+        map.ssh_policy.expect("SSH policy present in map response")
+    }
+
+    fn set_policy(state: &WireState, raw: &str) {
+        state
+            .policy
+            .set(crate::policy::parse_hujson_policy(raw).unwrap(), raw.into());
+    }
+
+    const MIXED_POLICY: &str = r#"{
+      "ssh": [
+        {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["root"]},
+        {"action": "check", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["deploy"]}
+      ]
+    }"#;
+
+    const RELOADED_POLICY: &str = r#"{
+      "ssh": [
+        {"action": "accept", "src": ["alice@"], "dst": ["autogroup:self"],
+         "users": ["autogroup:nonroot", "root"]},
+        {"action": "check", "src": ["alice@"], "dst": ["autogroup:self"], "users": ["deploy"]}
+      ]
+    }"#;
+
+    #[tokio::test]
+    async fn map_response_ssh_policy_honours_forwarding_opt_out_across_policy_reload() {
+        let (state, _dir) = fixture();
+        set_policy(&state, MIXED_POLICY);
+        let default = map_ssh_policy(&state).await;
+        let accept = default
+            .rules
+            .iter()
+            .find(|rule| rule.action.accept)
+            .expect("accept rule");
+        assert!(accept.action.allow_agent_forwarding);
+        assert!(accept.action.allow_local_port_forwarding);
+        assert!(accept.action.allow_remote_port_forwarding);
+        let check = default
+            .rules
+            .iter()
+            .find(|rule| !rule.action.hold_and_delegate.is_empty())
+            .expect("check rule");
+        assert!(!check.action.allow_agent_forwarding);
+
+        for (label, forwarding) in forwarding_cases() {
+            let (state, _dir) = fixture();
+            state.policy.set_ssh_forwarding(forwarding);
+            set_policy(&state, MIXED_POLICY);
+            let served = map_ssh_policy(&state).await;
+
+            let mut want = default.clone();
+            for rule in &mut want.rules {
+                rule.action.allow_agent_forwarding &= forwarding.agent;
+                rule.action.allow_local_port_forwarding &= forwarding.local_port;
+                rule.action.allow_remote_port_forwarding &= forwarding.remote_port;
+            }
+            assert_eq!(served, want, "{label}: served SSHPolicy");
+
+            // A policy reload recompiles every rule; the operator's choice is
+            // server config and must survive it.
+            set_policy(&state, RELOADED_POLICY);
+            let reloaded = map_ssh_policy(&state).await;
+            assert!(
+                !reloaded.rules.is_empty(),
+                "{label}: reloaded policy has rules"
+            );
+            for rule in reloaded.rules.iter().filter(|rule| rule.action.accept) {
+                assert_eq!(
+                    rule.action.allow_agent_forwarding, forwarding.agent,
+                    "{label}: agent flag after reload"
+                );
+                assert_eq!(
+                    rule.action.allow_local_port_forwarding, forwarding.local_port,
+                    "{label}: local flag after reload"
+                );
+                assert_eq!(
+                    rule.action.allow_remote_port_forwarding, forwarding.remote_port,
+                    "{label}: remote flag after reload"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compiled_cache_path_applies_forwarding_opt_out() {
+        // Production serves SSH policy from the per-node compile cache that
+        // PolicyStore::from_initial_registry builds. The opt-out is applied
+        // after that cache, so a policy compiled and cached before the
+        // setting was installed is still narrowed when read.
+        let (mut state, _dir) = fixture();
+        // The native store resolves `alice@` through the user table, so the
+        // nodes carry the user's id the way registered nodes do.
+        for (node_key, machine_key, hostname, ip) in [
+            (SRC_NODE_KEY, SRC_MACHINE_KEY, "client", 10),
+            (DST_NODE_KEY, DST_MACHINE_KEY, "server", 20),
+        ] {
+            let mut record = MachineRecord::new_at(
+                chrono::Utc::now(),
+                node_key.to_string(),
+                machine_key.to_string(),
+                "alice".to_string(),
+                hostname.to_string(),
+                Ipv4Addr::new(100, 64, 0, ip),
+                false,
+            );
+            record.user_id = Some(1);
+            state.machines.upsert(node_key.to_string(), record);
+        }
+        let alice = crate::policy::PolicyUser {
+            id: 1,
+            name: "alice".into(),
+            email: String::new(),
+            provider_identifier: None,
+        };
+        state.policy = Arc::new(
+            crate::policy::PolicyStore::from_initial_registry(
+                Some((MIXED_POLICY.to_string(), 1)),
+                vec![alice],
+                &state.machines,
+            )
+            .unwrap(),
+        );
+        let before = map_ssh_policy(&state).await;
+        assert!(
+            before
+                .rules
+                .iter()
+                .any(|rule| rule.action.accept && rule.action.allow_agent_forwarding),
+            "cache primed with the default policy"
+        );
+
+        state.policy.set_ssh_forwarding(SshForwarding {
+            agent: false,
+            local_port: true,
+            remote_port: false,
+        });
+        let after = map_ssh_policy(&state).await;
+        assert_eq!(after.rules.len(), before.rules.len());
+        for rule in after.rules.iter().filter(|rule| rule.action.accept) {
+            assert!(!rule.action.allow_agent_forwarding);
+            assert!(rule.action.allow_local_port_forwarding);
+            assert!(!rule.action.allow_remote_port_forwarding);
+        }
     }
 }

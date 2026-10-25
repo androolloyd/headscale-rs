@@ -67,6 +67,17 @@ pub const REGISTRATION_CACHE_EXPIRATION: Duration = Duration::from_secs(15 * 60)
 pub const REGISTRATION_CACHE_CLEANUP: Duration = Duration::from_secs(20 * 60);
 /// Headscale-go default upper bound for pending auth/registration requests.
 pub const REGISTRATION_CACHE_MAX_ENTRIES: usize = 1024;
+/// How many unconsumed, unexpired registration entries one
+/// [`RegistrationSource`] may hold at once. headscale-go has no such limit
+/// (its `authCache` is a plain LRU), so an unauthenticated peer can push
+/// every pending admin approval out of the 1024-entry cache with tiny
+/// Register requests (F-REGCACHE). 64 is 1/16 of the Go cache bound: it takes
+/// at least 16 distinct sources to occupy the whole default cache, while 64
+/// simultaneously unapproved sign-ins from one address (a NAT'd office, CGNAT,
+/// a reverse proxy) inside the 15 minute expiry window is far beyond what
+/// people running `tailscale up` and waiting for approval produce. A source
+/// over this limit loses only its own least recently used pending entries.
+pub const REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE: usize = 64;
 /// Upstream debug knob that enables on-disk MapResponse dumps.
 pub const MAPRESPONSE_DEBUG_DUMP_ENV: &str = "HEADSCALE_DEBUG_DUMP_MAPRESPONSE_PATH";
 const PING_ID_LENGTH: usize = 16;
@@ -1986,14 +1997,76 @@ fn new_ping_id() -> String {
         .collect()
 }
 
+/// Network identity a pending registration is accounted against.
+///
+/// The key is the peer address the Noise connection resolved to (the TCP peer,
+/// or the client address a trusted proxy forwarded), reduced to the part one
+/// host cannot cheaply multiply: an IPv4 address is kept whole, an IPv6
+/// address is reduced to its /64, because a single host is routinely handed a
+/// whole /64 and could otherwise rotate through 2^64 source addresses to
+/// dodge a per-address quota. IPv4-mapped IPv6 addresses count as the IPv4
+/// address they carry. The port is never part of the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegistrationSource {
+    /// The connection carried no usable peer address (in-process drivers, an
+    /// unparsable address). Every such request shares this one bucket, so a
+    /// missing address is never a way around the quota.
+    Unknown,
+    V4(Ipv4Addr),
+    /// The upper 64 bits of an IPv6 address.
+    V6Prefix(u64),
+}
+
+impl RegistrationSource {
+    pub fn from_ip(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(v4) => Self::V4(v4),
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+                || {
+                    let [s0, s1, s2, s3, ..] = v6.segments();
+                    Self::V6Prefix(
+                        (u64::from(s0) << 48)
+                            | (u64::from(s1) << 32)
+                            | (u64::from(s2) << 16)
+                            | u64::from(s3),
+                    )
+                },
+                Self::V4,
+            ),
+        }
+    }
+
+    /// Parse the textual peer address the request logger carries: `ip:port`,
+    /// `[ipv6]:port`, or a bare address that may carry a `%zone`.
+    pub fn from_remote_addr(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Ok(addr) = text.parse::<SocketAddr>() {
+            return Some(Self::from_ip(addr.ip()));
+        }
+        let host = text.split_once('%').map_or(text, |(host, _zone)| host);
+        host.trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .ok()
+            .map(Self::from_ip)
+    }
+}
+
 /// Shared pending registration cache keyed by headscale-go's
 /// 24-character registration ID.
+///
+/// Entries created by unauthenticated Register requests are also accounted
+/// per [`RegistrationSource`] (see
+/// [`REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE`]). The per-source count is
+/// derived from the map itself while the map's write guard is held, so it
+/// cannot leak when an entry is consumed, completed, expired, replaced or
+/// evicted, and concurrent inserts cannot race past the quota.
 pub struct RegistrationCache {
     inner: RwLock<BTreeMap<String, Arc<RegistrationEntry>>>,
     last_ssh_auth: RwLock<BTreeMap<SshCheckPair, SshAuthRecord>>,
     expiration: Duration,
     cleanup: Duration,
     max_entries: usize,
+    max_pending_per_source: usize,
     access_counter: AtomicU64,
 }
 
@@ -2001,6 +2074,10 @@ pub struct RegistrationCache {
 struct RegistrationEntry {
     record: Option<MachineRecord>,
     hostinfo: Option<serde_json::Value>,
+    /// Who created this entry; `None` for internal callers (gRPC
+    /// `debug create-node`, SSH-check requests from authenticated nodes,
+    /// tests), which are exempt from per-source accounting.
+    source: Option<RegistrationSource>,
     ssh_binding: Option<SshCheckBinding>,
     oidc_confirmation: Mutex<Option<crate::oidc::OidcPendingRegistrationConfirmation>>,
     expires_at: Instant,
@@ -2116,10 +2193,19 @@ impl RegistrationCache {
             } else {
                 max_entries
             },
+            max_pending_per_source: REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE,
             access_counter: AtomicU64::new(0),
         }
     }
 
+    #[cfg(test)]
+    fn with_max_pending_per_source(mut self, quota: usize) -> Self {
+        self.max_pending_per_source = quota.max(1);
+        self
+    }
+
+    /// Insert a pending registration with no source: exempt from per-source
+    /// accounting. For internal callers (gRPC `debug create-node`, tests).
     pub fn insert(&self, registration_id: String, record: MachineRecord) {
         self.insert_with_hostinfo(registration_id, record, None);
     }
@@ -2130,11 +2216,38 @@ impl RegistrationCache {
         record: MachineRecord,
         hostinfo: Option<serde_json::Value>,
     ) {
+        self.insert_from_source(registration_id, record, hostinfo, None);
+    }
+
+    /// Insert a pending registration created by an unauthenticated Register
+    /// request. A `Some` source is held to
+    /// [`REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE`] pending entries: going
+    /// over drops that source's own least recently used pending entries, never
+    /// another source's. `None` is exempt, exactly like [`Self::insert`].
+    pub(crate) fn insert_from_source(
+        &self,
+        registration_id: String,
+        record: MachineRecord,
+        hostinfo: Option<serde_json::Value>,
+        source: Option<RegistrationSource>,
+    ) {
         self.prune_expired();
         let mut entry =
             RegistrationEntry::new_registration(record, self.expiration, self.next_access());
         entry.hostinfo = hostinfo;
+        entry.source = source;
         self.insert_entry(registration_id, Arc::new(entry));
+    }
+
+    /// Pending (unexpired, no verdict yet) entries currently held for `source`.
+    pub fn pending_from_source(&self, source: RegistrationSource) -> usize {
+        self.prune_expired();
+        let now = Instant::now();
+        self.inner
+            .read()
+            .values()
+            .filter(|entry| entry.source == Some(source) && entry.is_pending(now))
+            .count()
     }
 
     pub fn insert_ssh_check(&self, auth_id: String, binding: SshCheckBinding) {
@@ -2552,18 +2665,34 @@ impl RegistrationCache {
     }
 
     fn insert_entry(&self, id: String, entry: Arc<RegistrationEntry>) {
+        let now = Instant::now();
+        // The entry being inserted is never an eviction victim.
+        let keep = Arc::clone(&entry);
         let mut expired = Vec::new();
         {
+            // The insert, the per-source count and every eviction below share
+            // this one write guard: concurrent registrations from a source
+            // serialise here and cannot both slip past the quota.
             let mut inner = self.inner.write();
             if let Some(old) = inner.insert(id, entry) {
                 expired.push(old);
             }
+            if let Some(source) = keep.source {
+                // The quota only protects somebody when pending entries from
+                // another party exist. If every pending entry shares one
+                // source (typically every client behind a reverse proxy
+                // without `trusted_proxies`) the bucket cannot tell the
+                // attacker from the users, so trimming it at the quota would
+                // make the flood easier than Go's plain LRU; fall back to the
+                // global LRU there. A lone flooder that arrived first is still
+                // the first victim: `eviction_victim` takes from the heaviest
+                // source once anyone else holds an entry.
+                if Self::other_party_pending(&inner, source, now) {
+                    self.evict_over_source_quota(&mut inner, &keep, source, now, &mut expired);
+                }
+            }
             while inner.len() > self.max_entries {
-                let Some(evict_id) = inner
-                    .iter()
-                    .min_by_key(|(_id, entry)| entry.last_used())
-                    .map(|(id, _entry)| id.clone())
-                else {
+                let Some(evict_id) = eviction_victim(&inner, &keep, now) else {
                     break;
                 };
                 if let Some(evicted) = inner.remove(&evict_id) {
@@ -2574,6 +2703,61 @@ impl RegistrationCache {
 
         for entry in expired {
             entry.expire();
+        }
+    }
+
+    /// Whether any pending entry belongs to a party other than `source`:
+    /// another source, or an exempt internal entry such as one created over
+    /// gRPC.
+    fn other_party_pending(
+        inner: &BTreeMap<String, Arc<RegistrationEntry>>,
+        source: RegistrationSource,
+        now: Instant,
+    ) -> bool {
+        inner
+            .values()
+            .any(|entry| entry.source != Some(source) && entry.is_pending(now))
+    }
+
+    /// Drop `source`'s own least recently used pending entries until it holds
+    /// at most `max_pending_per_source`, never touching `keep` (the entry just
+    /// inserted) or any other source's entries.
+    fn evict_over_source_quota(
+        &self,
+        inner: &mut BTreeMap<String, Arc<RegistrationEntry>>,
+        keep: &Arc<RegistrationEntry>,
+        source: RegistrationSource,
+        now: Instant,
+        expired: &mut Vec<Arc<RegistrationEntry>>,
+    ) {
+        // `held` counts `keep` too; only the other entries can be dropped.
+        let mut held = 0_usize;
+        let mut droppable = Vec::new();
+        for (id, entry) in inner.iter() {
+            if entry.source != Some(source) || !entry.is_pending(now) {
+                continue;
+            }
+            held += 1;
+            if !Arc::ptr_eq(entry, keep) {
+                droppable.push((entry.last_used(), id.clone()));
+            }
+        }
+        let excess = held.saturating_sub(self.max_pending_per_source);
+        if excess == 0 {
+            return;
+        }
+        droppable.sort_unstable();
+        tracing::debug!(
+            target: "tailscale_wire::registration_cache",
+            ?source,
+            quota = self.max_pending_per_source,
+            dropped = excess,
+            "per-source pending registration quota reached; dropping the source's own oldest entries"
+        );
+        for (_used, id) in droppable.into_iter().take(excess) {
+            if let Some(evicted) = inner.remove(&id) {
+                expired.push(evicted);
+            }
         }
     }
 
@@ -2588,11 +2772,62 @@ impl Default for RegistrationCache {
     }
 }
 
+/// Choose what to drop when the cache is over `max_entries`, never `keep`
+/// (the entry just inserted). Go's LRU drops the least recently used entry
+/// whatever it is; here, in order:
+///
+/// 1. an entry that already has a verdict or has expired: nothing is waiting
+///    on it any more (waiters hold their own `Arc`), so it is the cheapest to
+///    lose;
+/// 2. the least recently used entry of the source holding the most pending
+///    entries (ties go to the source whose entry is oldest), provided that
+///    source holds more than one: a flooding source pays for its own flood and
+///    the entries other sources are waiting on survive;
+/// 3. otherwise every sourced entry is alone in its bucket and the plain
+///    least recently used entry goes, exactly as in Go.
+fn eviction_victim(
+    inner: &BTreeMap<String, Arc<RegistrationEntry>>,
+    keep: &Arc<RegistrationEntry>,
+    now: Instant,
+) -> Option<String> {
+    let candidates = || {
+        inner
+            .iter()
+            .filter(|(_id, entry)| !Arc::ptr_eq(entry, keep))
+    };
+
+    if let Some((id, _entry)) = candidates()
+        .filter(|(_id, entry)| !entry.is_pending(now))
+        .min_by_key(|(_id, entry)| entry.last_used())
+    {
+        return Some(id.clone());
+    }
+
+    let mut per_source = BTreeMap::<RegistrationSource, usize>::new();
+    for source in inner.values().filter_map(|entry| entry.source) {
+        *per_source.entry(source).or_default() += 1;
+    }
+    let heaviest = candidates()
+        .filter_map(|(id, entry)| {
+            let held = *per_source.get(&entry.source?)?;
+            (held > 1).then_some((held, entry.last_used(), id))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    if let Some((_held, _used, id)) = heaviest {
+        return Some(id.clone());
+    }
+
+    candidates()
+        .min_by_key(|(_id, entry)| entry.last_used())
+        .map(|(id, _entry)| id.clone())
+}
+
 impl RegistrationEntry {
     fn new_registration(record: MachineRecord, expiration: Duration, last_used: u64) -> Self {
         Self {
             record: Some(record),
             hostinfo: None,
+            source: None,
             ssh_binding: None,
             oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
@@ -2607,6 +2842,7 @@ impl RegistrationEntry {
         Self {
             record: None,
             hostinfo: None,
+            source: None,
             ssh_binding: Some(binding),
             oidc_confirmation: Mutex::new(None),
             expires_at: Instant::now() + expiration,
@@ -2627,6 +2863,12 @@ impl RegistrationEntry {
 
     fn outcome(&self) -> Option<RegistrationOutcome> {
         self.outcome.lock().clone()
+    }
+
+    /// Still waiting on a verdict and not yet expired: the only entries that
+    /// count against a source's quota.
+    fn is_pending(&self, now: Instant) -> bool {
+        now < self.expires_at && self.outcome.lock().is_none()
     }
 
     fn store_oidc_confirmation(&self, pending: crate::oidc::OidcPendingRegistrationConfirmation) {
@@ -9031,6 +9273,481 @@ mod registry_tests {
             cache.get(&registration_id).is_none(),
             "expired rejected auth session is evicted by cache expiry"
         );
+    }
+
+    fn registration_source(text: &str) -> RegistrationSource {
+        RegistrationSource::from_remote_addr(text).expect("test address parses")
+    }
+
+    fn insert_pending_from(cache: &RegistrationCache, id: &str, host: u32, source: &str) {
+        cache.insert_from_source(
+            id.to_owned(),
+            mk_record(host),
+            None,
+            Some(registration_source(source)),
+        );
+    }
+
+    fn pending(cache: &RegistrationCache, id: &str) -> bool {
+        cache.get_pending_registration(id).is_some()
+    }
+
+    #[test]
+    fn registration_source_ignores_ports_and_groups_ipv6_by_prefix() {
+        // The port is never part of the key.
+        assert_eq!(
+            registration_source("203.0.113.7:1111"),
+            registration_source("203.0.113.7:2222")
+        );
+        assert_eq!(
+            registration_source("203.0.113.7"),
+            registration_source("203.0.113.7:2222")
+        );
+        assert_ne!(
+            registration_source("203.0.113.7:1"),
+            registration_source("203.0.113.8:1")
+        );
+        // A whole /64 is one source; the next /64 is another.
+        assert_eq!(
+            registration_source("[2001:db8:1:2::1]:443"),
+            registration_source("[2001:db8:1:2:ffff:ffff:ffff:ffff]:80")
+        );
+        assert_eq!(
+            registration_source("2001:db8:1:2::1"),
+            registration_source("[2001:db8:1:2::9]:443")
+        );
+        assert_ne!(
+            registration_source("2001:db8:1:2::1"),
+            registration_source("2001:db8:1:3::1")
+        );
+        // The forwarded-address rendering may carry a zone.
+        assert_eq!(
+            registration_source("fe80::1%eth0"),
+            registration_source("[fe80::2]:5")
+        );
+        // An IPv4-mapped IPv6 address is the IPv4 address it carries.
+        assert_eq!(
+            registration_source("[::ffff:203.0.113.7]:9"),
+            registration_source("203.0.113.7:9")
+        );
+        // IPv4 and IPv6 buckets never collide, nor does the missing-address one.
+        assert_ne!(
+            registration_source("0.0.0.1:1"),
+            registration_source("[::1]:1")
+        );
+        assert_ne!(registration_source("[::]:1"), RegistrationSource::Unknown);
+        assert_eq!(RegistrationSource::from_remote_addr("not an address"), None);
+        assert_eq!(RegistrationSource::from_remote_addr(""), None);
+    }
+
+    /// Negative control for F-REGCACHE: entries that carry no source are not
+    /// accounted, so a flood of them still pushes the earlier pending entry out
+    /// of the default 1024-entry cache, exactly as in headscale-go.
+    #[test]
+    fn unaccounted_flood_evicts_an_earlier_pending_entry() {
+        let cache = RegistrationCache::new();
+        assert_eq!(cache.max_entries(), REGISTRATION_CACHE_MAX_ENTRIES);
+
+        cache.insert("victim".to_owned(), mk_record(1));
+        for i in 0..cache.max_entries() {
+            cache.insert(
+                format!("flood-{i}"),
+                mk_record(100 + u32::try_from(i).unwrap()),
+            );
+        }
+        assert!(
+            !pending(&cache, "victim"),
+            "without per-source accounting the flood evicts the earlier entry"
+        );
+        assert_eq!(cache.len(), cache.max_entries());
+    }
+
+    #[test]
+    fn default_cache_flood_from_one_source_cannot_evict_another_sources_pending_entry() {
+        let cache = RegistrationCache::new();
+        insert_pending_from(&cache, "victim", 1, "203.0.113.7:4000");
+
+        let flooder = registration_source("198.51.100.9:1");
+        for i in 0..(2 * cache.max_entries()) {
+            // A new ephemeral port per request: the port is not the source.
+            insert_pending_from(
+                &cache,
+                &format!("flood-{i}"),
+                100 + u32::try_from(i).unwrap(),
+                &format!("198.51.100.9:{}", 1024 + i),
+            );
+        }
+
+        assert!(
+            pending(&cache, "victim"),
+            "the other source's entry survives"
+        );
+        assert_eq!(
+            cache.pending_from_source(flooder),
+            REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE
+        );
+        assert_eq!(cache.len(), 1 + REGISTRATION_CACHE_MAX_PENDING_PER_SOURCE);
+    }
+
+    #[tokio::test]
+    async fn per_source_quota_drops_only_the_flooding_sources_own_oldest_entries() {
+        let cache = Arc::new(
+            RegistrationCache::with_tuning_and_max_entries(
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                100,
+            )
+            .with_max_pending_per_source(3),
+        );
+        insert_pending_from(&cache, "victim", 1, "203.0.113.7:1");
+        insert_pending_from(&cache, "flood-0", 100, "198.51.100.9:1");
+        let oldest_waiter = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.wait_for_registration("flood-0").await })
+        };
+        tokio::task::yield_now().await;
+        for i in 1..10 {
+            insert_pending_from(&cache, &format!("flood-{i}"), 100 + i, "198.51.100.9:2");
+        }
+
+        assert!(pending(&cache, "victim"));
+        assert_eq!(
+            cache.pending_from_source(registration_source("198.51.100.9:3")),
+            3
+        );
+        for i in 0..7 {
+            assert!(!pending(&cache, &format!("flood-{i}")), "flood-{i} dropped");
+        }
+        for i in 7..10 {
+            assert!(pending(&cache, &format!("flood-{i}")), "flood-{i} kept");
+        }
+        assert_eq!(cache.len(), 4);
+        // The dropped entry's waiter is told it expired, as for an LRU eviction.
+        let outcome = tokio::time::timeout(Duration::from_secs(1), oldest_waiter)
+            .await
+            .expect("waiter finishes")
+            .expect("waiter task");
+        assert!(matches!(outcome, RegistrationWaitOutcome::Expired));
+    }
+
+    #[test]
+    fn sources_are_counted_per_ipv6_prefix_not_per_address() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        // The quota only applies while another party holds a pending entry.
+        insert_pending_from(&cache, "other-prefix", 20, "[2001:db8:0:1::1]:1");
+        for (i, source) in ["[2001:db8::1]:1", "[2001:db8::2]:1", "[2001:db8::3]:1"]
+            .into_iter()
+            .enumerate()
+        {
+            insert_pending_from(
+                &cache,
+                &format!("same-prefix-{i}"),
+                10 + u32::try_from(i).unwrap(),
+                source,
+            );
+        }
+
+        assert_eq!(
+            cache.pending_from_source(registration_source("2001:db8::9")),
+            2
+        );
+        assert!(!pending(&cache, "same-prefix-0"));
+        assert!(pending(&cache, "same-prefix-1"));
+        assert!(pending(&cache, "same-prefix-2"));
+        assert!(pending(&cache, "other-prefix"));
+    }
+
+    #[test]
+    fn a_single_shared_source_falls_back_to_the_plain_lru_like_go() {
+        // Every client behind a reverse proxy without `trusted_proxies` shares
+        // one source. Trimming that bucket at the quota would make a flood
+        // easier than Go's 1024-entry LRU, so the quota stands down until some
+        // other party holds a pending entry.
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            10,
+        )
+        .with_max_pending_per_source(2);
+        for i in 0..12_u32 {
+            insert_pending_from(&cache, &format!("shared-{i}"), i, "203.0.113.7:1");
+        }
+        assert_eq!(cache.len(), 10);
+        assert_eq!(
+            cache.pending_from_source(registration_source("203.0.113.7:1")),
+            10,
+            "the quota must not trim a bucket nobody else shares"
+        );
+        assert!(!pending(&cache, "shared-0") && !pending(&cache, "shared-1"));
+        assert!(pending(&cache, "shared-2") && pending(&cache, "shared-11"));
+    }
+
+    #[test]
+    fn the_quota_applies_as_soon_as_another_party_holds_an_entry() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        for i in 0..5_u32 {
+            insert_pending_from(&cache, &format!("a{i}"), i, "198.51.100.1:1");
+        }
+        assert_eq!(cache.len(), 5, "no other party yet: nothing is trimmed");
+
+        insert_pending_from(&cache, "b0", 50, "198.51.100.2:1");
+        insert_pending_from(&cache, "a5", 5, "198.51.100.1:1");
+        assert_eq!(
+            cache.pending_from_source(registration_source("198.51.100.1:1")),
+            2,
+            "the flooder is cut back to its quota"
+        );
+        assert!(pending(&cache, "b0"), "the bystander is untouched");
+        assert!(pending(&cache, "a4") && pending(&cache, "a5"));
+    }
+
+    #[test]
+    fn a_flooder_that_arrived_first_is_still_the_first_victim() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            6,
+        )
+        .with_max_pending_per_source(2);
+        for i in 0..6_u32 {
+            insert_pending_from(&cache, &format!("a{i}"), i, "198.51.100.1:1");
+        }
+        assert_eq!(cache.len(), 6, "the cache is full of one source");
+
+        // A user from a different source arrives at the full cache: the
+        // flooder pays, not the newcomer or anybody else.
+        insert_pending_from(&cache, "user", 50, "198.51.100.2:1");
+        assert!(pending(&cache, "user"));
+        assert!(!pending(&cache, "a0"));
+        assert_eq!(cache.len(), 6);
+    }
+
+    #[test]
+    fn global_eviction_takes_from_the_heaviest_source_first() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            6,
+        )
+        .with_max_pending_per_source(4);
+        insert_pending_from(&cache, "b1", 10, "198.51.100.2:1");
+        insert_pending_from(&cache, "c1", 11, "198.51.100.3:1");
+        for i in 1..=4 {
+            insert_pending_from(&cache, &format!("a{i}"), i, "198.51.100.1:1");
+        }
+        assert_eq!(cache.len(), 6);
+
+        // b1 and c1 are the two least recently used entries, yet plain LRU is
+        // not what runs: the heaviest source pays for each new arrival.
+        insert_pending_from(&cache, "d1", 12, "198.51.100.4:1");
+        assert!(!pending(&cache, "a1"));
+        insert_pending_from(&cache, "e1", 13, "198.51.100.5:1");
+        assert!(!pending(&cache, "a2"));
+        for id in ["a3", "a4", "b1", "c1", "d1", "e1"] {
+            assert!(pending(&cache, id), "{id} survives");
+        }
+    }
+
+    #[test]
+    fn global_eviction_falls_back_to_lru_when_no_source_holds_two_entries() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            3,
+        );
+        insert_pending_from(&cache, "x", 1, "198.51.100.1:1");
+        insert_pending_from(&cache, "y", 2, "198.51.100.2:1");
+        cache.insert("z".to_owned(), mk_record(3));
+        assert!(pending(&cache, "x"), "touching x makes y the least recent");
+        insert_pending_from(&cache, "w", 4, "198.51.100.4:1");
+
+        assert!(!pending(&cache, "y"));
+        for id in ["x", "z", "w"] {
+            assert!(pending(&cache, id), "{id} survives");
+        }
+    }
+
+    #[test]
+    fn global_eviction_prefers_entries_that_already_have_a_verdict() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            3,
+        );
+        insert_pending_from(&cache, "rejected", 1, "198.51.100.1:1");
+        insert_pending_from(&cache, "second", 2, "198.51.100.2:1");
+        insert_pending_from(&cache, "third", 3, "198.51.100.3:1");
+        assert!(cache.reject("rejected", "auth request rejected"));
+        assert!(cache.get("rejected").is_some(), "touch: most recently used");
+
+        insert_pending_from(&cache, "fourth", 4, "198.51.100.4:1");
+        assert!(
+            cache.get("rejected").is_none(),
+            "the finished entry goes before the least recently used pending one"
+        );
+        for id in ["second", "third", "fourth"] {
+            assert!(pending(&cache, id), "{id} survives");
+        }
+    }
+
+    #[test]
+    fn sourceless_entries_are_exempt_from_the_per_source_quota() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        for i in 0..10 {
+            cache.insert(format!("internal-{i}"), mk_record(i));
+        }
+        insert_pending_from(&cache, "s1", 50, "203.0.113.7:1");
+        insert_pending_from(&cache, "s2", 51, "203.0.113.7:1");
+        assert_eq!(cache.len(), 12);
+        assert_eq!(
+            cache.pending_from_source(registration_source("203.0.113.7:1")),
+            2
+        );
+    }
+
+    #[test]
+    fn reinserting_an_id_does_not_double_count_its_source() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        for host in 0..3 {
+            insert_pending_from(&cache, "dup", host, "203.0.113.7:1");
+        }
+        insert_pending_from(&cache, "other", 9, "203.0.113.7:1");
+        assert_eq!(
+            cache.pending_from_source(registration_source("203.0.113.7:1")),
+            2
+        );
+        assert!(pending(&cache, "dup"));
+        assert!(pending(&cache, "other"));
+    }
+
+    #[test]
+    fn per_source_quota_is_released_when_entries_leave_the_cache() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        let source = registration_source("203.0.113.7:1");
+        // The quota only applies while another party holds a pending entry.
+        insert_pending_from(&cache, "bystander", 99, "198.51.100.99:1");
+
+        insert_pending_from(&cache, "e1", 1, "203.0.113.7:1");
+        insert_pending_from(&cache, "e2", 2, "203.0.113.7:1");
+        assert_eq!(cache.pending_from_source(source), 2);
+
+        // Completed (consumed by an admin approval): released.
+        assert!(cache.complete("e1", mk_record(1)));
+        assert_eq!(cache.pending_from_source(source), 1);
+        insert_pending_from(&cache, "e3", 3, "203.0.113.7:1");
+        assert!(
+            pending(&cache, "e2") && pending(&cache, "e3"),
+            "nothing dropped"
+        );
+
+        // Rejected: still cached for followups, but no longer pending.
+        assert!(cache.reject("e2", "auth request rejected"));
+        assert_eq!(cache.pending_from_source(source), 1);
+        insert_pending_from(&cache, "e4", 4, "203.0.113.7:1");
+        assert!(
+            cache.get("e2").is_some(),
+            "the quota never drops a finished entry"
+        );
+        assert!(pending(&cache, "e3") && pending(&cache, "e4"));
+
+        // Removed: released.
+        assert!(cache.remove("e3").is_some());
+        assert_eq!(cache.pending_from_source(source), 1);
+
+        // Over the quota again: the source's own oldest goes, the count stays at 2.
+        insert_pending_from(&cache, "e5", 5, "203.0.113.7:1");
+        insert_pending_from(&cache, "e6", 6, "203.0.113.7:1");
+        assert_eq!(cache.pending_from_source(source), 2);
+        assert!(!pending(&cache, "e4"));
+
+        // Everything consumed: the source is back to a clean slate, not locked out.
+        assert!(cache.complete("e5", mk_record(5)));
+        assert!(cache.complete("e6", mk_record(6)));
+        assert_eq!(cache.pending_from_source(source), 0);
+        insert_pending_from(&cache, "e7", 7, "203.0.113.7:1");
+        insert_pending_from(&cache, "e8", 8, "203.0.113.7:1");
+        assert!(pending(&cache, "e7") && pending(&cache, "e8"));
+    }
+
+    #[tokio::test]
+    async fn per_source_quota_ignores_expired_entries() {
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_millis(150),
+            Duration::from_millis(300),
+            100,
+        )
+        .with_max_pending_per_source(2);
+        let source = registration_source("203.0.113.7:1");
+        insert_pending_from(&cache, "old1", 1, "203.0.113.7:1");
+        insert_pending_from(&cache, "old2", 2, "203.0.113.7:1");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        insert_pending_from(&cache, "fresh", 3, "203.0.113.7:1");
+        assert_eq!(cache.pending_from_source(source), 1);
+        assert_eq!(cache.len(), 1);
+        assert!(pending(&cache, "fresh"));
+    }
+
+    #[test]
+    fn concurrent_inserts_from_one_source_cannot_race_past_the_quota() {
+        let quota = 5;
+        let cache = RegistrationCache::with_tuning_and_max_entries(
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            10_000,
+        )
+        .with_max_pending_per_source(quota);
+        // The quota only applies while another party holds a pending entry.
+        insert_pending_from(&cache, "bystander", 9_999_999, "198.51.100.99:1");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for thread in 0..8_u32 {
+                let cache = &cache;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for i in 0..100_u32 {
+                        insert_pending_from(
+                            cache,
+                            &format!("race-{thread}-{i}"),
+                            thread * 1000 + i,
+                            "203.0.113.7:1",
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            cache.pending_from_source(registration_source("203.0.113.7:1")),
+            quota
+        );
+        assert_eq!(cache.len(), quota + 1);
+        assert!(pending(&cache, "bystander"));
     }
 
     #[tokio::test]

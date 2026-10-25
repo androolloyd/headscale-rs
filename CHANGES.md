@@ -1,5 +1,18 @@
 # Changes
 
+## 2026-10-25 — Resource-limit hardening from a public assessment
+
+- Registration cache: per-source quota for unauthenticated pending
+  registrations and a per-registration cap on pending OIDC states, so one
+  source cannot evict other users' pending approvals or sign-ins.
+- Stream the `derp.urls` and ACME response reads with a hard limit (OIDC reads
+  were already bounded) and truncate remote bodies embedded in errors and logs.
+- Embedded DERP: cap same-key sessions, make duplicate-health transition-only,
+  drop instead of blocking on full queues, bound frame and WebSocket sizes, add
+  a write timeout, and reject mesh-only frames from regular clients.
+- Add `policy.ssh.allow_{agent,local_port,remote_port}_forwarding` (default
+  true, matching headscale-go) to stop authorising SSH forwarding.
+
 ## 2026-10-25 — Evidence gaps: /health, packet-filter parity, Postgres
 
 - `GET /health` now pings the database like headscale-go's `HealthHandler`

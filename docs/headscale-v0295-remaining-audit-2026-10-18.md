@@ -501,3 +501,30 @@ than by reading Rust.
   (`registration_gate` missing from its `WireState` initializer).
 - Vestigial plumbing remains (`NodeStoreBoolUpdateOutcome.change`,
   `pending_native_hostinfo`); clippy does not flag it.
+
+## Follow-up — public assessment hardening (2026-10-25)
+
+A public assessment (tailworm.com, "Tailscale v1.104.2 and headscale v0.29.5",
+tested 2026-10-22 to 2026-10-24) was reviewed for findings that apply to this
+control server. Its Tailscale client findings (tailscaled SSH forwarding races,
+app connectors, `serve`, the DERP client) are out of scope here. Four items
+apply and were patched, each with a test that failed before the change:
+
+- Registration-cache flooding: per-source quota and eviction order (plus a
+  per-registration cap on OIDC states).
+- Unbounded remote response reads and over-long error text: the `derp.urls`
+  fetch and the ACME client read whole bodies without a limit and now stream
+  with one; the OIDC reads were already bounded (1 MiB) and only their error
+  text is shortened.
+- Embedded-DERP growth: Go's `sendHistory` has no Rust counterpart, but the
+  relay had unbounded same-key sessions, an O(n^2) duplicate-health fan-out,
+  blocking sends on session queues, oversized frame and WebSocket message
+  limits and mesh-only frames accepted from regular clients; all limited or
+  corrected.
+- SSH forwarding flags: headscale-go sets all three on every accepted rule with
+  no way to change it; headscale-rs keeps that default and adds
+  `policy.ssh.allow_*_forwarding` to clear them. This is a control-plane
+  mitigation only and does not fix the client-side component the report names.
+
+These are intentional deviations from headscale-go. Limits and caveats are in
+`HARDENING.md`. The report's numbers were not independently verified.

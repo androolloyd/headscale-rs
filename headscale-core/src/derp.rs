@@ -52,6 +52,20 @@ pub mod protocol {
     pub const MAX_CLIENT_INFO_LEN: usize = 256 << 10;
     /// Maximum encrypted server info envelope length accepted by clients.
     pub const MAX_INFO_LEN: usize = 1 << 20;
+    /// Largest frame payload a server buffers before the client has
+    /// authenticated: one `ClientInfo` frame (node key plus the nonce-prefixed
+    /// encrypted info). Go reads up to `maxInfoLen` (1 MiB) at this point, but
+    /// `parse_client_info` already rejects anything above
+    /// `MAX_CLIENT_INFO_LEN`, so sizing the pre-auth buffer to that limit
+    /// loses no accepted handshake.
+    pub const MAX_HANDSHAKE_FRAME_LEN: usize = KEY_LEN + NONCE_LEN + MAX_CLIENT_INFO_LEN;
+    /// Largest payload of any client-to-server frame once the handshake is
+    /// done. The biggest is `ForwardPacket` (two keys plus a packet); Go
+    /// rejects packets above `MaxPacketSize` before reading their body
+    /// (`recvPacket`, `recvForwardPacket`) and caps pings at 1000 bytes, and
+    /// the remaining frames are tiny. Buffering more than this for an
+    /// authenticated peer only lets it pin memory.
+    pub const MAX_CLIENT_FRAME_LEN: usize = 2 * KEY_LEN + MAX_PACKET_SIZE;
     /// Modern protocol version where received packets include a source key.
     pub const PROTOCOL_VERSION: u8 = 2;
     /// Server greeting magic bytes: `DERP` plus the UTF-8 key emoji.
@@ -672,39 +686,63 @@ pub mod protocol {
     #[derive(Debug)]
     pub struct FrameDecoder {
         buffer: Vec<u8>,
+        /// Offset of the first undecoded byte in `buffer`. Decoded frames
+        /// advance this instead of shifting the buffer, so a peer that packs
+        /// many tiny frames into one read cannot make decoding quadratic.
+        start: usize,
         max_payload_len: usize,
     }
+
+    /// Capacity an emptied decoder keeps for the next read. A burst of
+    /// coalesced frames (a WebSocket message can carry up to 1 MiB) must not
+    /// leave that whole allocation pinned to an idle connection.
+    const DECODER_RETAINED_CAPACITY: usize = 128 << 10;
 
     impl FrameDecoder {
         /// Create a stream decoder with a maximum accepted payload size.
         pub fn new(max_payload_len: usize) -> Self {
             Self {
                 buffer: Vec::new(),
+                start: 0,
                 max_payload_len,
             }
         }
 
+        /// Change the maximum accepted payload size. Servers use this to drop
+        /// from the pre-auth handshake limit to the (smaller) post-auth frame
+        /// limit; already buffered headers are re-checked against it.
+        pub fn set_max_payload_len(&mut self, max_payload_len: usize) {
+            self.max_payload_len = max_payload_len;
+        }
+
         /// Queue more stream bytes.
         pub fn push(&mut self, bytes: &[u8]) {
+            self.reclaim_decoded();
             self.buffer.extend_from_slice(bytes);
         }
 
         /// Current queued byte count.
         pub fn buffered_len(&self) -> usize {
-            self.buffer.len()
+            self.buffer.len() - self.start
+        }
+
+        /// Drop the already-decoded prefix. Called once per `push`, so the
+        /// bytes moved are only the (at most one frame long) undecoded tail.
+        fn reclaim_decoded(&mut self) {
+            if self.start == 0 {
+                return;
+            }
+            self.buffer.drain(..self.start);
+            self.start = 0;
         }
 
         /// Decode the next complete frame when enough bytes are buffered.
         pub fn next_frame(&mut self) -> Result<Option<Frame>, ProtocolError> {
-            if self.buffer.len() < FRAME_HEADER_LEN {
+            let pending = &self.buffer[self.start..];
+            if pending.len() < FRAME_HEADER_LEN {
                 return Ok(None);
             }
-            let len = u32::from_be_bytes([
-                self.buffer[1],
-                self.buffer[2],
-                self.buffer[3],
-                self.buffer[4],
-            ]) as usize;
+            let len = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]) as usize;
             if len > self.max_payload_len {
                 return Err(ProtocolError::FrameTooLarge {
                     len,
@@ -712,12 +750,17 @@ pub mod protocol {
                 });
             }
             let expected = FRAME_HEADER_LEN + len;
-            if self.buffer.len() < expected {
+            if pending.len() < expected {
                 return Ok(None);
             }
 
-            let (frame, consumed) = decode_frame(&self.buffer[..expected], self.max_payload_len)?;
-            self.buffer.drain(..consumed);
+            let (frame, consumed) = decode_frame(&pending[..expected], self.max_payload_len)?;
+            self.start += consumed;
+            if self.start == self.buffer.len() {
+                self.buffer.clear();
+                self.buffer.shrink_to(DECODER_RETAINED_CAPACITY);
+                self.start = 0;
+            }
             Ok(Some(frame))
         }
     }
@@ -1561,6 +1604,106 @@ pub mod protocol {
                 Err(ProtocolError::FrameTooLarge { len: 9, max: 8 })
             ));
         }
+
+        /// Many tiny frames pushed in one go must decode in linear time. The
+        /// decoder used to shift its whole buffer after every frame, so cost grew
+        /// with buffer length times frame count; a peer can fill a read (up to a
+        /// 1 MiB WebSocket message) with five-byte frames. Four MiB of them takes a
+        /// fraction of a second now and minutes with the shifting decoder, which
+        /// the early exit turns into a prompt failure.
+        #[test]
+        fn stream_decoder_decodes_coalesced_tiny_frames_in_linear_time() {
+            const BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+            let frame = encode_frame(&Frame::KeepAlive).unwrap();
+            let count = (4 << 20) / frame.len();
+            let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+            decoder.push(&frame.repeat(count));
+
+            let started = std::time::Instant::now();
+            let mut decoded = 0;
+            while let Some(frame) = decoder.next_frame().unwrap() {
+                assert_eq!(frame, Frame::KeepAlive);
+                decoded += 1;
+                assert!(
+                    decoded % 4096 != 0 || started.elapsed() < BUDGET,
+                    "decoded only {decoded} of {count} coalesced frames in {BUDGET:?}"
+                );
+            }
+
+            assert_eq!(decoded, count);
+            assert_eq!(decoder.buffered_len(), 0);
+        }
+
+        #[test]
+        fn stream_decoder_keeps_partial_tail_across_pushes_after_decoding() {
+            let ping = encode_frame(&Frame::Ping([1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
+            let health = encode_frame(&Frame::Health("ERR".to_string())).unwrap();
+            let mut decoder = FrameDecoder::new(MAX_INFO_LEN);
+
+            decoder.push(&ping);
+            decoder.push(&health[..4]);
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some(Frame::Ping([1, 2, 3, 4, 5, 6, 7, 8]))
+            );
+            assert_eq!(decoder.buffered_len(), 4);
+
+            decoder.push(&health[4..]);
+            assert_eq!(
+                decoder.next_frame().unwrap(),
+                Some(Frame::Health("ERR".to_string()))
+            );
+            assert_eq!(decoder.next_frame().unwrap(), None);
+            assert_eq!(decoder.buffered_len(), 0);
+        }
+
+        #[test]
+        fn stream_decoder_limit_can_be_tightened_after_the_handshake() {
+            let mut decoder = FrameDecoder::new(MAX_HANDSHAKE_FRAME_LEN);
+            // A SendPacket header announcing more than any client may send.
+            let announced = MAX_CLIENT_FRAME_LEN + 1;
+            let mut header = encode_header(FrameType::SendPacket.code(), announced as u32).to_vec();
+            header.extend_from_slice(&[0; 64]);
+            decoder.push(&header);
+            assert_eq!(decoder.next_frame().unwrap(), None, "waits for the body");
+
+            decoder.set_max_payload_len(MAX_CLIENT_FRAME_LEN);
+            assert!(matches!(
+                decoder.next_frame(),
+                Err(ProtocolError::FrameTooLarge { len, max })
+                    if len == announced && max == MAX_CLIENT_FRAME_LEN
+            ));
+        }
+
+        #[test]
+        fn server_side_frame_limits_fit_every_legitimate_client_frame() {
+            // Go: largest client frame is ForwardPacket = two keys + MaxPacketSize.
+            assert_eq!(MAX_CLIENT_FRAME_LEN, 2 * KEY_LEN + 64 * 1024);
+            for frame in [
+                Frame::SendPacket {
+                    destination: [7; KEY_LEN],
+                    packet: vec![0; MAX_PACKET_SIZE],
+                },
+                Frame::ForwardPacket {
+                    source: [6; KEY_LEN],
+                    destination: [7; KEY_LEN],
+                    packet: vec![0; MAX_PACKET_SIZE],
+                },
+            ] {
+                let encoded = encode_frame(&frame).unwrap();
+                let (decoded, _) = decode_frame(&encoded, MAX_CLIENT_FRAME_LEN).unwrap();
+                assert_eq!(decoded, frame);
+            }
+
+            // The pre-auth limit must still admit a real client-info frame.
+            let client = DerpNodeKeyPair::from_private_key([4; KEY_LEN]).unwrap();
+            let server = DerpNodeKeyPair::from_private_key([5; KEY_LEN]).unwrap();
+            let client_info =
+                encode_client_info_frame(&client, &server.public_key(), &ClientInfo::regular())
+                    .unwrap();
+            decode_frame(&client_info, MAX_HANDSHAKE_FRAME_LEN).unwrap();
+            const { assert!(MAX_HANDSHAKE_FRAME_LEN < MAX_INFO_LEN) };
+        }
     }
 }
 
@@ -1570,28 +1713,79 @@ pub mod protocol {
 /// future `/derp` upgrade handler. It does not perform the DERP HTTP upgrade
 /// or encrypted client-info handshake; callers are expected to authenticate and
 /// parse a client key before registering a session.
+///
+/// # Resource bounds
+///
+/// Everything an authenticated peer can drive is bounded, unlike Go's
+/// `derpserver` (an alternating-sender pattern grows `dupClientSet.sendHistory`
+/// without limit there): at most [`MAX_SESSIONS_PER_KEY`] sessions per key
+/// (the oldest is closed on overflow), duplicate health is reported only on a
+/// state change, `PeerGone` bookkeeping is kept only between connected keys
+/// (at most [`MAX_PEER_PATHS_PER_SOURCE`] per source) and is dropped with them,
+/// and no relay operation ever waits on a session's full queue, so a peer
+/// that stops reading loses its own frames instead of stalling others.
 pub mod native {
     use super::protocol::{Frame, KEY_LEN, PeerGoneReason};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use tokio::sync::{RwLock, mpsc};
+    use tokio::sync::{RwLock, mpsc, watch};
 
     const DEFAULT_SESSION_QUEUE: usize = 256;
     /// Health problem sent to clients while the same node key has more than
     /// one live connection to this native DERP relay.
     pub const DUPLICATE_CONNECTION_HEALTH: &str = "duplicate DERP connection for node key";
 
+    /// Most simultaneous sessions the relay keeps for one node key. When a
+    /// connection arrives past this, the oldest session for the key is closed
+    /// to make room, so a reconnect storm still lands on the newest connection.
+    ///
+    /// Go's `derpserver` has no such cap: every duplicate connection stays in
+    /// the key's `dupClientSet` until it disconnects. In practice a duplicate
+    /// is a client that reconnected before the server noticed the old socket
+    /// died, or a cloned key; Go's own `TestServerDupClients` models three.
+    /// Both implementations route to the most recent connection
+    /// (`registerClient` makes the newcomer `activeClient`/`dup.last`), so the
+    /// oldest session is the least useful one and is the one dropped. Four is
+    /// the current connection plus three not-yet-reaped predecessors; an
+    /// uncapped set lets one authenticated key grow the registry (and, before
+    /// the health fan-out was made transition-only, the per-connect work)
+    /// without bound.
+    pub const MAX_SESSIONS_PER_KEY: usize = 4;
+    const _: () = assert!(
+        MAX_SESSIONS_PER_KEY >= 2,
+        "a cap below two could never report a duplicate connection"
+    );
+
+    /// Most destinations the relay remembers per source key for `PeerGone`
+    /// notifications (see `RelayState::reverse_paths`). A path is only ever
+    /// recorded between two currently connected keys and is dropped when
+    /// either side's last session goes away, so this can only bind a source
+    /// that has relayed to more than 65 536 distinct live peers at once; Go
+    /// keeps the equivalent `sawSrc` set per client without a cap. Past the
+    /// cap the source still routes normally, its extra peers just aren't told
+    /// when it disconnects.
+    pub const MAX_PEER_PATHS_PER_SOURCE: usize = 1 << 16;
+
     /// In-process DERP relay registry.
     #[derive(Clone, Debug)]
     pub struct NativeDerpRelay {
         inner: Arc<RwLock<RelayState>>,
         session_queue: usize,
+        max_peer_paths_per_source: usize,
     }
 
     #[derive(Debug, Default)]
     struct RelayState {
         sessions: HashMap<[u8; KEY_LEN], ClientSessions>,
+        /// `reverse_paths[src]` is the set of connected destinations that
+        /// received a packet from `src` through this relay; they are sent
+        /// `PeerGone` when `src` goes away. Entries exist only for connected
+        /// keys on both sides and are removed with them.
         reverse_paths: HashMap<[u8; KEY_LEN], HashSet<[u8; KEY_LEN]>>,
+        /// Inverse of `reverse_paths` (`paths_to[dst]` = sources that sent to
+        /// `dst`), so forgetting a disconnected key touches only its own
+        /// paths instead of scanning every source.
+        paths_to: HashMap<[u8; KEY_LEN], HashSet<[u8; KEY_LEN]>>,
         next_session_id: u64,
     }
 
@@ -1605,6 +1799,10 @@ pub mod native {
     struct SessionEntry {
         id: u64,
         tx: mpsc::Sender<Frame>,
+        /// Dropping the entry (eviction or `disconnect`) drops this sender,
+        /// which makes the session's `recv` return `None` immediately instead
+        /// of after its queue drains: a closed session may be unable to drain.
+        _close: watch::Sender<()>,
     }
 
     /// A registered native DERP client session.
@@ -1614,6 +1812,7 @@ pub mod native {
         key: [u8; KEY_LEN],
         session_id: u64,
         rx: mpsc::Receiver<Frame>,
+        closed: watch::Receiver<()>,
     }
 
     /// Native relay routing errors.
@@ -1625,6 +1824,35 @@ pub mod native {
         /// A destination session existed but could not receive its frame.
         #[error("DERP destination session closed")]
         DestinationClosed,
+        /// The frame is reserved for DERP mesh peers, which this relay does
+        /// not have; Go answers a regular client's `ClosePeer`/`ForwardPacket`
+        /// with "insufficient permissions" and hangs up on it.
+        #[error("DERP frame requires mesh permissions")]
+        InsufficientPermissions,
+    }
+
+    /// Outcome of handing a frame to a session's bounded queue.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Offer {
+        Queued,
+        /// The session is not draining its queue; the frame was dropped.
+        QueueFull,
+        /// The session has already shut down.
+        Closed,
+    }
+
+    /// Queue `frame` for a session without ever waiting on it.
+    ///
+    /// Go never blocks a sender on a slow receiver (`sendPkt` drops, and a
+    /// full pong channel ignores pings). Waiting here would let one peer that
+    /// stops reading stall every connection that sends to it, and a session
+    /// waiting on its own full queue would wedge its own reader.
+    fn offer(tx: &mpsc::Sender<Frame>, frame: Frame) -> Offer {
+        match tx.try_send(frame) {
+            Ok(()) => Offer::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => Offer::QueueFull,
+            Err(mpsc::error::TrySendError::Closed(_)) => Offer::Closed,
+        }
     }
 
     impl Default for NativeDerpRelay {
@@ -1644,33 +1872,48 @@ pub mod native {
             Self {
                 inner: Arc::new(RwLock::new(RelayState::default())),
                 session_queue: session_queue.max(1),
+                max_peer_paths_per_source: MAX_PEER_PATHS_PER_SOURCE,
             }
         }
 
         /// Register a client session for `key`.
+        ///
+        /// At most [`MAX_SESSIONS_PER_KEY`] sessions stay registered per key:
+        /// the oldest is closed when a newer one pushes past the cap, and its
+        /// `recv` returns `None` so the connection driver winds it down.
         pub async fn connect(&self, key: [u8; KEY_LEN]) -> NativeDerpSession {
             let (tx, rx) = mpsc::channel(self.session_queue);
-            let (session_id, duplicate_senders) = {
-                let mut state = self.inner.write().await;
-                state.next_session_id = state.next_session_id.wrapping_add(1).max(1);
-                let session_id = state.next_session_id;
-                let sessions = state.sessions.entry(key).or_default();
-                sessions.sessions.push(SessionEntry { id: session_id, tx });
-                sessions.active_session_id = session_id;
-                let duplicate_senders = if sessions.len() > 1 {
-                    sessions.senders()
-                } else {
-                    Vec::new()
-                };
-                (session_id, duplicate_senders)
-            };
-            send_health_to(duplicate_senders, DUPLICATE_CONNECTION_HEALTH.to_string()).await;
+            let (close, closed) = watch::channel(());
+            let mut state = self.inner.write().await;
+            state.next_session_id = state.next_session_id.wrapping_add(1).max(1);
+            let session_id = state.next_session_id;
+            let sessions = state.sessions.entry(key).or_default();
+            let live_before = sessions.len();
+            sessions.sessions.push(SessionEntry {
+                id: session_id,
+                tx: tx.clone(),
+                _close: close,
+            });
+            sessions.active_session_id = session_id;
+            sessions.evict_oldest_beyond(MAX_SESSIONS_PER_KEY);
+            // Report the duplicate state only when it changes. The first
+            // duplicate tells every session (the original one learns it now);
+            // from then on the others already know, so only the newcomer is
+            // told. Fanning out to every duplicate on every connect made a
+            // storm of same-key connects quadratic.
+            match live_before {
+                0 => {}
+                1 => send_health_to(&sessions.senders(), DUPLICATE_CONNECTION_HEALTH),
+                _ => send_health_to(&[tx], DUPLICATE_CONNECTION_HEALTH),
+            }
+            drop(state);
 
             NativeDerpSession {
                 relay: self.clone(),
                 key,
                 session_id,
                 rx,
+                closed,
             }
         }
 
@@ -1699,12 +1942,11 @@ pub mod native {
                     return;
                 };
 
-                let removed = match session_id {
-                    Some(session_id) => sessions.remove(session_id),
-                    None => {
-                        sessions.sessions.clear();
-                        true
-                    }
+                let removed = if let Some(session_id) = session_id {
+                    sessions.remove(session_id)
+                } else {
+                    sessions.sessions.clear();
+                    true
                 };
                 if !removed {
                     return;
@@ -1712,10 +1954,7 @@ pub mod native {
 
                 if sessions.is_empty() {
                     state.sessions.remove(key);
-                    let watchers = state.reverse_paths.remove(key).unwrap_or_default();
-                    for peers in state.reverse_paths.values_mut() {
-                        peers.remove(key);
-                    }
+                    let watchers = state.forget_key(key);
                     let frames = watchers
                         .iter()
                         .filter_map(|watcher| {
@@ -1735,16 +1974,14 @@ pub mod native {
 
             match result {
                 DisconnectResult::None => {}
-                DisconnectResult::ClearDuplicate(senders) => {
-                    send_health_to(senders, String::new()).await;
-                }
+                DisconnectResult::ClearDuplicate(senders) => send_health_to(&senders, ""),
                 DisconnectResult::PeerGone(senders) => {
                     let gone = Frame::PeerGone {
                         peer: *key,
                         reason: PeerGoneReason::Disconnected,
                     };
                     for tx in senders {
-                        let _ = tx.send(gone.clone()).await;
+                        offer(&tx, gone.clone());
                     }
                 }
             }
@@ -1764,7 +2001,10 @@ pub mod native {
         /// Broadcast a server-originated control frame to all active sessions.
         ///
         /// This is used by the native runtime for connection-level DERP
-        /// advisories such as health changes and restart notices.
+        /// advisories such as health changes and restart notices. The count is
+        /// of sessions whose queue accepted the frame; a session that has
+        /// stopped reading is skipped rather than waited on, so a stuck client
+        /// cannot hold up a shutdown announcement.
         pub async fn broadcast_frame(&self, frame: Frame) -> usize {
             let senders = self
                 .inner
@@ -1774,13 +2014,10 @@ pub mod native {
                 .values()
                 .flat_map(ClientSessions::senders)
                 .collect::<Vec<_>>();
-            let mut delivered = 0;
-            for tx in senders {
-                if tx.send(frame.clone()).await.is_ok() {
-                    delivered += 1;
-                }
-            }
-            delivered
+            senders
+                .iter()
+                .filter(|tx| offer(tx, frame.clone()) == Offer::Queued)
+                .count()
         }
 
         async fn handle_from(
@@ -1794,27 +2031,22 @@ pub mod native {
                     destination,
                     packet,
                 } => {
-                    self.route_packet(source, Some(session_id), destination, packet)
+                    self.route_packet(source, session_id, destination, packet)
                         .await
                 }
-                Frame::ForwardPacket {
-                    source: forwarded_source,
-                    destination,
-                    packet,
-                } => {
-                    let source_session_id = (forwarded_source == source).then_some(session_id);
-                    self.route_packet(forwarded_source, source_session_id, destination, packet)
+                // Mesh-only frames. A regular client could otherwise spoof the
+                // source of a relayed packet (`ForwardPacket`) or hang up any
+                // other client by key (`ClosePeer`); Go requires the mesh key
+                // and disconnects clients that send them without it.
+                Frame::ForwardPacket { .. } | Frame::ClosePeer { .. } => {
+                    Err(NativeDerpRelayError::InsufficientPermissions)
+                }
+                Frame::Ping(payload) => {
+                    self.send_to_session(source, session_id, Frame::Pong(payload))
                         .await
                 }
-                Frame::Ping(payload) => self
-                    .send_to_session(source, session_id, Frame::Pong(payload))
-                    .await
-                    .map(|_| ()),
-                Frame::ClosePeer { peer } => {
-                    self.disconnect(&peer).await;
-                    Ok(())
-                }
-                Frame::KeepAlive | Frame::NotePreferred(_) | Frame::Pong(_) => Ok(()),
+                // KeepAlive, NotePreferred, Pong and everything else a client
+                // may send carry nothing the relay acts on.
                 _ => Ok(()),
             }
         }
@@ -1822,7 +2054,7 @@ pub mod native {
         async fn route_packet(
             &self,
             source: [u8; KEY_LEN],
-            source_session_id: Option<u64>,
+            source_session_id: u64,
             destination: [u8; KEY_LEN],
             packet: Vec<u8>,
         ) -> Result<(), NativeDerpRelayError> {
@@ -1831,51 +2063,43 @@ pub mod native {
                 let Some(source_sessions) = state.sessions.get_mut(&source) else {
                     return Err(NativeDerpRelayError::SourceNotRegistered);
                 };
-                let source_tx = match source_session_id {
-                    Some(source_session_id) => {
-                        if !source_sessions.contains(source_session_id) {
-                            return Err(NativeDerpRelayError::SourceNotRegistered);
-                        }
-                        source_sessions.active_session_id = source_session_id;
-                        source_sessions.sender(source_session_id)
-                    }
-                    None => source_sessions.active_sender(),
-                };
+                if !source_sessions.contains(source_session_id) {
+                    return Err(NativeDerpRelayError::SourceNotRegistered);
+                }
+                source_sessions.active_session_id = source_session_id;
+                let source_tx = source_sessions.sender(source_session_id);
                 let dest_tx = state
                     .sessions
                     .get(&destination)
                     .and_then(ClientSessions::active_sender);
                 if dest_tx.is_some() {
-                    state
-                        .reverse_paths
-                        .entry(source)
-                        .or_default()
-                        .insert(destination);
+                    state.record_path(source, destination, self.max_peer_paths_per_source);
                 }
                 (dest_tx, source_tx)
             };
             let Some(dest_tx) = dest_tx else {
-                return self.send_peer_gone_not_here(source_tx, destination).await;
+                return Self::send_peer_gone_not_here(source_tx, destination);
             };
 
-            dest_tx
-                .send(Frame::RecvPacket { source, packet })
-                .await
-                .map_err(|_| NativeDerpRelayError::DestinationClosed)
+            // A full or closing destination drops the packet (Go: queue-tail
+            // and gone-disconnected drops); it is never the sender's error.
+            offer(&dest_tx, Frame::RecvPacket { source, packet });
+            Ok(())
         }
 
-        async fn send_peer_gone_not_here(
-            &self,
+        fn send_peer_gone_not_here(
             source_tx: Option<mpsc::Sender<Frame>>,
             destination: [u8; KEY_LEN],
         ) -> Result<(), NativeDerpRelayError> {
             let tx = source_tx.ok_or(NativeDerpRelayError::SourceNotRegistered)?;
-            tx.send(Frame::PeerGone {
+            let gone = Frame::PeerGone {
                 peer: destination,
                 reason: PeerGoneReason::NotHere,
-            })
-            .await
-            .map_err(|_| NativeDerpRelayError::DestinationClosed)
+            };
+            match offer(&tx, gone) {
+                Offer::Closed => Err(NativeDerpRelayError::DestinationClosed),
+                Offer::Queued | Offer::QueueFull => Ok(()),
+            }
         }
 
         async fn send_to_session(
@@ -1892,9 +2116,61 @@ pub mod native {
                 .get(&key)
                 .and_then(|sessions| sessions.sender(session_id))
                 .ok_or(NativeDerpRelayError::SourceNotRegistered)?;
-            tx.send(frame)
-                .await
-                .map_err(|_| NativeDerpRelayError::DestinationClosed)
+            // The reply goes to the session that is asking: its own task is
+            // the only reader of this queue, so waiting for room here would
+            // deadlock it. A full queue means the client is pinging faster
+            // than it reads; Go ignores such pings the same way.
+            match offer(&tx, frame) {
+                Offer::Closed => Err(NativeDerpRelayError::DestinationClosed),
+                Offer::Queued | Offer::QueueFull => Ok(()),
+            }
+        }
+    }
+
+    impl RelayState {
+        /// Remember that `source` has relayed a packet to `destination`, unless
+        /// `source` already tracks `max_per_source` destinations. `max_per_source`
+        /// must be at least one so an empty set is never left behind.
+        fn record_path(
+            &mut self,
+            source: [u8; KEY_LEN],
+            destination: [u8; KEY_LEN],
+            max_per_source: usize,
+        ) {
+            if source == destination {
+                return;
+            }
+            let destinations = self.reverse_paths.entry(source).or_default();
+            if destinations.len() >= max_per_source && !destinations.contains(&destination) {
+                return;
+            }
+            if destinations.insert(destination) {
+                self.paths_to.entry(destination).or_default().insert(source);
+            }
+        }
+
+        /// Drop every path that starts or ends at `key`, deleting sets that
+        /// become empty. Returns the destinations `key` had relayed to, which
+        /// are the peers to tell that `key` is gone.
+        fn forget_key(&mut self, key: &[u8; KEY_LEN]) -> HashSet<[u8; KEY_LEN]> {
+            let destinations = self.reverse_paths.remove(key).unwrap_or_default();
+            for destination in &destinations {
+                if let Some(sources) = self.paths_to.get_mut(destination) {
+                    sources.remove(key);
+                    if sources.is_empty() {
+                        self.paths_to.remove(destination);
+                    }
+                }
+            }
+            for source in self.paths_to.remove(key).unwrap_or_default() {
+                if let Some(destinations) = self.reverse_paths.get_mut(&source) {
+                    destinations.remove(key);
+                    if destinations.is_empty() {
+                        self.reverse_paths.remove(&source);
+                    }
+                }
+            }
+            destinations
         }
     }
 
@@ -1933,6 +2209,14 @@ pub mod native {
                 .collect()
         }
 
+        /// Close the oldest sessions until at most `max` remain. Sessions are
+        /// kept in connect order and the newest is the active one, so this
+        /// never closes the session that is receiving traffic.
+        fn evict_oldest_beyond(&mut self, max: usize) {
+            let excess = self.sessions.len().saturating_sub(max);
+            self.sessions.drain(..excess);
+        }
+
         fn remove(&mut self, session_id: u64) -> bool {
             let previous_len = self.sessions.len();
             self.sessions.retain(|session| session.id != session_id);
@@ -1944,9 +2228,11 @@ pub mod native {
         }
     }
 
-    async fn send_health_to(senders: Vec<mpsc::Sender<Frame>>, problem: String) {
+    /// Tell each session `problem` (an empty string clears it). Dropped, not
+    /// waited on, for a session that is not reading.
+    fn send_health_to(senders: &[mpsc::Sender<Frame>], problem: &str) {
         for tx in senders {
-            let _ = tx.send(Frame::Health(problem.clone())).await;
+            offer(tx, Frame::Health(problem.to_string()));
         }
     }
 
@@ -1968,9 +2254,16 @@ pub mod native {
                 .await
         }
 
-        /// Receive the next frame that should be written to this client.
+        /// Receive the next frame that should be written to this client, or
+        /// `None` once the session has been closed by the relay (evicted past
+        /// [`MAX_SESSIONS_PER_KEY`] or disconnected), even if frames are
+        /// still queued.
         pub async fn recv(&mut self) -> Option<Frame> {
-            self.rx.recv().await
+            tokio::select! {
+                biased;
+                _ = self.closed.changed() => None,
+                frame = self.rx.recv() => frame,
+            }
         }
     }
 
@@ -2162,6 +2455,453 @@ pub mod native {
 
             relay.disconnect(&alice_key).await;
             assert_eq!(relay.session_count().await, 1);
+        }
+
+        /// Everything the relay keeps per key, for asserting that churn and
+        /// floods leave bounded, fully cleaned-up state behind.
+        #[derive(Debug, PartialEq, Eq)]
+        struct StateSizes {
+            keys: usize,
+            sessions: usize,
+            path_sources: usize,
+            paths: usize,
+            inverse_paths: usize,
+        }
+
+        async fn state_sizes(relay: &NativeDerpRelay) -> StateSizes {
+            let state = relay.inner.read().await;
+            StateSizes {
+                keys: state.sessions.len(),
+                sessions: state.sessions.values().map(ClientSessions::len).sum(),
+                path_sources: state.reverse_paths.len(),
+                paths: state.reverse_paths.values().map(HashSet::len).sum(),
+                inverse_paths: state.paths_to.values().map(HashSet::len).sum(),
+            }
+        }
+
+        /// Nothing may be queued for `session` right now.
+        async fn assert_idle(session: &mut NativeDerpSession) {
+            let pending = tokio::time::timeout(Duration::from_millis(20), session.recv()).await;
+            assert!(pending.is_err(), "unexpected queued frame: {pending:?}");
+        }
+
+        fn send_to(destination: [u8; KEY_LEN]) -> Frame {
+            Frame::SendPacket {
+                destination,
+                packet: b"wireguard".to_vec(),
+            }
+        }
+
+        #[tokio::test]
+        async fn native_relay_caps_sessions_per_key_under_a_connect_flood() {
+            let relay = NativeDerpRelay::new();
+            let key = [1u8; KEY_LEN];
+
+            // The caller keeps every handle: the relay itself must bound its
+            // registry rather than rely on connections going away. (Uncapped,
+            // each connect also queued a health frame on every earlier
+            // duplicate and blocked once those 256-deep queues filled.)
+            let mut sessions = Vec::new();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                for _ in 0..10_000 {
+                    sessions.push(relay.connect(key).await);
+                }
+            })
+            .await
+            .expect("a same-key connect flood must not stall the relay");
+
+            assert_eq!(relay.session_count().await, MAX_SESSIONS_PER_KEY);
+            assert_eq!(
+                state_sizes(&relay).await,
+                StateSizes {
+                    keys: 1,
+                    sessions: MAX_SESSIONS_PER_KEY,
+                    path_sources: 0,
+                    paths: 0,
+                    inverse_paths: 0,
+                }
+            );
+            let evicted = sessions.len() - MAX_SESSIONS_PER_KEY;
+            for session in &mut sessions[..evicted] {
+                assert_eq!(session.recv().await, None, "evicted session stays closed");
+            }
+            let newest = sessions.last_mut().unwrap();
+            assert_eq!(
+                recv_frame(newest).await,
+                Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_evicts_the_oldest_duplicate_and_routes_to_the_newest() {
+            let relay = NativeDerpRelay::new();
+            let key = [1u8; KEY_LEN];
+            let peer_key = [2u8; KEY_LEN];
+            let mut sessions = Vec::new();
+            for _ in 0..=MAX_SESSIONS_PER_KEY {
+                sessions.push(relay.connect(key).await);
+            }
+            let peer = relay.connect(peer_key).await;
+
+            // The oldest session was closed to make room, even though it still
+            // had its duplicate-health frame queued.
+            let mut oldest = sessions.remove(0);
+            assert_eq!(oldest.recv().await, None);
+            assert_eq!(relay.session_count().await, MAX_SESSIONS_PER_KEY + 1);
+
+            // Its driver's own cleanup is a no-op: no health "clear" reaches the
+            // survivors and the survivors stay registered.
+            relay.disconnect_session(&key, oldest.session_id()).await;
+            assert_eq!(relay.session_count().await, MAX_SESSIONS_PER_KEY + 1);
+            for session in &mut sessions {
+                assert_eq!(
+                    recv_frame(session).await,
+                    Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string())
+                );
+                assert_idle(session).await;
+            }
+
+            // Traffic for the key goes to the most recent connection.
+            peer.handle_frame(send_to(key)).await.unwrap();
+            let newest = sessions.last_mut().unwrap();
+            assert_eq!(
+                recv_frame(newest).await,
+                Frame::RecvPacket {
+                    source: peer_key,
+                    packet: b"wireguard".to_vec(),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_session_closes_immediately_when_disconnected() {
+            let relay = NativeDerpRelay::new();
+            let key = [1u8; KEY_LEN];
+            let mut first = relay.connect(key).await;
+            let mut second = relay.connect(key).await;
+            // Both sessions have a health frame queued; closing wins over it.
+            relay.disconnect(&key).await;
+            assert_eq!(first.recv().await, None);
+            assert_eq!(second.recv().await, None);
+            assert_eq!(relay.session_count().await, 0);
+        }
+
+        #[tokio::test]
+        async fn native_relay_duplicate_health_fanout_is_transition_only() {
+            let relay = NativeDerpRelay::new();
+            let key = [1u8; KEY_LEN];
+            let problem = Frame::Health(DUPLICATE_CONNECTION_HEALTH.to_string());
+
+            let mut first = relay.connect(key).await;
+            assert_idle(&mut first).await;
+            let mut second = relay.connect(key).await;
+            assert_eq!(recv_frame(&mut first).await, problem);
+            assert_eq!(recv_frame(&mut second).await, problem);
+
+            // Already flagged: a third connection tells only itself.
+            let mut third = relay.connect(key).await;
+            assert_eq!(recv_frame(&mut third).await, problem);
+            assert_idle(&mut first).await;
+            assert_idle(&mut second).await;
+
+            // Dropping back to two is still a duplicate, so nothing is sent;
+            // dropping to one clears it for the survivor only.
+            relay.disconnect_session(&key, third.session_id()).await;
+            assert_idle(&mut first).await;
+            relay.disconnect_session(&key, second.session_id()).await;
+            assert_eq!(recv_frame(&mut first).await, Frame::Health(String::new()));
+        }
+
+        /// The Go `sendHistory` pattern: duplicate connections for one key take
+        /// turns sending, which makes `dupClientSet.sendHistory` grow by one
+        /// entry per frame there. The relay keeps no per-frame history, so
+        /// alternating senders must leave only per-key, per-peer state behind.
+        #[tokio::test]
+        async fn native_relay_alternating_duplicate_senders_keep_state_bounded() {
+            let relay = NativeDerpRelay::new();
+            let key = [1u8; KEY_LEN];
+            let peer_key = [2u8; KEY_LEN];
+            let senders = [
+                relay.connect(key).await,
+                relay.connect(key).await,
+                relay.connect(key).await,
+            ];
+            let mut peer = relay.connect(peer_key).await;
+            let drain = tokio::spawn(async move { while peer.recv().await.is_some() {} });
+
+            tokio::time::timeout(Duration::from_secs(30), async {
+                for turn in 0..50_000 {
+                    senders[turn % senders.len()]
+                        .handle_frame(send_to(peer_key))
+                        .await
+                        .unwrap();
+                }
+            })
+            .await
+            .expect("alternating senders must never stall the relay");
+
+            assert_eq!(
+                state_sizes(&relay).await,
+                StateSizes {
+                    keys: 2,
+                    sessions: senders.len() + 1,
+                    path_sources: 1,
+                    paths: 1,
+                    inverse_paths: 1,
+                }
+            );
+            drain.abort();
+        }
+
+        #[tokio::test]
+        async fn native_relay_records_no_path_for_absent_destinations() {
+            let relay = NativeDerpRelay::new();
+            let mut source = relay.connect([1u8; KEY_LEN]).await;
+
+            for index in 0..10_000u32 {
+                let mut missing = [9u8; KEY_LEN];
+                missing[..4].copy_from_slice(&index.to_be_bytes());
+                source.handle_frame(send_to(missing)).await.unwrap();
+                // Keep the source's own queue from filling with NotHere replies.
+                while source.rx.try_recv().is_ok() {}
+            }
+
+            assert_eq!(
+                state_sizes(&relay).await,
+                StateSizes {
+                    keys: 1,
+                    sessions: 1,
+                    path_sources: 0,
+                    paths: 0,
+                    inverse_paths: 0,
+                }
+            );
+            assert_idle(&mut source).await;
+        }
+
+        #[tokio::test]
+        async fn native_relay_forgets_paths_when_either_end_disconnects() {
+            let relay = NativeDerpRelay::new();
+            let hub_key = [1u8; KEY_LEN];
+            let mut hub = relay.connect(hub_key).await;
+
+            // A hub that talks to a stream of short-lived peers must not
+            // accumulate empty path sets for them.
+            for index in 0..500u32 {
+                let mut peer_key = [3u8; KEY_LEN];
+                peer_key[..4].copy_from_slice(&index.to_be_bytes());
+                let mut peer = relay.connect(peer_key).await;
+                hub.handle_frame(send_to(peer_key)).await.unwrap();
+                peer.handle_frame(send_to(hub_key)).await.unwrap();
+                relay.disconnect(&peer_key).await;
+                assert_eq!(peer.recv().await, None);
+                // Drain the hub's packets and PeerGone notices.
+                while hub.rx.try_recv().is_ok() {}
+            }
+            assert_eq!(
+                state_sizes(&relay).await,
+                StateSizes {
+                    keys: 1,
+                    sessions: 1,
+                    path_sources: 0,
+                    paths: 0,
+                    inverse_paths: 0,
+                }
+            );
+
+            // Many sources into one destination, then the destination leaves.
+            let sink_key = [2u8; KEY_LEN];
+            let sink = relay.connect(sink_key).await;
+            let mut sources = Vec::new();
+            for index in 0..100u32 {
+                let mut source_key = [4u8; KEY_LEN];
+                source_key[..4].copy_from_slice(&index.to_be_bytes());
+                let source = relay.connect(source_key).await;
+                source.handle_frame(send_to(sink_key)).await.unwrap();
+                sources.push(source);
+            }
+            assert_eq!(state_sizes(&relay).await.paths, sources.len());
+            relay.disconnect(&sink_key).await;
+            drop(sink);
+            let sizes = state_sizes(&relay).await;
+            assert_eq!(
+                (sizes.path_sources, sizes.paths, sizes.inverse_paths),
+                (0, 0, 0)
+            );
+            drop(hub);
+        }
+
+        #[tokio::test]
+        async fn native_relay_caps_remembered_paths_per_source() {
+            const CAP: usize = 8;
+            const PEERS: usize = 100;
+            let mut relay = NativeDerpRelay::new();
+            relay.max_peer_paths_per_source = CAP;
+            let source_key = [1u8; KEY_LEN];
+            let source = relay.connect(source_key).await;
+
+            let mut peers = Vec::new();
+            for index in 0..PEERS {
+                let mut peer_key = [2u8; KEY_LEN];
+                peer_key[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                peers.push((peer_key, relay.connect(peer_key).await));
+            }
+            for (peer_key, _) in &peers {
+                source.handle_frame(send_to(*peer_key)).await.unwrap();
+            }
+
+            // Routing is unaffected by the cap; only the bookkeeping is bounded.
+            for (_, peer) in &mut peers {
+                assert!(matches!(
+                    recv_frame(peer).await,
+                    Frame::RecvPacket { source, .. } if source == source_key
+                ));
+            }
+            let sizes = state_sizes(&relay).await;
+            assert_eq!(
+                (sizes.path_sources, sizes.paths, sizes.inverse_paths),
+                (1, CAP, CAP)
+            );
+
+            // The first CAP peers are the tracked ones and hear about the
+            // disconnect; the rest were never recorded.
+            relay.disconnect(&source_key).await;
+            for (_, peer) in &mut peers[..CAP] {
+                assert_eq!(
+                    recv_frame(peer).await,
+                    Frame::PeerGone {
+                        peer: source_key,
+                        reason: PeerGoneReason::Disconnected,
+                    }
+                );
+            }
+            assert_idle(&mut peers[CAP].1).await;
+            assert_eq!(
+                state_sizes(&relay).await,
+                StateSizes {
+                    keys: PEERS,
+                    sessions: PEERS,
+                    path_sources: 0,
+                    paths: 0,
+                    inverse_paths: 0,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn native_relay_full_destination_queue_drops_packets_instead_of_blocking() {
+            let relay = NativeDerpRelay::with_session_queue(2);
+            let sender_key = [1u8; KEY_LEN];
+            let stuck_key = [2u8; KEY_LEN];
+            let sender = relay.connect(sender_key).await;
+            let mut stuck = relay.connect(stuck_key).await;
+
+            // `stuck` never reads. The sender must keep going regardless.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..100 {
+                    sender.handle_frame(send_to(stuck_key)).await.unwrap();
+                }
+            })
+            .await
+            .expect("a full destination queue must drop packets, not stall the sender");
+
+            // Exactly the queue's worth was delivered; the rest were dropped.
+            for _ in 0..2 {
+                assert!(matches!(
+                    recv_frame(&mut stuck).await,
+                    Frame::RecvPacket { .. }
+                ));
+            }
+            assert_idle(&mut stuck).await;
+        }
+
+        #[tokio::test]
+        async fn native_relay_full_own_queue_does_not_wedge_replies() {
+            let relay = NativeDerpRelay::with_session_queue(2);
+            let session = relay.connect([1u8; KEY_LEN]).await;
+
+            // A client that pings and probes absent peers without ever reading
+            // fills its own queue; the task that would drain it is the one
+            // handling these frames, so waiting for room would hang it forever.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                for _ in 0..100 {
+                    session.handle_frame(Frame::Ping([7; 8])).await.unwrap();
+                    session.handle_frame(send_to([9u8; KEY_LEN])).await.unwrap();
+                }
+            })
+            .await
+            .expect("replies to a client that is not reading must be dropped, not awaited");
+        }
+
+        #[tokio::test]
+        async fn native_relay_disconnect_and_broadcast_do_not_wait_on_a_stuck_session() {
+            let relay = NativeDerpRelay::with_session_queue(1);
+            let source_key = [1u8; KEY_LEN];
+            let stuck_key = [2u8; KEY_LEN];
+            let source = relay.connect(source_key).await;
+            let mut stuck = relay.connect(stuck_key).await;
+            let mut healthy = relay.connect([3u8; KEY_LEN]).await;
+
+            // The source reaches `stuck`, filling its one-slot queue, so the
+            // source's disconnect has a PeerGone to deliver into a full queue.
+            source.handle_frame(send_to(stuck_key)).await.unwrap();
+
+            let health = Frame::Health("restart soon".to_string());
+            let delivered = tokio::time::timeout(
+                Duration::from_secs(5),
+                relay.broadcast_frame(health.clone()),
+            )
+            .await
+            .expect("broadcast must not wait on a session that is not reading");
+            assert_eq!(delivered, 2, "the stuck session's full queue is skipped");
+            assert_eq!(recv_frame(&mut healthy).await, health);
+
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                relay.disconnect_session(&source_key, source.session_id()),
+            )
+            .await
+            .expect("disconnect must not wait on a watcher that is not reading");
+            assert_eq!(relay.session_count().await, 2);
+            assert!(matches!(
+                recv_frame(&mut stuck).await,
+                Frame::RecvPacket { .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn native_relay_rejects_mesh_only_frames_from_regular_clients() {
+            let relay = NativeDerpRelay::new();
+            let attacker_key = [1u8; KEY_LEN];
+            let victim_key = [2u8; KEY_LEN];
+            let bob_key = [3u8; KEY_LEN];
+            let attacker = relay.connect(attacker_key).await;
+            let mut victim = relay.connect(victim_key).await;
+            let mut bob = relay.connect(bob_key).await;
+
+            // ClosePeer would hang up any other client by key.
+            assert!(matches!(
+                attacker
+                    .handle_frame(Frame::ClosePeer { peer: victim_key })
+                    .await,
+                Err(NativeDerpRelayError::InsufficientPermissions)
+            ));
+            assert_eq!(relay.session_count().await, 3);
+            assert_idle(&mut victim).await;
+
+            // ForwardPacket would let the attacker choose the source key bob sees.
+            assert!(matches!(
+                attacker
+                    .handle_frame(Frame::ForwardPacket {
+                        source: victim_key,
+                        destination: bob_key,
+                        packet: b"spoofed".to_vec(),
+                    })
+                    .await,
+                Err(NativeDerpRelayError::InsufficientPermissions)
+            ));
+            assert_idle(&mut bob).await;
+            assert_eq!(state_sizes(&relay).await.paths, 0);
         }
     }
 }

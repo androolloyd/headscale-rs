@@ -33,11 +33,14 @@ use hyper_util::client::legacy::connect::{Connect, HttpConnector};
 use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
 
+use limits::{MAX_RESPONSE_BODY, body_too_large};
+
 mod account;
 pub use account::Key;
 pub use account::{Account, AccountBuilder, ExternalAccountKey};
 #[cfg(feature = "go-native-client")]
 mod go_native;
+mod limits;
 #[cfg(all(feature = "go-native-client", feature = "hyper-rustls"))]
 #[doc(hidden)]
 pub use go_native::transport::go_http_get;
@@ -516,14 +519,23 @@ where
     B::Error: Into<Box<dyn StdError + Send + Sync + 'static>>,
 {
     async fn into_bytes(&mut self) -> Result<Bytes, Box<dyn StdError + Send + Sync + 'static>> {
-        let Some(body) = self.inner.take() else {
+        let Some(mut body) = self.inner.take() else {
             return Ok(Bytes::new());
         };
 
-        match body.collect().await {
-            Ok(body) => Ok(body.to_bytes()),
-            Err(e) => Err(e.into()),
+        // Stream frame by frame and give up as soon as the bound is passed,
+        // instead of collecting the whole body and measuring it afterwards.
+        let mut output = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(Into::into)?;
+            if let Ok(mut data) = frame.into_data() {
+                if data.remaining() > MAX_RESPONSE_BODY - output.len() {
+                    return Err(body_too_large(MAX_RESPONSE_BODY));
+                }
+                extend_limited(&mut output, &mut data, MAX_RESPONSE_BODY);
+            }
         }
+        Ok(Bytes::from(output))
     }
 
     #[cfg(feature = "go-native-client")]
@@ -539,8 +551,7 @@ where
             match body.frame().await {
                 Some(Ok(frame)) => {
                     if let Ok(mut data) = frame.into_data() {
-                        let take = data.remaining().min(limit - output.len());
-                        output.extend_from_slice(&data.copy_to_bytes(take));
+                        extend_limited(&mut output, &mut data, limit);
                     }
                 }
                 Some(Err(error)) => return Err(error.into()),
@@ -567,11 +578,20 @@ where
             if let Ok(mut data) = frame.into_data() {
                 while data.has_remaining() {
                     let chunk = data.chunk();
+                    // A value, or the bytes read so far, past the bound is an
+                    // error; nothing beyond the bound is buffered.
+                    let room = MAX_RESPONSE_BODY - output.len();
                     if let Some(length) = scanner.feed(chunk) {
+                        if length > room {
+                            return Err(body_too_large(MAX_RESPONSE_BODY));
+                        }
                         output.extend_from_slice(&chunk[..length]);
                         return Ok(Bytes::from(output));
                     }
                     let length = chunk.len();
+                    if length > room {
+                        return Err(body_too_large(MAX_RESPONSE_BODY));
+                    }
                     output.extend_from_slice(chunk);
                     data.advance(length);
                 }
@@ -587,21 +607,28 @@ where
         let Some(mut body) = self.inner.take() else {
             return Bytes::new();
         };
+        // Error bodies keep their received prefix; past the bound the rest is
+        // not read at all (the caller only wants a diagnostic prefix).
         let mut output = Vec::new();
-        while let Some(frame) = body.frame().await {
-            let Ok(frame) = frame else {
+        while output.len() < MAX_RESPONSE_BODY {
+            let Some(Ok(frame)) = body.frame().await else {
                 break;
             };
             if let Ok(mut data) = frame.into_data() {
-                while data.has_remaining() {
-                    let chunk = data.chunk();
-                    let length = chunk.len();
-                    output.extend_from_slice(chunk);
-                    data.advance(length);
-                }
+                extend_limited(&mut output, &mut data, MAX_RESPONSE_BODY);
             }
         }
         Bytes::from(output)
+    }
+}
+
+/// Append at most `limit - output.len()` bytes of `data` to `output`.
+fn extend_limited(output: &mut Vec<u8>, data: &mut impl Buf, limit: usize) {
+    while data.has_remaining() && output.len() < limit {
+        let chunk = data.chunk();
+        let take = chunk.len().min(limit - output.len());
+        output.extend_from_slice(&chunk[..take]);
+        data.advance(take);
     }
 }
 
@@ -768,5 +795,86 @@ mod tests {
             .from_credentials(serde_json::from_str::<AccountCredentials>(CREDENTIALS)?)
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod body_limit_tests {
+    use super::*;
+
+    /// A body that never ends, in 64 KiB frames, counting what was pulled.
+    struct Endless {
+        first: Option<&'static [u8]>,
+        frame: &'static [u8],
+        pulled: usize,
+    }
+
+    impl http_body::Body for Endless {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let data = Bytes::from_static(self.first.take().unwrap_or(self.frame));
+            self.pulled += data.len();
+            assert!(
+                self.pulled < 4 * MAX_RESPONSE_BODY,
+                "the reader pulled {} bytes without stopping",
+                self.pulled
+            );
+            Poll::Ready(Some(Ok(Frame::data(data))))
+        }
+    }
+
+    const FRAME: &[u8] = &[b'x'; 64 * 1024];
+
+    fn endless(first: Option<&'static [u8]>) -> BodyWrapper<Endless> {
+        BodyWrapper {
+            inner: Some(Endless {
+                first,
+                frame: FRAME,
+                pulled: 0,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn whole_body_read_stops_at_the_bound() {
+        let mut body = endless(None);
+        let error = body.into_bytes().await.unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!("http: response body too large (limit {MAX_RESPONSE_BODY} bytes)")
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_body_read_accepts_exactly_the_bound() {
+        let full = |length| BodyWrapper {
+            inner: Some(http_body_util::Full::new(Bytes::from(vec![b'x'; length]))),
+        };
+        assert_eq!(
+            full(MAX_RESPONSE_BODY).into_bytes().await.unwrap().len(),
+            MAX_RESPONSE_BODY
+        );
+        assert!(full(MAX_RESPONSE_BODY + 1).into_bytes().await.is_err());
+    }
+
+    #[cfg(feature = "go-native-client")]
+    #[tokio::test]
+    async fn error_prefix_read_stops_at_the_bound() {
+        let mut body = endless(None);
+        assert_eq!(body.into_bytes_partial().await.len(), MAX_RESPONSE_BODY);
+    }
+
+    #[cfg(feature = "go-native-client")]
+    #[tokio::test]
+    async fn first_json_value_read_stops_at_the_bound() {
+        // An unterminated JSON string is a first value that never completes.
+        let mut body = endless(Some(b"\"xxxx"));
+        let error = body.into_first_json_value().await.unwrap_err().to_string();
+        assert!(error.contains("response body too large"), "{error}");
     }
 }

@@ -1514,7 +1514,7 @@ mod tests {
         assert!(s.magic_dns);
         assert_eq!(s.base_domain, "");
         assert!(s.override_local_dns);
-        assert!(s.nameservers.is_empty());
+        assert_eq!(s.nameservers, [] as [String; 0]);
     }
 
     #[test]
@@ -1546,15 +1546,15 @@ mod tests {
         let store = DnsStore::new();
         let cfg = store.build(&[]);
         assert!(!cfg.proxied);
-        assert!(cfg.extra_records.is_empty());
+        assert_eq!(cfg.extra_records.len(), 0);
     }
 
     #[test]
     fn invalid_magic_dns_spec_is_safe_if_validation_is_bypassed() {
         let cfg = DnsStore::from_spec(DnsConfigSpec::default()).build(&[machine("peer", 1, 1)]);
         assert!(!cfg.proxied);
-        assert!(cfg.domains.is_empty());
-        assert!(cfg.extra_records.is_empty());
+        assert_eq!(cfg.domains, [] as [String; 0]);
+        assert_eq!(cfg.extra_records.len(), 0);
     }
 
     #[test]
@@ -1563,7 +1563,7 @@ mod tests {
         let cfg = store.build(&[]);
         assert!(cfg.proxied);
         assert_eq!(cfg.domains, vec!["headscale.test".to_string()]);
-        assert!(cfg.authoritative_suffixes.is_empty());
+        assert_eq!(cfg.authoritative_suffixes, [] as [String; 0]);
     }
 
     #[test]
@@ -1865,10 +1865,10 @@ mod tests {
         let cfg = store.build(&[]);
 
         assert_eq!(cfg.routes["corp.internal"][0].addr, "10.0.0.53");
-        assert!(cfg.routes["64.100.in-addr.arpa"].is_empty());
-        assert!(cfg.routes["100.100.in-addr.arpa"].is_empty());
-        assert!(cfg.routes["127.100.in-addr.arpa"].is_empty());
-        assert!(cfg.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"].is_empty());
+        assert_eq!(cfg.routes["64.100.in-addr.arpa"].len(), 0);
+        assert_eq!(cfg.routes["100.100.in-addr.arpa"].len(), 0);
+        assert_eq!(cfg.routes["127.100.in-addr.arpa"].len(), 0);
+        assert_eq!(cfg.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"].len(), 0);
     }
 
     #[test]
@@ -1914,7 +1914,7 @@ mod tests {
             ..magic_spec()
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
-        assert!(cfg.authoritative_suffixes.is_empty());
+        assert_eq!(cfg.authoritative_suffixes, [] as [String; 0]);
     }
 
     #[test]
@@ -1988,9 +1988,9 @@ mod tests {
 
     #[test]
     fn parse_extra_records_empty_file_ok_but_whitespace_errors() {
-        assert!(parse_extra_records(b"").unwrap().is_empty());
+        assert_eq!(parse_extra_records(b"").unwrap().len(), 0);
         assert!(parse_extra_records(b"  \n\t ").is_err());
-        assert!(parse_extra_records(b"[]").unwrap().is_empty());
+        assert_eq!(parse_extra_records(b"[]").unwrap().len(), 0);
     }
 
     #[test]
@@ -2066,7 +2066,7 @@ mod tests {
 
         let cfg = DnsStore::from_spec(spec).build(&[]);
 
-        assert!(cfg.resolvers.is_empty());
+        assert_eq!(cfg.resolvers.len(), 0);
         assert_eq!(cfg.fallback_resolvers.len(), 2);
         assert_eq!(cfg.fallback_resolvers[0].addr, "1.1.1.1");
         assert_eq!(cfg.fallback_resolvers[1].addr, "8.8.8.8");
@@ -2101,7 +2101,7 @@ mod tests {
         };
         let cfg = DnsStore::from_spec(spec).build(&[]);
         assert!(!cfg.proxied);
-        assert!(cfg.authoritative_suffixes.is_empty());
+        assert_eq!(cfg.authoritative_suffixes, [] as [String; 0]);
     }
 
     #[test]
@@ -2162,7 +2162,7 @@ mod tests {
             ]
         );
         assert!(cfg.routes.contains_key("Corp.Internal."));
-        assert!(cfg.authoritative_suffixes.is_empty());
+        assert_eq!(cfg.authoritative_suffixes, [] as [String; 0]);
         assert!(cfg.proxied);
     }
 
@@ -2523,7 +2523,7 @@ extra_records = "/etc/headscale/extra-records.json"
             spec.restricted_nameservers.get("corp.internal").unwrap(),
             &vec!["10.0.0.1".to_string()]
         );
-        assert!(spec.extra_records.is_empty());
+        assert_eq!(spec.extra_records.len(), 0);
         assert_eq!(
             spec.extra_records_path.as_deref(),
             Some(Path::new("/etc/headscale/extra-records.json"))

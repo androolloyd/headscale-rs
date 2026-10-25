@@ -4775,8 +4775,8 @@ mod tests {
         let version = VersionInfo::current();
 
         assert_eq!(version.version, env!("CARGO_PKG_VERSION"));
-        assert!(!version.commit.is_empty());
-        assert!(!version.build_time.is_empty());
+        assert_ne!(version.commit, "");
+        assert_ne!(version.build_time, "");
         assert_eq!(version.go.os, go_os_label(std::env::consts::OS));
         assert!(version.human().contains("headscale version"));
         assert!(!version.human().contains("headscale-rs version"));

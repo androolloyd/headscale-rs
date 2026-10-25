@@ -381,13 +381,13 @@ impl Database {
 
     /// Go pool behavior requires the opt-in native compatibility bridge.
     #[cfg(not(feature = "go-pool-compat"))]
-    pub async fn new_with_go_sqlite_options(
+    pub fn new_with_go_sqlite_options(
         _url: &str,
         _options: SqliteOpenOptions,
-    ) -> Result<Self> {
-        Err(DbError::General(
+    ) -> impl Future<Output = Result<Self>> {
+        std::future::ready(Err(DbError::General(
             "Go pool compatibility requires the go-pool-compat feature and SQLx-core patch".into(),
-        ))
+        )))
     }
 
     async fn new_sqlite_with_pool_options(

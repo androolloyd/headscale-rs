@@ -239,8 +239,8 @@ fn via_routes_include_overlapping_advertised_prefixes() {
                 "{client_tag} should not include disjoint {route}"
             );
         }
-        assert!(got.exclude.is_empty());
-        assert!(got.use_primary.is_empty());
+        assert_eq!(got.exclude, [] as [String; 0]);
+        assert_eq!(got.use_primary, [] as [String; 0]);
     }
 }
 
@@ -293,9 +293,9 @@ fn via_routes_regular_overlap_clears_non_via_exclude() {
     let got =
         doc.via_routes_for_peer_with_candidates(&client, 14, &primary, 12, &routes, &candidates);
 
-    assert!(got.include.is_empty());
-    assert!(got.exclude.is_empty());
-    assert!(got.use_primary.is_empty());
+    assert_eq!(got.include, [] as [String; 0]);
+    assert_eq!(got.exclude, [] as [String; 0]);
+    assert_eq!(got.use_primary, [] as [String; 0]);
 }
 
 #[test]
@@ -329,9 +329,9 @@ fn via_routes_autogroup_internet_matches_exit_defaults_only_for_via_tag() {
     let excluded = doc.via_routes_for_peer(&client, &exit_b, &routes);
 
     assert_eq!(included.include, routes);
-    assert!(included.exclude.is_empty());
+    assert_eq!(included.exclude, [] as [String; 0]);
     assert_eq!(excluded.exclude, routes);
-    assert!(excluded.include.is_empty());
+    assert_eq!(excluded.include, [] as [String; 0]);
 }
 
 #[test]
@@ -360,9 +360,9 @@ fn via_routes_specific_subnet_does_not_match_exit_defaults() {
 
     let got = doc.via_routes_for_peer(&client, &exit, &routes);
 
-    assert!(got.include.is_empty());
-    assert!(got.exclude.is_empty());
-    assert!(got.use_primary.is_empty());
+    assert_eq!(got.include, [] as [String; 0]);
+    assert_eq!(got.exclude, [] as [String; 0]);
+    assert_eq!(got.use_primary, [] as [String; 0]);
 }
 
 #[test]

@@ -160,7 +160,7 @@ fn crypt(password: &[u8], salt: &[u8], cost: u32) -> [u8; 24] {
         cipher.bc_expand_key(salt);
     }
     let mut output = *b"OrpheanBeholderScryDoubt";
-    for block in output.chunks_exact_mut(8) {
+    for block in output.as_chunks_mut::<8>().0 {
         let mut words = [
             u32::from_be_bytes(block[..4].try_into().expect("four-byte word")),
             u32::from_be_bytes(block[4..].try_into().expect("four-byte word")),

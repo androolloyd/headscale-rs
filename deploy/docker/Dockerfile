@@ -2,7 +2,9 @@
 # Multi-stage build for minimal final image
 
 # Build stage
-FROM rust:1.99-bookworm AS builder
+# Keep this tag equal to the channel in rust-toolchain.toml
+# (scripts/check_toolchain_pin.py enforces it).
+FROM rust:1.99.0-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

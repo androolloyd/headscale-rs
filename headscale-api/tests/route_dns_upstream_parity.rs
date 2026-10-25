@@ -90,7 +90,7 @@ fn enablingroutes() {
     assert_eq!(state.primary_routes(3), routes(&["10.0.2.0/24"]));
 
     state.set_routes(2, Vec::<String>::new()).unwrap();
-    assert!(state.primary_routes(2).is_empty());
+    assert_eq!(state.primary_routes(2), [] as [String; 0]);
 }
 
 #[test]
@@ -426,10 +426,10 @@ fn issue3233viainternetexitvisibility() {
         routes(exit_routes),
         "matching exit node defaults drive AllowedIPs"
     );
-    assert!(alice_to_exit1.exclude.is_empty());
+    assert_eq!(alice_to_exit1.exclude, [] as [String; 0]);
 
     let alice_to_exit2 = store.via_routes_for_peer(&nodes, 1, 3).unwrap();
-    assert!(alice_to_exit2.include.is_empty());
+    assert_eq!(alice_to_exit2.include, [] as [String; 0]);
     assert_eq!(
         alice_to_exit2.exclude,
         routes(exit_routes),

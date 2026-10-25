@@ -577,7 +577,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
         let action: SshAction = serde_json::from_slice(&body).unwrap();
         assert!(action.reject);
-        assert!(action.hold_and_delegate.is_empty());
+        assert_eq!(action.hold_and_delegate, "");
     }
 
     #[tokio::test]
@@ -1034,7 +1034,7 @@ mod tests {
         let action: SshAction = serde_json::from_slice(&body).unwrap();
         assert!(action.accept);
         assert!(!action.reject);
-        assert!(action.hold_and_delegate.is_empty());
+        assert_eq!(action.hold_and_delegate, "");
     }
 
     /// Replace the random auth id the server mints so two runs of the same

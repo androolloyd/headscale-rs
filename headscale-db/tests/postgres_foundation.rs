@@ -757,10 +757,9 @@ async fn postgres_user_primitives_match_sqlite_contract() -> TestResult {
         );
 
         users::destroy_postgres_on_connection(&mut schema.conn, renamed.id).await?;
-        assert!(
-            users::list_postgres_on_connection(&mut schema.conn)
-                .await?
-                .is_empty()
+        assert_eq!(
+            users::list_postgres_on_connection(&mut schema.conn).await?,
+            [] as [headscale_db::users::UserRow; 0]
         );
         assert!(matches!(
             users::destroy_postgres_on_connection(&mut schema.conn, renamed.id)
@@ -962,10 +961,9 @@ async fn postgres_api_key_primitives_match_sqlite_contract() -> TestResult {
             &second.row.display_prefix(),
         )
         .await?;
-        assert!(
-            api_keys::list_postgres_on_connection(&mut schema.conn)
-                .await?
-                .is_empty()
+        assert_eq!(
+            api_keys::list_postgres_on_connection(&mut schema.conn).await?,
+            [] as [headscale_db::api_keys::ApiKeyRow; 0]
         );
 
         Ok::<(), headscale_db::DbError>(())

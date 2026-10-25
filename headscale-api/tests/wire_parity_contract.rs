@@ -299,7 +299,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
     assert_eq!(first.status(), StatusCode::OK);
     let first = decode_register_response(first).await;
     assert!(first.machine_authorized);
-    assert!(first.error.is_empty());
+    assert_eq!(first.error, "");
 
     let replay = app
         .clone()
@@ -330,7 +330,7 @@ async fn noise_register_rejects_used_authkey_replay_from_different_machine_key()
     assert_eq!(same_identity_replay.status(), StatusCode::OK);
     let same_identity_replay = decode_register_response(same_identity_replay).await;
     assert!(same_identity_replay.machine_authorized);
-    assert!(same_identity_replay.error.is_empty());
+    assert_eq!(same_identity_replay.error, "");
 
     let stored = state.machines.get(&node_key_hex).unwrap();
     assert_eq!(stored.machine_key_hex, original_machine_key);
@@ -363,7 +363,7 @@ async fn noise_flat_register_no_auth_restart_rejects_mismatched_machine_key() {
     assert_eq!(first.status(), StatusCode::OK);
     let first = decode_register_response(first).await;
     assert!(first.machine_authorized);
-    assert!(first.error.is_empty());
+    assert_eq!(first.error, "");
 
     let stolen_restart = app
         .oneshot(noise_post(

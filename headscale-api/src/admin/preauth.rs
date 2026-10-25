@@ -237,7 +237,7 @@ impl InMemoryPreauthAdmin {
         Self::default()
     }
 
-    async fn mint_inner(
+    fn mint_inner(
         &self,
         mut req: PreauthMintRequest,
         explicit_expiration: Option<i64>,
@@ -310,7 +310,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
     }
 
     async fn mint(&self, req: PreauthMintRequest) -> Result<PreauthAdminKey, PreauthAdminError> {
-        self.mint_inner(req, None, None).await
+        self.mint_inner(req, None, None)
     }
 
     async fn mint_with_expiration(
@@ -318,7 +318,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         req: PreauthMintRequest,
         expiration: Option<i64>,
     ) -> Result<PreauthAdminKey, PreauthAdminError> {
-        self.mint_inner(req, expiration, None).await
+        self.mint_inner(req, expiration, None)
     }
 
     async fn mint_with_precise_expiration(
@@ -326,7 +326,7 @@ impl PreauthAdmin for InMemoryPreauthAdmin {
         req: PreauthMintRequest,
         expiration: Option<DateTime<Utc>>,
     ) -> Result<PreauthAdminKey, PreauthAdminError> {
-        self.mint_inner(req, None, expiration).await
+        self.mint_inner(req, None, expiration)
     }
 
     async fn expire_by_prefix(&self, prefix: &str) -> Result<(), PreauthAdminError> {

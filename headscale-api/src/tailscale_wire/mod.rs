@@ -10435,7 +10435,7 @@ mod registry_tests {
             .unwrap();
 
         let registered = state.machines.get(&pending.node_key_hex).unwrap();
-        assert!(registered.approved_routes.is_empty());
+        assert_eq!(registered.approved_routes, [] as [String; 0]);
         // Only the registration's own change; an unchanged approval adds no
         // SetApprovedRoutes PolicyChange.
         assert_eq!(state.machines.map_change_history()[history_len..].len(), 1);
@@ -10920,8 +10920,8 @@ mod registry_tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_label(), "peers removed");
         assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
-        assert!(new_changes[0].content.peers_changed.is_empty());
-        assert!(new_changes[0].content.peer_patches.is_empty());
+        assert_eq!(new_changes[0].content.peers_changed, [] as [u64; 0]);
+        assert_eq!(new_changes[0].content.peer_patches, [] as [u64; 0]);
     }
 
     /// Go's `processWrite` applies on a free-running ticker. A write that
@@ -11345,7 +11345,7 @@ mod registry_tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_label(), "peers removed");
         assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
-        assert!(new_changes[0].content.peer_patches.is_empty());
+        assert_eq!(new_changes[0].content.peer_patches, [] as [u64; 0]);
     }
 
     #[test]
@@ -11559,7 +11559,7 @@ mod registry_tests {
         ]);
 
         assert_eq!(changed, 2);
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
         assert_eq!(
             reg.get("node-update-many-1").unwrap().approved_routes,
             vec!["10.1.0.0/24"]
@@ -11609,7 +11609,7 @@ mod registry_tests {
         ]);
 
         assert_eq!(changed, 0);
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
         assert_eq!(
             reg.map_change_history().len(),
             history_len,
@@ -11650,11 +11650,9 @@ mod registry_tests {
 
         assert_eq!(changed, 0);
         assert_eq!(missing, vec!["node-update-many-missing"]);
-        assert!(
-            reg.get("node-update-many-present")
-                .unwrap()
-                .approved_routes
-                .is_empty()
+        assert_eq!(
+            reg.get("node-update-many-present").unwrap().approved_routes,
+            [] as [String; 0]
         );
         assert_eq!(
             reg.nodestore_operation_metrics()
@@ -11709,7 +11707,7 @@ mod registry_tests {
             changed, 0,
             "update-many completion should reflect final absence after same-batch delete"
         );
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [String; 0]);
 
         assert!(reg.get("node-update-many-delete").is_none());
         assert_eq!(reg.nodestore_queue_depth(), 0);
@@ -11737,8 +11735,8 @@ mod registry_tests {
         assert_eq!(new_changes.len(), 1, "{new_changes:?}");
         assert_eq!(new_changes[0].reason_label(), "peers removed");
         assert_eq!(new_changes[0].content.peers_removed, vec![node_id]);
-        assert!(new_changes[0].content.peers_changed.is_empty());
-        assert!(new_changes[0].content.peer_patches.is_empty());
+        assert_eq!(new_changes[0].content.peers_changed, [] as [u64; 0]);
+        assert_eq!(new_changes[0].content.peer_patches, [] as [u64; 0]);
     }
 
     #[test]
@@ -11843,7 +11841,7 @@ mod registry_tests {
             .map(|(node_key, _)| node_key)
             .collect::<Vec<_>>();
         assert_eq!(node_keys, vec!["node-owned"]);
-        assert!(reg.list_nodes_by_user_id(99).is_empty());
+        assert_eq!(reg.list_nodes_by_user_id(99).len(), 0);
     }
 
     #[test]
@@ -11862,7 +11860,7 @@ mod registry_tests {
             .map(|(node_key, _)| node_key)
             .collect::<Vec<_>>();
         assert_eq!(node_keys, vec!["node-a", "node-c"]);
-        assert!(reg.list_peers_for(99).is_empty());
+        assert_eq!(reg.list_peers_for(99).len(), 0);
     }
 
     #[test]
@@ -11975,9 +11973,9 @@ mod registry_tests {
         reg.upsert("nk-a".to_string(), rec);
         let mut gen_rx = reg.subscribe_gen();
 
-        assert!(
-            reg.wake_expired_nodes_between(base, expiry - chrono::Duration::milliseconds(1))
-                .is_empty()
+        assert_eq!(
+            reg.wake_expired_nodes_between(base, expiry - chrono::Duration::milliseconds(1)),
+            [] as [String; 0]
         );
         assert!(!gen_rx.has_changed().unwrap());
 
@@ -12521,7 +12519,7 @@ mod registry_tests {
             vec!["route health update"]
         );
         assert_eq!(route_health_change.change_type(), "policy");
-        assert!(route_health_change.content.peers_changed.is_empty());
+        assert_eq!(route_health_change.content.peers_changed, [] as [u64; 0]);
         assert!(route_health_change.content.include_policy);
         assert!(
             route_health_change
@@ -12843,9 +12841,9 @@ mod registry_tests {
         assert!(node_a_changes[0].is_self_only());
         assert_eq!(node_a_changes[0].change_type(), "self");
         assert!(node_a_changes[0].content.include_self);
-        assert!(node_a_changes[0].content.peers_changed.is_empty());
-        assert!(node_a_changes[0].content.peers_removed.is_empty());
-        assert!(node_a_changes[0].content.peer_patches.is_empty());
+        assert_eq!(node_a_changes[0].content.peers_changed, [] as [u64; 0]);
+        assert_eq!(node_a_changes[0].content.peers_removed, [] as [u64; 0]);
+        assert_eq!(node_a_changes[0].content.peer_patches, [] as [u64; 0]);
         assert!(
             !pending.contains_key(&node_b),
             "self-only changes must not leak to broadcast observers"
@@ -13072,7 +13070,7 @@ mod registry_tests {
         assert!(reg.disconnected_at.read().contains_key(&node_id));
 
         let cleaned = reg.cleanup_offline_connections(Duration::from_secs(60));
-        assert!(cleaned.is_empty());
+        assert_eq!(cleaned, [] as [u64; 0]);
         assert_eq!(reg.active_connections().get(&node_id), Some(&0));
         assert_eq!(reg.online_states().get(&node_id), Some(&false));
         assert!(reg.disconnected_at.read().contains_key(&node_id));
@@ -13110,7 +13108,10 @@ mod registry_tests {
                 .contains_key(&node_id)
         );
         assert!(reg.get("nk-a").is_some());
-        assert!(reg.cleanup_offline_connections(Duration::ZERO).is_empty());
+        assert_eq!(
+            reg.cleanup_offline_connections(Duration::ZERO),
+            [] as [u64; 0]
+        );
     }
 
     #[test]
@@ -13370,7 +13371,7 @@ mod registry_tests {
         assert!(reg.set_approved_routes(node_key, Vec::new()));
         let updated = reg.get(node_key).unwrap();
         assert_eq!(updated.available_routes, vec![route]);
-        assert!(updated.approved_routes.is_empty());
+        assert_eq!(updated.approved_routes, [] as [String; 0]);
 
         let after = reg.primary_routes_for_snapshot(&reg.snapshot());
         assert!(!after.contains_key(node_key));
@@ -13419,7 +13420,7 @@ mod registry_tests {
         assert_eq!(change.change_type(), "policy");
         assert!(change.content.include_policy);
         assert!(change.content.requires_runtime_peer_computation);
-        assert!(change.content.peers_changed.is_empty());
+        assert_eq!(change.content.peers_changed, [] as [u64; 0]);
     }
 
     #[test]
@@ -13755,7 +13756,7 @@ mod registry_tests {
         tokio::time::advance(Duration::from_secs(5)).await;
         let results = probe.await.unwrap();
 
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 0);
         assert!(state.machines.is_route_candidate_healthy(node_a));
         assert!(state.machines.is_route_candidate_healthy(node_b));
         let primary = state
@@ -13985,7 +13986,7 @@ mod registry_tests {
         assert_eq!(registered.machine_key_hex, "same-machine");
         assert_eq!(registered.user, "alice");
         assert_eq!(registered.auth_key_id, None);
-        assert!(registered.forced_tags.is_empty());
+        assert_eq!(registered.forced_tags, [] as [String; 0]);
         assert_eq!(registered.ipv4, old_ip);
         assert_eq!(registered.created_at, old_created_at);
         // headscale-go v0.29.5 applyAuthNodeUpdate (HandleNodeFromAuthPath)
@@ -14003,7 +14004,7 @@ mod registry_tests {
         assert!(reg.get("old-node").is_none());
         let stored = reg.get("new-node").unwrap();
         assert_eq!(stored.auth_key_id, None);
-        assert!(stored.forced_tags.is_empty());
+        assert_eq!(stored.forced_tags, [] as [String; 0]);
         assert_eq!(stored.ipv4, old_ip);
 
         let changes = reg.map_change_history();
@@ -14049,7 +14050,7 @@ mod registry_tests {
         assert!(reg.get("old-tagged-node").is_none());
         assert_eq!(tagged.node_id, Some(42));
         assert_eq!(tagged.ipv4, ip);
-        assert!(tagged.user.is_empty());
+        assert_eq!(tagged.user, "");
         assert_eq!(tagged.user_id, None);
         assert_eq!(tagged.auth_key_id, Some(7));
         assert_eq!(tagged.expiry, None);
@@ -14068,7 +14069,7 @@ mod registry_tests {
         assert_eq!(personal.ipv4, ip);
         assert_eq!(personal.user, "alice");
         assert_eq!(personal.user_id, Some(10));
-        assert!(personal.forced_tags.is_empty());
+        assert_eq!(personal.forced_tags, [] as [String; 0]);
         assert_eq!(personal.auth_key_id, None);
         assert!(!personal.ephemeral);
         assert_eq!(personal.expiry, Some(future_expiry));
@@ -14255,7 +14256,7 @@ mod registry_tests {
         a.last_seen = Utc::now();
         reg.upsert("nk-a".to_string(), a);
         let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
-        assert!(removed.is_empty());
+        assert_eq!(removed, [] as [String; 0]);
         assert_eq!(reg.len(), 1);
     }
 

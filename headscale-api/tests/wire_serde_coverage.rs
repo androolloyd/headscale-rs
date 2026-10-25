@@ -281,7 +281,7 @@ fn hostinfo_round_trip_preserves_unset_fields_as_empty_strings() {
     assert_eq!(h.hostname, "");
     assert_eq!(h.os, "");
     assert_eq!(h.os_version, "");
-    assert!(h.request_tags.is_empty());
+    assert_eq!(h.request_tags, [] as [String; 0]);
     assert!(h.net_info.is_none());
 }
 
@@ -675,7 +675,7 @@ fn map_node_round_trips_route_tag_and_cap_metadata() {
     assert_eq!(v["Online"], true);
     assert_eq!(v["Cap"], 74);
     assert_eq!(v["Capabilities"][0], "https://tailscale.com/cap/ssh");
-    assert!(v["CapMap"]["funnel"].as_array().unwrap().is_empty());
+    assert_eq!(v["CapMap"]["funnel"].as_array().unwrap().len(), 0);
     assert_eq!(v["Expired"], true);
     assert_eq!(v["HomeDERP"], 900);
     assert_eq!(v["Sharer"], 88);
@@ -1571,7 +1571,10 @@ fn filter_rule_src_bits_and_cap_grant_round_trip() {
     let back: FilterRule = serde_json::from_value(v).unwrap();
     assert_eq!(back.src_ips, vec!["100.64.0.1"]);
     assert_eq!(back.src_bits, vec![32]);
-    assert!(back.dst_ports.is_empty());
+    assert_eq!(
+        back.dst_ports,
+        [] as [headscale_api::tailscale_wire::wire::NetPortRange; 0]
+    );
     assert_eq!(back.cap_grant.len(), 1);
     assert_eq!(back.cap_grant[0].dsts, vec!["100.64.0.0/10"]);
     assert_eq!(

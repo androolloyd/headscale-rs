@@ -185,7 +185,7 @@ mod tests {
             } => {
                 assert_eq!(id.as_deref(), Some("abc123"));
                 assert_eq!(identifier, None);
-                assert!(tags.is_empty());
+                assert_eq!(tags, [] as [String; 0]);
                 assert_eq!(legacy_tags, vec!["tag:web"]);
             }
             other => panic!("unexpected command: {other:?}"),

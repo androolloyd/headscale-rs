@@ -1,0 +1,45 @@
+[package]
+name = "headscale-vendor-conformance"
+description = "Behavioural conformance tests for the locally patched crates under vendor/"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This crate has no library surface of its own. Its integration tests drive the
+# patched crates in `vendor/` (picked up through the root `[patch.crates-io]`)
+# with the same default-off Go-exactness features the real binaries enable, and
+# assert both the stock behaviour and the native behaviour so that reverting a
+# patch, or a feature silently becoming a no-op, fails a test.
+# See README.md for the feature -> test -> Go reference map.
+
+[dev-dependencies]
+tokio.workspace = true
+bytes = "1"
+# instant-acme `go-native-client` -> `http/go-native-header-capacity`.
+http = { version = "1", features = ["go-native-header-capacity"] }
+# Feature set = the union the workspace enables: headscale-api `full`
+# (go-server-*) and the instant-acme -> hyper-util -> hyper -> h2 chain
+# (go-client-idle).
+h2 = { version = "=0.4.20", features = [
+    "go-server-first-settings",
+    "go-server-graceful-current-id",
+    "go-server-lifecycle",
+    "go-client-idle",
+] }
+# headscale-api `full` enables `rustls/go-server-client-hello`.
+rustls = { version = "0.23.46", default-features = false, features = [
+    "aws-lc-rs",
+    "std",
+    "tls12",
+    "go-server-client-hello",
+] }
+# headscale-db `go-pool-compat` enables the native Postgres bridge.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "tls-rustls-aws-lc-rs",
+] }
+
+[lints]
+workspace = true

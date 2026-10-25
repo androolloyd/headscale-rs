@@ -1,0 +1,14 @@
+# The one toolchain this tree is built, linted and tested with. CI, the
+# container images and local builds all resolve it from here
+# (scripts/check_toolchain_pin.py fails if they drift apart).
+#
+# 1.99.0 is the release CHANGES.md records as qualified (1.96.0 before it). Bump it
+# deliberately, in its own commit, after re-running clippy `-D warnings`,
+# the workspace tests and the vendored-crate gates on the new release.
+#
+# The fuzz targets need a nightly compiler for the libFuzzer sanitizers; they
+# select it explicitly (`cargo +nightly fuzz`) and are unaffected by this pin.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

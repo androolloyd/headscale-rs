@@ -79,7 +79,7 @@ impl TestContext {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    async fn stop_server(&mut self) {
+    fn stop_server(&mut self) {
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
         }
@@ -158,7 +158,7 @@ async fn test_single_node_registration() {
     assert_eq!(nodes[0].id, "node-1");
     assert!(nodes[0].online);
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 #[tokio::test]
@@ -193,7 +193,7 @@ async fn test_multi_node_mesh_formation() {
     let unique_ips: std::collections::HashSet<_> = ips.iter().collect();
     assert_eq!(ips.len(), unique_ips.len());
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 #[tokio::test]
@@ -220,7 +220,7 @@ async fn test_node_heartbeat() {
     let result = ctx.mesh.heartbeat("non-existent").await;
     assert!(result.is_err());
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 #[tokio::test]
@@ -289,7 +289,7 @@ async fn test_node_capabilities_filtering() {
     let relay_nodes = ctx.mesh.nodes_with_capability("relay").await;
     assert_eq!(relay_nodes.len(), 1);
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 // ============================================================================
@@ -423,7 +423,7 @@ async fn test_api_health_endpoint() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "healthy");
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 #[tokio::test]
@@ -453,9 +453,9 @@ async fn test_api_node_registration() {
     let resp = resp.unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(!body["addresses"].as_array().unwrap().is_empty());
+    assert_ne!(body["addresses"].as_array().unwrap().len(), 0);
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 #[tokio::test]
@@ -476,7 +476,7 @@ async fn test_api_metrics_endpoint() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("mesh_nodes") || body.contains("inference_tokens") || !body.is_empty());
 
-    ctx.stop_server().await;
+    ctx.stop_server();
 }
 
 // ============================================================================

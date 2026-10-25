@@ -1,0 +1,116 @@
+# Runs each vendored crate's own upstream test suite against its local patch.
+#
+# vendor/ carries ten crates (rustls, aws-lc-rs, h2, hyper, hyper-util,
+# hyper-rustls, http, instant-acme, sqlx-core, sqlx-postgres) with Go-exactness
+# patches. None of their upstream tests run anywhere else in CI, so a patch can
+# break upstream behaviour unnoticed. scripts/test_vendored_crates.sh builds a
+# scratch workspace per crate (never writing to vendor/), pulls the upstream
+# tests that are not in the crates.io archive from the exact commit recorded in
+# `.cargo_vcs_info.json`, and runs them with default features and with the
+# Go-native feature set the workspace enables. See tools/vendor-tests/README.md.
+#
+# Whether the vendored sources still match their pinned upstream release is
+# checked separately by the supply-chain workflow.
+
+name: Vendored crate tests
+
+on:
+  pull_request:
+    paths:
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "scripts/test_vendored_crates.sh"
+      - "tools/vendor-tests/**"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/vendor-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "scripts/test_vendored_crates.sh"
+      - "tools/vendor-tests/**"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/vendor-tests.yml"
+  schedule:
+    # Weekly, so upstream-test and toolchain drift shows up even without a
+    # vendor/ change.
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: vendor-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - aws-lc-rs
+          - h2
+          - http
+          - hyper
+          - hyper-rustls
+          - hyper-util
+          - instant-acme
+          - rustls
+          - sqlx-core
+          - sqlx-postgres
+    # Only sqlx-postgres uses this; a service container is cheap enough to
+    # start for every row.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: sqlx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sqlx"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      VENDOR_TESTS_POSTGRES_URL: postgres://postgres:password@localhost:5432/sqlx
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-rust
+      # instant-acme's integration suite builds the pinned pebble ACME server
+      # with `go install`.
+      - uses: actions/setup-go@v6
+        if: matrix.crate == 'instant-acme'
+        with:
+          go-version-file: tools/parity/headscale-go/go.mod
+          cache-dependency-path: tools/parity/headscale-go/go.sum
+      # sqlx-postgres loads the upstream test schema with psql.
+      - name: Install psql
+        if: matrix.crate == 'sqlx-postgres'
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/vendor-tests/target"
+          key: vendor-${{ matrix.crate }}-${{ hashFiles('tools/vendor-tests/**') }}
+      - name: Run upstream tests against the vendored patch
+        run: scripts/test_vendored_crates.sh "${{ matrix.crate }}"
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vendor-tests-${{ matrix.crate }}-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: target/vendor-tests/logs/

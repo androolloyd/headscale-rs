@@ -3973,7 +3973,10 @@ server_url: "https://headscale.example"
             dns.nameservers,
             ["1.1.1.1", "https://dns.example/dns-query"]
         );
-        assert!(dns.nameserver_resolvers.is_empty());
+        assert_eq!(
+            dns.nameserver_resolvers,
+            [] as [headscale_api::tailscale_wire::wire::DnsResolver; 0]
+        );
         assert_eq!(
             dns.restricted_nameservers.get("corp.example.org").unwrap(),
             &vec!["10.0.0.53".to_string()]

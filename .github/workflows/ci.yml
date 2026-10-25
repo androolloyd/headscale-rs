@@ -18,6 +18,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,6 +32,10 @@ jobs:
       - uses: actions/checkout@v6
       - name: Check headscale-go reference pins
         run: python3 scripts/check_headscale_go_refs.py --remote
+      - name: Check Rust toolchain pin is used everywhere
+        run: python3 scripts/check_toolchain_pin.py
+      - name: Gate script unit tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Check fuzz corpus coverage
         run: ./scripts/check_fuzz_corpus.sh
       - name: Check parity golden coverage
@@ -58,10 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          components: rustfmt
+      - uses: ./.github/actions/setup-rust
       - run: cargo fmt --all -- --check
       - name: cargo fmt excluded crates
         run: |
@@ -82,10 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
+      - uses: ./.github/actions/setup-rust
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       # Workspace-wide gate. The `[workspace.lints]` block in the
@@ -121,9 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
@@ -155,6 +152,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
+      # libFuzzer sanitizers need a nightly compiler. It is pinned to a dated
+      # build so a new nightly cannot turn this job red between commits; bump it
+      # with fuzz-nightly.yml (same value) after a green local run.
+      FUZZ_NIGHTLY_TOOLCHAIN: nightly-2026-08-21
       CARGO_FUZZ_INSTALL_TOOLCHAIN: "1.95.0"
       CARGO_FUZZ_VERSION: "0.13.1"
       FUZZ_RUNS: "10000"
@@ -162,9 +163,9 @@ jobs:
       FUZZ_RSS_LIMIT_MB: "4096"
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_NIGHTLY_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -195,9 +196,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - uses: actions/setup-go@v6
         with:
           go-version-file: tools/parity/headscale-go/go.mod

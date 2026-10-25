@@ -161,7 +161,15 @@ The same authorized upgrade advances the explicit webpki-roots1.0.5 pin to
 1.0.9 in both manifests. The trust-anchor API remains unchanged; CA/trust and
 platform behavior need final qualification.
 
+## Security advisory pin bump — 2026-10-25
+
+The exact webpki-roots pin moves from 1.0.9 to 1.0.11 in both manifests to
+clear RUSTSEC-2026-0381 (bundled roots allow trust in distrusted emSign
+intermediates; fixed in >=1.0.10). Only the pin changed: the trust-anchor API is
+the same, and Cargo.lock moves webpki-roots, webpki-root-certs and rustls-webpki
+(RUSTSEC-2026-0383, RUSTSEC-2026-0382) within their semver-compatible ranges.
+
 Current manifest SHA-256:
 
-- Cargo.toml: 45185a1914714bbb97eb4cef701be065bf3980e0a67839cbe59ff24ce9caa452
-- Cargo.toml.orig: d1f0de6e2c9a6083d7578c112fccbff21ae68a819c22a7c0590827e775f8d4d2
+- Cargo.toml: 793f3029745ddb104e0e23e347c08fa6ffd04b4a23bd27e7f4c879d54414cf5a
+- Cargo.toml.orig: a704eecee74928e96d1118b943aa86ec084168fe5a2590900b304ed2d1f7e4e4

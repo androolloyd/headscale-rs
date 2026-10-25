@@ -958,7 +958,7 @@ async fn ephemeral2006deletedtooquickly() {
     reg.upsert("b1".repeat(32), active);
 
     let removed = reg.gc_ephemeral(std::time::Duration::from_secs(66));
-    assert!(removed.is_empty());
+    assert_eq!(removed, [] as [String; 0]);
     assert!(reg.get(&"b1".repeat(32)).is_some());
 }
 
@@ -986,7 +986,7 @@ async fn gc_ephemeral_leaves_fresh_devices() {
     let r = mk_record(0xd0, "ephem", 50, true);
     reg.upsert("d0".repeat(32), r);
     let removed = reg.gc_ephemeral(std::time::Duration::from_mins(1));
-    assert!(removed.is_empty());
+    assert_eq!(removed, [] as [String; 0]);
 }
 
 #[tokio::test(start_paused = true)]

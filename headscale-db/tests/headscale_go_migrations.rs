@@ -1094,7 +1094,7 @@ async fn migrates_current_beta2_database_versions_rows_and_preserves_go_row_sema
         .await
         .expect("read user preauth key");
     assert_eq!(user_preauth.user_id, "1");
-    assert!(user_preauth.tag_list().is_empty());
+    assert_eq!(user_preauth.tag_list(), [] as [String; 0]);
 
     let tagged_node = headscale_nodes::get_by_id(db.pool(), 1)
         .await
@@ -1110,7 +1110,7 @@ async fn migrates_current_beta2_database_versions_rows_and_preserves_go_row_sema
         .expect("read user-owned node");
     assert_eq!(user_node.user_id, Some(1));
     assert_eq!(user_node.auth_key_id, Some(user_preauth.id));
-    assert!(user_node.tag_list().is_empty());
+    assert_eq!(user_node.tag_list(), [] as [String; 0]);
     assert_eq!(user_node.expiry, Some(1_893_456_000));
 
     let after = db

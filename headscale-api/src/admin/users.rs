@@ -1415,7 +1415,7 @@ mod tests {
         assert!(users.get("alice").await.unwrap().is_none());
 
         users.delete_by_id(created.id).await.unwrap();
-        assert!(users.all().await.unwrap().is_empty());
+        assert_eq!(users.all().await.unwrap().len(), 0);
     }
 
     #[tokio::test]

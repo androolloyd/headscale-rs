@@ -41,6 +41,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
     env:
+      # Keep in step with the fuzz job in ci.yml (dated nightly, see there).
+      FUZZ_NIGHTLY_TOOLCHAIN: nightly-2026-08-21
       CARGO_FUZZ_INSTALL_TOOLCHAIN: "1.95.0"
       CARGO_FUZZ_VERSION: "0.13.1"
       FUZZ_TARGET: ${{ matrix.target }}
@@ -49,9 +51,9 @@ jobs:
       FUZZ_RSS_LIMIT_MB: ${{ github.event.inputs.rss_limit_mb || '4096' }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_NIGHTLY_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |

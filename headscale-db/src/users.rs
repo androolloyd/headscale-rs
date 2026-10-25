@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(users[0].name, "bob");
 
         destroy(db.pool(), user.id).await.unwrap();
-        assert!(list(db.pool()).await.unwrap().is_empty());
+        assert_eq!(list(db.pool()).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1301,6 +1301,6 @@ mod tests {
         .execute(db.pool())
         .await
         .unwrap();
-        assert!(list(db.pool()).await.unwrap().is_empty());
+        assert_eq!(list(db.pool()).await.unwrap().len(), 0);
     }
 }

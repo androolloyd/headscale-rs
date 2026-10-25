@@ -224,7 +224,7 @@ version = "1.1.2"
 optional = true
 
 [dependencies.webpki-roots]
-version = "=1.0.9"
+version = "=1.0.11"
 optional = true
 
 [dev-dependencies.sqlx]

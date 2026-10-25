@@ -1473,7 +1473,7 @@ mod tests {
         assert_eq!(rs[0].dst_ports[0].ip, "*");
         assert_eq!(rs[0].dst_ports[0].ports.first, 0);
         assert_eq!(rs[0].dst_ports[0].ports.last, 65535);
-        assert!(rs[0].ip_proto.is_empty());
+        assert_eq!(rs[0].ip_proto, [] as [i32; 0]);
     }
 
     #[test]
@@ -1638,7 +1638,7 @@ mod tests {
             BTreeMap::new(),
         );
         let rs = acl_to_filter_rules(&d);
-        assert!(rs.is_empty());
+        assert_eq!(rs.len(), 0);
     }
 
     #[test]
@@ -1653,7 +1653,7 @@ mod tests {
             BTreeMap::new(),
         );
         let rs = acl_to_filter_rules(&d);
-        assert!(rs.is_empty());
+        assert_eq!(rs.len(), 0);
     }
 
     #[test]
@@ -1852,7 +1852,7 @@ mod tests {
             },
         ];
 
-        assert!(acl_to_filter_rules_for_node(&d, &nodes, 2).is_empty());
+        assert_eq!(acl_to_filter_rules_for_node(&d, &nodes, 2).len(), 0);
         nodes[1].user = Some("u3".into());
         let rules = acl_to_filter_rules_for_node(&d, &nodes, 2);
         assert_eq!(rules.len(), 1);
@@ -1945,7 +1945,7 @@ mod tests {
         let rs = acl_to_filter_rules_for_node(&d, &nodes, 2);
         assert_eq!(rs.len(), 1);
         assert_eq!(rs[0].src_ips, vec!["100.64.0.1"]);
-        assert!(rs[0].dst_ports.is_empty());
+        assert_eq!(rs[0].dst_ports.len(), 0);
         assert_eq!(rs[0].cap_grant.len(), 1);
         assert_eq!(rs[0].cap_grant[0].dsts, vec!["100.64.0.2/32"]);
         assert!(
@@ -1989,7 +1989,7 @@ mod tests {
         let rs = acl_to_filter_rules_for_node(&d, &nodes, 2);
 
         assert_eq!(rs.len(), 1);
-        assert!(rs[0].dst_ports.is_empty());
+        assert_eq!(rs[0].dst_ports.len(), 0);
         assert_eq!(rs[0].cap_grant.len(), 1);
         assert_eq!(
             rs[0].cap_grant[0].dsts,
@@ -2110,7 +2110,7 @@ mod tests {
         assert_eq!(router_rules[0].dst_ports[0].ports.first, 443);
 
         let client_rules = acl_to_filter_rules_for_node(&d, &nodes, 1);
-        assert!(client_rules.is_empty());
+        assert_eq!(client_rules.len(), 0);
     }
 
     #[test]

@@ -4203,9 +4203,18 @@ regions:
         let dns = store.build(&[]);
 
         assert!(path.is_none());
-        assert!(dns.routes["64.100.in-addr.arpa"].is_empty());
-        assert!(dns.routes["127.100.in-addr.arpa"].is_empty());
-        assert!(dns.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"].is_empty());
+        assert_eq!(
+            dns.routes["64.100.in-addr.arpa"],
+            [] as [headscale_api::tailscale_wire::wire::DnsResolver; 0]
+        );
+        assert_eq!(
+            dns.routes["127.100.in-addr.arpa"],
+            [] as [headscale_api::tailscale_wire::wire::DnsResolver; 0]
+        );
+        assert_eq!(
+            dns.routes["0.e.1.a.c.5.1.1.a.7.d.f.ip6.arpa"],
+            [] as [headscale_api::tailscale_wire::wire::DnsResolver; 0]
+        );
     }
 
     #[test]
@@ -4557,7 +4566,7 @@ database:
             )
             .await;
             assert!(register.machine_authorized, "{register:?}");
-            assert!(register.error.is_empty(), "{register:?}");
+            assert_eq!(register.error, "", "{register:?}");
 
             let node_row = headscale_db::headscale_nodes::get_postgres_by_node_key(
                 schema.pool(),
@@ -6428,7 +6437,7 @@ policy:
             auth_register.machine_authorized,
             "auth-key register response: {auth_register:?}"
         );
-        assert!(auth_register.error.is_empty());
+        assert_eq!(auth_register.error, "");
 
         let interactive_node_key = "c1".repeat(32);
         let interactive_machine_key = "d1".repeat(32);

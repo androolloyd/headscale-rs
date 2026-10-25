@@ -2903,7 +2903,7 @@ mod tests {
             node.endpoint_list(),
             vec!["192.0.2.10:41641", "[2001:db8::1]:41641"]
         );
-        assert!(node.tag_list().is_empty());
+        assert_eq!(node.tag_list(), [] as [String; 0]);
         assert_eq!(node.approved_route_list(), vec!["10.0.0.0/24"]);
         assert_eq!(node.host_info_value()["Hostname"], "alice-laptop");
         assert_eq!(node.expiry, Some(4_102_444_800));
@@ -3108,7 +3108,7 @@ mod tests {
             vec![first.id, second.id]
         );
 
-        assert!(list_by_ids(db.pool(), &[999]).await.unwrap().is_empty());
+        assert_eq!(list_by_ids(db.pool(), &[999]).await.unwrap().len(), 0);
         let partial = list_by_ids(db.pool(), &[second.id, 999]).await.unwrap();
         assert_eq!(
             partial.iter().map(|node| node.id).collect::<Vec<_>>(),
@@ -3220,7 +3220,7 @@ mod tests {
 
         assert_eq!(node.user_id, None);
         assert_eq!(node.tag_list(), vec!["tag:dev"]);
-        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+        assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 0);
         let raw_user_id: Option<i64> = sqlx::query_scalar("SELECT user_id FROM nodes WHERE id = ?")
             .bind(node.id)
             .fetch_one(db.pool())
@@ -3310,7 +3310,7 @@ mod tests {
         assert_eq!(updated.user_id, Some(user_id));
         assert_eq!(updated.auth_key_id, None);
         assert_eq!(updated.register_method, REGISTER_METHOD_OIDC);
-        assert!(updated.tag_list().is_empty());
+        assert_eq!(updated.tag_list(), [] as [String; 0]);
         // Go expands exit routes only in the gRPC SetApprovedRoutes handler;
         // an auth-path update stores the routes it is given.
         assert_eq!(updated.approved_route_list(), vec!["::/0"]);
@@ -3350,7 +3350,7 @@ mod tests {
         assert_eq!(updated.id, original.id);
         assert_eq!(updated.user_id, None);
         assert_eq!(updated.tag_list(), vec!["tag:server"]);
-        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+        assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -3373,7 +3373,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.user_id, Some(user_id));
-        assert!(updated.tag_list().is_empty());
+        assert_eq!(updated.tag_list(), [] as [String; 0]);
         assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 1);
     }
 
@@ -3540,10 +3540,10 @@ mod tests {
         .unwrap();
         assert_eq!(tagged.tag_list(), vec!["tag:dev", "tag:prod"]);
         assert_eq!(tagged.user_id, None);
-        assert!(list_by_user(db.pool(), user_id).await.unwrap().is_empty());
+        assert_eq!(list_by_user(db.pool(), user_id).await.unwrap().len(), 0);
 
         let untagged = set_tags(db.pool(), node.id, Vec::new()).await.unwrap();
-        assert!(untagged.tag_list().is_empty());
+        assert_eq!(untagged.tag_list(), [] as [String; 0]);
         assert_eq!(untagged.tags, "[]");
         assert_eq!(untagged.user_id, None);
 
@@ -3564,7 +3564,7 @@ mod tests {
         assert!(logged_out.expiry.is_some());
 
         destroy(db.pool(), node.id).await.unwrap();
-        assert!(list(db.pool()).await.unwrap().is_empty());
+        assert_eq!(list(db.pool()).await.unwrap().len(), 0);
         assert!(get_by_id(db.pool(), node.id).await.is_err());
     }
 

@@ -1,0 +1,1220 @@
+{
+  "crates": {
+    "aws-lc-rs": {
+      "dir": "vendor/aws-lc-rs",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "56263795822a724a6700ab0b281f882717321c358bc17bb538cde3490913bf17",
+          "status": "modified",
+          "upstream_sha256": "517c7bbff7942205d4a1ae7073001960e1308e649d23dd9cf7a7c6abd55a1a0b"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "959ea18459f45b36eb32d417b8e3baba23e041ce2165f9afc6ac33821e525fb1",
+          "status": "modified",
+          "upstream_sha256": "c2668c96cd3b76587ec19969f8ed58206aec5993f2b072d4c0c10f24e6fb4ac2"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "NOTICE-GO": {
+          "sha256": "df994285ba3f21a9324b50b9a7fa70a2ae5f6dffdfddb846cc51416ec1f756e8",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "7d4a533defe1ac4aa78a711b260e8ff7ff110471ab0660a9a4bd451ddd5e7d0a",
+          "status": "added"
+        },
+        "src/ec/key_pair.rs": {
+          "sha256": "58cc0980d2400baafceca00654e4c278283cbcd35a5e85d0a9ac4558bf8fd03c",
+          "status": "modified",
+          "upstream_sha256": "df9bf4959faab94350384af43df3f62accb4ea7179c99f47013612d20260c4c9"
+        },
+        "src/rsa/key.rs": {
+          "sha256": "6dc1c13998c8a56fdad5bf2471bfab21bdd22ca4a994c8db0593de35fbbb113d",
+          "status": "modified",
+          "upstream_sha256": "10570549ffe69dcc9924b1a3335fda0b93da00d2da0b74b654c0ce687895f8c9"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13",
+        "name": "aws-lc-rs",
+        "registry": "crates.io",
+        "version": "1.18.2"
+      }
+    },
+    "h2": {
+      "dir": "vendor/h2",
+      "files": {
+        "Cargo.lock": {
+          "status": "removed",
+          "upstream_sha256": "e0a04eb6713bcbfc479d222d821de08cad08951a17f4f5e6158a102d7d964fe2"
+        },
+        "Cargo.toml": {
+          "sha256": "39398ed5b6700e6ac5ba4d525bdac1d6a157cf2c2a9a926690496e3f7164a355",
+          "status": "modified",
+          "upstream_sha256": "21f9c0931a0aecb68fd64ba5b3aa2c311055f54c55443fb669833379bb45ed16"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "dc1ac3b3debc3b00700cbf8290d0baf06844265f0cf7ca61fd81d5bd5041eacc",
+          "status": "modified",
+          "upstream_sha256": "98903ebe8ca104782b455e6d8c1b23d6c0f475db5aeb8db9205b25039f52983b"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "3f7beaed716848ba7d0f6b2e83d9a5d61222f81a6bab4f3a9660b35680a3bc19",
+          "status": "added"
+        },
+        "LOCAL.patch": {
+          "sha256": "9dd379b1ca14475b11c16a0144ff71bb2fd2162940b266dbf343b2d88d5aa530",
+          "status": "added"
+        },
+        "SOURCE_SHA256SUMS": {
+          "sha256": "2447302582dc0fc75d70f4f2678589ac7d130a144921391c9289acdcdd74dcd4",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "578dd978da5a27d81c8843ebb5ec54798173388af5ce056ccfb343302c8d4557",
+          "status": "added"
+        },
+        "src/client.rs": {
+          "sha256": "ae5ac75271ae14fdc5dba270b3c274651a0fb1adb3887d185c95ab80811e7595",
+          "status": "modified",
+          "upstream_sha256": "b82325ff9589700afc92f3bfc561f75bb9d9c0c78289921ca9a54c4d0cbaed8c"
+        },
+        "src/codec/framed_read.rs": {
+          "sha256": "90c4ef4e167557324c0d058f015885e950fa54915ce58165c04d434ac647ffd5",
+          "status": "modified",
+          "upstream_sha256": "f9020eef96af3158f54349e05e3f159b4840281e7ed19d037f8415306271726b"
+        },
+        "src/codec/framed_write.rs": {
+          "sha256": "8bf024c3e72f3a667f95dbace80be421209fce0019451eda19fd3a222a5aedac",
+          "status": "modified",
+          "upstream_sha256": "032aab4c8c9108082e915885d0d582871bf4cdd95cd485bdcd7b717087c8ec35"
+        },
+        "src/codec/mod.rs": {
+          "sha256": "14f82c1931595145b7ca9ce2d33550c3cbe0988ae135bb7144a99b56c0331c82",
+          "status": "modified",
+          "upstream_sha256": "806fc32706d789f8e48a6867df014d945c438334e981205ff8f43d5b7f8ce0ef"
+        },
+        "src/error.rs": {
+          "sha256": "ee6a259500372c9d9f9a9f7db1ecf23dc3b9d55dee46a81e78a7d9e0ec0bd694",
+          "status": "modified",
+          "upstream_sha256": "b05dc52f36a29b29b1b3e0705a3f1ecf102a89896e173356f3e5fb1165dd6090"
+        },
+        "src/frame/headers.rs": {
+          "sha256": "40d00fd552f64ee21feeed513b932b98e0ce50f2a0e64fb8ca2273d3abac035d",
+          "status": "modified",
+          "upstream_sha256": "207d6b1d88c792440dec619e39f5500717d54cac5ae7060fc4ad6f19a6400b30"
+        },
+        "src/frame/priority.rs": {
+          "sha256": "0295fa56b3bf46313e8dd9bab814deacb615dcd467e6629a632f16711a38bbca",
+          "status": "modified",
+          "upstream_sha256": "9392b7aa2636157024dc645c92d0e450a4d3f7a53bc9de1188d3b61178c2b5fc"
+        },
+        "src/frame/settings.rs": {
+          "sha256": "361e49ad0a105823d6062b829a7d788c5b0f88f54d68a591714bf528f6d75be1",
+          "status": "modified",
+          "upstream_sha256": "9aed52868a1ddbb5570025edde2e073d3da1291b58d8759bfed7f086d40ef293"
+        },
+        "src/lib.rs": {
+          "sha256": "b9b6f4d9254a9f7666eb6a30a5e68d802920ee1afc2f227942821bad7c6bd1cf",
+          "status": "modified",
+          "upstream_sha256": "c8680fc4eb13ccb4ce944716042bd33c6554677cf8261c371442f91fbee352e0"
+        },
+        "src/proto/connection.rs": {
+          "sha256": "3c77f44811acfec262cad6fc3396180443bf5a9da56af67652c3eefc675982c3",
+          "status": "modified",
+          "upstream_sha256": "89a31bd0ec294714c0ecda282fdaeed204bb8386768f2689720ffb7b535a0cfa"
+        },
+        "src/proto/go_away.rs": {
+          "sha256": "64ace49ae96ce65b56078fdd783998f5d0d6e46e64a6f2dac6c88b858bd4c862",
+          "status": "modified",
+          "upstream_sha256": "51d467027bc30873fc76166ed731e968a23725e7b106b58ecadcb85044466a5f"
+        },
+        "src/proto/mod.rs": {
+          "sha256": "556a00a7507954d5e3a60fb302a54d8676d9965314a01a923996e26b2269898c",
+          "status": "modified",
+          "upstream_sha256": "592f8c60d97425946ff62cf694e3f36097a793863fc218fb4357dd440ed377e8"
+        },
+        "src/proto/ping_pong.rs": {
+          "sha256": "27474224f5140c18949ff32d8c4051038c3ae7bd4ec6645ad236c42d6ec733b0",
+          "status": "modified",
+          "upstream_sha256": "fabf42b1b1062e361c4d45026e9bfc9c32a02a9074259c71b525e78d2113a148"
+        },
+        "src/proto/settings.rs": {
+          "sha256": "7c44217a899a4112dfba4a358a440830d21312918913fbd1c30527f873dc5a88",
+          "status": "modified",
+          "upstream_sha256": "0fef5d01aa0233100a0cda9c0b5080a15cfbaab16c42c991933f5ed7db06bf77"
+        },
+        "src/proto/streams/buffer.rs": {
+          "sha256": "2b0b6f1d6ea96225427af735212fa0e00e6ec73e29cd120b0a1ed6e579385f11",
+          "status": "modified",
+          "upstream_sha256": "631aa4360b7b942c3899c6fb7455e682655c3ac099a170d5c3d566af3fec8318"
+        },
+        "src/proto/streams/client_state.rs": {
+          "sha256": "ab8a474ee020fd492240696aa2bc39bbf026bd5fdf3a2c11c775d2e808d3b3c9",
+          "status": "added"
+        },
+        "src/proto/streams/counts.rs": {
+          "sha256": "dd6857cee207201efeb123a584d7440d0bf04d6629c8dd046c10016617d49e5c",
+          "status": "modified",
+          "upstream_sha256": "9c0a1326fe0edf1e0636e1664915ceeb09e762c90fa8184bc6af0ca6ad077449"
+        },
+        "src/proto/streams/mod.rs": {
+          "sha256": "b22d232b1305e679331729c7245a3c5a55fe8c65378cd55ec78af7ff8e350596",
+          "status": "modified",
+          "upstream_sha256": "79b2b497bed11ea75997a02c8c626ba270e1520273ee677e944475d2fc8e594f"
+        },
+        "src/proto/streams/prioritize.rs": {
+          "sha256": "dc59b23d3cdf4fff7ae005443d1ce525ea23d2fe0c05f2560e93f44eb773a94f",
+          "status": "modified",
+          "upstream_sha256": "6d6d85ccbd0e7d0a549b9212061dae0386a09d4ac18099e78253047fac442b80"
+        },
+        "src/proto/streams/recv.rs": {
+          "sha256": "8bba5c85eeb35a8c2c14a4cb09fc7ef2f6c937c00da03b38fa963f80b951bb9e",
+          "status": "modified",
+          "upstream_sha256": "f8a3d085c88d117f510478c194e7c9375fde89033f0bfead9cc6805d6da3ffab"
+        },
+        "src/proto/streams/send.rs": {
+          "sha256": "a23a06ac022521c265474b159e190e21e94dae27cba42c3446f5a5f71de9a6cc",
+          "status": "modified",
+          "upstream_sha256": "ee355358b86ea048fd0e64642595e7be6e7f03a39d96745e74503cba2f1b08ef"
+        },
+        "src/proto/streams/state.rs": {
+          "sha256": "c96fdc0e9894324866ad052c23e830d27618c51af1a9433f27588677bef95fe6",
+          "status": "modified",
+          "upstream_sha256": "486b99b293d0f874b72724e1511cb0b11b44b3906ea20eb176fae1821772794d"
+        },
+        "src/proto/streams/store.rs": {
+          "sha256": "066e979212fbd969978252158e8d5471e6c0b9564d08493ce8a4e48e0dd2afd5",
+          "status": "modified",
+          "upstream_sha256": "cbce79b0c680b20a5b98fdd5b886c41caca0c773edb526d11caf4896b55dcff3"
+        },
+        "src/proto/streams/stream.rs": {
+          "sha256": "b0529a00da6989e520a3b9a0b91d6dd4cfeb8ad55c2f0f156432019ec11d4bf5",
+          "status": "modified",
+          "upstream_sha256": "fdf5a6b68fdf64edbbfe522759c1c9f345e72e5eaaf2abd860e357f66399d8ce"
+        },
+        "src/proto/streams/streams.rs": {
+          "sha256": "dd1da105d5b86018b3d4368d3d3b5e584a667d1a16f366ae6fa516bf07c867e1",
+          "status": "modified",
+          "upstream_sha256": "b218674c27db6389adf6766e9b31a509429738e47cfd2a3bcf42cba5dceb8561"
+        },
+        "src/server.rs": {
+          "sha256": "f12b9fbc4138dc8baca34d2e372ce00a0f5921c2338d92931e2a6949ef5cfdf2",
+          "status": "modified",
+          "upstream_sha256": "a567d950e49e897f844e865b945a748b3bf6226645c2d9c97af214d66118d596"
+        },
+        "src/share.rs": {
+          "sha256": "cebdaf29ecdf9360a8bca0356c9fccd6d3ad1a4fa6b392fdd9563a33097cae03",
+          "status": "modified",
+          "upstream_sha256": "e313c11a24b649d4c9da937fb37e5c2cc7c689c53f6afd2470fd40fd030237c5"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118",
+        "name": "h2",
+        "registry": "crates.io",
+        "version": "0.4.20"
+      }
+    },
+    "http": {
+      "dir": "vendor/http",
+      "files": {
+        "Cargo.lock": {
+          "status": "removed",
+          "upstream_sha256": "109b4934906d271c629d8511df2289683f7e4a15ef2eb6a5cb597aa8d14c1799"
+        },
+        "Cargo.toml": {
+          "sha256": "2e003fec803a35f0701f6f03d1c77cc69dd91b8148ee7a697462c6a11b801c01",
+          "status": "modified",
+          "upstream_sha256": "a949b1afc8b7fe334e9f6038b88d987e6a83b41b10cc852ad11dad1ead3c296d"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "95f3a3419a220639027e077349f6045090761ee748359366918ce0efd45e2d10",
+          "status": "modified",
+          "upstream_sha256": "d746fe0ed51dfd2a4e92c9a8c2348278adea73671187bbb711f231cd3c19669b"
+        },
+        "LICENSE-LOCAL-NOTICE": {
+          "sha256": "59a54ccc283eae7e7860be243e64ece09d441085c5c5fac01f23290039dbc622",
+          "status": "added"
+        },
+        "LOCAL.patch": {
+          "sha256": "a67a0787f4e2b1456785e910a5f40881ba13c023bb8403b2efc95d8b7dcc7987",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "b136364bcc2d318dc83e77df6e65a1cc03d37a2a0a9f72bbe6d9d12488c902f1",
+          "status": "added"
+        },
+        "src/header/map.rs": {
+          "sha256": "f9b6566637bcfe2c54f0cee1982e2999c0f5cc541ca0a4ab8f4fe211c93634bc",
+          "status": "modified",
+          "upstream_sha256": "fff2c8490382c7e739e0b2d0ac344c2acc33e8d47f80643c85742b57950da648"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0",
+        "name": "http",
+        "registry": "crates.io",
+        "version": "1.5.0"
+      }
+    },
+    "hyper": {
+      "dir": "vendor/hyper",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "28d161ef9abbd4aa479bc7ba8ff80a982a614245833db9aba75ff717873ab2d3",
+          "status": "modified",
+          "upstream_sha256": "dda7caddb7df155f479d2bd4764f201c57311f04969a0e7c893362765857161a"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "fdfa54696ba7aecf256ec3b702714b45dad543b4844607ca457b03401815acdf",
+          "status": "modified",
+          "upstream_sha256": "226a36792ab1b4cfbb7082ca10d477858a8bd0ab7b6171071f4376b02f83a85f"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "40883e902a79cfe60598c40ecb573a05fc692bde62a907bf6b90f6be135fa0bc",
+          "status": "added"
+        },
+        "LOCAL.patch": {
+          "sha256": "27b162cd281341fbd490d39645b5999452b52eb89f93d6bea9a457323e5aba8b",
+          "status": "added"
+        },
+        "SOURCE-HASHES.txt": {
+          "sha256": "27e01963bec8a080d0048f1d08a519656294d7007dfcdf372d1af9839cab294c",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "d1f9285b87678d7cdec0203cb5407c3b81004f1936f7d1dd436c876d600ef7ca",
+          "status": "added"
+        },
+        "src/body/go_h1.rs": {
+          "sha256": "e3b8e8bfcb3dfd176c327daab41170fa7651fb8b312267aa4a7bd00eecb4f56d",
+          "status": "added"
+        },
+        "src/body/incoming.rs": {
+          "sha256": "1b5ae4eb46519c102496898f3f7c628e793a735ae417d932836eb4e91a656dff",
+          "status": "modified",
+          "upstream_sha256": "11b8d262650730750721d6f93faf567e9cce6aa2e8a326aeb8f2cad908fdd485"
+        },
+        "src/body/mod.rs": {
+          "sha256": "9077d5d2d5d1e5bc4f3b611ea555dbbdbe50f1636511d91e61ac62e4d2420638",
+          "status": "modified",
+          "upstream_sha256": "5296424f2f8148925c8cf18992e4d59b827b9fa84eb8b3a8dad040c532ce04ef"
+        },
+        "src/client/conn/http1.rs": {
+          "sha256": "1511ec260e51358da9fe31d00fc74858a6fc02c5ee5868d932049e08d8ce51d4",
+          "status": "modified",
+          "upstream_sha256": "6ec8124f5dc3f176baae99d9528d467e976e2522912d5bab13603a792fecb203"
+        },
+        "src/client/conn/http2.rs": {
+          "sha256": "78afd3874c9821f076fc450e9696e8488a141f814eafb7ff4ad4dc5b99c46f69",
+          "status": "modified",
+          "upstream_sha256": "0ec553b8106fbc1eec7ed2b84ce4f37128512e4bbbf73096b822c2c1a8bbfcb5"
+        },
+        "src/client/dispatch.rs": {
+          "sha256": "f2081ab7b76a93f990b4c5f2c33feada6c7d2f0605c3489fcfb05093d71393ed",
+          "status": "modified",
+          "upstream_sha256": "cce049418dcd9e1700b87701d6e78a4a021ba0e9912e9b669fec3d3f037d4e29"
+        },
+        "src/proto/h1/conn.rs": {
+          "sha256": "1ac653f79cf4f866dc377efa81b7ceb77448c756ab794543cb1eaba037a28ac1",
+          "status": "modified",
+          "upstream_sha256": "59a6db81bd098c126d7929e1996a3a6bf9d6e997da76b47d88178fd8206ad44a"
+        },
+        "src/proto/h1/dispatch.rs": {
+          "sha256": "d692686e716aec465c24c64e6bd9060650d2f884ae5cb65dac66fdadc2c1f3d9",
+          "status": "modified",
+          "upstream_sha256": "9cd6638c59ae4857ae43ee58857abf585cc6a52dfda616c3631e2e48c02eaba2"
+        },
+        "src/proto/h1/role.rs": {
+          "sha256": "a2d03c6fd9947ffa91c11dc237bbbc6da5534d73e4ee458a23e2dcd82d0ffc92",
+          "status": "modified",
+          "upstream_sha256": "ee27600c6d7ae2f23e148af5cef02fa029def6ea5999cce84af4aac058ceb03e"
+        },
+        "src/proto/h2/client.rs": {
+          "sha256": "b83c658eacd1b748669cd8a817d17eecfbe6b0a7b49928df25a04299954a34ce",
+          "status": "modified",
+          "upstream_sha256": "56d715d09cdeddb91606dd0a9cfaa3de360ef31c07179ab9df6d24d9da0868af"
+        },
+        "src/proto/h2/mod.rs": {
+          "sha256": "6602d71aee7dd0d5bdf96d4b696acf7f9140ace90246ce86fffd0e76f0ff535f",
+          "status": "modified",
+          "upstream_sha256": "8f10d6023aa310984b7e9450e9fe9db2dde3a5c34ad6f78c6a16210ad868258a"
+        },
+        "src/proto/h2/server.rs": {
+          "sha256": "3f423d75e8dd1d469c0506223ba9de4b0f1121413b0edaf61a6294a5885a8504",
+          "status": "modified",
+          "upstream_sha256": "4a31750ff85d513011234d497cd00114a6b8ebb83e7c416cdfbace185e9fb47f"
+        },
+        "src/server/conn/http2.rs": {
+          "sha256": "1712b6cbbf411f22d09b4254f22418032117a6a0b56fab9e33f1e893e8ed3a13",
+          "status": "modified",
+          "upstream_sha256": "625bc621eab3dd7110574a8e5e0bc9bfe931556d062cfea8cef104c708802ea5"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c",
+        "name": "hyper",
+        "registry": "crates.io",
+        "version": "1.12.0"
+      }
+    },
+    "hyper-rustls": {
+      "dir": "vendor/hyper-rustls",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "38a317329b56fc5fb35e9e0ee12f24f7ce043ded8456aba02dfb45bd965d5c65",
+          "status": "modified",
+          "upstream_sha256": "ea73618088153351ec214a8bf7f5fa26a358f636a7cbe79b99a91961dc95a8fe"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "c9ac9916c441f8a7335a0dd042a223066cd0c518c93935758d5a6f71148c1e2d",
+          "status": "modified",
+          "upstream_sha256": "e5c2d451b9398887233bfafce4eff4e32bea450081f03945191664b388f14e78"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "5024de116ae476f62cd6d057e3a0267bf233fff61ef3b4ccd43957933e638ce8",
+          "status": "added"
+        },
+        "LOCAL.patch": {
+          "sha256": "8557b3c7e25e35d195bb3e57cbabf7728e1daaa13ef3d7df1d65c299bce3c370",
+          "status": "added"
+        },
+        "SOURCE_SHA256SUMS": {
+          "sha256": "7c5bd373cdc1f2c22fe6a67d80ac049dbe02716446d58e6e63e9bba2b2204107",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "5c9ff213c2029be8121652e590c76335ec07a6dcb5cb83c800c7d151948417ac",
+          "status": "added"
+        },
+        "src/connector.rs": {
+          "sha256": "2db005f168f9fa62e7f2089fde487f3e7523168a3f356b67450e99e2e2e893e4",
+          "status": "modified",
+          "upstream_sha256": "3f2d7eb6967d2d9750ed0542a241f59b192b4ba830f5ef3e45f2d078eabe16df"
+        },
+        "src/connector/builder.rs": {
+          "sha256": "f088369b1a765c481f432d2a64e8256f50466729deed0a2768bb956a69d7ac5a",
+          "status": "modified",
+          "upstream_sha256": "79f98460fa32642fa7d07db59e419d13bdcd0c913ede1168bf087a541d134909"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53",
+        "name": "hyper-rustls",
+        "registry": "crates.io",
+        "version": "0.27.10"
+      }
+    },
+    "hyper-util": {
+      "dir": "vendor/hyper-util",
+      "files": {
+        "Cargo.lock": {
+          "status": "removed",
+          "upstream_sha256": "63eec12a60cf824c88c06c001dcfc4f211f3161599c9f8ebc2aa5d4ea7278311"
+        },
+        "Cargo.toml": {
+          "sha256": "cb242e0a908ba26a7ccdec373d7981840b9671f502ef099f0338c7ef908c2790",
+          "status": "modified",
+          "upstream_sha256": "be68258b960525839b23a699362c550c7c5e73934cabd9dfe1b2a3fdebb37a2e"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "69c57de46ed63a387c7e8325fddf4290114e3d03f28c3556d4be915d503be593",
+          "status": "modified",
+          "upstream_sha256": "ecdace19ddd41ff8f9d3c2b87d4cdc3daa1c5820d64a268817f6431ab1ba856c"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "50cba8d7e828ef4f5aace204b4dfbb88e5e3a2f93181cded810df3e0315e38f4",
+          "status": "added"
+        },
+        "LOCAL.patch": {
+          "sha256": "eec50c0dfb5a55df91dcf6bd2d3213f6ae2fab63b05f9bd33ca35890216f24c3",
+          "status": "added"
+        },
+        "SOURCE_SHA256SUMS": {
+          "sha256": "541b4d1b7d1042bf344832d64ac6829983f6e0a3a024d328ab9f92e59c914a53",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "b51c3449868e074f4f901cf59468f90be34aac1619bc27a10847bdaa06a7ac2b",
+          "status": "added"
+        },
+        "src/client/legacy/client.rs": {
+          "sha256": "24a7c7c363338ae65066462d5cdbeb46d26cb03e5fe758dabc1bad48893238ae",
+          "status": "modified",
+          "upstream_sha256": "bc854508f0bee926f93adf5c00b0ecd4387d3047d8f748b3571a2a72dcbbb8a1"
+        },
+        "src/client/legacy/client/go_h2.rs": {
+          "sha256": "2974dc3054ef34d7f0e9faf504d0d9770db914d78996848463455ac7e26dfc10",
+          "status": "added"
+        },
+        "src/client/legacy/mod.rs": {
+          "sha256": "8ab75f8d9cf7eafe5101927247a8dc15422a333b105b0abc61a83f86126186d2",
+          "status": "modified",
+          "upstream_sha256": "a893df119a025ce5e8226868f76130b50b15dd0a4c8ae007556b14f29cd3520a"
+        },
+        "src/client/legacy/pool.rs": {
+          "sha256": "4f315f6d58faf5a6021f1058dc81e4cf3711e9be9d9b0eb32e6e7468dda86382",
+          "status": "modified",
+          "upstream_sha256": "7154a4688d94c5ac199e31560c1a6bda33dce5aaa4e3b10f38a22f9d37851191"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff",
+        "name": "hyper-util",
+        "registry": "crates.io",
+        "version": "0.1.21"
+      }
+    },
+    "instant-acme": {
+      "dir": "vendor/instant-acme",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "183b4b7bdf0428002173a9759d167a8c5fa4b45b368e3577251e6f7926461f5d",
+          "status": "modified",
+          "upstream_sha256": "5b8233d9669b5b0c5f80494e39045fdb38d2d930eb12d354b1e240f8c2b2a636"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "01d88fd2c91f25a0adc3b50c893e0959bea9d936b117a6b1e2b9426eee6d679c",
+          "status": "modified",
+          "upstream_sha256": "944b6966344a987f34408127b2c2940dde61a4c78107e27a0086c360c15085f0"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "8fdfed2346ba7f9bd75280aa0d2e6903a319689170867e5f2e630575bd7ee94b",
+          "status": "added"
+        },
+        "LICENSE-HEADSCALE-GO": {
+          "sha256": "e77c52635a2043a215a2905d3cf5288562acdf119a32bc8fd794d45b542c9fd8",
+          "status": "added"
+        },
+        "LICENSE-TZDATA-NOTICE": {
+          "sha256": "151ab98a89050d88019d577fda46561b45ccafd27c0228f2e4935f8217998b31",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "07a74efe1da55ddb36dfffd6d89fb3a85440808d44c2581e61a0c4ddcd13af4e",
+          "status": "added"
+        },
+        "src/account.rs": {
+          "sha256": "ec6bc21ce9aa5acadcbfc97592bc3795e589f5842e4cf2d339a2da86c9cd4f5e",
+          "status": "modified",
+          "upstream_sha256": "d53f4b10b21f20ff07c938096713e1635005a6d433da66beff1b77a0b7cf991c"
+        },
+        "src/go_native.rs": {
+          "sha256": "3bab12ca5e4df68014ecb02e615d116d8c9a0edfb369cbcc1a676f05401cff0c",
+          "status": "added"
+        },
+        "src/go_native/account_client.rs": {
+          "sha256": "535ede66abf10b23b7d10b3fd9c463890e4b41595b8b150eecdb6089e687a4e4",
+          "status": "added"
+        },
+        "src/go_native/account_key.rs": {
+          "sha256": "0dc831dd7b7f0913af4705cbde5a50fce8219916b0cc5207d64fe2929bd21273",
+          "status": "added"
+        },
+        "src/go_native/account_key/ec_der.rs": {
+          "sha256": "ba4a855c22283ec20d9179b510f3497081fe0127c5bd3dc159ec4e13cdcf08c2",
+          "status": "added"
+        },
+        "src/go_native/godebug.rs": {
+          "sha256": "b383fcadfba4047f6c370273ffe92fafaae76e524b88b16009ba3b7cc24d5f5b",
+          "status": "added"
+        },
+        "src/go_native/http_date.rs": {
+          "sha256": "f38602cf8433120a65ed1658ad72f6624d50a05e7d583e4b707ca26b3acdb741",
+          "status": "added"
+        },
+        "src/go_native/http_date/local.rs": {
+          "sha256": "ccd2f6c57fc5f29e910e718d2c06fba80a505d2870956b997ec2f1dd6e981752",
+          "status": "added"
+        },
+        "src/go_native/http_date/local/tzset.rs": {
+          "sha256": "beccb293e85c810e373318bfe71e638ce3c574905eea5ffc852d85d831a94ed1",
+          "status": "added"
+        },
+        "src/go_native/http_date/zoneinfo.zip": {
+          "sha256": "8f55634d05f8bca1f7bc7c69c5933428c69357e0bdf565e5ba224e3f88ff12e8",
+          "status": "added"
+        },
+        "src/go_native/json_prefix.rs": {
+          "sha256": "8607cf05244ec9efb7e063e17cfa60096ec19a4aa39f5a7f967502f5f4b0a55a",
+          "status": "added"
+        },
+        "src/go_native/json_time.rs": {
+          "sha256": "aadbcf635e734808328b438e656a30eff7766208f2b5712fc157ff92b26dd0b6",
+          "status": "added"
+        },
+        "src/go_native/legacy_json.rs": {
+          "sha256": "b71503dbcf2cc7fbc489745cbe663cd28af0dcce5964325df68b7ec419b0d20c",
+          "status": "added"
+        },
+        "src/go_native/legacy_json/scanner.rs": {
+          "sha256": "8777b54dbd9d5f3401c54b05fcf35c824a8fa4bf56a67e1ed9b2cee804213a3a",
+          "status": "added"
+        },
+        "src/go_native/pem.rs": {
+          "sha256": "655f0629865cba78d13647f68e9952691092f6fe71908f6bd7d39799957debd6",
+          "status": "added"
+        },
+        "src/go_native/quote.rs": {
+          "sha256": "96fc4f0b6ce2b01f3ff24fd9fe33138ecc4715c8c9b1a2622b26ef49ad8eb804",
+          "status": "added"
+        },
+        "src/go_native/quote/unicode.rs": {
+          "sha256": "27fa9712788f1774d89f2010df9fc09f1b00536743b1c5f2fd603ce341746cbd",
+          "status": "added"
+        },
+        "src/go_native/resource.rs": {
+          "sha256": "c6850822359f60303ed1cc6814a3f642d5b06921f3f564974809eec5baffca52",
+          "status": "added"
+        },
+        "src/go_native/resource_decode.rs": {
+          "sha256": "01d0af25ab95b4c8f69d283b8d670e2ca59ea84c8f21996ebb0e76b315cf54cb",
+          "status": "added"
+        },
+        "src/go_native/response_error.rs": {
+          "sha256": "15d2924b51c21a746281e26d819985436e359889d9af7b2eb2945a5aa0f22dca",
+          "status": "added"
+        },
+        "src/go_native/transport.rs": {
+          "sha256": "3018b20bf30bc09fcbd6f22adb18f679906417051e3f8bf86b68feb1076888ea",
+          "status": "added"
+        },
+        "src/go_native/transport/gzip.rs": {
+          "sha256": "365fe49ec42fddcae28e5a18c016602211ffa87ae861889df683328cf14e88f8",
+          "status": "added"
+        },
+        "src/go_native/transport/gzip/inflate.rs": {
+          "sha256": "101f94855e67a9b86cc63cf8ec57f04bbd3682e5ed593ace147664584cf3f785",
+          "status": "added"
+        },
+        "src/go_native/transport/gzip/read_size.rs": {
+          "sha256": "505c8d8d514ca30775649804e55cdc52913b27c2b4cd1a07b61f31cacaa1e83e",
+          "status": "added"
+        },
+        "src/go_native/transport/proxy.rs": {
+          "sha256": "bfc586ecf22d3c5db79dd1a7079594eb3fad2dca9fe2449b0494289c974a288d",
+          "status": "added"
+        },
+        "src/go_native/transport/proxy/environment.rs": {
+          "sha256": "c1dffc9e08455c017ab15baba75d6e16769c9c22eb00016896ddfe2aff61ecc1",
+          "status": "added"
+        },
+        "src/go_native/transport/proxy/socks.rs": {
+          "sha256": "d773f9ae6e17667819b3271368594f99cf3d807ba178b46ffcb25b2faecf7d60",
+          "status": "added"
+        },
+        "src/go_native/transport/proxy/unicode.rs": {
+          "sha256": "aa5b7cff549f0fdd655b87e2df446e9b83afda44c182a155035071a953fd7318",
+          "status": "added"
+        },
+        "src/go_native/transport/url.rs": {
+          "sha256": "68be748c54fc5425009e8c337f3f257610a94853d38f0307351bd089f60dd765",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna.rs": {
+          "sha256": "4e8eb2c9ea736c9a21a69125564d7a3fb2a53fc2a1fa99e1fedba8f86b31b792",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/bidi.rs": {
+          "sha256": "f76100914478aff0d3f730616cfc0d91ca9ad41019774f6d1d081eeff039f15b",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/data.rs": {
+          "sha256": "3f666c52ccc7f75e3abc1dc873e6d8dccedd9a56d739e318a4008e4a20be83e0",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/nfc.rs": {
+          "sha256": "7f11b0af4d3bcd7011507777391658c4dbe7600c6c0e2687d6f2d3878243421e",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/profile.rs": {
+          "sha256": "6c968c039b2ca1a07edd66a4883af4afffacea6e540a5e90219c8228bbbd9cc4",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/punycode.rs": {
+          "sha256": "3e61c4153daf68821b4d2a5962dc84f916ac0310c5fcf707447ccd97cdbdb879",
+          "status": "added"
+        },
+        "src/go_native/transport/url/idna/trie.rs": {
+          "sha256": "29da58b8e053f200c5e1fbb42c7cc96c524ed33221c282e076d7b848b0564b9f",
+          "status": "added"
+        },
+        "src/lib.rs": {
+          "sha256": "0a634563f07083d417c120f384627130d1dadffde894f32de5a7af2b29bfe9de",
+          "status": "modified",
+          "upstream_sha256": "e344a537df48b372eae21c804c3200fcfd5b8670baf91c370d88fc3d74369410"
+        },
+        "src/limits.rs": {
+          "sha256": "b9ea151c00a6a4c3f64eb8cb82126fb02a75d0062157222bafd45197e11bff35",
+          "status": "added"
+        },
+        "src/order.rs": {
+          "sha256": "52fc75344d8b012861fe05271d8fe5273cb2c992e3ec592cc60d5febf9fc77d4",
+          "status": "modified",
+          "upstream_sha256": "d23e49a02af011717147b54e4f04d694ed1a71010939a5c41267f2debff77800"
+        },
+        "src/types.rs": {
+          "sha256": "299aa0157ae28cf49e1c19046ad1b572f1a518094d310a8bedc66b393626dda1",
+          "status": "modified",
+          "upstream_sha256": "7be27ac647b4dec0159a563d57756c83a922f81769b67cf8c13356d8fc2e7a87"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "9f05ad37c421b962354c358d347d4a6130151df9407978372d3ad7f0c8f71a64",
+        "name": "instant-acme",
+        "registry": "crates.io",
+        "version": "0.8.5"
+      }
+    },
+    "rustls": {
+      "dir": "vendor/rustls",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "cdd700e0ca1ed06f90d3b6d668823b10edef752a305c45497e64a422039f2788",
+          "status": "modified",
+          "upstream_sha256": "ef983ace35d7ad699e22682ee0ee45211f805b074fc9e84190b62f200259070f"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "d8303c1e6d58b1eb2b642f8740dc176d8dc2d3cd04a075068df78b5039ed24e7",
+          "status": "modified",
+          "upstream_sha256": "279a804f483d7e4ac77a56dcb58cef9832b71e48af4280d5473945a81e93b2e8"
+        },
+        "LICENSE-GO": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-NOTICE": {
+          "sha256": "5800a299a5a148ec8105acd7d6ea5b6197ecedf397b0f5fc0a50205c98894102",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "dde3681db216417d73c29eb2a7e346ea622629e86c46150b681dc5396692a3b4",
+          "status": "added"
+        },
+        "src/client/client_conn.rs": {
+          "sha256": "8fa75d99ddfbaf2484b93c82c20a417439aca8a2657ba99ee105d106d29cca05",
+          "status": "modified",
+          "upstream_sha256": "7cf3803f3b95e078743d687ab08b8c1d183c0c27a502a2a3d4403a512874b92d"
+        },
+        "src/common_state.rs": {
+          "sha256": "44f0be41e75ad8281c9e455ce63d9762d9b1e057e76b537934ef59012e4d1c94",
+          "status": "modified",
+          "upstream_sha256": "f47f795cd2f8b393971e9896dfbf69c38d78aef9610797cc4534d61b0c16491f"
+        },
+        "src/conn.rs": {
+          "sha256": "da26eeb7ff657148dc37c034550cb5458e5f806bfd0b30592c857c64916a6f68",
+          "status": "modified",
+          "upstream_sha256": "60b4bf4186776efe7df71c43be3aef44027cfde06f393e1238efbb9d1cfdfcf9"
+        },
+        "src/crypto/aws_lc_rs/sign.rs": {
+          "sha256": "f25c7cd7c8333e0ab0b45a50cc1d9c63acb50e0ef0d06bb93aa09a81357d510b",
+          "status": "modified",
+          "upstream_sha256": "8163d1a10e5ce0d729af920ba8b5ad9096a0553a3b2b7798fb400bfc422f23b9"
+        },
+        "src/crypto/signer.rs": {
+          "sha256": "c6339182ab9f20b68a7f947b0d257f2bc84031d41d6721333a3d81947604f0b4",
+          "status": "modified",
+          "upstream_sha256": "b097775c0b30d507255824a8ac65d8d7440e723b16a9e91036e0d096a3d7b071"
+        },
+        "src/lib.rs": {
+          "sha256": "20f36bcd617195655cdcbdbc2d1c58f2bc600e84a611117649953befada98681",
+          "status": "modified",
+          "upstream_sha256": "7bd4855fe9628a0d596e89edf8130a6c099a14a0b7f7bbb28953b53c01810502"
+        },
+        "src/msgs/codec.rs": {
+          "sha256": "abb53b83125318920ddcb15697448add7c47dc81f9ec1046be07964b3b956e28",
+          "status": "modified",
+          "upstream_sha256": "fa53201ef4387a453c626c37138a6a2de2d2ff13d85c0ec34f8b13ee20daeeaf"
+        },
+        "src/msgs/handshake.rs": {
+          "sha256": "22e619ab1f0ec57b414bc00669a821811007c15a94413685c6208c320774cf9e",
+          "status": "modified",
+          "upstream_sha256": "9f9d9d4686e4a3f4433edf5fcc17c224155fa3eef747363bfa53802fd67dda7d"
+        },
+        "src/msgs/message/mod.rs": {
+          "sha256": "0443e46be548b3208c1e061813195ff5157e33dd34ec9fb203c79d1666e56ee1",
+          "status": "modified",
+          "upstream_sha256": "f1bdfa1ee08e31e54c85dd1c47d090afee672bd50bb6074aaa9c51d08feae3bf"
+        },
+        "src/msgs/persist.rs": {
+          "sha256": "a4106916f7c4c1625c57c0c0c30f6ae8f2a16b0e70c78a484e65eecaa22e6299",
+          "status": "modified",
+          "upstream_sha256": "2d88c8855a11c6ced38f4688da8cc772c2c41f84a165ba77c9f8bde30ff96891"
+        },
+        "src/server/handy.rs": {
+          "sha256": "ddd7de113c20ea375aeac8185a6014999098c258a4dd25bdefe8f0934b702c68",
+          "status": "modified",
+          "upstream_sha256": "b3a6d338ee0fe635190b2d14094ebf5cfcb5dbdf34568e7f4cf431e0867104ff"
+        },
+        "src/server/hs.rs": {
+          "sha256": "b21554213f79d96a5c6e3d6861186628b8ab2fda162b376b754fd25b5bd9a0e3",
+          "status": "modified",
+          "upstream_sha256": "b1ed14e5e36ee46bfb843b86af58efda01cdaa71a7f25a2f647da21f52529f91"
+        },
+        "src/server/server_conn.rs": {
+          "sha256": "464c209b6cf313c34b2d353f255dd4335217375eced46bf3eec7297d474f423f",
+          "status": "modified",
+          "upstream_sha256": "603cddb8a3a415737b7e047deedd32a2a6e4f918c2372af0bfb50ebb04de2163"
+        },
+        "src/server/tls12.rs": {
+          "sha256": "7f397b5a93b330791379ade029aa062485b78ec4650475ac8e5dd3ad69cdc0d4",
+          "status": "modified",
+          "upstream_sha256": "b7d083644d3be9bb6bf6cca4c654537cd22d3bc545f932ab2c9354503ebd7056"
+        },
+        "src/server/tls13.rs": {
+          "sha256": "af474cdf0b1249840ed3da16f69319b2c3eecbc91f0fee1c83e9b017d5b16ccc",
+          "status": "modified",
+          "upstream_sha256": "bd2482dad0811a179ea55af468f59d567e520a533a021a0e2f99c3b2afdbf18c"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
+        "name": "rustls",
+        "registry": "crates.io",
+        "version": "0.23.46"
+      }
+    },
+    "sqlx-core": {
+      "dir": "vendor/sqlx-core",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "793f3029745ddb104e0e23e347c08fa6ffd04b4a23bd27e7f4c879d54414cf5a",
+          "status": "modified",
+          "upstream_sha256": "05446ffc84fbeb8dffca4dd61138911f53b044792889400e9244529e44b3b22e"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "a704eecee74928e96d1118b943aa86ec084168fe5a2590900b304ed2d1f7e4e4",
+          "status": "modified",
+          "upstream_sha256": "e9f6cb3c07e434a902dff58029c6ef7289009951f31c2eae1ae240d2465e3470"
+        },
+        "LICENSE-GO-STDLIB": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "91af27e7db52a2272ac1a90c09ac99ffda1ae6d881c5c33cc2eac7f9dbf2408d",
+          "status": "added"
+        },
+        "src/any/connection/backend.rs": {
+          "sha256": "85a90049f53eee7e67f01e720a2aefff1360460483027f55fc7523e2278eadc8",
+          "status": "modified",
+          "upstream_sha256": "61313123763c3c5afd3aba3984baaf135a2f756bd6ce69d5913bf385f2c804b0"
+        },
+        "src/any/connection/executor.rs": {
+          "sha256": "036e4f33a8d4928d8f47135fa9cd029a63aa218fba08ee4ee4deaa61a89bacfb",
+          "status": "modified",
+          "upstream_sha256": "6fa7b76c86f58066ecff7a8f9b71ad753547081b5a37ebe8da502c7aa6985a18"
+        },
+        "src/common/statement_cache.rs": {
+          "sha256": "bd6ef753e27039d0962c9b5d2de3ed39e1b7d45c92bec681b68c4d06ba483cc8",
+          "status": "modified",
+          "upstream_sha256": "14a82d9719afac1abc088809c23c87f07069fafecaf0ba12cf64d02c802c3e62"
+        },
+        "src/net/mod.rs": {
+          "sha256": "2ba35194cceca0e3875ddec7e97e1ad6d13e0f854333bf2b5d023d52c74a6016",
+          "status": "modified",
+          "upstream_sha256": "fc9ce11d0a2542a9f3a9e50d210b678670001edf8fe1d3e6c1cb37ccbb7fdb0c"
+        },
+        "src/net/socket/buffered.rs": {
+          "sha256": "294a7bad1d0ab3f1e113d080d228a6de465800b3764bd913bff6cdd7d4a99c12",
+          "status": "modified",
+          "upstream_sha256": "4ed9cbb4dd4fa68c6104b1e626178994ddd5e2708c7423cc137c01ea51e2829e"
+        },
+        "src/net/socket/mod.rs": {
+          "sha256": "f95a2b901a2a6da1067b2747ec08628c8d3800f8a9dd3a25f7dcb62adefea6a4",
+          "status": "modified",
+          "upstream_sha256": "1e0e49cd0f61682bcbcfc9785e33dce8d929da8acd914e175b43c6cb0c9676fe"
+        },
+        "src/net/tls/go_pem.rs": {
+          "sha256": "b9160ae842e34e6c7c1b18236752cd763e93bb44e77699612b5176643dcf518c",
+          "status": "added"
+        },
+        "src/net/tls/go_pem/des.rs": {
+          "sha256": "04ba6425166194f8664a300e64d781ec31b10bea4665f6458997756eec9b41a1",
+          "status": "added"
+        },
+        "src/net/tls/go_pem/des/tables.rs": {
+          "sha256": "030e2861ef7c485397c47b55e973d61d467ae4dbcabd7cd8df49cd19a7f482b3",
+          "status": "added"
+        },
+        "src/net/tls/mod.rs": {
+          "sha256": "6aa612018cb02fe4d74a8cebd4c6351a52922361424fb7dac4fda9c4bb6155d3",
+          "status": "modified",
+          "upstream_sha256": "01696d72da790695731b565f9473e3047ff5651b4d71781ef38e9e53fe104c81"
+        },
+        "src/net/tls/tls_native_tls.rs": {
+          "sha256": "671f08ab1a9f1436f976361c8dd340ee94c9bbb5538cd2e5beb3ba8152fb90f1",
+          "status": "modified",
+          "upstream_sha256": "fe42160bf1ec62dd44a079d2f7c682780138633dea0dc1fff161213d4a4639fd"
+        },
+        "src/net/tls/tls_rustls.rs": {
+          "sha256": "e6c565891a340525e7c8794a1d62a185aed75de3eb35a8aeee11966a3320a644",
+          "status": "modified",
+          "upstream_sha256": "c0d2428e5c5e8610856b44f50c1553eca8956297ca21269347571d29c2e08807"
+        },
+        "src/pool/connection.rs": {
+          "sha256": "2f27ad58c0e7c666a2b934a29b404b8ebfae8c13e8ca69ef6a0c79b7bfe1fd3b",
+          "status": "modified",
+          "upstream_sha256": "e67d3755b3f9d57154658b1f898bb863d5fd553cdf089d86cd653ba5952bafa2"
+        },
+        "src/pool/executor.rs": {
+          "sha256": "b2627e9e27cf5710d834c78b3f007fa90107a1d7dd085bfc28f0990dc0fd0bd5",
+          "status": "modified",
+          "upstream_sha256": "5ea07b96227abe4ba8c9f04960034bece961c1d47938dd72fd665fdb6ff49c3d"
+        },
+        "src/pool/idle_queue.rs": {
+          "sha256": "f727b578a5d02036943cb5651bf311c5c4b7861e462d5c68700dd3b943eaa1cc",
+          "status": "added"
+        },
+        "src/pool/inner.rs": {
+          "sha256": "9c059bdc44ba4b4261874ff8f4226ccb2e68fb8f81ba105286a5f5b87f4b7087",
+          "status": "modified",
+          "upstream_sha256": "6e80be032bd771bdc69406fbddf1c2422b9179c7ada6754f4e1ad49374ef5706"
+        },
+        "src/pool/mod.rs": {
+          "sha256": "d7b1eae6afe61e497cc95c8bdfa72f270128cc7813c92a4d5ac74946f5c4c4e4",
+          "status": "modified",
+          "upstream_sha256": "be3ac12cf098eb5b04e5bce69efaf11a1b7f2975de187a8bf5dcdbe7e32ffafe"
+        },
+        "src/pool/options.rs": {
+          "sha256": "060eca336e62a3a25f9e51cbf5f9d0b38cfd71e042116c12d64c1d05bfee0963",
+          "status": "modified",
+          "upstream_sha256": "924cd57a062328b2e7c6ac55242eabb1706893d80ce1e8cb02fe643a592f4f83"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6",
+        "name": "sqlx-core",
+        "registry": "crates.io",
+        "version": "0.8.6"
+      }
+    },
+    "sqlx-postgres": {
+      "dir": "vendor/sqlx-postgres",
+      "files": {
+        "Cargo.toml": {
+          "sha256": "df473caad8ef020db1424598eacb896773fdced0c6726f307db921baed0fafce",
+          "status": "modified",
+          "upstream_sha256": "8ab3881ed0d6d430f2b2f328cf165c1983842c32dc3b44d4f5689a6458614d1f"
+        },
+        "Cargo.toml.orig": {
+          "sha256": "2e3f26c271c7a33c91124a2c2b371f29728b10e96b93d4d374a4b550035b6756",
+          "status": "modified",
+          "upstream_sha256": "8f5268df59dc8fa6f51712b4df54c1aa34c0c7a9cb1c0bd07e24aa28c631729e"
+        },
+        "LICENSE-GO-PGX": {
+          "sha256": "c2df788c01ac0b7d45fa122624a60ba70af50a966e410f615452d071ab7bb4e4",
+          "status": "added"
+        },
+        "LICENSE-GO-STDLIB": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "LICENSE-GO-TEXT": {
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+          "status": "added"
+        },
+        "UPSTREAM.md": {
+          "sha256": "f140990aa2963cc878b9331e951dcb2b326cf4fc06628d6f740eaa6517a4d29b",
+          "status": "added"
+        },
+        "src/any.rs": {
+          "sha256": "6728156ebbf63c613ae52dbb2ceb93419b4380bdb7ab869a31814217ed589fa5",
+          "status": "modified",
+          "upstream_sha256": "7772a390c61476a73a313e669f3892884276883cbc5a59b6cb56296b48ebf7d8"
+        },
+        "src/connection/establish.rs": {
+          "sha256": "ac1d35582e44cee56bb1dabf9519cfa0886943e2f59a70176f7bdf4baa24c114",
+          "status": "modified",
+          "upstream_sha256": "5613cf0981d15aae0246cd212b88c0a49c87d810d669f299bb04b63f8e51acc9"
+        },
+        "src/connection/executor.rs": {
+          "sha256": "142c4f721bc431f4b11da75e17510807d32914ff98bd3961ec88282bf83005ad",
+          "status": "modified",
+          "upstream_sha256": "d9c6143baeeca38b8d068c0beea0dcf40e6ce9269af8fd5ebe5c2b6cf511c892"
+        },
+        "src/connection/go_auth.rs": {
+          "sha256": "c65c11848456ac2ff399f8f430a62c0e47c0a07ff318b1cfa18ce3199d36d61d",
+          "status": "added"
+        },
+        "src/connection/go_auth/precis.rs": {
+          "sha256": "6ef9bcdc410505ff6fa40a3a6cefed72de9a402d6b5bb6a975c36ac191fadcc0",
+          "status": "added"
+        },
+        "src/connection/go_auth/precis/tables.rs": {
+          "sha256": "4422571fba23a26d98e73e199795c32363fbc9df81d8bb5ea37003ddddd433d5",
+          "status": "added"
+        },
+        "src/connection/go_query.rs": {
+          "sha256": "5db5dd1f07b8eba571ea351db600eb6a9e8a9d8ae0f1ea9ae49cc6d31d5b9ac8",
+          "status": "added"
+        },
+        "src/connection/go_query/sanitize.rs": {
+          "sha256": "b6a21f72d0b42e8108426884cce06e4e5c8e5cb8f104973243443328bd258469",
+          "status": "added"
+        },
+        "src/connection/go_query/text.rs": {
+          "sha256": "05dea41522d0846cc16ba7abdd3c45258bb3c091b4762d3f466a2f45df308cce",
+          "status": "added"
+        },
+        "src/connection/mod.rs": {
+          "sha256": "b03bb19efc0092b1adcefface7222eae235fea9b17af22ff44f059f51fca6817",
+          "status": "modified",
+          "upstream_sha256": "1b03f1869531596c75511d12c6abf796c09263df8697d3207357ddc981a26d6d"
+        },
+        "src/connection/sasl.rs": {
+          "sha256": "ff5bc0cc7fdc55255ba4dd71370469228dce986854599606f5e6d04e6a69fadd",
+          "status": "modified",
+          "upstream_sha256": "73007cdd24c45698a03baccaa5641c473b2636f08157542d50d0e01d4676537b"
+        },
+        "src/connection/stream.rs": {
+          "sha256": "17a478fe4cdd7456d2b5f48880fc8b3ac01173e224c0919f8ee1d868c14a9e7f",
+          "status": "modified",
+          "upstream_sha256": "185f39afdd96284a7dd1f40fff1a9292fd289c85c2106c65a121045b551c00c5"
+        },
+        "src/connection/tls.rs": {
+          "sha256": "ff9ebf17e897897ec346ae1ed73969fb566b8233fa97ffbb35fc5d08be31f0eb",
+          "status": "modified",
+          "upstream_sha256": "4e3997a0c8af39dd7de68ba30bd2512de4a394ed63db1f1239c845554113e6f2"
+        },
+        "src/io/mod.rs": {
+          "sha256": "fc7f571b18a39eaab79cad58e64dfa4c5f1e59c78a2de83514a577378dac2c9c",
+          "status": "modified",
+          "upstream_sha256": "1006e3fcf49c1147c09cbf29aa4e50151d241054b268537073dccb788a8173ba"
+        },
+        "src/message/authentication.rs": {
+          "sha256": "51f7eac7da81c9ad413231ed837a5b1fc8ca76bb0048735dded61056810af8dc",
+          "status": "modified",
+          "upstream_sha256": "d72a8a381d686fcb719f5582db48bd4e5bcb64931baa30f736179fdc2fd3341d"
+        },
+        "src/message/backend_key_data.rs": {
+          "sha256": "9b19e56f455da386b1ff255cfdeb7ab3e0eb462fc1c98bc5dd099317b4c800ee",
+          "status": "modified",
+          "upstream_sha256": "add437e94e69b7152695094517885c3f4dde48bb53aeb10201c2e67446034d1a"
+        },
+        "src/message/command_complete.rs": {
+          "sha256": "433f785fa0376b071d157a730bf73fed86c338ef4fffd7a5d30cd046efa1af31",
+          "status": "modified",
+          "upstream_sha256": "c2950bddc035e86dcc5d97c3d0d6aaea821f957d5ecccdb5fcd99e44d2611930"
+        },
+        "src/message/copy.rs": {
+          "sha256": "fc3e926d070e16a86d11405033b6e6dc28260160582ea9f70b300e377d27db92",
+          "status": "modified",
+          "upstream_sha256": "d42d3097114a1085c9e643b2378705a8661c40075d5d11e302d9801ea63bf290"
+        },
+        "src/message/data_row.rs": {
+          "sha256": "7c314f873360f0f701929a63f7f147822a8fffa605c82b71b0c9044f78e057b7",
+          "status": "modified",
+          "upstream_sha256": "50a13a82c07ff5cd3734cb5bbbc69eb51e85a4960a105ae357f16308a388be47"
+        },
+        "src/message/go_body.rs": {
+          "sha256": "2b87ea3762a915fea9690466fd5660640f0f5c8f234a8855a012886ca9a5d237",
+          "status": "added"
+        },
+        "src/message/mod.rs": {
+          "sha256": "0c3e58afcd9f309f583c1bbb5259902b396bdd494ed7972414fcd9fc31f273d1",
+          "status": "modified",
+          "upstream_sha256": "acdffa196ce3b056bcb6c8a8d3171ccf5b50328ebfecd5456fd255a5aed83cb5"
+        },
+        "src/message/negotiate_protocol_version.rs": {
+          "sha256": "5b4d8c1c2ad87f23e19f0dd7ab4d01f50825c18ce5829489764fdc3f4043188a",
+          "status": "added"
+        },
+        "src/message/notification.rs": {
+          "sha256": "5ab61b188aa6b09de5274e43023866622c68cc216d882b598f3dc7a7b8c71408",
+          "status": "modified",
+          "upstream_sha256": "c19452b316673391afbfeb09d5c99a2fe904d1e142de706970e47729d5f012e2"
+        },
+        "src/message/parameter_description.rs": {
+          "sha256": "250343a6ef4f071319c4fbdcc7a4d20288b31118207300695bee3c55ad61f947",
+          "status": "modified",
+          "upstream_sha256": "cefef4381ce4e9fde9961d849d30c1c36b48198b1b26744c6d0e175b8bdd933d"
+        },
+        "src/message/parameter_status.rs": {
+          "sha256": "c814707e30fb5c146461602a0772bdbdc0ce609fd7b67870b69c0f47ef8c7b28",
+          "status": "modified",
+          "upstream_sha256": "9d95d05077699a856e63fb3f88ecfca14de6805fe9595132744fa24d20da14b5"
+        },
+        "src/message/ready_for_query.rs": {
+          "sha256": "d3854effec015f212dad84fe65c300af0c66f9446ec87927f00cf9e2cf76f2d3",
+          "status": "modified",
+          "upstream_sha256": "fe79869e33d0da9f218350817915a0f88cd536ae7ccd3604e376f96e5918fe9b"
+        },
+        "src/message/response.rs": {
+          "sha256": "b345cb3845a73961b6f22b95553fc4901240927207872b6c1ddf03d440dcf99d",
+          "status": "modified",
+          "upstream_sha256": "9e3b8b9d2149df0bc6ae73ba603e5b6935e5224a39fd948d39bb4d3f7199ea12"
+        },
+        "src/message/row_description.rs": {
+          "sha256": "c4c404716cda1656d088b84282b5bbdbc60693219e93ebea5b6a629e528f00be",
+          "status": "modified",
+          "upstream_sha256": "af5e046634af3fd61b7f2771b206c60976b6985fb552bf34f43baa5966f82d6d"
+        },
+        "src/message/startup.rs": {
+          "sha256": "8e69df3eac825595a67e7d7f9ddf7b3e6174e181aabdfa4236904ed290be80bc",
+          "status": "modified",
+          "upstream_sha256": "9e1781291a648be9058b0b9f0014355a6510725ef88e04f19a545a5600518b00"
+        },
+        "src/options/connect.rs": {
+          "sha256": "6e334d08a9f39cafe4877988348ddd1dd5d0b52bb10217542055e31f9e7831a0",
+          "status": "modified",
+          "upstream_sha256": "b68afaa732d95cf9a5bb695a9944382dd476800fed06c02cd4cdc665fb7a4892"
+        },
+        "src/options/go_compat.rs": {
+          "sha256": "9e6c1f96a9e9991ae421c61b73dfce2b900c0294109992482325f847891c7785",
+          "status": "added"
+        },
+        "src/options/go_compat/auth.rs": {
+          "sha256": "79f6760366d022c1ea66c6e7594c9ce661e67d8f3af505b83d1b11c393220339",
+          "status": "added"
+        },
+        "src/options/go_compat/connector.rs": {
+          "sha256": "274edf5c70ddcf3ad48f52585376a1de79e9f4c6c9939e53c72453e208b47074",
+          "status": "added"
+        },
+        "src/options/go_compat/pem.rs": {
+          "sha256": "abad8482117ce909e44c90748006e876e9f13200ec96086026cc32e4d16387c7",
+          "status": "added"
+        },
+        "src/options/go_compat/query.rs": {
+          "sha256": "04122ff087dc24c1fc144d7b0abd52f8d33ff0de2cf66d5af7e3d22722ab869e",
+          "status": "added"
+        },
+        "src/options/mod.rs": {
+          "sha256": "e54d75d65c080813d36f810176765297261f5f95f6cae309fd8d190710ee6b4a",
+          "status": "modified",
+          "upstream_sha256": "6f8fc871f6c7e73169e6713a753be4c2557ab874d019d395488854437242c6f9"
+        },
+        "src/row.rs": {
+          "sha256": "5b217cf638499b245bc9b70cfea006bcc301cb833c9501607147bf21b4a117a5",
+          "status": "modified",
+          "upstream_sha256": "e9ca6ff8cc4533ce8815774d37db285161edec339b4de20d4020b906ce2335f2"
+        },
+        "src/types/array.rs": {
+          "sha256": "c6e13eadf8e650bdc68d26abe9fc213503175f9016c659e51dcc57c3abf8a68e",
+          "status": "modified",
+          "upstream_sha256": "92545b7b3db841dfd10cfea044f0c5b91d26daccb4be4573390b2fe4423222d3"
+        },
+        "src/types/bit_vec.rs": {
+          "sha256": "440599998a1614a5cd3f1a67203927362e6cd7f2c0846036b01e8b9f6db88a77",
+          "status": "modified",
+          "upstream_sha256": "ed2707f677bf2613342e2892e2362fce6c838284b2966989f14f9ab863622557"
+        },
+        "src/types/bool.rs": {
+          "sha256": "8c59184b66cf9acb6cc5cebdc9667e1444594388c634ef57f3bb5ae29348bef7",
+          "status": "modified",
+          "upstream_sha256": "4ade8342b8f63bd7b33bf6e878591796420491079c072e09e683c0279e7a102d"
+        },
+        "src/types/chrono/date.rs": {
+          "sha256": "11dc72d557124d3537332c05ee89cf9ff5ae6c68b8898d1fba24b3588b3eaaf8",
+          "status": "modified",
+          "upstream_sha256": "96d053917becadd885f2417521d690f140b1ad49fb12acda9502ffc14bc04060"
+        },
+        "src/types/chrono/datetime.rs": {
+          "sha256": "be27ceb0149824c73efec73af1ed6b00063e4a0f5ac931d71747d0908383d9f7",
+          "status": "modified",
+          "upstream_sha256": "cad2020b1ae7dd3b7b734b2a762f847210c87eda0af6222e8b87eb2409e11bbd"
+        },
+        "src/types/float.rs": {
+          "sha256": "e7611d81deaa29f6159dbbdfe932132ed4b0d53b41191323f75484f2643f79fd",
+          "status": "modified",
+          "upstream_sha256": "f450fc0113ff18dbd1868775153a4cd989dfdd6650c12caa555518288cbbafb5"
+        },
+        "src/types/geometry/path.rs": {
+          "sha256": "c3649531c813e32178e298c8ed8edbf668eff3acb021b326eb89cb20dd7f153d",
+          "status": "modified",
+          "upstream_sha256": "7cd04dbfbab2891257b2c35161a3b6334fa1852b380a55baf868aa6c2e062a66"
+        },
+        "src/types/geometry/polygon.rs": {
+          "sha256": "9d9486b1d3d2d08d258ea2623c33c1adf9afa963ea89ae4e6e2c5e8a38d21f97",
+          "status": "modified",
+          "upstream_sha256": "cd204ac59c13264136b7003429a8e9e1bd6328dee46da4907ba74b29834e8024"
+        },
+        "src/types/json.rs": {
+          "sha256": "fc21824c9aceccbdc920387b2fa2919aebe1a74a1cc7feb8210dab97b98aed5c",
+          "status": "modified",
+          "upstream_sha256": "60fb07fa989f46cf7189c534683bc70d83ac161572a8b1c80070db52d73956b2"
+        },
+        "src/types/money.rs": {
+          "sha256": "94d5d29a64321085e4217cdd8baad15aa2d4ee5e022ca36df0bc54713231fd42",
+          "status": "modified",
+          "upstream_sha256": "9c94722979e67671c62e881773a4aa478ce5a69ae983dc3c6ed0213c6f10e64b"
+        },
+        "src/types/numeric.rs": {
+          "sha256": "910f9d4dd789ea7f37c4354c0a1cd020a238eb81414d3050befc7fac067c8779",
+          "status": "modified",
+          "upstream_sha256": "08522610ab1862fa47746ef1105a5b86959d19198f68b4e337792189afd8628e"
+        },
+        "src/types/oid.rs": {
+          "sha256": "f1e09dc365da6b873da95d78261aba3eb9da8d2103a59506695d8f163fb9228b",
+          "status": "modified",
+          "upstream_sha256": "97cad1980a82c33f83a2cadd3232f7d0e0a3b5444b28d9919fc94fa764b1dd9b"
+        },
+        "src/types/range.rs": {
+          "sha256": "70abec8f9b7a0e24bbc3d4d4190f676dade90b345b105dcc30bdc892b001e0c9",
+          "status": "modified",
+          "upstream_sha256": "442dcc1d36b427e48aef24b046b5a88c1ec51008427f5d06354228d945bb4773"
+        },
+        "src/types/record.rs": {
+          "sha256": "006e961d1fb79a60eaaf7b8b2baa838cc21649be17667d2f1d1721c7de914a2b",
+          "status": "modified",
+          "upstream_sha256": "03e0a9e078ebd2bae1da92459ca58bdbe56161af95e397210b96fb6335500b2a"
+        },
+        "src/types/time/date.rs": {
+          "sha256": "45e9401310cfa59e2b6d3bc6bb06885f8d4c4ec401100a23b8d5a4a7e7a174ff",
+          "status": "modified",
+          "upstream_sha256": "ce1196c33e187df1d05e1145bd684f44837c701b81a751ee648bfda0494e1fab"
+        },
+        "src/types/time/datetime.rs": {
+          "sha256": "4c6fa4d52833fc628177ac49a50a94b5f4c745b2adcf9adef9c67d225d887ce1",
+          "status": "modified",
+          "upstream_sha256": "7f3bb4a37a992cb88a9e28aee98c4fee529350527da1eebd2504b125421992b8"
+        },
+        "src/value.rs": {
+          "sha256": "15a69c14fd0973e93cf264d6b7f5fa83ccdf66a98e602865fc0f5c251bb7d767",
+          "status": "modified",
+          "upstream_sha256": "80f9303a892fb97ac0a4084532bc03e0a344d881495cad1af2d2357150cde0c6"
+        },
+        "tools/import-go-precis.py": {
+          "sha256": "567860e98cf290854831b35ad265a838aecabed0a6c20cc2070c70f1fb328952",
+          "status": "added"
+        }
+      },
+      "upstream": {
+        "archive_sha256": "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46",
+        "name": "sqlx-postgres",
+        "registry": "crates.io",
+        "version": "0.8.6"
+      }
+    }
+  },
+  "generated_by": "scripts/check_vendor_provenance.py --update",
+  "ignored_files": [
+    ".cargo-ok"
+  ],
+  "notes": "Each entry lists the files of vendor/<dir> that differ from the pristine crates.io archive named under 'upstream' (status + sha256 of the vendored file). Reviewed local changes only: regenerate with --update and review the diff of this file.",
+  "schema": 1
+}

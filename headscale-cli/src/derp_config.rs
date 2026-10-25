@@ -434,8 +434,13 @@ fn rng_cooked() -> &'static [i64; RNG_LEN] {
         assert_eq!(raw.len(), RNG_LEN * std::mem::size_of::<i64>());
 
         let mut cooked = [0_i64; RNG_LEN];
-        for (idx, chunk) in raw.chunks_exact(std::mem::size_of::<i64>()).enumerate() {
-            cooked[idx] = i64::from_le_bytes(chunk.try_into().unwrap());
+        for (idx, chunk) in raw
+            .as_chunks::<{ std::mem::size_of::<i64>() }>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            cooked[idx] = i64::from_le_bytes(*chunk);
         }
         cooked
     })
@@ -763,7 +768,7 @@ regions:
         let mut empty_region =
             derp_map_with_regions(vec![(1, "empty", "Empty Region", Vec::new())]);
         shuffle_native_derp_map_with_seed(&mut empty_region, "edge.example.com");
-        assert!(node_names(&empty_region, 1).is_empty());
+        assert_eq!(node_names(&empty_region, 1), [] as [String; 0]);
 
         let mut single_node =
             derp_map_with_regions(vec![(1, "single", "Single Node Region", vec!["1a"])]);

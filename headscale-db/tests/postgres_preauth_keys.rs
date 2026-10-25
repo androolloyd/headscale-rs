@@ -82,10 +82,9 @@ async fn postgres_preauth_key_primitives_match_sqlite_contract() -> TestResult {
             preauth_keys::list_postgres_by_user_on_connection(&mut schema.conn, "alice").await?;
         assert_eq!(alice_keys.len(), 1);
         assert_eq!(alice_keys[0].id, created.row.id);
-        assert!(
-            preauth_keys::list_postgres_by_user_on_connection(&mut schema.conn, "missing")
-                .await?
-                .is_empty()
+        assert_eq!(
+            preauth_keys::list_postgres_by_user_on_connection(&mut schema.conn, "missing").await?,
+            [] as [headscale_db::preauth_keys::PreauthKeyRow; 0]
         );
 
         let userless = preauth_keys::create_postgres_for_test_on_connection(

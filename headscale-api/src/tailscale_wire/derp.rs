@@ -1114,7 +1114,7 @@ mod tests {
             panic!("expected server-key frame");
         };
         assert_eq!(server_public, runtime.public_key());
-        assert!(extra.is_empty());
+        assert_eq!(extra, [] as [u8; 0]);
 
         let client_info =
             encode_client_info_frame(&client_key, &server_public, &ClientInfo::regular()).unwrap();
@@ -1942,7 +1942,7 @@ mod tests {
             panic!("expected server key frame");
         };
         assert_eq!(key, server_public);
-        assert!(extra.is_empty());
+        assert_eq!(extra, [] as [u8; 0]);
 
         let (frame, _) =
             headscale_core::derp::protocol::decode_frame(binary_frame(&messages[1]), MAX_INFO_LEN)
@@ -2022,7 +2022,7 @@ mod tests {
             panic!("expected server-key frame");
         };
         assert_eq!(key, server_public);
-        assert!(extra.is_empty());
+        assert_eq!(extra, [] as [u8; 0]);
 
         let (frame, _) =
             headscale_core::derp::protocol::decode_frame(binary_frame(&messages[1]), MAX_INFO_LEN)
@@ -3411,7 +3411,7 @@ mod tests {
             panic!("expected websocket server-key frame");
         };
         assert_eq!(key, server_public);
-        assert!(extra.is_empty());
+        assert_eq!(extra, [] as [u8; 0]);
         let server_info_frame =
             decode_websocket_sent_frame(&sent, 1, "websocket server-info frame decodes");
         assert_eq!(

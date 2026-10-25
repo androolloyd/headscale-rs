@@ -396,13 +396,6 @@ PLANS["sqlx-postgres"] = Plan(
         Run(
             "unit-default",
             ["-p", "sqlx-postgres", "--lib"],
-            xfail=["types::geometry::path::path_tests::cannot_deserialise_path_type_uneven_point_bytes"],
-            xfail_reason=(
-                "the patch adds a point-count bounds check to PgPath decoding, so the malformed "
-                "input is still rejected but with the new message \"PATH point count exceeds its "
-                "buffer\" instead of the \"expected 32 bytes after header, got 28\" the "
-                "upstream test pins"
-            ),
         ),
         Run(
             "integration-postgres",

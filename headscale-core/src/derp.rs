@@ -3457,6 +3457,27 @@ pub struct DerperSidecar {
     status: Arc<Mutex<SidecarStatus>>,
 }
 
+/// Admission flags for the Go `derper` sidecar.
+///
+/// `-verify-clients` makes derper ask a *local tailscaled* whether each peer is
+/// authorised and rejects everyone when there is none. When the control
+/// server's `/verify` endpoint is configured it is the admission authority, so
+/// the local-tailscaled check is only requested for deployments that run
+/// derper beside a tailscaled and give it no URL.
+fn derper_verification_args(cfg: &EmbeddedDerpConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    match &cfg.verify_client_url {
+        Some(url) => {
+            args.push("-verify-client-url".to_string());
+            args.push(url.clone());
+            args.push("-verify-client-url-fail-open=false".to_string());
+        }
+        None if cfg.verify_clients => args.push("-verify-clients".to_string()),
+        None => {}
+    }
+    args
+}
+
 impl DerperSidecar {
     /// Spawn the configured upstream `derper` binary.
     pub fn spawn(cfg: &EmbeddedDerpConfig) -> Result<Self, EmbeddedDerpError> {
@@ -3480,15 +3501,7 @@ impl DerperSidecar {
         if let Some(cert_dir) = &cfg.derper_cert_dir {
             command.arg("-certdir").arg(cert_dir);
         }
-        if cfg.verify_clients {
-            command.arg("-verify-clients");
-        }
-        if let Some(url) = &cfg.verify_client_url {
-            command
-                .arg("-verify-client-url")
-                .arg(url)
-                .arg("-verify-client-url-fail-open=false");
-        }
+        command.args(derper_verification_args(cfg));
 
         let child = command.spawn()?;
         let pid = child.id();
@@ -3772,5 +3785,36 @@ mod tests {
         assert!(args.contains("-verify-client-url\n"));
         assert!(args.contains("http://127.0.0.1:51821/verify\n"));
         assert!(args.contains("-verify-client-url-fail-open=false\n"));
+    }
+    #[test]
+    fn derper_admission_prefers_the_control_verify_url_over_local_tailscaled() {
+        let url = "http://127.0.0.1:51821/verify".to_string();
+        let with_url = EmbeddedDerpConfig {
+            verify_clients: true,
+            verify_client_url: Some(url.clone()),
+            ..EmbeddedDerpConfig::default()
+        };
+        assert_eq!(
+            derper_verification_args(&with_url),
+            [
+                "-verify-client-url",
+                url.as_str(),
+                "-verify-client-url-fail-open=false"
+            ]
+        );
+
+        let local_only = EmbeddedDerpConfig {
+            verify_clients: true,
+            verify_client_url: None,
+            ..EmbeddedDerpConfig::default()
+        };
+        assert_eq!(derper_verification_args(&local_only), ["-verify-clients"]);
+
+        let open = EmbeddedDerpConfig {
+            verify_clients: false,
+            verify_client_url: None,
+            ..EmbeddedDerpConfig::default()
+        };
+        assert!(derper_verification_args(&open).is_empty());
     }
 }

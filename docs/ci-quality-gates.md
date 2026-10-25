@@ -15,14 +15,14 @@ that is exactly what happened on 2026-10-16 when the runner's `stable` became
 1.99.0 (new `clippy::assert_is_empty`, 22 hits in `headscale-api-acl`) and the
 unpinned nightly `rustfmt` reformatted `tools/parity`.
 
-`rust-toolchain.toml` pins `1.96.0` (the release `CHANGES.md` records as
-qualified) with the `clippy` and `rustfmt` components. Everything follows it:
+`rust-toolchain.toml` pins `1.99.0` (the release `CHANGES.md` records as
+qualified; it was 1.96.0 until 2026-10-25) with the `clippy` and `rustfmt` components. Everything follows it:
 
 | consumer | how |
 | --- | --- |
 | local `cargo` / `rustup` | picks the file up automatically |
 | `.github/workflows/*` | `uses: ./.github/actions/setup-rust` reads the file and installs exactly that toolchain |
-| `deploy/docker/Dockerfile*` | `FROM rust:1.96.0-bookworm` |
+| `deploy/docker/Dockerfile*` | `FROM rust:1.99.0-bookworm` |
 | fuzz jobs | need a nightly for libFuzzer sanitizers: `FUZZ_NIGHTLY_TOOLCHAIN: nightly-2026-08-21` in `ci.yml` and `fuzz-nightly.yml` (a dated nightly, via the same action) |
 | `cargo audit` / `cargo deny` / `cargo llvm-cov` | installed with a current `stable` (`cargo +stable install --locked …`) because their own MSRV moves faster than the pin |
 
@@ -35,17 +35,14 @@ uses a floating `stable`/`nightly` or `dtolnay/rust-toolchain`.
 `cargo test --workspace --all-targets`, `scripts/test_vendored_crates.sh` and
 `python3 scripts/check_toolchain_pin.py` on the new release.
 
-The tree is also clippy-clean (`-D warnings`, workspace, the three `headscale-api`
-feature variants and the excluded crates) on Rust 1.99.0, the release CI's floating
-`stable` had reached when `main` went red. Moving the pin to 1.99.0 therefore only
-needs the steps above; it has not been done because `CHANGES.md` records 1.96.0 as
-the qualified release. The 1.99 pass rewrote test assertions that clippy flags
-(`assert!(x.is_empty())` is now `assert_eq!(x, [] as [T; 0])`, `assert_eq!(x, "")`
-or `assert_eq!(x.len(), 0)` where the element type cannot be named from the test),
-replaced `chunks_exact(N)` with `as_chunks::<N>()` in the DERP YAML and RNG-table
-parsers, and made two functions that never awaited non-async
-(`InMemoryPreauthAdmin::mint_inner`, and the `go-pool-compat`-off stub of
-`Database::new_with_go_sqlite_options`, which returns a ready future).
+Moving the pin from 1.96.0 to 1.99.0 needed a lint pass first: the 1.99 clippy
+rewrote test assertions (`assert!(x.is_empty())` is now `assert_eq!(x, [] as [T; 0])`,
+`assert_eq!(x, "")` or `assert_eq!(x.len(), 0)` where the element type cannot be
+named from the test), replaced `chunks_exact(N)` with `as_chunks::<N>()` in the
+DERP YAML and RNG-table parsers, and made two functions that never awaited
+non-async (`InMemoryPreauthAdmin::mint_inner`, and the `go-pool-compat`-off stub of
+`Database::new_with_go_sqlite_options`, which returns a ready future). The tree
+still lints clean on 1.96.0, stable 1.95 and nightly.
 
 ## Gates
 

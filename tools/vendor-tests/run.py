@@ -137,15 +137,24 @@ H2_NATIVE = [
 
 HTTP_NATIVE_XFAIL = ["reserve_over_capacity", "with_capacity_overflow"]
 
+# http 1.5.0 declares `#![deny(warnings)]` and its own unit tests spell
+# `::std::usize::MAX` / `::std::isize::MAX` (src/header/value.rs, byte-identical in
+# the pristine archive). Since Rust 1.99 those module constants are deprecated, so
+# the crate's `cfg(test)` build fails with `deprecated` errors that have nothing to
+# do with the local patch. Capping lints to warnings keeps the upstream behaviour
+# tests runnable on the pinned compiler; the library itself builds clean without it.
+HTTP_ENV = {"RUSTFLAGS": "--cap-lints=warn"}
+
 PLANS: dict[str, Plan] = {
     "http": Plan(
         group="http",
         vendored=["http"],
         runs=[
-            Run("default", ["-p", "http"]),
+            Run("default", ["-p", "http"], env=HTTP_ENV),
             Run(
                 "native",
                 ["-p", "http", "--features", "go-native-header-capacity"],
+                env=HTTP_ENV,
                 xfail=HTTP_NATIVE_XFAIL,
                 xfail_reason=(
                     "go-native-header-capacity widens the HeaderMap index to u32 and the "

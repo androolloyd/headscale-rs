@@ -2,7 +2,7 @@
 
 ## 2026-10-25 — Quality gates that gate
 
-- Pin the compiler in `rust-toolchain.toml` (1.96.0) and use it everywhere: all
+- Pin the compiler in `rust-toolchain.toml` and use it everywhere: all
   workflows (via `.github/actions/setup-rust`), both Dockerfiles (they built on
   an unqualified 1.99) and the fuzz jobs (a dated nightly).
   `scripts/check_toolchain_pin.py` fails on drift. Floating `stable`/`nightly`
@@ -19,7 +19,8 @@
   and pgx Go-exactness behaviour. See `docs/ci-quality-gates.md`.
 - Clear the clippy 1.99.0 findings across the workspace (assertion forms,
   `as_chunks`, two needlessly async functions) so the tree lints clean on both the
-  pinned 1.96.0 and 1.99.0; the pin itself stays at the qualified 1.96.0.
+  previously qualified 1.96.0 and 1.99.0. The qualified toolchain is 1.99.0
+  (was 1.96.0): `rust-toolchain.toml`, both Dockerfiles and the CI jobs use it.
 - `check_headscale_go_refs.py --remote` warns, instead of failing every run,
   when headscale-go `main` has moved; a nightly `pin-freshness` job fails on it.
 

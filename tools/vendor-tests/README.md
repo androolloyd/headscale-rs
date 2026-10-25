@@ -68,6 +68,15 @@ stale exemption is itself an error. Currently:
 | `hyper` / `native` | `body::incoming::tests::test_size_of` | `go-client-idle` (with `client`) adds per-body idle-tracking state to `hyper::body::Incoming` (248 bytes); upstream's accident detector asserts <= 40 bytes |
 | `h2` / `integration-native` | `recv_invalid_authority`, `recv_next_stream_id_updated_by_malformed_headers` | `go-server-lifecycle` keeps a request whose `:authority` is not a valid URI authority (exposed as `Host`, like Go's `net/http`; see the comment in `vendor/h2/src/server.rs`); both upstream tests send `"not:a/good authority"` and assert the stream is rejected |
 
+## Compiler-drift allowance
+
+The `http` runs set `RUSTFLAGS=--cap-lints=warn`. Upstream `http` 1.5.0 has
+`#![deny(warnings)]` and its own unit tests use `::std::usize::MAX` /
+`::std::isize::MAX` (`src/header/value.rs`, byte-identical in the pristine archive),
+which Rust 1.99 deprecates, so the crate's test build fails on 1.99.0 with no
+connection to the patch. The library itself compiles without the cap. Drop the
+allowance once an `http` release fixes it.
+
 ## Lockfiles
 
 `locks/<group>.Cargo.lock` pin the resolution of each scratch workspace. They are

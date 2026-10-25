@@ -11,7 +11,8 @@ The compiler this tree is built, linted and tested with is pinned once, in
   `toolchain:` override must be a dated nightly (`nightly-YYYY-MM-DD`), which is
   what the fuzz jobs need for the libFuzzer sanitizers, and the floating
   installers (`dtolnay/rust-toolchain`, `actions-rs/toolchain`) are forbidden;
-* CHANGES.md, when it names a qualified toolchain, names the pinned one.
+* CHANGES.md, when it names a qualified toolchain, names the pinned one (its
+  newest mention counts; older entries are history).
 
 Floating `stable`/`nightly` in CI is how main went red on 2026-10-16: the runner's
 `stable` moved to 1.99, whose new `clippy::assert_is_empty` lint failed the
@@ -108,18 +109,19 @@ def check_workflows(root: pathlib.Path) -> list[str]:
 
 
 def check_changes(root: pathlib.Path, channel: str) -> list[str]:
+    """CHANGES.md is newest-first; its latest statement of the qualified toolchain wins."""
     path = root / "CHANGES.md"
     if not path.is_file():
         return []
-    problems = []
-    for found in re.findall(
+    found = re.search(
         r"qualified toolchain is (\d+\.\d+\.\d+)", path.read_text(encoding="utf-8")
-    ):
-        if found != channel:
-            problems.append(
-                f"CHANGES.md names qualified toolchain {found}, rust-toolchain.toml pins {channel}"
-            )
-    return problems
+    )
+    if found and found.group(1) != channel:
+        return [
+            f"CHANGES.md names qualified toolchain {found.group(1)}, "
+            f"rust-toolchain.toml pins {channel}"
+        ]
+    return []
 
 
 def check(root: pathlib.Path) -> list[str]:

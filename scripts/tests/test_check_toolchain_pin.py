@@ -77,6 +77,15 @@ class CheckToolchainPin(unittest.TestCase):
         )
         self.assertEqual(module.check(root), [])
 
+    def test_older_changes_entries_are_history(self) -> None:
+        root = tree()
+        write(
+            root,
+            "CHANGES.md",
+            "the qualified toolchain is 1.96.0.\n\n## older\nthe qualified toolchain is 1.89.0.\n",
+        )
+        self.assertEqual(module.check(root), [])
+
     def test_changes_md_drift_is_reported(self) -> None:
         root = tree()
         write(root, "CHANGES.md", "the qualified toolchain is 1.95.0.\n")

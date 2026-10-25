@@ -681,3 +681,65 @@ nested inside another workspace; they were run per package, and
 - The shared-failure rows above, and a client image that supports OS DNS
   configuration and `tailscale ssh`.
 
+
+## Independent four-area code review (2026-10-25)
+
+Four reviewers read the wire layer and DERP relay, the control-plane logic
+(policy, ACL parsers, admin, gRPC/gateway, OIDC, DNS), persistence and the CLI,
+and the locally patched vendored crates (diffed against the pristine crates.io
+sources). Every fix below was reproduced with a test that fails without it;
+Go-defined behaviour was checked against the pinned v0.29.5 source or binary.
+
+Fixed:
+
+- **Policy nesting abort.** The policy parser accepted Go's 10,000 containers
+  but the value it built was consumed recursively, so a policy nested about
+  5,000 to 10,000 levels deep overflowed the stack and aborted the process
+  (any API-key holder could send one through `SetPolicy`, `CheckPolicy` or the
+  admin policy PUT). Policies are now bounded at 1,000 containers. This is a
+  deliberate deviation from Go, which accepts the deeper document.
+- **Knock gate bypass.** The raw-TLS `/ts2021` and `/derp` hijack paths never
+  reached the knock middleware. Only library embedders enable the knock; the
+  CLI does not.
+- **`/ts2021` handshake permit.** A request without a valid
+  `X-Tailscale-Handshake` header, or with a wrong `Upgrade`, is answered with
+  Go's 400 before any hijack instead of holding a Noise handshake permit for 30
+  seconds.
+- **Directory modes.** Server-created state, database, socket and key
+  directories are 0700 as in Go's `EnsureDir` (they were 0755, exposing the
+  SQLite file's directory).
+- **Shutdown.** The database is closed after the writer drains (a WAL-mode
+  SQLite database is vacuumed first), so a stopped server leaves no WAL frames.
+- **`dns.extra_records_path`** is relative to the working directory, as in Go.
+- **Parity details:** ACME HTTP-01 host normalisation (autocert), the DERP 426
+  body, unsupported-client release names, and the admin machine page panicking
+  on a short persisted node key.
+- **Vendored crates:** the instant-acme IDNA lookup and JSON scanner quoting,
+  and the sqlx-postgres PATH decoder and AuthenticationSASL terminator.
+
+Not fixed, recorded as residual risk or as decisions:
+
+- The Rust-only DERP "duplicate connection" health frame, which Go never
+  sends; a stock client shows it as a warning on each reconnect while the old
+  socket lingers. Several tests and the native-DERP smoke rows encode it.
+- The shared 1024-permit budget for pending handshakes (TLS accept, Noise,
+  DERP): 1024 idle connections make new handshakes fail. Go has no such cap.
+- DERP `PeerGone` is sent for every packet to an unknown peer (Go: disco
+  packets only, rate limited), a websocket upgrade without the `derp`
+  subprotocol is refused where Go falls through to plain DERP, and the send
+  queue is 256 frames tail-drop (Go: 32 with head drop).
+- SSH forwarding stays on by default to match Go; `policy.ssh.allow_*` turns it
+  off.
+- Go logs "closing state and database" and "Headscale stopped" on shutdown;
+  Rust does not.
+- `headscale-db` username validation accepts Unicode digits that Go's
+  `unicode.IsDigit` rejects (edge case, unconfirmed against the binary).
+- OIDC provider JSON is parsed into trees up to 10,000 deep; the content is
+  provider-controlled, so it was left as is.
+- The patched `http` crate widens `HeaderMap` capacity for the whole binary and
+  the gRPC listeners keep h2's 16 MiB header-list default; whether that
+  amplifies memory for an unauthenticated peer is being measured (see
+  `CHANGES.md` for the outcome).
+- The h2 `:authority` fallback and the first-SETTINGS guard are compiled in for
+  every h2 server once their features are on; the vendored crates do not pass
+  `-D warnings` as shipped.

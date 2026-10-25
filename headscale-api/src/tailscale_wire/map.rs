@@ -1289,6 +1289,32 @@ pub(crate) fn packet_filter_for(policy: &crate::policy::PolicyStore) -> Vec<Filt
     }
 }
 
+/// Packet-filter inputs for every node in `machines`, projected exactly as the
+/// map handlers project them (owner identity, policy addresses, tags and
+/// announced-and-approved routes). Public so the differential parity harness
+/// and its golden test exercise the production projection and compiler.
+pub fn packet_filter_nodes_for_registry(
+    machines: &super::MachineRegistry,
+) -> Vec<PacketFilterNode> {
+    let snapshot = machines.snapshot_with_metadata();
+    let served_routes = served_routes_for_snapshot(&snapshot);
+    packet_filter_nodes_from_snapshot(machines, &snapshot, &served_routes)
+}
+
+/// The `PacketFilters["base"]` rules a `/machine/map` response carries for
+/// `node_id`, computed by the same path the handlers use.
+pub fn base_packet_filter_for_node(
+    policy: &crate::policy::PolicyStore,
+    nodes: &[PacketFilterNode],
+    node_id: u64,
+) -> Vec<FilterRule> {
+    packet_filters_for_node(policy, nodes, node_id)
+        .0
+        .remove("base")
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn packet_filters_for_node(
     policy: &crate::policy::PolicyStore,
     nodes: &[PacketFilterNode],

@@ -153,7 +153,9 @@ async fn postgres_node_primitives_match_sqlite_contract() -> TestResult {
         );
         assert_eq!(updated.user_id, Some(alice.id));
         assert!(updated.tag_list().is_empty());
-        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0", "::/0"]);
+        // Go expands exit routes only in the gRPC SetApprovedRoutes handler;
+        // an auth-path update stores the routes it is given.
+        assert_eq!(updated.approved_route_list(), vec!["0.0.0.0/0"]);
 
         let expiry = temporary_timestamp() + 3600;
         assert_eq!(
@@ -333,6 +335,56 @@ async fn postgres_node_unique_constraints_match_sqlite_contract() -> TestResult 
             node.id
         );
 
+        Ok::<(), DbError>(())
+    }
+    .await;
+
+    schema.cleanup().await?;
+    result?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_new_registration_bumps_colliding_given_name_like_go_nodestore() -> TestResult {
+    let Some(mut schema) = TempSchema::open("nodes_new_registration_given_name").await? else {
+        return Ok(());
+    };
+
+    let result = async {
+        migrate_postgres_foundation_on_connection(&mut schema.conn).await?;
+
+        let mut names = Vec::new();
+        for (n, given_name) in [(1_u8, "laptop"), (2, "laptop"), (3, "laptop"), (4, "")] {
+            let row = headscale_nodes::create_postgres_new_registration_on_connection(
+                &mut schema.conn,
+                headscale_nodes::NewNodeRegistration {
+                    machine_key: format!("mkey:{n:064x}"),
+                    node_key: format!("nodekey:{n:064x}"),
+                    disco_key: format!("discokey:{n:064x}"),
+                    endpoints: None,
+                    host_info: None,
+                    ipv4: Some(format!("100.64.0.{n}")),
+                    ipv6: None,
+                    hostname: "Laptop".into(),
+                    given_name: given_name.into(),
+                    user_id: None,
+                    register_method: headscale_nodes::REGISTER_METHOD_AUTH_KEY.into(),
+                    tags: None,
+                    auth_key_id: None,
+                    expiry: None,
+                    last_seen: None,
+                    approved_routes: None,
+                },
+            )
+            .await?;
+            names.push(row.given_name);
+        }
+        assert_eq!(names, ["laptop", "laptop-1", "laptop-2", "laptop-3"]);
+
+        let stored: Vec<String> = sqlx::query_scalar("SELECT given_name FROM nodes ORDER BY id")
+            .fetch_all(&mut schema.conn)
+            .await?;
+        assert_eq!(stored, names);
         Ok::<(), DbError>(())
     }
     .await;

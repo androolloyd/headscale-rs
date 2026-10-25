@@ -244,10 +244,8 @@ pub mod upstream {
         Unsupported { mode: String },
     }
 
-    #[async_trait]
-    pub trait DatabaseHealthCheck: Send + Sync {
-        async fn ping(&self) -> Result<(), String>;
-    }
+    pub use crate::tailscale_wire::database_health::DatabaseHealthCheck;
+    use crate::tailscale_wire::database_health::ping_with_timeout;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct PersistedPolicy {
@@ -298,28 +296,6 @@ pub mod upstream {
             },
             updated_at,
         )
-    }
-
-    #[cfg(feature = "admin")]
-    #[async_trait]
-    impl DatabaseHealthCheck for sqlx::SqlitePool {
-        async fn ping(&self) -> Result<(), String> {
-            sqlx::query("SELECT 1")
-                .execute(self)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-    }
-
-    #[cfg(all(feature = "admin", feature = "postgres-sqlx"))]
-    #[async_trait]
-    impl DatabaseHealthCheck for sqlx::PgPool {
-        async fn ping(&self) -> Result<(), String> {
-            headscale_db::check_postgres_health(self)
-                .await
-                .map_err(|e| e.to_string())
-        }
     }
 
     #[cfg(feature = "admin")]
@@ -2122,8 +2098,7 @@ pub mod upstream {
         ) -> Result<Response<HealthResponse>, Status> {
             self.authorize(&request).await?;
             if let Some(database_health) = &self.database_health {
-                database_health
-                    .ping()
+                ping_with_timeout(database_health.ping())
                     .await
                     .map_err(|e| Status::unknown(format!("pinging database: {e}")))?;
             }

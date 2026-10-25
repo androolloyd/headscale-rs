@@ -119,6 +119,13 @@ const MOCKOIDC_ENV: &[&str] = &[
 #[cfg(feature = "postgres-sqlx")]
 const POSTGRES_TEST_URL_ENV: &str = "HEADSCALE_DB_POSTGRES_TEST_URL";
 
+/// Empty repeated fields print as `null` from the CLI and as `[]` from some
+/// debug endpoints.
+#[cfg(feature = "postgres-sqlx")]
+fn json_list_is_empty(value: &serde_json::Value) -> bool {
+    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+}
+
 type BoxTestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn headscale_clean_command() -> Command {
@@ -5013,12 +5020,11 @@ async fn policy_direct_db_bypass_supports_postgres_without_server() -> BoxTestRe
 
     let result = async {
         let empty_get = headscale_with_config(&config, &["--force", "policy", "get", bypass]);
-        assert_eq!(empty_get.status.code(), Some(6));
+        assert_eq!(empty_get.status.code(), Some(1));
         assert_eq!(stdout(&empty_get), "");
-        assert!(
-            stderr(&empty_get).contains("loading ACL from Postgres database: acl policy not found"),
-            "stderr: {}",
-            stderr(&empty_get)
+        assert_eq!(
+            comparable_stderr(&stderr(&empty_get)),
+            comparable_expected(include_str!("snapshots/policy_direct_db_missing.stderr"))
         );
 
         let set_json = headscale_with_config(
@@ -6611,10 +6617,9 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-restart-node"));
         assert_eq!(nodes[0]["user"]["name"].as_str(), Some("tagged-devices"));
         assert_eq!(nodes[0]["tags"], serde_json::json!(["tag:router"]));
-        assert_eq!(
-            nodes[0]["available_routes"],
-            serde_json::json!(["10.40.0.0/24"])
-        );
+        // Go's DebugCreateNode only echoes the routes it was given; the node it
+        // registers carries no Hostinfo, so it advertises nothing.
+        assert!(nodes[0]["available_routes"].is_null());
         assert_eq!(
             nodes[0]["approved_routes"],
             serde_json::json!(["10.40.0.0/24"])
@@ -6643,10 +6648,7 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
         assert_eq!(live_node["hostname"].as_str(), Some("pg-restart-node"));
         assert_eq!(live_node["user"].as_str(), Some(""));
         assert_eq!(live_node["forced_tags"], serde_json::json!(["tag:router"]));
-        assert_eq!(
-            live_node["available_routes"],
-            serde_json::json!(["10.40.0.0/24"])
-        );
+        assert!(json_list_is_empty(&live_node["available_routes"]));
         assert_eq!(
             live_node["approved_routes"],
             serde_json::json!(["10.40.0.0/24"])
@@ -6708,7 +6710,9 @@ async fn serve_postgres_runtime_local_grpc_mutations_survive_restart_smoke() -> 
 
         let renamed = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
         let renamed = json_output(&renamed);
-        assert_eq!(renamed[0]["name"].as_str(), Some("pg-restart-renamed"));
+        // A rename changes GivenName only; `name` is the client's Hostname.
+        assert_eq!(renamed[0]["name"].as_str(), Some("pg-restart-node"));
+        assert_eq!(renamed[0]["given_name"].as_str(), Some("pg-restart-renamed"));
 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
@@ -6820,7 +6824,8 @@ async fn serve_postgres_runtime_live_admin_rename_updates_nodestore_smoke() -> B
         assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
         let nodes = json_output(&nodes);
         assert_eq!(nodes[0]["id"].as_u64().unwrap().to_string(), node_id);
-        assert_eq!(nodes[0]["name"].as_str(), Some("pg-live-renamed"));
+        // A rename changes GivenName only; `name` is the client's Hostname.
+        assert_eq!(nodes[0]["name"].as_str(), Some("pg-live-node"));
         assert_eq!(nodes[0]["given_name"].as_str(), Some("pg-live-renamed"));
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -7085,10 +7090,9 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
         let node_id_number = node["id"].as_u64().expect("node id");
         let node_id = node_id_number.to_string();
         assert_eq!(node["user"]["name"].as_str(), Some("alice"));
-        assert_eq!(
-            node["available_routes"],
-            serde_json::json!([advertised_route])
-        );
+        // Go's DebugCreateNode only echoes the routes it was given; the node it
+        // registers carries no Hostinfo, so it advertises nothing.
+        assert!(node["available_routes"].is_null());
         assert!(node["approved_routes"].is_null());
 
         let policy_path = dir.path().join("db-policy-live.hujson");
@@ -7111,28 +7115,21 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
         assert_eq!(stdout(&set_policy), "Policy updated.\n");
         assert_eq!(comparable_stderr(&stderr(&set_policy)), "");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let approved_nodes = loop {
-            let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
-            assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
-            let nodes = json_output(&nodes);
-            if nodes[0]["approved_routes"] == serde_json::json!([advertised_route]) {
-                break nodes;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for database policy set to auto-approve route; nodes: {nodes}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
+        // With nothing advertised the autoApprovers have nothing to approve
+        // (stock-client rows cover approval of announced routes).
+        let approved_nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(
+            approved_nodes.status.success(),
+            "stderr: {}",
+            stderr(&approved_nodes)
+        );
+        let approved_nodes = json_output(&approved_nodes);
         assert_eq!(
             approved_nodes[0]["id"].as_u64().unwrap().to_string(),
             node_id
         );
-        assert_eq!(
-            approved_nodes[0]["available_routes"],
-            serde_json::json!([advertised_route])
-        );
+        assert!(approved_nodes[0]["available_routes"].is_null());
+        assert!(approved_nodes[0]["approved_routes"].is_null());
 
         let get_policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
         assert!(
@@ -7156,14 +7153,8 @@ async fn serve_postgres_runtime_db_policy_live_route_auto_approval_smoke() -> Bo
             .unwrap_or_else(|| panic!("missing live registry node {node_id}: {nodestore}"));
         assert_eq!(live_node["hostname"].as_str(), Some("pg-db-policy-router"));
         assert_eq!(live_node["user"].as_str(), Some("alice"));
-        assert_eq!(
-            live_node["available_routes"],
-            serde_json::json!([advertised_route])
-        );
-        assert_eq!(
-            live_node["approved_routes"],
-            serde_json::json!([advertised_route])
-        );
+        assert!(json_list_is_empty(&live_node["available_routes"]));
+        assert!(json_list_is_empty(&live_node["approved_routes"]));
 
         let debug_routes = http
             .get(format!("{metrics_url}/debug/routes"))
@@ -7297,10 +7288,9 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
         let node_id_number = node["id"].as_u64().expect("node id");
         let node_id = node_id_number.to_string();
         assert_eq!(node["user"]["name"].as_str(), Some("alice"));
-        assert_eq!(
-            node["available_routes"],
-            serde_json::json!([advertised_route])
-        );
+        // Go's DebugCreateNode only echoes the routes it was given; the node it
+        // registers carries no Hostinfo, so it advertises nothing.
+        assert!(node["available_routes"].is_null());
         assert!(node["approved_routes"].is_null());
 
         let reloaded_policy = r#"{
@@ -7311,24 +7301,30 @@ async fn serve_postgres_runtime_policy_file_reload_auto_approves_route_smoke() -
         fs::write(&policy_path, reloaded_policy)?;
         send_sighup(&child)?;
 
+        // The reload is applied once `policy get` returns the new document;
+        // with nothing advertised there is nothing for it to approve.
         let deadline = Instant::now() + Duration::from_secs(5);
-        let approved_nodes = loop {
-            let nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
-            assert!(nodes.status.success(), "stderr: {}", stderr(&nodes));
-            let nodes = json_output(&nodes);
-            if nodes[0]["approved_routes"] == serde_json::json!([advertised_route]) {
-                break nodes;
+        loop {
+            let policy = headscale_with_config(&config, &["-o", "json", "policy", "get"]);
+            if policy.status.success() && stdout(&policy) == format!("{reloaded_policy}\n") {
+                break;
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for SIGHUP policy reload to approve route; nodes: {nodes}"
+                "timed out waiting for SIGHUP policy reload; policy: {}",
+                stdout(&policy)
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-        assert_eq!(
-            approved_nodes[0]["available_routes"],
-            serde_json::json!([advertised_route])
+        }
+        let approved_nodes = headscale_with_config(&config, &["-o", "json", "nodes", "list"]);
+        assert!(
+            approved_nodes.status.success(),
+            "stderr: {}",
+            stderr(&approved_nodes)
         );
+        let approved_nodes = json_output(&approved_nodes);
+        assert!(approved_nodes[0]["available_routes"].is_null());
+        assert!(approved_nodes[0]["approved_routes"].is_null());
         assert_eq!(
             approved_nodes[0]["id"].as_u64().unwrap().to_string(),
             node_id
@@ -7920,9 +7916,11 @@ async fn serve_postgres_runtime_gateway_user_rename_restart_smoke() -> BoxTestRe
             nodes_before_restart[0]["id"].as_u64().unwrap().to_string(),
             node_id
         );
+        // Go's ListNodes keeps the owner name the NodeStore cached until the
+        // next restart reloads it (verified against the v0.29.5 binary).
         assert_eq!(
             nodes_before_restart[0]["user"]["name"].as_str(),
-            Some("bob")
+            Some("alice")
         );
 
         stop_child(&mut child);
@@ -8073,7 +8071,8 @@ async fn serve_postgres_runtime_grpc_gateway_api_key_lifecycle_smoke() -> BoxTes
                 .is_some_and(|created_at| created_at.ends_with('Z')),
             "created api key row: {created_row}"
         );
-        assert!(created_row.get("lastSeen").is_none());
+        // Go prints a never-used key's lastSeen as null rather than omitting it.
+        assert!(created_row["lastSeen"].is_null());
 
         let expired = http
             .post(format!("{server_url}/api/v1/apikey/expire"))
@@ -8312,10 +8311,8 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             debug_created["node"]["name"].as_str(),
             Some("pg-gateway-node")
         );
-        assert_eq!(
-            debug_created["node"]["givenName"].as_str(),
-            Some("pg-gateway-node")
-        );
+        // Go's DebugCreateNode echo sets no GivenName.
+        assert_eq!(debug_created["node"]["givenName"].as_str(), Some(""));
         assert_eq!(
             debug_created["node"]["user"]["name"].as_str(),
             Some("alice")
@@ -8435,7 +8432,8 @@ async fn serve_postgres_runtime_grpc_gateway_node_lifecycle_smoke() -> BoxTestRe
             .await?;
         assert_eq!(renamed.status(), reqwest::StatusCode::OK);
         let renamed = renamed.json::<serde_json::Value>().await?;
-        assert_eq!(renamed["node"]["name"].as_str(), Some("pg-gateway-renamed"));
+        // A rename changes GivenName only; `name` is the client's Hostname.
+        assert_eq!(renamed["node"]["name"].as_str(), Some("pg-gateway-node"));
         assert_eq!(
             renamed["node"]["givenName"].as_str(),
             Some("pg-gateway-renamed")

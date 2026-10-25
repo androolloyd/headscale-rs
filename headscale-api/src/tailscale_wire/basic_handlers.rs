@@ -26,7 +26,7 @@ use crate::policy::{PeerMapNode, PolicyAction, SshPolicyNode};
 
 use super::{
     DerpMap, HistogramMetric, MachineRecord, NODESTORE_BATCH_SIZE_BUCKETS,
-    PROMETHEUS_DEFAULT_BUCKETS, WireState, wire::SshPolicy,
+    PROMETHEUS_DEFAULT_BUCKETS, WireState, database_health::ping_with_timeout, wire::SshPolicy,
 };
 
 const ROBOTS_BODY: &str = "User-agent: *\nDisallow: /";
@@ -125,16 +125,32 @@ pub async fn handle_robots() -> Response {
         .into_response()
 }
 
-pub async fn handle_health() -> Response {
+/// Go `HealthHandler`: ping the database (bounded at one second) and answer
+/// `{"status":"pass"}` with 200, or `{"status":"fail"}` with 500. Both bodies
+/// carry the trailing newline of Go's `json.Encoder`. A wire surface with no
+/// database-backed registration store has nothing to ping and passes, as it
+/// did before the route consulted the database.
+pub async fn handle_health(State(state): State<WireState>) -> Response {
+    let ping = match &state.registration_store {
+        Some(store) => ping_with_timeout(store.ping_database()).await,
+        None => Ok(()),
+    };
+    let (status, label) = match ping {
+        Ok(()) => (StatusCode::OK, "pass"),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "fail"),
+    };
+    let mut body = serde_json::to_vec(&HealthResponse {
+        status: label.into(),
+    })
+    .unwrap_or_default();
+    body.push(b'\n');
     (
-        StatusCode::OK,
+        status,
         [(
             header::CONTENT_TYPE,
             "application/health+json; charset=utf-8",
         )],
-        Json(HealthResponse {
-            status: "pass".into(),
-        }),
+        body,
     )
         .into_response()
 }
@@ -3682,9 +3698,95 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("application/health+json; charset=utf-8")
         );
+        assert_security_headers(resp.headers());
         let body = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let parsed: HealthResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed.status, "pass");
+        // Go's json.Encoder terminates the document with a newline.
+        assert_eq!(&body[..], b"{\"status\":\"pass\"}\n");
+    }
+
+    type PingFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
+    struct PingStore {
+        ping: fn() -> PingFuture,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tailscale_wire::MachineRegistrationStore for PingStore {
+        async fn ping_database(&self) -> Result<(), String> {
+            (self.ping)().await
+        }
+
+        async fn create_or_update_auth_key_registration(
+            &self,
+            _record: MachineRecord,
+            _policy: &crate::policy::PolicyStore,
+            _auth_key_id: Option<i64>,
+        ) -> Result<crate::tailscale_wire::PersistedMachineRegistration, String> {
+            Err("not used".into())
+        }
+    }
+
+    async fn health_response_with_store(ping: fn() -> PingFuture) -> axum::response::Response {
+        let (mut state, _dir) = fixture_state();
+        state.registration_store = Some(Arc::new(PingStore { ping }));
+        router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn assert_health(resp: axum::response::Response, status: StatusCode, body: &[u8]) {
+        assert_eq!(resp.status(), status);
+        assert_security_headers(resp.headers());
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/health+json; charset=utf-8")
+        );
+        let actual = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(&actual[..], body);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_passes_when_database_ping_succeeds() {
+        let resp = health_response_with_store(|| Box::pin(async { Ok(()) })).await;
+        assert_health(resp, StatusCode::OK, b"{\"status\":\"pass\"}\n").await;
+    }
+
+    /// Go `HealthHandler` answers 500 `{"status":"fail"}` when `PingDB`
+    /// errors (verified against the real v0.29.5 binary with its Postgres
+    /// stopped).
+    #[tokio::test]
+    async fn health_endpoint_fails_when_database_ping_fails() {
+        let resp =
+            health_response_with_store(|| Box::pin(async { Err("connection refused".into()) }))
+                .await;
+        assert_health(
+            resp,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            b"{\"status\":\"fail\"}\n",
+        )
+        .await;
+    }
+
+    /// Go bounds `PingDB` at one second, so a wedged pool fails the check
+    /// instead of hanging it.
+    #[tokio::test(start_paused = true)]
+    async fn health_endpoint_fails_when_database_ping_hangs() {
+        let resp = health_response_with_store(|| Box::pin(std::future::pending())).await;
+        assert_health(
+            resp,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            b"{\"status\":\"fail\"}\n",
+        )
+        .await;
     }
 
     #[tokio::test]

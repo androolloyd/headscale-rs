@@ -465,7 +465,8 @@ than by reading Rust.
   same way against real headscale-go. The SSH-OIDC rows could not build their
   mock-OIDC helper because a pinned Go module contains test-data file names
   that macOS rejects.
-- Postgres-backed smoke rows were not run in this pass.
+- Postgres-backed smoke rows were not run in this pass (run on 2026-10-25;
+  see "Evidence-gap pass" at the end).
 
 ### Residual differences (not fixed)
 
@@ -486,8 +487,8 @@ than by reading Rust.
   caller-supplied IP).
 - The DB-only rename fallback (no wire registry attached; not the production
   wiring) does no given-name validation.
-- The parity harness's Rust side uses its own filter compiler rather than
-  `policy::filter`, so rule order is not compared by it.
+- ~~The parity harness's Rust side uses its own filter compiler.~~ Fixed
+  2026-10-25: it now reads the production compiler (see "Evidence-gap pass").
 - The node-deletion change reason label is `peers removed` where Go says
   `node removed`; nothing externally visible depends on it.
 - `route-via-same-tag` is nondeterministic by design. The two HA routers
@@ -528,3 +529,155 @@ apply and were patched, each with a test that failed before the change:
 
 These are intentional deviations from headscale-go. Limits and caveats are in
 `HARDENING.md`. The report's numbers were not independently verified.
+
+## Evidence-gap pass — 2026-10-25 (`/health`, packet-filter parity, Postgres)
+
+An independent review found two places where the parity claim read stronger
+than the evidence, and one untested backend. Each was checked against a
+headscale-go v0.29.5 binary built offline from the module cache.
+
+### `/health` never failed
+
+Go's `HealthHandler` pings the database (`State.PingDB`, bounded at one second)
+and answers 200 `{"status":"pass"}` or 500 `{"status":"fail"}`, both bodies
+ending in the newline of `json.Encoder` and both with
+`Content-Type: application/health+json; charset=utf-8` plus the usual security
+headers. Rust answered `pass` unconditionally (and without the newline).
+
+Now `/health` pings through `MachineRegistrationStore::ping_database`
+(overridden by the SQLite and Postgres persistent stores) under the same
+one-second bound, which the gRPC `Health` RPC shares. A wire surface with no
+database-backed store (the wire-only build) still always passes; the only
+change there is the trailing newline.
+
+Evidence: with the Go and Rust servers each on their own Postgres database,
+the database up gives identical status line, headers (names case-folded, `Date`
+dropped) and body; after `DROP DATABASE ... WITH (FORCE)` under the running
+server both answer 500 `{"status":"fail"}` with identical headers and body
+(`tools/parity/health_db_down_diff.sh` repeats this). Not provoked: a failing
+SQLite ping against Go (an open SQLite connection survives deleting its file);
+the Rust SQLite path is covered by closing the pool. Tests that fail without
+the change: `basic_handlers` health tests (fail, hang, pass bytes) and, through
+the production wiring, `persistent_wire_runtime_health_follows_database_connectivity`
+(SQLite) and its Postgres twin. HTTP/1.1 header *case and order* differ from Go
+(hyper lower-cases names); only names, values and the body are compared.
+
+### The differential did not run production code
+
+`tools/parity/headscale-rs` carried its own filter compiler, so "104 scenarios
+match Go" said nothing about the `PacketFilter` the server emits. The Rust side
+now builds a `MachineRegistry` and `PolicyStore` exactly as startup does and
+reads `PolicyStore::filter_rules` and the `PacketFilters["base"]` of every node
+(`tailscale_wire::map::base_packet_filter_for_node`). Rule order is compared
+exactly; the lists inside a rule are compared sorted, as the Go harness prints
+them, and `PARITY_FILTER_ORDER=emitted` compares them unsorted on both sides.
+Result: all 104 scenarios match in both modes, over 37 non-empty global
+filters, 143 per-node filters (79 non-empty) and 29 named checks. No production
+difference was found. `headscale-api/tests/packet_filter_golden.rs` runs the
+same code against `golden/headscale-go-v0.29.5.json` under `cargo test`
+(60 scenarios compile; the 44 rejected-policy scenarios are compared on error
+class by the differential only). Breaking the production per-node reduction
+turns both the differential and the golden test red. The golden gained a
+`node_filters` field; everything else in it is unchanged.
+
+### Postgres stock-client rows
+
+Postgres is the production backend and had not been run. It could not even
+start: every multi-column described query failed with SQLSTATE 08P01 `invalid
+message format`, because the vendored sqlx-postgres `Bind` encoder wrote the
+result-format count from the parameter-format slice (an upstream 0.8.6 defect
+that per-column result formats exposed). Fixed in `vendor/sqlx-postgres`
+(`UPSTREAM.md`) with `headscale-db/tests/postgres_go_pool.rs`, which opens the
+pool the server uses. Nothing previously opened that pool against a live
+database; the `HEADSCALE_DB_POSTGRES_TEST_URL` tests are skipped when it is
+unset (CI's `cargo test` never sets it), and the `postgres-*` rows print
+"skipping" and exit 0 in that case, so a green row can be vacuous.
+
+Method: `postgres:16` container, `HEADSCALE_DB_POSTGRES_TEST_URL` set,
+`REAL_CLIENT_TARGETS=rust`, one `smoke-matrix.sh` invocation per row (121 rows),
+stock `tailscale/tailscale:v1.94.1` clients. Go comparison: the same row with
+the Go target and `HEADSCALE_GO_BIN` set to the pinned build (the default Go
+row builds an unpinned commit whose module zip macOS refuses to create).
+
+Outcome: 86 of 121 passed on the first run, which overlapped heavy compiles.
+Re-running the 35 failures on a quiet machine, then again after the fixes
+below, leaves **105 passing and 16 failing**. Rust-only defects found and fixed:
+
+| Row(s) | Cause | Fix |
+|---|---|---|
+| (server start) | `Bind` result-format count | vendored sqlx-postgres |
+| `authkey-relogin-different-user` | new node whose hostname equals another node's given name hit the unique `given_name` index (SQLite too); Go bumps `-1`, `-2` in NodeStore | resolve the name before the insert (`headscale-db`), SQLite + Postgres tests |
+| `route-primary-failover`, `-sticky` | `nodes approve-routes --routes ""` sent `[""]`; cobra `StringSlice` reads it as `[]` | `routes_from_flag` |
+| `derp-private`, `derp-native-restart` | sidecar `derper` always got `-verify-clients` (needs a local tailscaled), rejecting every client even with the control `/verify` URL set | pass it only when no URL is configured |
+| `user-node-lifecycle-restart` | row expected the owner name to change before restart; Go (and Rust) keep the hydrated owner until restart | row pinned for both targets |
+| `invalid-fqdn-peer-restart` | row script handed libpq `PGSSLMODE=false` | map to `disable`/`require` |
+
+Rows that passed on rerun with no change (load or a build racing the merge):
+`online-lastseen`, `rejected-policy-filter`, `route-primary-restart`. The 8
+`ssh-oidc-*` rows and `ssh-cli-check` failed only because their mock-OIDC
+helper builds that same unpinned Go commit; with `HEADSCALE_GO_BIN` they pass.
+
+The 16 remaining failures (15 also fail against Go, so they are not Rust
+regressions; the row set exercises features this local Docker/macOS setup
+cannot):
+
+- DNS (`extra-records`, `dns-edge`, `dns-hot-reload`,
+  `prefix-family-v4-to-dual-backfill-magicdns-restart`,
+  `web-register-policy-config-map-churn-restart` at its MagicDNS step): the
+  client container "failed to fetch the DNS configuration of your device:
+  getting OS base config is not supported", on both targets. The last row's Go
+  run stops earlier on a row-script error (`auth ID has invalid prefix`), so it
+  is not a clean comparison.
+- SSH (`ssh`, `ssh-accept-env`, `ssh-localpart`, `ssh-profile-variants`):
+  `tailscale ssh` exits 143 or times out on both targets.
+- Identical failure text on both targets: `node-rename` and
+  `policy-rename-restart` ("timed out waiting for renamed node admin row"),
+  `route-health-mixed-exit-reload` and `-all-unhealthy-reload` ("expected
+  approved routes [0.0.0.0/0, ::/0], got []"), `route-primary-withdraw` and
+  `route-health-both-offline-reconnect` ("No such container ...-exit").
+- `derp-native-websocket` fails only on Rust: it is a Rust-only row (the Go row
+  is a no-op) that forces websocket DERP with `TS_DEBUG_DERP_WS_CLIENT=1`, a
+  knob the pinned `tailscale/tailscale:v1.94.1` image's `tailscaled` does not contain, so
+  the clients use raw DERP (`raw_allowed=2, websocket_allowed=0`). The row cannot
+  pass with this client image; websocket DERP is covered by unit tests only.
+
+These rows were not made to pass; the shared failures need either a client
+image with OS DNS/SSH support or row-script fixes, and are follow-ups.
+
+### Live-database tests that had never run
+
+With the URL set, 11 `headscale-db` / `headscale-cli` tests failed. All were
+stale expectations, each checked against the Go binary: Go's `DebugCreateNode`
+registers no routes, a rename changes `GivenName` (not `Name`), a key created
+with no expiration is the zero time and so already expired, `ListNodes` shows
+the old owner name until restart, never-used API keys print `lastSeen: null`,
+the missing-policy bypass exits 1 with the shared snapshot text, and an
+auth-path update stores exit routes as given. They now pass against
+`postgres:16`. The two route auto-approval tests no longer exercise approval
+(nothing is advertised); stock-client route rows cover that.
+
+### Verification on the final tree
+
+`cargo test --workspace --all-targets`: 2185 passed, 0 failed, 1 ignored with
+`HEADSCALE_DB_POSTGRES_TEST_URL` set to a live `postgres:16` (the live-database
+tests included), and passing without it; `cargo clippy ... -D warnings` clean
+on nightly and stable for the workspace and CI's three extra `headscale-api`
+configurations, `headscale-core` clippy and tests, `cargo fmt` over the member
+crates and the harness, `scripts/headscale_go_diff.sh` (sorted and
+`PARITY_FILTER_ORDER=emitted`) and the golden metadata check all pass.
+(`cargo fmt --all` and the excluded-crate commands cannot run from a worktree
+nested inside another workspace; they were run per package, and
+`headscale-core` with a temporary empty `[workspace]` table.)
+
+### Not done / follow-ups
+
+- `ci.yml` should run the live-Postgres tests (add a service and set
+  `HEADSCALE_DB_POSTGRES_TEST_URL`); today they never run in CI.
+- Rows built on `authkey-smoke.sh` (authkey and relogin families) run the
+  wire-only harness, not the production binary. `authkey-relogin-different-user`
+  passed there on 2026-10-24 while the production server failed the same
+  scenario on Postgres, and would on SQLite (the new SQLite `headscale-db` test
+  fails without the fix), so the 33-row result did not cover that path.
+- The shared-failure rows above, and a client image that supports OS DNS
+  configuration and `tailscale ssh`.
+

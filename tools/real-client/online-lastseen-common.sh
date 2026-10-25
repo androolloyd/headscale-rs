@@ -1169,6 +1169,16 @@ postgres_user=""
 postgres_pass=""
 postgres_sslmode=""
 postgres_database_created=0
+
+# The server config accepts the pgx-style `false`/`true` this script defaults
+# to, but libpq (psql, pg_dump) only accepts its own mode names.
+libpq_sslmode() {
+  case "${postgres_sslmode}" in
+    false) echo disable ;;
+    true) echo require ;;
+    *) echo "${postgres_sslmode}" ;;
+  esac
+}
 rust_derp_effective_port="${rust_derp_port}"
 
 cleanup() {
@@ -1313,7 +1323,7 @@ export_postgres_database_if_requested() {
   mkdir -p "$(dirname "${export_path}")"
   PGHOST="${postgres_host}" PGPORT="${postgres_port}" \
     PGUSER="${postgres_user}" PGPASSWORD="${postgres_pass}" \
-    PGSSLMODE="${postgres_sslmode}" \
+    PGSSLMODE="$(libpq_sslmode)" \
     pg_dump --format=custom --no-owner --file="${export_path}" \
       "${postgres_database_name}"
 }
@@ -1565,7 +1575,7 @@ assert_corrupt_peer_name_after_restart_if_requested() {
   stop_server
   PGHOST="${postgres_host}" PGPORT="${postgres_port}" \
     PGUSER="${postgres_user}" PGPASSWORD="${postgres_pass}" \
-    PGSSLMODE="${postgres_sslmode}" \
+    PGSSLMODE="$(libpq_sslmode)" \
     psql -v ON_ERROR_STOP=1 -d "${postgres_database_name}" \
       -c "UPDATE nodes SET given_name = '' WHERE id = ${affected_id}" \
       >"${work_dir}/corrupt-peer-name.stdout"
@@ -4771,9 +4781,11 @@ assert_user_node_lifecycle_state() {
   local output_path="${work_dir}/user-node-lifecycle-${safe_label}.json"
   local rename_user_new="${rename_user_after_login#*:}"
   local expected_node_owner="${rename_user_new}"
-  if [[ "${target}" == "headscale-go" && "${headscale_go_version}" == "v0.29.5" && "${label}" == "after-mutations" ]]; then
+  if [[ "${headscale_go_version}" == "v0.29.5" && "${label}" == "after-mutations" ]]; then
     # v0.29.5 updates users immediately but keeps the node's hydrated User
-    # association until process restart. Pin both sides of that boundary.
+    # association until process restart. Pin both sides of that boundary, for
+    # headscale-rs as well: it matches Go here (checked with the same
+    # `users rename` + `nodes list` sequence against both binaries).
     expected_node_owner="${rename_user_after_login%%:*}"
   fi
   local expired_client_name="${client_names[$((expire_node_index - 1))]}"

@@ -4532,7 +4532,12 @@ database:
                     user: user.id,
                     reusable: true,
                     ephemeral: false,
-                    expiration: None,
+                    // headscale-go turns a missing expiration into the zero time,
+                    // i.e. an already-expired key, so ask for a real one.
+                    expiration: Some(prost_types::Timestamp {
+                        seconds: chrono::Utc::now().timestamp() + 3600,
+                        nanos: 0,
+                    }),
                     acl_tags: Vec::new(),
                 }))
                 .await?
@@ -4551,8 +4556,8 @@ database:
                 "pg-router",
             )
             .await;
-            assert!(register.machine_authorized);
-            assert!(register.error.is_empty());
+            assert!(register.machine_authorized, "{register:?}");
+            assert!(register.error.is_empty(), "{register:?}");
 
             let node_row = headscale_db::headscale_nodes::get_postgres_by_node_key(
                 schema.pool(),
@@ -4753,7 +4758,10 @@ database:
                 .machines
                 .get(&second_node_key)
                 .expect("rekeyed OIDC node projected into live registry");
-            assert_eq!(second_wire.hostname, "oidc-router-two");
+            // Go's re-registration updates Hostname but leaves GivenName alone
+            // (only a map-request hostname change re-derives it).
+            assert_eq!(second_wire.hostname, "oidc-router-one");
+            assert_eq!(second_wire.raw_hostname, "oidc-router-two");
             assert_eq!(second_wire.user, "alice@example.com");
             assert_eq!(second_wire.register_method, 3);
             assert_eq!(second_wire.available_routes, vec!["10.82.0.0/24"]);
@@ -4771,6 +4779,7 @@ database:
             .await?;
             assert_eq!(second_row.node_key, format!("nodekey:{second_node_key}"));
             assert_eq!(second_row.hostname, "oidc-router-two");
+            assert_eq!(second_row.given_name, "oidc-router-one");
             assert_eq!(second_row.user_id, Some(i64::try_from(oidc_user.id)?));
             assert_eq!(second_row.ipv4, first_ipv4);
             assert_eq!(
@@ -4780,7 +4789,7 @@ database:
 
             let full = wire_full_map(&runtime.state, &second_node_key, &machine_key).await;
             let self_node = full.node.expect("self node after OIDC Pg rekey");
-            assert_eq!(self_node.name, "oidc-router-two");
+            assert_eq!(self_node.name, "oidc-router-one");
             assert_eq!(
                 self_node.hostinfo.routable_ips,
                 vec!["10.82.0.0/24".to_string()]
@@ -4812,7 +4821,7 @@ database:
                 .machines
                 .get(&second_node_key)
                 .expect("rekeyed OIDC Postgres node hydrated");
-            assert_eq!(hydrated.hostname, "oidc-router-two");
+            assert_eq!(hydrated.hostname, "oidc-router-one");
             assert_eq!(hydrated.user, "alice@example.com");
             assert_eq!(hydrated.register_method, 3);
             assert_eq!(hydrated.available_routes, vec!["10.82.0.0/24"]);
@@ -4821,7 +4830,7 @@ database:
             let restarted_self = restarted_full
                 .node
                 .expect("self node after OIDC Pg hydration");
-            assert_eq!(restarted_self.name, "oidc-router-two");
+            assert_eq!(restarted_self.name, "oidc-router-one");
             assert_eq!(
                 restarted_self.hostinfo.routable_ips,
                 vec!["10.82.0.0/24".to_string()]
@@ -5103,6 +5112,105 @@ database:
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    /// GET `/health` through the production wire state, as headscale-go's
+    /// `HealthHandler` serves it from the control listener.
+    async fn get_health(state: &WireState) -> (StatusCode, Vec<u8>) {
+        let app = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(headscale_api::tailscale_wire::basic_handlers::handle_health),
+            )
+            .with_state(state.clone());
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn persistent_wire_runtime_health_follows_database_connectivity() {
+        let db = Database::in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = build_persistent_wire_runtime(
+            db.pool(),
+            dir.path(),
+            "https://headscale.example",
+            "100.64.0.0/10",
+            None,
+            DerpMap::default(),
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = get_health(&runtime.state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"{\"status\":\"pass\"}\n");
+
+        // A closed pool is how SQLx reports a database that is gone.
+        db.pool().close().await;
+
+        let (status, body) = get_health(&runtime.state).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, b"{\"status\":\"fail\"}\n");
+    }
+
+    #[cfg(feature = "postgres-sqlx")]
+    #[tokio::test]
+    async fn postgres_persistent_wire_runtime_health_follows_database_connectivity() -> BoxTestResult
+    {
+        let Some(schema) = TempPostgresRuntimeSchema::open("runtime_health").await? else {
+            return Ok(());
+        };
+
+        let result = async {
+            headscale_db::migrate_postgres_foundation(schema.pool()).await?;
+            let dir = tempfile::tempdir()?;
+            let cfg = test_run_server_config(&dir);
+            let derp_map = DerpMap::default();
+            let dns = Arc::new(DnsStore::new());
+            let runtime_config = Arc::new(runtime_config_snapshot(&cfg, &derp_map, dns.as_ref()));
+            let runtime = build_postgres_persistent_wire_runtime_with_dns_and_policy(
+                schema.pool(),
+                &dir.path().join("state"),
+                "https://headscale.example",
+                "100.64.0.0/10",
+                None,
+                "sequential",
+                None,
+                derp_map,
+                dns,
+                &PolicyConfig::database(),
+                runtime_config,
+                None,
+            )
+            .await?;
+
+            let (status, body) = get_health(&runtime.state).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, b"{\"status\":\"pass\"}\n");
+
+            schema.pool().close().await;
+
+            let (status, body) = get_health(&runtime.state).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body, b"{\"status\":\"fail\"}\n");
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        schema.cleanup().await?;
+        result
     }
 
     async fn tcp_grpc_channel(addr: SocketAddr) -> Channel {

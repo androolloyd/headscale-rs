@@ -162,7 +162,7 @@ pub async fn approve_routes(
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let path = format!("/machines/{id}/routes");
-    let body = serde_json::json!({ "routes": routes });
+    let body = serde_json::json!({ "routes": routes_from_flag(routes) });
     let node: MachineAdminRecord = client.post_json(&path, &body).await?;
     if fmt.is_structured() {
         print_structured(fmt, &node)?;
@@ -204,6 +204,18 @@ pub fn select_rename_args<'a>(
         _ => Err(AdminError::Local(
             "rename requires --identifier ID NEW_NAME".into(),
         )),
+    }
+}
+
+/// `--routes` is a cobra `StringSlice` upstream, which reads a lone empty value
+/// as an empty list: `--routes ""` removes every approved route. Clap's
+/// delimiter split would hand the server `[""]`, which it rejects as an
+/// unparsable route.
+pub fn routes_from_flag(routes: Vec<String>) -> Vec<String> {
+    if routes.len() == 1 && routes[0].is_empty() {
+        Vec::new()
+    } else {
+        routes
     }
 }
 
@@ -401,7 +413,11 @@ pub async fn approve_routes_grpc(
     fmt: OutputFormat,
 ) -> Result<(), AdminError> {
     let node_id = parse_node_id(id)?;
-    let node = NodeOutput::from(client.set_approved_routes(node_id, routes).await?);
+    let node = NodeOutput::from(
+        client
+            .set_approved_routes(node_id, routes_from_flag(routes))
+            .await?,
+    );
     if fmt.is_structured() {
         print_proto(fmt, &node)?;
     } else {
@@ -1333,5 +1349,21 @@ mod tests {
             vec![route]
         );
         assert!(!serving.contains_key("node-10"));
+    }
+    #[test]
+    fn routes_flag_reads_a_lone_empty_value_as_an_empty_list() {
+        // cobra StringSlice: `--routes ""` is [], which clears approvals.
+        assert!(routes_from_flag(vec![String::new()]).is_empty());
+        assert!(routes_from_flag(Vec::new()).is_empty());
+        assert_eq!(
+            routes_from_flag(vec!["10.0.0.0/24".into()]),
+            vec!["10.0.0.0/24".to_string()]
+        );
+        // Only a lone empty value collapses; other empties still reach the
+        // server, which rejects them as Go does.
+        assert_eq!(
+            routes_from_flag(vec!["10.0.0.0/24".into(), String::new()]).len(),
+            2
+        );
     }
 }

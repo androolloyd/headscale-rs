@@ -68,6 +68,7 @@ type scenarioOutput struct {
 	Filter            []filterRuleOut    `json:"filter"`
 	PolicyError       string             `json:"policy_error,omitempty"`
 	FilterForNodes    []filterForNodeOut `json:"filter_for_nodes,omitempty"`
+	NodeFilters       []nodeFilterOut    `json:"node_filters,omitempty"`
 	PeerMaps          []peerMapOut       `json:"peer_maps,omitempty"`
 	RouteApprovals    []routeApprovalOut `json:"route_approvals,omitempty"`
 	ViaRoutes         []viaRouteOut      `json:"via_routes,omitempty"`
@@ -89,6 +90,12 @@ type filterNodeCheck struct {
 type filterForNodeOut struct {
 	Name  string          `json:"name"`
 	Rules []filterRuleOut `json:"rules"`
+}
+
+// nodeFilterOut is FilterForNode for every scenario node, not only the checked ones.
+type nodeFilterOut struct {
+	NodeID uint64          `json:"node_id"`
+	Rules  []filterRuleOut `json:"rules"`
 }
 
 type peerMapCheck struct {
@@ -558,6 +565,10 @@ func runScenario(path string) (scenarioOutput, error) {
 	if err != nil {
 		return scenarioOutput{}, err
 	}
+	nodeFilters, err := runNodeFilters(pm, nodes)
+	if err != nil {
+		return scenarioOutput{}, err
+	}
 	peerMaps, err := runPeerMapChecks(sc.PeerMapChecks, pm, nodes)
 	if err != nil {
 		return scenarioOutput{}, err
@@ -591,6 +602,7 @@ func runScenario(path string) (scenarioOutput, error) {
 		Name:              sc.Name,
 		Filter:            normalizeFilterRules(rules),
 		FilterForNodes:    filterForNodes,
+		NodeFilters:       nodeFilters,
 		PeerMaps:          peerMaps,
 		RouteApprovals:    routeApprovals,
 		ViaRoutes:         viaRoutes,
@@ -677,11 +689,20 @@ func buildNodes(in []scenarioNode, users map[uint]*types.User) (types.Nodes, err
 	return nodes, nil
 }
 
+// filterListsAsEmitted (PARITY_FILTER_ORDER=emitted) keeps the compiler's own
+// order for the lists inside a rule. By default SrcIPs, DstPorts, IPProto, the
+// caps of a grant and the CapGrant list are sorted so the comparison ignores
+// their order; the order of the rules themselves is always compared. CapGrant
+// destination prefixes are sorted in both modes (prefixStrings).
+var filterListsAsEmitted = os.Getenv("PARITY_FILTER_ORDER") == "emitted"
+
 func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 	out := make([]filterRuleOut, 0, len(rules))
 	for _, rule := range rules {
 		src := append([]string(nil), rule.SrcIPs...)
-		sort.Strings(src)
+		if !filterListsAsEmitted {
+			sort.Strings(src)
+		}
 		dst := make([]netPortRangeOut, 0, len(rule.DstPorts))
 		for _, p := range rule.DstPorts {
 			dst = append(dst, netPortRangeOut{
@@ -692,24 +713,30 @@ func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 				},
 			})
 		}
-		sort.Slice(dst, func(i, j int) bool {
-			if dst[i].IP != dst[j].IP {
-				return dst[i].IP < dst[j].IP
-			}
-			if dst[i].Ports.First != dst[j].Ports.First {
-				return dst[i].Ports.First < dst[j].Ports.First
-			}
-			return dst[i].Ports.Last < dst[j].Ports.Last
-		})
+		if !filterListsAsEmitted {
+			sort.Slice(dst, func(i, j int) bool {
+				if dst[i].IP != dst[j].IP {
+					return dst[i].IP < dst[j].IP
+				}
+				if dst[i].Ports.First != dst[j].Ports.First {
+					return dst[i].Ports.First < dst[j].Ports.First
+				}
+				return dst[i].Ports.Last < dst[j].Ports.Last
+			})
+		}
 		ipProto := append([]int(nil), rule.IPProto...)
-		sort.Ints(ipProto)
+		if !filterListsAsEmitted {
+			sort.Ints(ipProto)
+		}
 		capGrant := make([]capGrantOut, 0, len(rule.CapGrant))
 		for _, grant := range rule.CapGrant {
 			caps := make([]string, 0, len(grant.Caps))
 			for _, cap := range grant.Caps {
 				caps = append(caps, string(cap))
 			}
-			sort.Strings(caps)
+			if !filterListsAsEmitted {
+				sort.Strings(caps)
+			}
 			var capMap json.RawMessage
 			if len(grant.CapMap) > 0 {
 				capMap, _ = marshalRaw(grant.CapMap)
@@ -720,15 +747,17 @@ func normalizeFilterRules(rules []tailcfg.FilterRule) []filterRuleOut {
 				CapMap: capMap,
 			})
 		}
-		sort.Slice(capGrant, func(i, j int) bool {
-			if strings.Join(capGrant[i].Dsts, "\x00") != strings.Join(capGrant[j].Dsts, "\x00") {
-				return strings.Join(capGrant[i].Dsts, "\x00") < strings.Join(capGrant[j].Dsts, "\x00")
-			}
-			if strings.Join(capGrant[i].Caps, "\x00") != strings.Join(capGrant[j].Caps, "\x00") {
-				return strings.Join(capGrant[i].Caps, "\x00") < strings.Join(capGrant[j].Caps, "\x00")
-			}
-			return string(capGrant[i].CapMap) < string(capGrant[j].CapMap)
-		})
+		if !filterListsAsEmitted {
+			sort.Slice(capGrant, func(i, j int) bool {
+				if strings.Join(capGrant[i].Dsts, "\x00") != strings.Join(capGrant[j].Dsts, "\x00") {
+					return strings.Join(capGrant[i].Dsts, "\x00") < strings.Join(capGrant[j].Dsts, "\x00")
+				}
+				if strings.Join(capGrant[i].Caps, "\x00") != strings.Join(capGrant[j].Caps, "\x00") {
+					return strings.Join(capGrant[i].Caps, "\x00") < strings.Join(capGrant[j].Caps, "\x00")
+				}
+				return string(capGrant[i].CapMap) < string(capGrant[j].CapMap)
+			})
+		}
 		out = append(out, filterRuleOut{
 			SrcIPs:   src,
 			DstPorts: dst,
@@ -756,6 +785,24 @@ func runFilterNodeChecks(checks []filterNodeCheck, pm policy.PolicyManager, node
 		out = append(out, filterForNodeOut{
 			Name:  check.Name,
 			Rules: normalizeFilterRules(rules),
+		})
+	}
+	return out, nil
+}
+
+func runNodeFilters(pm policy.PolicyManager, nodes types.Nodes) ([]nodeFilterOut, error) {
+	if len(nodes) == 0 {
+		return nil, nil
+	}
+	out := make([]nodeFilterOut, 0, len(nodes))
+	for _, node := range nodes {
+		rules, err := pm.FilterForNode(node.View())
+		if err != nil {
+			return nil, fmt.Errorf("filter for node %d: %w", node.ID, err)
+		}
+		out = append(out, nodeFilterOut{
+			NodeID: uint64(node.ID),
+			Rules:  normalizeFilterRules(rules),
 		})
 	}
 	return out, nil

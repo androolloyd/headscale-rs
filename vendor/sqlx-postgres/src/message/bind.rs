@@ -89,8 +89,15 @@ impl FrontendMessage for Bind<'_> {
 
         buf.extend(self.params);
 
-        let result_formats_len = u16::try_from(self.formats.len())
-            .map_err(|_| err_protocol!("too many result format codes ({})", self.formats.len()))?;
+        // Upstream 0.8.6 counted `self.formats` here. That only worked while both
+        // slices were always one element long; per-column result formats made
+        // PostgreSQL see trailing bytes ("invalid message format").
+        let result_formats_len = u16::try_from(self.result_formats.len()).map_err(|_| {
+            err_protocol!(
+                "too many result format codes ({})",
+                self.result_formats.len()
+            )
+        })?;
 
         buf.extend(result_formats_len.to_be_bytes());
 

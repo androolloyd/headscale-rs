@@ -18,12 +18,14 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-llvm-cov
+      # llvm-tools must match the pinned compiler; the tool itself is built
+      # with a current stable compiler, whose MSRV moves faster than the pin.
+      - run: rustup component add llvm-tools-preview
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: cargo +stable install --locked cargo-llvm-cov
       - run: ./scripts/coverage.sh
       - uses: actions/upload-artifact@v7
         if: always()

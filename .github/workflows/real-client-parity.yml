@@ -57,6 +57,20 @@ env:
   TAILSCALE_IMAGE: tailscale/tailscale:v1.94.1
 
 jobs:
+  # Upstream headscale-go main moves independently of this repository. The
+  # smoke job below only warns about it (`--remote`); this separate job turns a
+  # stale checked-in current-head pin into a failing scheduled run without
+  # stopping the smoke matrix from running.
+  pin-freshness:
+    name: headscale-go current-head pin freshness
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fail when upstream main has moved past the checked-in pin
+        run: python3 scripts/check_headscale_go_refs.py --remote --fail-on-stale
+
   paired-smokes:
     name: paired stock-client smokes
     runs-on: ubuntu-latest
@@ -116,9 +130,7 @@ jobs:
         run: tools/real-client/smoke-matrix.sh --check
       - name: List selected matrix
         run: tools/real-client/smoke-matrix.sh --list-selected
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - uses: actions/setup-go@v6
         with:
           go-version-file: tools/parity/headscale-go/go.mod

@@ -1,0 +1,57 @@
+name: Set up Rust
+description: >-
+  Install the toolchain pinned in rust-toolchain.toml (channel, profile and
+  components), or an explicit override such as a dated nightly for fuzzing.
+  The pin lives only in rust-toolchain.toml; scripts/check_toolchain_pin.py
+  keeps the Dockerfiles and workflows pointing at it.
+
+inputs:
+  toolchain:
+    description: >-
+      Override the pinned toolchain (for example a dated nightly). Leave empty
+      to use rust-toolchain.toml from the checkout.
+    required: false
+    default: ""
+  components:
+    description: >-
+      Comma-separated components to install with an override toolchain. Ignored
+      when the pin from rust-toolchain.toml is used (it lists its own).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      env:
+        TOOLCHAIN_OVERRIDE: ${{ inputs.toolchain }}
+        COMPONENTS_OVERRIDE: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${TOOLCHAIN_OVERRIDE}" ]]; then
+          toolchain="${TOOLCHAIN_OVERRIDE}"
+          components="${COMPONENTS_OVERRIDE}"
+        else
+          # Read the pin explicitly instead of relying on rustup's implicit
+          # install-from-file behaviour, which differs between rustup releases.
+          read -r toolchain components < <(python3 - <<'PY'
+        import tomllib
+        with open("rust-toolchain.toml", "rb") as handle:
+            table = tomllib.load(handle)["toolchain"]
+        print(table["channel"], ",".join(table.get("components", [])))
+        PY
+          )
+        fi
+        args=(toolchain install "${toolchain}" --profile minimal --no-self-update)
+        if [[ -n "${components}" ]]; then
+          args+=(--component "${components}")
+        fi
+        rustup "${args[@]}"
+        if [[ -n "${TOOLCHAIN_OVERRIDE}" ]]; then
+          # RUSTUP_TOOLCHAIN beats the rust-toolchain.toml in the checkout, so
+          # later steps (cargo fuzz, ...) really use the override.
+          echo "RUSTUP_TOOLCHAIN=${toolchain}" >> "${GITHUB_ENV}"
+        fi
+        rustc --version --verbose
+        cargo --version

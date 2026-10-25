@@ -18,16 +18,27 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-audit
+      # The scanners are installed with a current stable compiler: their own
+      # MSRV moves faster than the workspace pin in rust-toolchain.toml.
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: cargo +stable install --locked cargo-audit
       # Audit the committed application lockfile. `rsa` is pulled through
       # sqlx-mysql, which is not enabled; the feature-aware deny job below
       # checks the active graph without that lockfile-only false positive.
       - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
-      - run: cargo audit --file headscale-core/fuzz/Cargo.lock --deny warnings
+      # Every other committed lockfile is audited too: the fuzz crate and the
+      # two standalone tool crates resolve their own dependency trees.
+      - name: cargo audit standalone lockfiles
+        run: |
+          set -euo pipefail
+          for lock in \
+            headscale-core/fuzz/Cargo.lock \
+            tools/parity/headscale-rs/Cargo.lock \
+            tools/real-client/headscale-rs-harness/Cargo.lock; do
+            cargo audit --file "${lock}" --deny warnings
+          done
 
   deny:
     name: cargo deny
@@ -35,9 +46,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-deny
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: cargo +stable install --locked cargo-deny
       - run: cargo deny check advisories licenses sources

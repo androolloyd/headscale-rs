@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import subprocess
@@ -79,7 +80,15 @@ def upstream_tag_sha(version: str) -> str:
         raise CheckError(f"{UPSTREAM_URL} is missing pinned tag {version}") from err
 
 
-def check(remote: bool) -> None:
+def warn(message: str) -> None:
+    """Report a non-fatal finding (a workflow annotation under GitHub Actions)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=headscale-go pin::{message}")
+    else:
+        print(f"warning: {message}", file=sys.stderr)
+
+
+def check(remote: bool, fail_on_stale: bool = False) -> None:
     go_mod_version = headscale_go_version()
     baseline = shell_default(BASELINE_SH, "HEADSCALE_GO_BASELINE_VERSION")
     current = shell_default(CURRENT_SH, "HEADSCALE_GO_CURRENT_VERSION")
@@ -97,15 +106,28 @@ def check(remote: bool) -> None:
         )
 
     if remote:
+        # The pinned baseline tag is an immutable reference: it must keep
+        # resolving, and a missing tag is always an error.
+        tag_sha = upstream_tag_sha(baseline)
+        print(f"checked upstream headscale-go baseline tag: {baseline} -> {tag_sha}")
+
+        # Upstream main moves whenever headscale-go merges anything, so a
+        # differing SHA is drift to schedule a re-qualification for, not a
+        # reason to fail every push, pull request and nightly smoke run (that
+        # is how this gate kept the whole real-client job red). It is reported
+        # as a warning; `--fail-on-stale` turns it into an error for the
+        # dedicated freshness job.
         upstream = upstream_main_sha()
         if current != upstream:
-            raise CheckError(
+            message = (
                 "checked-in current-head headscale-go pin is stale: "
                 f"{relative(CURRENT_SH)} has {current}, upstream main is {upstream}"
             )
-        tag_sha = upstream_tag_sha(baseline)
-        print(f"checked upstream headscale-go main pin: {current}")
-        print(f"checked upstream headscale-go baseline tag: {baseline} -> {tag_sha}")
+            if fail_on_stale:
+                raise CheckError(message)
+            warn(message)
+        else:
+            print(f"checked upstream headscale-go main pin: {current}")
 
     print(f"checked headscale-go baseline pin: {baseline}")
 
@@ -115,12 +137,22 @@ def main() -> int:
     parser.add_argument(
         "--remote",
         action="store_true",
-        help="also compare HEADSCALE_GO_CURRENT_VERSION with upstream main",
+        help=(
+            "also verify the baseline tag exists upstream and report (as a "
+            "warning) when HEADSCALE_GO_CURRENT_VERSION differs from upstream main"
+        ),
+    )
+    parser.add_argument(
+        "--fail-on-stale",
+        action="store_true",
+        help="with --remote, fail instead of warning when the current-head pin is stale",
     )
     args = parser.parse_args()
+    if args.fail_on_stale and not args.remote:
+        parser.error("--fail-on-stale requires --remote")
 
     try:
-        check(remote=args.remote)
+        check(remote=args.remote, fail_on_stale=args.fail_on_stale)
     except (CheckError, subprocess.CalledProcessError) as err:
         print(err, file=sys.stderr)
         return 1
